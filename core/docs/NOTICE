@@ -1,0 +1,24 @@
+vvah-sast
+=========
+
+This product is an original reimplementation of a 9-stage agentic SAST
+pipeline. It does NOT import, call, or bundle any code from the `vvaharness`
+package.
+
+Prompt content (stage system prompts, shared triage fragments, specialist and
+language lenses, and threat-model baselines) was ported as TEXT CONTENT from
+the `vvaharness` project (Visa, Inc. / Project Glasswing), which is licensed
+under the Apache License, Version 2.0.
+
+Per Apache-2.0, all ported prompt files retain the upstream license header and
+a source pointer; the per-item provenance is recorded in
+`prompt-provenance.md`. Porting is content-only and does not constitute a
+runtime dependency on `vvaharness`.
+
+Original vvaharness copyright:
+  Copyright 2026 Visa, Inc.
+
+License: Apache License 2.0 — https://www.apache.org/licenses/LICENSE-2.0
+
+This vvah-sast implementation:
+  Licensed under the Apache License, Version 2.0.

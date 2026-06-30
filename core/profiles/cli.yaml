@@ -1,0 +1,18 @@
+# mgh-sast profile — cli (default + Bash in agentic stages)
+# SPDX-License-Identifier: Apache-2.0
+# Mirrors vvaharness cli.yaml: same as default but lists Bash for the agentic
+# stages (survey/verify) so they can shell out.
+version: 1
+roles:
+  survey:      {model: inherit}
+  threatmodel: {model: inherit}
+  decompose:   {model: inherit}
+  deepdive:    {model: inherit}
+  verify:      {model: inherit}
+  dedup:       {model: inherit}
+  chain:       {model: inherit}
+allowed_tools: [Read, Glob, Grep, Bash]   # +Bash for survey/verify
+budget:
+  per_stage_usd: 25.0
+  max_turns: 40
+majority_vote: true

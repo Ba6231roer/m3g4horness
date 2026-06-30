@@ -1,0 +1,18 @@
+# mgh-sast profile — default (all stages via Claude Code subagents, Read/Glob/Grep only)
+# SPDX-License-Identifier: Apache-2.0
+# Mirrors vvaharness default.yaml semantics: every LLM role uses the host agent
+# (Claude Code login). No SDK key required.
+version: 1
+roles:
+  survey:      {model: inherit}     # s1 — host agent default model
+  threatmodel: {model: inherit}     # s2
+  decompose:   {model: inherit}     # s3
+  deepdive:    {model: inherit}     # s4 (fan out per chunk)
+  verify:      {model: inherit}     # s6 (majority vote when temperature allowed)
+  dedup:       {model: inherit}     # s7 (semantic assist)
+  chain:       {model: inherit}     # s8
+allowed_tools: [Read, Glob, Grep]   # tools LLM stages may use
+budget:
+  per_stage_usd: 25.0
+  max_turns: 40
+majority_vote: true                 # s6 FP suppression (host permitting)

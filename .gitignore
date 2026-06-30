@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 安装/运行产物(装入目标项目时生成,不属于本仓库)
+batch-workspace/
+security-scan/
+
+# 本地环境
+.env
+.env.local
+
+# 其他工具产物
+.obsidian/
+.claude/
+openspec/

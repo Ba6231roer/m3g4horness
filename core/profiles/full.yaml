@@ -1,0 +1,19 @@
+# mgh-sast profile — full (mixed providers; pin explicit model ids per role)
+# SPDX-License-Identifier: Apache-2.0
+# Mirrors vvaharness full.yaml: multi-provider layout. Pin each role to a
+# concrete model id supported by your host (Claude Code, opencode, etc.).
+# Use --models role=id to override a single role at run time.
+version: 1
+roles:
+  survey:      {model: claude-sonnet-4-6}
+  threatmodel: {model: claude-sonnet-4-6}
+  decompose:   {model: claude-sonnet-4-6}
+  deepdive:    {model: claude-opus-4-8}      # heaviest reasoning
+  verify:      {model: claude-sonnet-4-6}
+  dedup:       {model: claude-haiku-4-5}
+  chain:       {model: claude-sonnet-4-6}
+allowed_tools: [Read, Glob, Grep]
+budget:
+  per_stage_usd: 25.0
+  max_turns: 40
+majority_vote: true

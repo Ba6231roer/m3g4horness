@@ -5,8 +5,10 @@ allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 
 # /mgh-init — discover existing security controls → agent rules
 
-You are the **orchestrator** of the mgh-init pipeline. Implement it by running
-deterministic scripts (Bash) and spawning stage subagents (Agent). Shared assets
+> 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `discover_controls.py` / `chunk_sources.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。
+
+You are the **orchestrator** of the mgh-init pipeline. Carry it out by running the
+deterministic leaf scripts (Bash) and spawning stage subagents (Agent). Shared assets
 live at `.claude/mgh-core/` (mirrored from `core/`).
 
 > **Output is LLM-induced, not confirmed. Controls are "existing", not "effective".**
@@ -18,7 +20,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - `--format opencode|claude` — **required** (mutex). Missing → error + STOP.
 - `--out <path>` (claude default `<target>/.claude/rules`; opencode default `<target>/AGENTS.md`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
-- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8)
+- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)
 - `--resume` (skip units whose `.done` exists) · `--rebuild-cache` (rebuild call graph)
 - `--merge <partials-dir>` (merge multiple scoped runs; then STOP)
 - `--skip-consistency` (skip T4) · `--config <profile>` (default `init`)
@@ -28,7 +30,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 ## Orchestration flow
 
 ```
-0. parse + self-check (host agent/model available; else STOP with fix hint)
+0. parse + self-check (host agent/model available; else STOP with fix hint;发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`,扫描期向 stderr 打印进度)
 1. IF --merge: merge partial inventories by evidence anchor → STOP
 2. i1 discover (Bash, deterministic, streaming):
      py .claude/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init
@@ -65,7 +67,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 ### Deterministic invocation (Bash)
 
 ```bash
-py .claude/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init --format claude
+py .claude/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init
 py .claude/mgh-core/scripts/chunk_sources.py --in <big_file> --big-file-bytes 204800 --line <L> --out ./.mgh-init/_slice.json
 ```
 

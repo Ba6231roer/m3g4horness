@@ -12,22 +12,31 @@ Produces:
   controls_candidates.json  — raw hits (audit trail), see core/contracts/init/
   clusters.json             — T1 isolation units (centralized / distributed)
 
-Pipeline: walk sources (streaming) -> regex scan per category -> enclosing
-anchor -> reverse-graph wiring (entry_points) -> cluster formation.
+Pipeline: walk sources ONCE (materialized) -> read each file ONCE (cached) ->
+regex scan per category -> enclosing anchor (precomputed nodes + bisect) ->
+reverse-graph wiring (entry_points) -> cluster formation. Single-pass I/O keeps
+multi-tens-of-thousands-of-files repos within the host timeout (FD3).
 
 Usage:
   py discover_controls.py --repo <root> --out <dir> [--scope path:<d>|package:<p>|file:<g>]
         [--scope-mode defined|applicable] [--language <l>] [--max-files <N>]
-        [--big-file-bytes <N>] [--sample <N>]
+        [--big-file-bytes <N>] [--sample <N>] [--progress-every <N>]
+        [--large-repo-threshold <N>]
 """
 from __future__ import annotations
 import argparse
+import bisect
 import hashlib
 import json
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+# FD2: self-locate this script's directory so the sibling `expand_scope` import
+# resolves under ANY cwd / host-agent invocation (direct `py`/`python`), removing
+# the "No module named 'expand_scope'" failure and the python -c exec workaround.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from expand_scope import (  # reuse, no rewrite (D2)
     SOURCE_EXT, EXCLUDE_DIR, DEF_CALL, FRAMEWORK_RX,
@@ -101,6 +110,14 @@ CATEGORY_PATTERNS: dict[str, list[str]] = {
 }
 COMPILED = {cat: [re.compile(rx) for rx in rxs] for cat, rxs in CATEGORY_PATTERNS.items()}
 
+# FD3 pre-filter: union of every category pattern. One search per file decides
+# whether the file can yield ANY candidate — marker-free files (the majority in a
+# real repo) skip the per-category scan + node index entirely. Exact (no false
+# negatives: it IS the alternation of all category patterns), so the candidate
+# set is unchanged; it only avoids wasted regex work on irrelevant files.
+_QUICK_RX = re.compile("|".join(
+    f"(?:{rx})" for rxs in CATEGORY_PATTERNS.values() for rx in rxs))
+
 # category -> vvah kind (deterministic; see core/contracts/init/inventory.md)
 KIND = {
     "input-validation": "input-validation",
@@ -129,55 +146,107 @@ def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
 
-def _enclosing(text: str, line: int, lang: str):
-    """Nearest preceding class & function name for a 1-based line."""
-    cls = fn = None
+def _node_index(text: str, lang: str):
+    """Per-file precomputed structural nodes for O(log n) enclosing lookup (FD3).
+
+    Returns (cls_lines, cls_names, fn_lines, fn_names). Lines are non-decreasing
+    (finditer order); consecutive duplicate lines keep the FIRST occurrence, which
+    makes `bisect_right(lines, L)-1` match the old linear "nearest preceding,
+    first-wins-on-ties" _enclosing exactly.
+    """
+    cls_lines: list[int] = []
+    cls_names: list[str] = []
     cls_rx = CLASS_RX.get(lang)
     if cls_rx:
-        best = 0
+        prev = -1
         for m in cls_rx.finditer(text):
             ln = _line_of(text, m.start())
-            if ln <= line and ln > best:
-                best, cls = ln, m.group(1)
-    dp = _def_pattern(lang)
-    best = 0
-    for m in dp.finditer(text):
+            if ln == prev:
+                continue  # keep first per line (matches strict-gt linear scan)
+            prev = ln
+            cls_lines.append(ln)
+            cls_names.append(m.group(1))
+    fn_lines: list[int] = []
+    fn_names: list[str] = []
+    prev = -1
+    for m in _def_pattern(lang).finditer(text):
         name = m.group(1)
         if not name or len(name) <= 2:
             continue
         ln = _line_of(text, m.start())
-        if ln <= line and ln > best:
-            best, fn = ln, name
+        if ln == prev:
+            continue
+        prev = ln
+        fn_lines.append(ln)
+        fn_names.append(name)
+    return cls_lines, cls_names, fn_lines, fn_names
+
+
+def _enclosing_from_index(cls_lines, cls_names, fn_lines, fn_names, line: int):
+    """Nearest preceding class & function for a 1-based line, via bisect (FD3)."""
+    cls = fn = None
+    if cls_lines:
+        i = bisect.bisect_right(cls_lines, line) - 1
+        if i >= 0:
+            cls = cls_names[i]
+    if fn_lines:
+        i = bisect.bisect_right(fn_lines, line) - 1
+        if i >= 0:
+            fn = fn_names[i]
     kind = "class" if cls and (fn is None) else ("method" if fn else "annotation")
     return {"class": cls, "method": fn, "kind": kind}
 
 
-def build_call_graph_bounded(repo: Path, max_files: int):
-    """Reuse expand_scope primitives but --max-files aware (D11: no silent cap)
-    and ORDER-INDEPENDENT via two passes.
+def collect_sources(repo: Path, max_files: int):
+    """Walk the repo ONCE (FD3); materialize the source list shared by graph + scan.
 
-    expand_scope.build_call_graph is single-pass, so a caller visited before the
-    callee's def file silently misses the edge — harmless for SAST scope expansion
-    but it degrades init's wiring (entry_points). We collect ALL defs first, then
-    resolve calls. Returns (forward, reverse, framework_files, truncated, scanned).
+    Returns (files, truncated, scanned). Counting mirrors the old build_call_graph_bounded
+    so `truncated` / `scanned` in the output JSON stay equivalent.
     """
-    name_to_files = defaultdict(set)
-    framework_files = set()
-    files: list[tuple[str, str]] = []  # (rel, lang)
+    files: list[tuple[str, str, str]] = []  # (path, lang, rel)
     scanned = 0
     truncated = False
-    # pass 1: definitions + framework markers
     for path, lang in walk_sources(repo, limit_files=max_files + 1):
         scanned += 1
         if scanned > max_files:
             truncated = True
             break
-        rel = path.relative_to(repo).as_posix()
-        files.append((rel, lang))
+        files.append((path, lang, path.relative_to(repo).as_posix()))
+    return files, truncated, scanned
+
+
+def index_files(files, big_bytes: int):
+    """Read each file ONCE (FD3); cache text + splitlines + big flag. Unreadable
+    files are dropped (they contribute nothing to graph or candidates)."""
+    out = []
+    for path, lang, rel in files:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        try:
+            big = path.stat().st_size > big_bytes
+        except OSError:
+            big = False
+        out.append({"rel": rel, "lang": lang, "text": text,
+                    "lines": text.splitlines(), "big": big})
+    return out
+
+
+def build_call_graph(files_data, progress_every: int = 0):
+    """Two-pass textual graph over CACHED texts (FD3; no re-read). Order-independent.
+
+    Returns (forward, reverse, framework_files). forward is unused downstream but
+    kept to preserve scan()'s return contract.
+    """
+    name_to_files: dict[str, set[str]] = defaultdict(set)
+    framework_files: set[str] = set()
+    n = len(files_data)
+    # pass 1: definitions + framework markers
+    for i, fd in enumerate(files_data):
+        if progress_every and i and i % progress_every == 0:
+            print(f"[discover] callgraph pass1 {i}/{n} files", file=sys.stderr)
+        rel, lang, text = fd["rel"], fd["lang"], fd["text"]
         if FRAMEWORK_RX.search(text):
             framework_files.add(rel)
         dp = _def_pattern(lang)
@@ -185,16 +254,14 @@ def build_call_graph_bounded(repo: Path, max_files: int):
             name = m.group(1)
             if name and len(name) > 2:
                 name_to_files[name].add(rel)
-    # pass 2: resolve calls against the COMPLETE def index
-    forward = defaultdict(lambda: defaultdict(int))
-    for rel, lang in files:
-        p = repo / rel
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+    # pass 2: resolve calls against the COMPLETE def index (cached text)
+    forward: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for i, fd in enumerate(files_data):
+        if progress_every and i and i % progress_every == 0:
+            print(f"[discover] callgraph pass2 {i}/{n} files", file=sys.stderr)
+        rel, lang, text = fd["rel"], fd["lang"], fd["text"]
         cp = _call_pattern(lang)
-        seen = set()
+        seen: set[str] = set()
         for m in cp.finditer(text):
             name = m.group(1)
             if len(name) <= 2 or name in seen:
@@ -203,11 +270,73 @@ def build_call_graph_bounded(repo: Path, max_files: int):
             for tgt in name_to_files.get(name, ()):
                 if tgt != rel:
                     forward[rel][tgt] += 1
-    reverse = defaultdict(set)
+    reverse: dict[str, set[str]] = defaultdict(set)
     for caller, callees in forward.items():
         for callee in callees:
             reverse[callee].add(caller)
-    return dict(forward), reverse, framework_files, truncated, scanned
+    return dict(forward), reverse, framework_files
+
+
+def scan_candidates(files_data, reverse, seed_files, language: str | None,
+                    progress_every: int = 0):
+    """Yield candidate dicts from CACHED texts (FD3): one splitlines per file,
+    one node index per file, O(log n) enclosing per candidate."""
+    candidates = []
+    cid = 0
+    n = len(files_data)
+    for i, fd in enumerate(files_data):
+        if progress_every and i and i % progress_every == 0:
+            print(f"[discover] scanned {i}/{n} files, {len(candidates)} candidates",
+                  file=sys.stderr)
+        rel, lang, text, lines = fd["rel"], fd["lang"], fd["text"], fd["lines"]
+        if language and lang != language:
+            continue
+        if seed_files is not None and rel not in seed_files:
+            continue
+        if not _QUICK_RX.search(text):
+            continue  # FD3 pre-filter: no security marker → cannot yield a candidate
+        cls_lines, cls_names, fn_lines, fn_names = _node_index(text, lang)
+        n_lines = len(lines)
+        for cat, rxs in COMPILED.items():
+            for rx in rxs:
+                for m in rx.finditer(text):
+                    ln = _line_of(text, m.start())
+                    snippet = lines[ln - 1].strip()[:160] if ln <= n_lines else m.group(0)
+                    anchor = _enclosing_from_index(
+                        cls_lines, cls_names, fn_lines, fn_names, ln)
+                    cid += 1
+                    token = m.group(0)
+                    shape = "distributed" if token in DISTRIBUTED else "centralized"
+                    candidates.append({
+                        "id": f"C-{cid:04d}",
+                        "file": rel,
+                        "line": ln,
+                        "category": cat,
+                        "kind": KIND[cat],
+                        "pattern": token,
+                        "anchor": anchor,
+                        "snippet": snippet,
+                        "shape": shape,
+                        "cluster_id": None,  # filled by form_clusters
+                        "entry_points": sorted(reverse.get(rel, set()))[:8],
+                        "big_file": fd["big"],
+                    })
+    return candidates
+
+
+def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None,
+         progress_every: int = 0, large_repo_threshold: int = 0):
+    """Single-pass discover (FD3). Public API preserved: returns
+    (candidates, forward, reverse, framework_files, truncated, scanned)."""
+    files, truncated, scanned = collect_sources(repo, max_files)
+    if large_repo_threshold and scanned > large_repo_threshold:
+        print(f"[discover] large repo: ~{scanned} source files exceed "
+              f"--large-repo-threshold ({large_repo_threshold}); for speed consider "
+              f"--scope path:<module> + --merge", file=sys.stderr)
+    files_data = index_files(files, big_bytes)
+    forward, reverse, framework_files = build_call_graph(files_data, progress_every)
+    candidates = scan_candidates(files_data, reverse, seed_files, language, progress_every)
+    return candidates, forward, reverse, framework_files, truncated, scanned
 
 
 def resolve_seed(repo: Path, scope: str | None):
@@ -232,51 +361,6 @@ def resolve_seed(repo: Path, scope: str | None):
                 out.add(rel)
         return out, scope
     return None, "full-repo"
-
-
-def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None):
-    """Yield candidate dicts (streaming per file)."""
-    forward, reverse, framework_files, truncated, scanned = build_call_graph_bounded(repo, max_files)
-    cid = 0
-    candidates = []
-    for path, lang in walk_sources(repo, limit_files=max_files + 1):
-        rel = path.relative_to(repo).as_posix()
-        if language and lang != language:
-            continue
-        if seed_files is not None and rel not in seed_files:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        try:
-            big = path.stat().st_size > big_bytes
-        except OSError:
-            big = False
-        for cat, rxs in COMPILED.items():
-            for rx in rxs:
-                for m in rx.finditer(text):
-                    ln = _line_of(text, m.start())
-                    snippet = text.splitlines()[ln - 1].strip()[:160] if ln <= len(text.splitlines()) else m.group(0)
-                    anchor = _enclosing(text, ln, lang)
-                    cid += 1
-                    token = m.group(0)
-                    shape = "distributed" if token in DISTRIBUTED else "centralized"
-                    candidates.append({
-                        "id": f"C-{cid:04d}",
-                        "file": rel,
-                        "line": ln,
-                        "category": cat,
-                        "kind": KIND[cat],
-                        "pattern": token,
-                        "anchor": anchor,
-                        "snippet": snippet,
-                        "shape": shape,
-                        "cluster_id": None,  # filled by form_clusters
-                        "entry_points": sorted(reverse.get(rel, set()))[:8],
-                        "big_file": big,
-                    })
-    return candidates, forward, reverse, framework_files, truncated, scanned
 
 
 def _sha(s: str) -> str:
@@ -345,6 +429,10 @@ def main():
                     help="warn-and-continue beyond this (D11; no silent truncation)")
     ap.add_argument("--big-file-bytes", type=int, default=204800)
     ap.add_argument("--sample", type=int, default=8)
+    ap.add_argument("--progress-every", type=int, default=1000,
+                    help="emit stderr progress every N files (FD4)")
+    ap.add_argument("--large-repo-threshold", type=int, default=15000,
+                    help="advise --scope + --merge when source-file count exceeds this (FD4)")
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
     outdir = Path(args.out)
@@ -354,7 +442,9 @@ def main():
     seed_set = seed_files if seed_files is not None else None
 
     candidates, forward, reverse, framework_files, truncated, scanned = scan(
-        repo, seed_set, args.max_files, args.big_file_bytes, args.language)
+        repo, seed_set, args.max_files, args.big_file_bytes, args.language,
+        progress_every=args.progress_every,
+        large_repo_threshold=args.large_repo_threshold)
 
     # applicable mode: keep only candidates called from a seed file
     out_of_scope = []

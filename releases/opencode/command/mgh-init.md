@@ -4,9 +4,11 @@ description: Discover existing reusable security controls in a project (input-va
 
 # /mgh-init — discover existing security controls → agent rules
 
-You are the **orchestrator** of the mgh-init pipeline. Implement it by running
-deterministic scripts (Bash) and spawning stage subagents. Shared assets live at
-`.opencode/mgh-core/` (mirrored from `core/`).
+> 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `discover_controls.py` / `chunk_sources.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。
+
+You are the **orchestrator** of the mgh-init pipeline. Carry it out by running the
+deterministic leaf scripts (Bash) and spawning stage subagents. Shared assets live
+at `.opencode/mgh-core/` (mirrored from `core/`).
 
 > **Output is LLM-induced, not confirmed. Controls are "existing", not "effective".**
 > Human review required. State this in every summary.
@@ -17,7 +19,7 @@ deterministic scripts (Bash) and spawning stage subagents. Shared assets live at
 - `--format opencode|claude` — **required** (mutex). Missing → error + STOP.
 - `--out <path>` (opencode default `<target>/AGENTS.md`; claude default `<target>/.claude/rules`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
-- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8)
+- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)
 - `--resume` · `--rebuild-cache` · `--merge <partials-dir>` · `--skip-consistency` · `--config <profile>` (default `init`)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
@@ -25,10 +27,10 @@ deterministic scripts (Bash) and spawning stage subagents. Shared assets live at
 ## Orchestration flow
 
 ```
-0. parse + self-check
+0. parse + self-check(发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`;扫描期向 stderr 打印进度)
 1. IF --merge: merge partial inventories by evidence anchor → STOP
 2. i1 discover (Bash):
-     py .opencode/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init [--scope .. --format opencode]
+     py .opencode/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init [--scope .. --max-files ..]
    → controls_candidates.json + clusters.json  (skip on --resume if present & not --rebuild-cache)
 3. (optional) init-survey subagent → i1_enriched.json
 4. T1 FAN-OUT: per cluster without .done → (big file: chunk_sources slice first) spawn init-induct
@@ -55,7 +57,7 @@ deterministic scripts (Bash) and spawning stage subagents. Shared assets live at
 ### Deterministic invocation (Bash)
 
 ```bash
-py .opencode/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init --format opencode
+py .opencode/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init
 py .opencode/mgh-core/scripts/chunk_sources.py --in <big_file> --big-file-bytes 204800 --line <L> --out ./.mgh-init/_slice.json
 ```
 

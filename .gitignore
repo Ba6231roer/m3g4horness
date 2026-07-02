@@ -15,5 +15,4 @@ security-scan/
 # 其他工具产物
 .obsidian/
 .claude/
-openspec/
 .validate-webgoat/

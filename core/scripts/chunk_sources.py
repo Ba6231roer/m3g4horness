@@ -23,6 +23,11 @@ import re
 import sys
 from pathlib import Path
 
+# FD2: self-locate this script's directory so the sibling `expand_scope` import
+# resolves under ANY cwd / host-agent invocation (direct `py`/`python`), removing
+# the "No module named 'expand_scope'" failure and the python -c exec workaround.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from expand_scope import SOURCE_EXT, DEF_CALL  # reuse, no rewrite (D2)
 
 # Stronger Java method pattern than expand_scope's DEF_CALL (which misses methods

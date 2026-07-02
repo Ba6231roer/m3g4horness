@@ -71,6 +71,17 @@ esac
 mkdir -p "$DEST/mgh-core"
 cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 
+# 4) Self-check: the /mgh-init discover pipeline needs these 3 scripts co-located —
+#    discover_controls.py and chunk_sources.py both do `from expand_scope import ...`,
+#    so a missing expand_scope.py breaks the whole i1 stage with ImportError.
+for s in expand_scope discover_controls chunk_sources; do
+  [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || {
+    echo "✗ self-check FAILED: $DEST/mgh-core/scripts/$s.py missing (partial/stale install?)" >&2
+    exit 1
+  }
+done
+echo "✓ mgh-init scripts co-located: expand_scope / discover_controls / chunk_sources"
+
 echo "✓ installed $PLATFORM shell into $DEST"
 echo "  commands: /mgh-sast, /mgh-init ($PLATFORM)"
 echo "Run /mgh-sast --help or /mgh-init --help to verify."

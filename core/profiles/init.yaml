@@ -1,0 +1,21 @@
+# mgh-init profile — default (Claude Code / opencode host agent for every LLM tier)
+# SPDX-License-Identifier: Apache-2.0
+# Mirrors default.yaml semantics: every LLM role inherits the host model.
+# i1 discover is a deterministic script (no model).
+version: 1
+roles:
+  survey:     {model: inherit}     # init-survey (optional LLM assist over candidates)
+  induct:     {model: inherit}     # T1 — per-cluster fan-out (one context per cluster)
+  synthesis:  {model: inherit}     # T2 — cross-cluster canonical/role/dedup
+  rulewriter: {model: inherit}     # T3 — per-category fan-out (one context per category)
+  consistency:{model: inherit}     # T4 — optional cross-category rule reconciliation
+allowed_tools: [Read, Glob, Grep, Bash]
+budget:
+  per_stage_usd: 25.0
+  max_turns: 40
+# Isolation-first fan-out (D12). T1/T3 spawn one subagent context per unit.
+fanout:
+  t1_per_cluster: true
+  t3_per_category: true
+  t4_consistency: true            # default on (quality-first); --skip-consistency disables
+  max_concurrent: 8               # host-permitting; collapse to sequential if 1

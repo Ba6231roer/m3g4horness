@@ -12,7 +12,7 @@ opencode)的**安全工作流工具族**,所有命令共享前缀 `mgh-`。
 | 命令          | 状态      | 说明                                                |
 | ----------- | ------- | ------------------------------------------------- |
 | `/mgh-sast` | ✅ 可用    | 9 阶段 agentic SAST。零运行时依赖地复刻 vvaharness 流水线(详见下节)。 |
-| `/mgh-init` | 🚧 TODO | 发现存量代码安全设计 → 生成 opencode/Claude Code rules。       |
+| `/mgh-init` | ✅ 可用    | 发现存量安全控制 → 生成 Agent rules。隔离优先三层流水线(确定性发现 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ claude/opencode rules(二选一,结构不混)。详见 `openspec/changes/add-mgh-init/`。 |
 | `/mgh-sra`  | 🚧 TODO | openspec `propose` 后补充 specs/tasks 安全设计内容。        |
 | `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑设计强耦合安全测试案例。                              |
 

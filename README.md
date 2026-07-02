@@ -9,12 +9,12 @@
 | 命令 | 状态 | 用途 |
 |---|---|---|
 | `/mgh-sast` | ✅ 可用 | 9 阶段 agentic SAST（survey → threat-model → decompose → deep-dive → prefilter → verify → dedup → chain → SARIF）。零运行时依赖地复刻 vvaharness 流水线。 |
-| `/mgh-init` | 🚧 TODO | 发现存量代码中的安全设计（输入校验/脱敏封装、权限校验组件等），生成 opencode / Claude Code 可用的 rules。 |
+| `/mgh-init` | ✅ 可用 | 发现存量安全控制（输入校验/脱敏/鉴权/加密等）→ 生成 Agent rules（Claude Code `.claude/rules/` 或 opencode `AGENTS.md`，二选一不混用）。隔离优先三层流水线；产出 `controls_inventory.json`（与 vvah `design_controls` schema 兼容）。 |
 | `/mgh-sra` | 🚧 TODO | 在 openspec `propose` 后辅助补充 specs/tasks 的安全设计内容，并引导读取 mgh-init 产出的 rules。 |
 | `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑与 mgh-init 的 rules，设计与业务强耦合的安全测试案例（如换账户/auth 检验越权）。 |
 
-> 本 README 余下内容聚焦已可用的 **`/mgh-sast`**。TODO 命令目前仅为空骨架，功能定义见
-> [`task.260630.md`](task.260630.md)（下一阶段 proposal 的输入）。
+> 本 README 余下内容聚焦 **`/mgh-sast`** 与 **`/mgh-init`** 两个已可用命令。`/mgh-sra`、
+> `/mgh-blst` 仍为空骨架，功能定义见 [`task.260630.md`](task.260630.md)。
 
 ## `/mgh-sast` — 9-stage agentic SAST
 
@@ -51,23 +51,23 @@ m3g4horness/
 
 ## Install
 
-> **企业内网分发？** 多业务系统、Claude Code 与 opencode 混用环境的完整安装/使用/分发说明见
-> [`docs/分发与使用指南.md`](docs/分发与使用指南.md)。
-
-
+**工具包与目标仓分离**：`m3g4horness/` 是独立工具包（放在自己的路径）；install.sh 把
+运行时载荷**注入到你的业务仓**的 `.claude/` 或 `.opencode/`，不会把整个工具包拷进业务仓。
 
 ```bash
-# Claude Code (default)
-./install.sh                       # or: install.ps1 on Windows
-# opencode
-./install.sh --opencode
-# explicit
-./install.sh --claude
+# 在「业务仓根目录」里执行，把 m3g4horness 指过去（默认 Claude Code）：
+bash /PATH/TO/m3g4horness/install.sh --claude .        # → 本仓/.claude/
+bash /PATH/TO/m3g4horness/install.sh --opencode .      # → 本仓/.opencode/
+# Windows PowerShell：
+.\PATH\TO\m3g4horness\install.ps1 -Platform claude -Target .
 ```
 
-The installer (1) verifies zero runtime dependency on `vvaharness`, (2) copies
-the selected shell + `core/` into the target project's `.claude/` or
-`.opencode/`, (3) mirrors a copy in this repo.
+install.sh 会：(1) 自检零运行时依赖（不 import `vvaharness`）；(2) 把所选 shell + `core/`
+拷进目标仓的 `.claude/` 或 `.opencode/`（`core/` 以 `mgh-core/` 名义；**不**拷 `tools/`、
+`tests/`、`openspec/`、`docs/`）。多个业务仓可共用同一个工具包，各自安装、互不污染。
+
+> **企业内网分发？** 多业务系统、Claude Code 与 opencode 混用环境的完整安装/使用/分发说明见
+> [`docs/分发与使用指南.md`](docs/分发与使用指南.md)。
 
 ## Dependencies（无需 pip）
 

@@ -64,9 +64,13 @@ case "$PLATFORM" in
     ;;
 esac
 # Shared core always lands at <dest>/mgh-core so both shells reference one copy.
+# This single copy includes every command/agent/prompt/script/contract/profile
+# under core/ and releases/<platform>/ — so /mgh-sast AND /mgh-init (and their
+# agents, prompts, discover_controls.py, chunk_sources.py, contracts/init/) ship
+# together without per-command enumerate.
 mkdir -p "$DEST/mgh-core"
 cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 
 echo "✓ installed $PLATFORM shell into $DEST"
-echo "  command: /mgh-sast ($PLATFORM)"
-echo "Run /mgh-sast --help to verify."
+echo "  commands: /mgh-sast, /mgh-init ($PLATFORM)"
+echo "Run /mgh-sast --help or /mgh-init --help to verify."

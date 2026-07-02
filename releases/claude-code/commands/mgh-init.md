@@ -1,33 +1,94 @@
 ---
-description: TODO stub. Discover existing security designs in a project (input-validation / sensitive-data masking wrappers, authz components, centralised controls) and emit agent-consumable rules. Generates opencode OR Claude Code rules — structurally different, selected via --format. Not yet implemented.
+description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules. Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format claude|opencode required (structures differ, never mix). Supports --scope/--resume/--merge and large-file sharding. Findings are LLM-induced candidates needing human review.
 allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 ---
 
-# /mgh-init — discover security designs → agent rules (TODO)
+# /mgh-init — discover existing security controls → agent rules
 
-> **状态:TODO — 尚未实现。** 本文件仅为空命令骨架。
-> 完整功能定义见仓库根 [`task.260630.md`](../../../task.260630.md)。
+You are the **orchestrator** of the mgh-init pipeline. Implement it by running
+deterministic scripts (Bash) and spawning stage subagents (Agent). Shared assets
+live at `.claude/mgh-core/` (mirrored from `core/`).
 
-## 预期用途
+> **Output is LLM-induced, not confirmed. Controls are "existing", not "effective".**
+> Human review required. State this in every summary.
 
-扫描当前项目**存量代码**,识别团队已沉淀的可复用**安全设计**,据此生成 AI 编程
-Agent(opencode 或 Claude Code)可直接消费的 **rules**。
+## Parse arguments (validate BEFORE spending tokens)
 
-### 识别对象(示例)
-- **输入校验**封装:统一 sanitizer / validator / schema 守卫的方法或注解
-- **敏感信息脱敏**辅助:卡号/身份证/手机号/凭据的 mask/redact 工具
-- **权限校验**组件:拦截器、过滤器、`@PreAuthorize` 等注解、鉴权 AOP
-- 其它集中式安全控制(加密、限流、防重放等)
+- `--target <dir>` (default `.`)
+- `--format opencode|claude` — **required** (mutex). Missing → error + STOP.
+- `--out <path>` (claude default `<target>/.claude/rules`; opencode default `<target>/AGENTS.md`)
+- `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
+- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8)
+- `--resume` (skip units whose `.done` exists) · `--rebuild-cache` (rebuild call graph)
+- `--merge <partials-dir>` (merge multiple scoped runs; then STOP)
+- `--skip-consistency` (skip T4) · `--config <profile>` (default `init`)
 
-### 预期参数(占位,尚未解析)
-- `--target <dir>` — 待分析项目(默认 `.`)
-- `--format opencode|claude` — 生成哪种 rules 结构(**必选**;两者结构不同,
-  必须严格按目标 Agent 的 rules 格式学习后生成,不可混用)
-- `--out <path>` — rules 输出路径
+**No actionable args / `--help`** → print the flag table and STOP (zero tokens).
 
-> 产物供 `/mgh-sra`(补充 specs/tasks 时引导读取哪些 rules)与 `/mgh-blst`
-> (设计业务安全测试案例)消费。
+## Orchestration flow
 
-## TODO
-在后续变更中实现(见 `task.260630.md`)。当前收到本命令时:打印"未实现"说明 +
-参数表 + 指向 `task.260630.md`,**不消耗 token、不做任何分析**。
+```
+0. parse + self-check (host agent/model available; else STOP with fix hint)
+1. IF --merge: merge partial inventories by evidence anchor → STOP
+2. i1 discover (Bash, deterministic, streaming):
+     py .claude/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init
+        [--scope .. --scope-mode .. --language .. --max-files .. --big-file-bytes .. --sample ..]
+   → controls_candidates.json + clusters.json  (skip on --resume if present & not --rebuild-cache)
+3. (optional) init-survey subagent → i1_enriched.json
+4. T1 FAN-OUT: for each cluster in clusters.json WITHOUT a .done:
+     - if any evidence_file is big (> --big-file-bytes): run chunk_sources.py to get slices
+     - spawn init-induct (one isolated context per cluster) with the cluster record (+ slices)
+     → checkpoints/t1/<cluster_id>.json + .done
+5. T2: spawn init-synthesis (sees all T1 records, no raw code)
+     → controls_inventory.json + checkpoints/t2/.done
+6. T3 FAN-OUT: for each category in the inventory WITHOUT a .done:
+     - spawn init-rulewriter (one isolated context per category) with --format
+     → rules (claude: .claude/rules/security-<cat>.md ; opencode: AGENTS.md managed block)
+       + checkpoints/t3/<cat>.<format>.json.done
+7. T4 (unless --skip-consistency): spawn init-rules-consistency
+     → in-place edits within managed blocks + checkpoints/t4/.done
+8. i4: write init_manifest.json + report.md; print artifact paths + disclaimers
+```
+
+### Stage → component map
+
+| Stage | How | Asset |
+|---|---|---|
+| i1 discover | **script** | `core/scripts/discover_controls.py` (+ `expand_scope.py` reuse) |
+| i1 big-file slice | **script** | `core/scripts/chunk_sources.py` |
+| i1 survey (opt) | subagent `init-survey` | `core/prompts/stages/init-survey.md` |
+| T1 induct | subagent `init-induct` (fan out per cluster) | `core/prompts/stages/init-induct.md` |
+| T2 synthesis | subagent `init-synthesis` | `core/prompts/stages/init-synthesis.md` |
+| T3 rulewriter | subagent `init-rulewriter` (fan out per category) | `core/prompts/stages/init-rulewriter.md` + `fragments/rules-format-{claude,opencode}.md` |
+| T4 consistency | subagent `init-rules-consistency` (opt) | `core/prompts/stages/init-rules-consistency.md` |
+
+### Deterministic invocation (Bash)
+
+```bash
+py .claude/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init --format claude
+py .claude/mgh-core/scripts/chunk_sources.py --in <big_file> --big-file-bytes 204800 --line <L> --out ./.mgh-init/_slice.json
+```
+
+### Resume / cache
+- Work units (D9 = isolation unit): i1 per file, T1 per cluster, T2/T4 whole, T3 per category.
+- `<target>/.mgh-init/checkpoints/<tier>/<unit>.json.done` gates `--resume`.
+- Call graph is rebuilt by discover each run; pass `--rebuild-cache` to force (mtime-based skip otherwise).
+
+## Output (per `<target>/.mgh-init/`)
+
+- `controls_candidates.json` — raw deterministic hits (audit trail)
+- `clusters.json` — T1 isolation units (centralized/distributed)
+- `controls_inventory.json` — structured (vvah `design_controls`-compatible); downstream input for `/mgh-sra`, `/mgh-blst`, future mgh-sast control intake
+- `checkpoints/**` — per-unit artifacts (resume)
+- `init_manifest.json` — version/format/counts/provenance/unresolved[]/out_of_scope[]/boundaries[]
+- `report.md` — human-readable summary (+「competing controls」section)
+- rules → `<target>/.claude/rules/security-*.md` (claude) **or** `<target>/AGENTS.md` (opencode)
+
+## Always disclose
+- 面向人读的非代码内容(`report.md`、`init_manifest.json` 的 `boundaries[]`/文案、rules 正文)
+  用**简体中文**;锚点/路径/frontmatter 保持原样。
+
+- LLM-induced candidates — human review required.
+- **Existence ≠ effectiveness** (CVE-2025-41248: `@PreAuthorize` bypass on parameterized types).
+- Call-graph is textual/AST-level — misses AOP/reflection/DI/framework-routing; surface `unresolved[]`.
+- For ≥1.5M-line repos: prefer `--scope` per module + `--merge` over a single full-repo run.

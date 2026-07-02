@@ -81,3 +81,22 @@ py tests/test_deterministic.py
 - 上游无、无需反向同步:`expand_scope` / `diff_seed` 全套增量逻辑。
 - tree-sitter 接入点:`expand_scope.build_call_graph` 的 `DEF_CALL` 表替换处(非上游 `s1_preprocess`)。
 - 建议修:`emit_sarif.CWE_NAMES` 的 `CWE-79` 重复键 bug;可从 `cwe.py::CWE_NAMES` 取全量 65 条替换。
+
+---
+
+## 附录:`/mgh-init` 与 vvah `design_controls` 的关系(新增功能,非移植)
+
+> 本索引正文只覆盖 mgh-sast;`/mgh-init` 是**新增功能**(rewrite-original),不属移植同步范围,
+> 仅在此登记它与上游**唯一相关的概念**——`design_controls`——的对应关系,供未来 mgh-sast
+> 控制入口参考。完整设计见 `openspec/changes/add-mgh-init/`。
+
+| 维度 | vvah `design_controls` | `/mgh-init` |
+|---|---|---|
+| 来源 | `vvaharness/injectors/design_controls.py` + `models.py::Control`;手工 `design_controls.yaml` | **自动发现**(确定性扫 + 调用图 + LLM 归纳);非移植 |
+| schema | `Control{name, kind∈{auth,sandbox,input-validation,aslr,cfi,other}, protects: fnmatch globs, notes}` | `controls_inventory.json` **向后兼容**同字段,扩展 `category/usage/evidence/entry_points/gaps/cluster_id/role/confidence` |
+| 消费 | s2 降 likelihood / s3 门控 specialist / s6 判 FP / s8 重排严重度 | 产物供 `/mgh-sra`、`/mgh-blst`、未来 mgh-sast 控制入口消费 |
+| 上游同步 | mgh-sast 重写时**未移植**(grep 全空);本变更闭合该缺口 | 不需要反向同步上游(上游是手工声明) |
+
+> 保真度标记:`core/prompts/stages/init-*.md` 与 `fragments/rules-format-*.md` 均标 `rewrite-original`,
+> 不带 `Source: vvaharness/...` 溯源注释(无上游 SYSTEM 可移植)。`discover_controls.py` /
+> `chunk_sources.py` 复用本仓 `expand_scope.py` 的文本调用图原语(非 vvaharness)。

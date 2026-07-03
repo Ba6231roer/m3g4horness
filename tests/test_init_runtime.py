@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent / "core" / "scripts"
 DISCOVER = SCRIPTS / "discover_controls.py"
 CHUNK = SCRIPTS / "chunk_sources.py"
+LIST = SCRIPTS / "list_clusters.py"
 PY = sys.executable  # real interpreter when launched via `py -3`
 
 
@@ -135,6 +136,29 @@ class TestPerformanceNonRegression(unittest.TestCase):
         self.assertEqual(len(preauth), 200, "all 200 @PreAuthorize candidates detected")
         # loose upper bound — guards against gross regression, not a tight benchmark
         self.assertLess(elapsed, 10.0, f"discover too slow: {elapsed:.2f}s")
+
+
+class TestListClustersStandalone(unittest.TestCase):
+    """list_clusters.py runs as a subprocess from a NON-script cwd (self-contained, FD2 family)."""
+
+    def test_runs_from_non_script_cwd(self):
+        repo = Path(tempfile.mkdtemp(prefix="mgh_lc_rt_"))
+        cl = repo / "clusters.json"
+        cl.write_text(json.dumps({"repo": str(repo), "clusters": [
+            {"cluster_id": "a::A::1", "category": "authorization", "kind": "auth",
+             "shape": "centralized", "evidence_files": ["a.java"],
+             "usage_sites": ["a.java"], "candidate_ids": ["C-1"]},
+            {"cluster_id": "b::B::2", "category": "crypto", "kind": "other",
+             "shape": "centralized", "evidence_files": ["b.java"],
+             "usage_sites": ["b.java"], "candidate_ids": ["C-2"]},
+        ], "truncated": False}, ensure_ascii=False), encoding="utf-8")
+        r = subprocess.run([PY, str(LIST), "--clusters", str(cl)],
+                           cwd=str(repo), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0,
+                         f"list_clusters failed:\nstdout={r.stdout}\nstderr={r.stderr}")
+        data = json.loads(r.stdout)
+        self.assertEqual(data["total"], 2)             # NOT 3 (wrapper key count)
+        self.assertEqual(len(data["pending"]), 2)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,10 @@ New code handling <what> MUST use the existing <control> rather than reimplement
   no meaningful path scope exists.
 - One file per category. Filename `security-<category>.md`.
 - Anchors are `file::Class.method` or `file:line` — clickable, no long code (R3).
+- **Rule-body purity**: describe ONLY the target project's control; `NEVER` mention
+  this tool's name / scripts / pipeline tiers (`T1`/`T2`/`T3`/`scout`) / internal
+  paths — `assemble_rules.py --format claude --check` lints these files and fails
+  loud on any leak.
 - **Never** emit `AGENTS.md` or `.opencode/...` in this format (that is opencode).
 
 > Verified against Claude Code docs as of 2026-06; record the verification date

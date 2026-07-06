@@ -31,6 +31,14 @@ code** — only the small structured JSON each T1 produced.
 描述性字符串值);代码、文件路径、`file:class:method` 锚点、标识符、name/枚举值、YAML
 `paths:` 字段保持原样(英文/符号不变)。
 
+## 输出纯净性(硬边界 + 源头净化)
+inventory 人读字段(`description`/`usage`/`gaps`/`notes`/`competing_clusters[].note`)SHALL
+只描述**目标项目**的安全控制本身;`NEVER` 出现本工具内部信息(工具名 `mgh-init`/`megahorness`/
+脚本名 / 流水线层级 `T1`/`T2`/`T3`/`scout` 作过程描述 / 内部路径 `.mgh-init/`·`checkpoints/` /
+「如何被发现或归纳」的过程描述)。T2 是 shipped rules 纯净性的**源头净化层**:若 T1 记录的人读
+字段带入了上述工具内部引用,SHALL 在写入 inventory 前**剥离**。结构字段 `source`
+(取值 `regex`/`scout`)SHALL 保留为结构标识(供 manifest/审计),不视为人读正文泄漏。
+
 ## Output
 Write `.mgh-init/controls_inventory.json` per `core/contracts/init/inventory.md`:
 ```json

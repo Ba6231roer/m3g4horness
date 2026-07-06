@@ -13,8 +13,17 @@ No raw source code — only the drafted rules.
 3. **Cross-category dedup**: a control mentioned in two category files should
    point to the same canonical anchor (cross-link, don't duplicate the rule body).
 4. **Format purity**: claude output has valid `paths:` frontmatter and lives only
-   under `.claude/rules/`; opencode output is a single root `AGENTS.md`. Flag
-   (do not silently fix) any structural violation back to the orchestrator.
+   under `.claude/rules/`; opencode output is staged fragments under
+   `.mgh-init/rules-parts/` (one `<category>.md` per category, no outer sentinel).
+   Flag (do not silently fix) any structural violation back to the orchestrator.
+
+## Scope — semantic only (single responsibility, design D2)
+T4 does ONLY semantic reconciliation (naming / anchors / cross-category dedup /
+format purity). T4 MUST NOT assemble fragments into `AGENTS.md`, MUST NOT emit or
+modify managed-block sentinels — that is `assemble_rules.py`'s job. Edit opencode
+fragments (`.mgh-init/rules-parts/<category>.md`) and claude files
+(`.claude/rules/security-<category>.md`) in place. Preserve the 输出纯净性 hard
+boundary (no tool internals in rule prose) while editing.
 
 ## 输出语言
 面向人读的非代码内容用**简体中文**(描述/用法/缺口/规则正文/报告/manifest 文案,及 JSON
@@ -22,8 +31,8 @@ No raw source code — only the drafted rules.
 `paths:` 字段保持原样(英文/符号不变)。
 
 ## Output
-Apply edits in place to the rule files (within managed blocks only). Write a
-short `.mgh-init/checkpoints/t4/consistency.json` listing changes + any flags,
-then touch `.mgh-init/checkpoints/t4/consistency.json.done`.
+Apply edits in place to the rule files (claude) / staged fragments (opencode).
+Write a short `.mgh-init/checkpoints/t4/consistency.json` listing changes + any
+flags, then touch `.mgh-init/checkpoints/t4/consistency.json.done`.
 
 > If `--skip-consistency` was passed, the orchestrator does not spawn this tier.

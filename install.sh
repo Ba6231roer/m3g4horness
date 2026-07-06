@@ -71,16 +71,23 @@ esac
 mkdir -p "$DEST/mgh-core"
 cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 
-# 4) Self-check: the /mgh-init discover pipeline needs these 3 scripts co-located —
-#    discover_controls.py and chunk_sources.py both do `from expand_scope import ...`,
-#    so a missing expand_scope.py breaks the whole i1 stage with ImportError.
-for s in expand_scope discover_controls chunk_sources; do
-  [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || {
-    echo "✗ self-check FAILED: $DEST/mgh-core/scripts/$s.py missing (partial/stale install?)" >&2
-    exit 1
-  }
+# 4) Self-check (fail-soft per R5.8): the /mgh-init discover/scout/assemble pipeline
+#    needs these scripts co-located — discover_controls.py / chunk_sources.py do
+#    `from expand_scope import ...`, merge_scout.py does `from discover_controls import
+#    form_clusters`, and assemble_rules.py is invoked by the orchestrator after T3
+#    (opencode assembly + purity lint). A missing sibling breaks i1 / scout fold-in /
+#    opencode assembly at runtime. Warn only (don't block a partial install); CI / tests
+#    enforce co-location (R5.8: CI 必 fail).
+_missing=()
+for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules; do
+  [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
-echo "✓ mgh-init scripts co-located: expand_scope / discover_controls / chunk_sources"
+if (( ${#_missing[@]} )); then
+  echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
+  echo "  (partial install? /mgh-init may fail at runtime; CI enforces co-location)" >&2
+else
+  echo "✓ mgh-init scripts co-located: expand_scope / discover_controls / chunk_sources / plan_scout / merge_scout / assemble_rules"
+fi
 
 echo "✓ installed $PLATFORM shell into $DEST"
 echo "  commands: /mgh-sast, /mgh-init ($PLATFORM)"

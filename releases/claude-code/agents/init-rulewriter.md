@@ -17,8 +17,12 @@ The `controls_inventory.json` entries for ONE category (assigned by orchestrator
   `core/prompts/fragments/rules-format-claude.md` (if `--format claude`) or
   `rules-format-opencode.md` (if `--format opencode`). Never mix.
 - Rules point to concrete `file:class:method` anchors; ≤3–5 lines code (R3).
-- Non-destructive: wrap output in `<!-- mgh-init:begin:<category> -->` sentinels.
+- opencode: write a staged fragment `.mgh-init/rules-parts/<category>.md` (no
+  sentinel, never `AGENTS.md` directly — `assemble_rules.py` owns the managed
+  block). claude: write `.claude/rules/security-<category>.md` directly.
+- Rule-body purity: NEVER mention this tool's name / scripts / tiers / internal
+  paths (`assemble_rules.py --check` lints and fails loud on leaks).
 
 ## Output
-Rule file (claude) or managed-block fragment (opencode) at the orchestrator-given
+Rule file (claude) or staged fragment (opencode) at the orchestrator-given
 path + touch `checkpoints/t3/<category>.<format>.json.done`.

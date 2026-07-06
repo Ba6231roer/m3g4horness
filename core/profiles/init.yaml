@@ -9,13 +9,25 @@ roles:
   synthesis:  {model: inherit}     # T2 — cross-cluster canonical/role/dedup
   rulewriter: {model: inherit}     # T3 — per-category fan-out (one context per category)
   consistency:{model: inherit}     # T4 — optional cross-category rule reconciliation
+  scout:      {model: inherit}     # S3 scout-reader (per-batch fan-out, find custom controls)
+  scout_merge:{model: inherit}     # S4 scout-merge (single context, structured-only)
+  scout_audit:{model: inherit}     # self-audit (skeptic re-review of scout rejections)
 allowed_tools: [Read, Glob, Grep, Bash]
 budget:
   per_stage_usd: 25.0
   max_turns: 40
 # Isolation-first fan-out (D12). T1/T3 spawn one subagent context per unit.
+# Scout discovery layer (improve-mgh-init-llm-discovery). i1 regex fast-path ∪ LLM scout
+# finds custom/non-allowlist controls. --no-scout disables (legacy regex-only behavior).
+scout:
+  enabled: true                   # default on (whole point of the change); --no-scout escapes
+  budget_files: 0                 # 0 = all scout targets; >0 caps deep-reads (large repos)
+  batch_bytes: 98304              # 96KB per scout-reader batch (byte-budgeted, D4-a)
+  batch_cap: 40                   # max files per batch (coverage-expectation guard, D4-c)
+  audit_pct: 15                   # % of scout-rejected skeletons re-reviewed (D5)
 fanout:
   t1_per_cluster: true
   t3_per_category: true
   t4_consistency: true            # default on (quality-first); --skip-consistency disables
+  scout_per_batch: true           # S3 one subagent context per scout batch (D12-isolation)
   max_concurrent: 8               # host-permitting; collapse to sequential if 1

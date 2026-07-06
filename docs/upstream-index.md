@@ -100,3 +100,9 @@ py tests/test_deterministic.py
 > 保真度标记:`core/prompts/stages/init-*.md` 与 `fragments/rules-format-*.md` 均标 `rewrite-original`,
 > 不带 `Source: vvaharness/...` 溯源注释(无上游 SYSTEM 可移植)。`discover_controls.py` /
 > `chunk_sources.py` 复用本仓 `expand_scope.py` 的文本调用图原语(非 vvaharness)。
+
+> **发现层演进(`improve-mgh-init-llm-discovery`,非上游同步项)**:i1 正则从「闸门」降级为
+> 「fast-path hint」;新增 LLM scout 发现层(`init-scout` / `init-scout-merge` /
+> `init-scout-audit` subagent + `plan_scout.py` / `merge_scout.py` 脚本 + `skeleton.json` 契约)
+> 找出自研/非规范词命名的控制——regex ∪ scout 双源并集,每条候选带 `source`。设计见
+> `openspec/changes/improve-mgh-init-llm-discovery/`。

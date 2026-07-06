@@ -50,6 +50,14 @@ shapes). Produce ONE structured control record:
 描述性字符串值);代码、文件路径、`file:class:method` 锚点、标识符、name/枚举值、YAML
 `paths:` 字段保持原样(英文/符号不变)。
 
+## 输出纯净性(硬边界)
+人读字段(`description`/`usage`/`gaps`)SHALL 只写**目标项目**的安全控制本身(是什么 / 怎么
+复用 / 有效性缺口);`NEVER` 出现本工具内部信息——工具名(`mgh-init`/`megahorness`/`mgh-core`)、
+脚本名(`discover_controls.py`/`chunk_sources.py`/`plan_scout.py`/`merge_scout.py`/
+`list_clusters.py` 等)、流水线层级(`T1`/`T2`/`T3`/`scout` 作过程描述)、内部路径
+(`.mgh-init/`/`checkpoints/`)、「如何被发现或归纳」的过程描述。结构字段(`name`/`category`/
+`kind`/`cluster_id`/`confidence`/`evidence`/`source`)与目标项目锚点原样保留,不受此约束。
+
 ## Output
 Write `.mgh-init/checkpoints/t1/<cluster_id>.json` (the record above) and
 touch `.mgh-init/checkpoints/t1/<cluster_id>.json.done`.

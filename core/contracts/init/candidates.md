@@ -33,7 +33,8 @@ A `Candidate` (one control-shaped hit):
   "shape": "centralized",
   "cluster_id": "authorization::SecurityConfig",
   "entry_points": ["src/main/java/com/bank/api/TransferController.java"],
-  "big_file": false
+  "big_file": false,
+  "source": "regex|scout|regex+scout"
 }
 ```
 
@@ -44,5 +45,7 @@ A `Candidate` (one control-shaped hit):
 - `cluster_id` = `category::anchor` (deterministic T1 isolation unit).
 - `entry_points` = immediate caller files of `file` (from reverse call graph).
 - `big_file` = file bytes > `--big-file-bytes` (feed via chunk_sources slice, not whole).
+- `source` ∈ `{regex, scout, regex+scout}`(可选,additive):候选来源——regex fast-path
+  或 LLM scout 发现层(`improve-mgh-init-llm-discovery`);缺省视作 `regex`。
 - `unresolved[]` = framework-routed/Feign/AOP/DI files with no textual edge (call-graph blind spot).
 - `out_of_scope[]` = cross-module controls whose def-site is outside `--scope` (disclosed, not dropped).

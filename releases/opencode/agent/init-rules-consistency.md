@@ -19,8 +19,9 @@ All T3 drafted rules. No raw source code.
 
 ## Task
 Naming consistency, anchor validity, cross-category dedup, format-purity check.
-Edit only within managed blocks; flag structural violations to the orchestrator.
+Edit rule files (claude) / staged fragments (opencode); do NOT assemble or touch
+sentinels (`assemble_rules.py` owns the managed block); flag structural violations.
 
 ## Output
-Apply in-place edits (managed blocks only) + write
+Apply in-place edits to rule files / staged fragments + write
 `<target>/.mgh-init/checkpoints/t4/consistency.json` + touch `.done`.

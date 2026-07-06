@@ -25,6 +25,12 @@ NOT to re-scan from scratch.
 描述性字符串值);代码、文件路径、`file:class:method` 锚点、标识符、name/枚举值、YAML
 `paths:` 字段保持原样(英文/符号不变)。
 
+## 输出纯净性(硬边界)
+你校正/补充的人读字段(候选与簇的描述类字段)SHALL 只描述**目标项目**的安全控制本身;
+`NEVER` 在产出里出现本工具内部信息——工具名(`mgh-init`/`megahorness`/`mgh-core`)、脚本名
+(`discover_controls.py` 等)、流水线层级(`T1`/`T2`/`T3`/`scout` 作过程描述)、内部路径
+(`.mgh-init/`/`checkpoints/`)、「如何被扫描/发现」的过程描述。结构字段与目标项目锚点原样保留。
+
 ## Output
 Write `.mgh-init/i1_enriched.json` — the candidates/clusters with your
 corrections. Keep it structured; cite `file:line` for any change. No prose,

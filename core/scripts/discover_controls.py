@@ -141,6 +141,57 @@ CLASS_RX = {
     "php":    re.compile(r"\b(?:class|interface|trait)\s+([A-Za-z_]\w*)"),
 }
 
+# ── per-language import/include patterns (mechanical; feeds skeleton.json only) ──
+# Used by the scout discovery layer (improve-mgh-init-llm-discovery) to give the LLM
+# cheap "what does this file depend on" metadata. Multi-group patterns coalesced.
+IMPORTS_RX = {
+    "java":   re.compile(r"^\s*import\s+(?:static\s+)?([\w.\*]+)\s*;", re.M),
+    "python": re.compile(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", re.M),
+    "js":     re.compile(r"""^\s*(?:import\b[^'"]*['"]([\w./@-]+)['"]|require\(\s*['"]([\w./@-]+)['"]\s*\))""", re.M),
+    "ts":     re.compile(r"""^\s*(?:import\b[^'"]*['"]([\w./@-]+)['"]|require\(\s*['"]([\w./@-]+)['"]\s*\))""", re.M),
+    "go":     re.compile(r'^\s*import\s+"?([\w./]+)"?', re.M),
+    "c":      re.compile(r'^\s*#include\s*[<"]([^>"]+)[>"]', re.M),
+    "ruby":   re.compile(r"""^\s*(?:require_relative|require)\s+['"]([\w./]+)['"]""", re.M),
+    "php":    re.compile(r"^\s*use\s+([\w\\]+)\s*;", re.M),
+}
+
+
+def _extract_imports(text: str, lang: str, cap: int = 64):
+    rx = IMPORTS_RX.get(lang)
+    if not rx:
+        return []
+    out = []
+    for m in rx.finditer(text):
+        g = next((x for x in m.groups() if x), None)
+        if g and g not in out:
+            out.append(g)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _extract_meta(text: str, lang: str, rel: str):
+    """Lossless per-file metadata for skeleton.json (D2). NO semantic 'is this a control'
+    judgment — classes/method_sigs/imports are mechanical extractions over cached text."""
+    pkg = Path(rel).parent.as_posix() if rel else ""
+    cls_rx = CLASS_RX.get(lang)
+    classes = []
+    if cls_rx:
+        for m in cls_rx.finditer(text):
+            n = m.group(1)
+            if n and n not in classes:
+                classes.append(n)
+            if len(classes) >= 32:
+                break
+    method_sigs = []
+    for m in _def_pattern(lang).finditer(text):
+        n = m.group(1)
+        if n and len(n) > 2 and n not in method_sigs:
+            method_sigs.append(n)
+        if len(method_sigs) >= 64:
+            break
+    return pkg, classes, method_sigs, _extract_imports(text, lang)
+
 
 def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
@@ -216,8 +267,8 @@ def collect_sources(repo: Path, max_files: int):
 
 
 def index_files(files, big_bytes: int):
-    """Read each file ONCE (FD3); cache text + splitlines + big flag. Unreadable
-    files are dropped (they contribute nothing to graph or candidates)."""
+    """Read each file ONCE (FD3); cache text + splitlines + big flag + skeleton meta
+    (D2: pkg/classes/method_sigs/imports/bytes). Unreadable files are dropped."""
     out = []
     for path, lang, rel in files:
         try:
@@ -225,11 +276,35 @@ def index_files(files, big_bytes: int):
         except OSError:
             continue
         try:
-            big = path.stat().st_size > big_bytes
+            size = path.stat().st_size
         except OSError:
-            big = False
+            size = len(text.encode("utf-8", errors="replace"))
+        pkg, classes, method_sigs, imports = _extract_meta(text, lang, rel)
         out.append({"rel": rel, "lang": lang, "text": text,
-                    "lines": text.splitlines(), "big": big})
+                    "lines": text.splitlines(), "big": size > big_bytes,
+                    "bytes": size, "pkg": pkg, "classes": classes,
+                    "method_sigs": method_sigs, "imports": imports})
+    return out
+
+
+def build_skeleton(files_data, reverse, cand_files):
+    """Assemble skeleton.json (D2): lossless per-file metadata + fan_in + regex_hit.
+    reverse = call-graph reverse map (callees -> callers); cand_files = files that
+    already yielded a regex candidate (scout skips these, D4 targets)."""
+    out = []
+    for fd in files_data:
+        rel = fd["rel"]
+        out.append({
+            "file": rel,
+            "lang": fd["lang"],
+            "pkg": fd.get("pkg", ""),
+            "classes": fd.get("classes", []),
+            "imports": fd.get("imports", []),
+            "method_sigs": fd.get("method_sigs", []),
+            "fan_in": len(reverse.get(rel, ())) if reverse else 0,
+            "bytes": fd.get("bytes", 0),
+            "regex_hit": rel in cand_files,
+        })
     return out
 
 
@@ -320,14 +395,16 @@ def scan_candidates(files_data, reverse, seed_files, language: str | None,
                         "cluster_id": None,  # filled by form_clusters
                         "entry_points": sorted(reverse.get(rel, set()))[:8],
                         "big_file": fd["big"],
+                        "source": "regex",
                     })
     return candidates
 
 
 def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None,
-         progress_every: int = 0, large_repo_threshold: int = 0):
+         progress_every: int = 0, large_repo_threshold: int = 0, outdir=None):
     """Single-pass discover (FD3). Public API preserved: returns
-    (candidates, forward, reverse, framework_files, truncated, scanned)."""
+    (candidates, forward, reverse, framework_files, truncated, scanned). When `outdir`
+    is given, also writes skeleton.json (D2; lossless metadata for the scout layer)."""
     files, truncated, scanned = collect_sources(repo, max_files)
     if large_repo_threshold and scanned > large_repo_threshold:
         print(f"[discover] large repo: ~{scanned} source files exceed "
@@ -336,6 +413,14 @@ def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str |
     files_data = index_files(files, big_bytes)
     forward, reverse, framework_files = build_call_graph(files_data, progress_every)
     candidates = scan_candidates(files_data, reverse, seed_files, language, progress_every)
+    if outdir is not None:
+        cand_files = {c["file"] for c in candidates}
+        skeleton = build_skeleton(files_data, reverse, cand_files)
+        (Path(outdir) / "skeleton.json").write_text(
+            json.dumps({"repo": str(repo), "generated_by": "discover_controls.py",
+                        "files": skeleton}, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        print(f"[discover] skeleton.json: {len(skeleton)} files", file=sys.stderr)
     return candidates, forward, reverse, framework_files, truncated, scanned
 
 
@@ -444,7 +529,8 @@ def main():
     candidates, forward, reverse, framework_files, truncated, scanned = scan(
         repo, seed_set, args.max_files, args.big_file_bytes, args.language,
         progress_every=args.progress_every,
-        large_repo_threshold=args.large_repo_threshold)
+        large_repo_threshold=args.large_repo_threshold,
+        outdir=args.out)
 
     # applicable mode: keep only candidates called from a seed file
     out_of_scope = []

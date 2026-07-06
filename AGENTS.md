@@ -178,3 +178,5 @@ py tools/extract_prompts.py --out ./core/prompts
 - 调用图是**文本/AST 级**,漏动态分派/反射/DI/**框架路由**(Spring `@*Mapping`/Feign/AOP/
   `@Autowired`/JPA);未解析项写进 `scope_manifest.unresolved[]` 供报告披露。
 - **tree-sitter 调用链后端规划中、未接入**(当前纯文本 regex + 框架 allowlist)。
+- `/mgh-init` 规则产物的**纯净性 lint 仅覆盖高精度工具内部 token**(工具名 + 特征脚本名 +
+  内部路径);裸层级词(`T1`/`T2`/`scout`)与通用脚本名泄漏由提示词护栏覆盖、非确定性可测。

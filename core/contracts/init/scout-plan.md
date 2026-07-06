@@ -1,8 +1,7 @@
 # Contract: `scout_plan.json` + `scout_candidates.json`
 
 Producer: `core/scripts/plan_scout.py` (deterministic, stdlib). Consumer: orchestrator
-(fans out `init-scout` per batch) + `init-scout-merge`. Part of
-`improve-mgh-init-llm-discovery` (scout fan-out, D4).
+(fans out `init-scout` per batch) + `init-scout-merge`.
 
 ## `scout_plan.json`
 
@@ -11,12 +10,19 @@ Producer: `core/scripts/plan_scout.py` (deterministic, stdlib). Consumer: orches
   "repo": "<abs repo root>",
   "generated_by": "plan_scout.py",
   "targets_total": 812,
+  "regex_known_count": 222,
   "truncated": false,
   "batches": [<Batch>, ...]
 }
 ```
 
-A `Batch` (one S3 scout-reader isolation unit = resume unit, D9 = D12):
+| field | type | note |
+|---|---|---|
+| `targets_total` | int | scout 目标文件数(regex 盲区) |
+| `regex_known_count` | int | 已被 regex 命中、排除出 scout 的文件数(产出者 emit,下游直接读,**禁自算**) |
+| `truncated` | bool | 见下 |
+
+A `Batch` (one S3 scout-reader isolation unit = resume unit):
 
 ```json
 {
@@ -38,7 +44,7 @@ A `Batch` (one S3 scout-reader isolation unit = resume unit, D9 = D12):
 - **批数涌现**:`num_batches = ceil(Σtarget_bytes / --scout-batch-bytes)`,非固定常量。
 - **包内聚**:切批前按 `pkg` 排序,同目录相关文件落同批。
 - **每批文件数 ≤ `--scout-batch-cap`**(防 subagent 赶进度草率)。
-- `truncated`:`targets_total > --scout-budget` 时为真;编排器须建议 `--scope`+`--merge`(R5.4 无静默)。
+- `truncated`:`targets_total > --scout-budget` 时为真;编排器须建议 `--scope`+`--merge`(无静默)。
 
 ## `scout_candidates.json`
 

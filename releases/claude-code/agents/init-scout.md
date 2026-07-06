@@ -14,6 +14,7 @@ repo root + `regex_known[]` (controls regex already found — don't re-report). 
 `needs_slice` MUST go through `chunk_sources.py` first — never read them whole.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - Isolated: only this batch's files. Do not look at other batches.
 - Every proposal needs a real `file:line` anchor you Read; else drop it.
 - **Precision over recall** — "no control here" is a valid, common outcome.

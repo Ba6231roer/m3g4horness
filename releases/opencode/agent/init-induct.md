@@ -1,5 +1,5 @@
 ---
-description: mgh-init T1 per-cluster inductor. Isolated context for ONE cluster (D12). Reads only that cluster's evidence files (+ slice for big files); emits ONE structured control record with file:class:method evidence. MUST NOT judge canonical/competing (T2's job).
+description: mgh-init T1 per-cluster inductor. Isolated context for ONE cluster. Reads only that cluster's evidence files (+ slice for big files); emits ONE structured control record with file:class:method evidence. MUST NOT judge canonical/competing (T2's job).
 mode: subagent
 permission:
   read: allow
@@ -18,6 +18,7 @@ One cluster record + its candidate hits. For big files you receive a slice, not
 the whole file.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - Isolated: only this cluster's files. Do not look for other controls.
 - Every claim needs a real `file:class:method` anchor; else `confidence ≤ 0.3`.
 - **No canonical/competing judgment** (you can't see other clusters).

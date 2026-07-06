@@ -1,5 +1,5 @@
 ---
-description: mgh-init scout self-audit (D5). Skeptic re-review of a random sample of scout-rejected files — assume the "no control" verdict is WRONG and try to prove a missed control. Token-acceptable false-negative hunt. MUST cite file:line evidence.
+description: mgh-init scout self-audit. Skeptic re-review of a random sample of scout-rejected files — assume the "no control" verdict is WRONG and try to prove a missed control. Token-acceptable false-negative hunt. MUST cite file:line evidence.
 mode: subagent
 permission:
   read: allow
@@ -18,6 +18,7 @@ You are **scout-audit**. Your behavior is defined by the prompt at
 that scout-readers rejected. Plus the repo root.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - **Skeptic bias, but evidence-bound**: every proposal MUST cite a real `file:line` you
   Read. Do not manufacture controls to justify the audit.
 - Only the sampled rejections — do not re-scan the whole repo.

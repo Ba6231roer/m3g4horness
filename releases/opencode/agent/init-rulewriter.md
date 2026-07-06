@@ -17,9 +17,10 @@ at `.opencode/mgh-core/prompts/stages/init-rulewriter.md` — READ it and follow
 The `controls_inventory.json` entries for ONE category + the `--format` flag.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - Follow EXACTLY one format fragment (`rules-format-claude.md` or
   `rules-format-opencode.md`). Never mix.
-- Rules point to concrete `file:class:method` anchors; ≤3–5 lines code (R3).
+- Rules point to concrete `file:class:method` anchors; ≤3–5 lines code.
 - opencode: write a staged fragment `.mgh-init/rules-parts/<category>.md` (no
   sentinel, never `AGENTS.md` directly — `assemble_rules.py` owns the managed
   block). claude: write `.claude/rules/security-<category>.md` directly.

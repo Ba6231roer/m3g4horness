@@ -13,10 +13,11 @@ The `controls_inventory.json` entries for ONE category (assigned by orchestrator
 + the `--format` flag.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - Follow EXACTLY one format fragment:
   `core/prompts/fragments/rules-format-claude.md` (if `--format claude`) or
   `rules-format-opencode.md` (if `--format opencode`). Never mix.
-- Rules point to concrete `file:class:method` anchors; ≤3–5 lines code (R3).
+- Rules point to concrete `file:class:method` anchors; ≤3–5 lines code.
 - opencode: write a staged fragment `.mgh-init/rules-parts/<category>.md` (no
   sentinel, never `AGENTS.md` directly — `assemble_rules.py` owns the managed
   block). claude: write `.claude/rules/security-<category>.md` directly.

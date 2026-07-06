@@ -7,13 +7,15 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLATFORM="claude"
 TARGET="${TARGET:-.}"
+ENFORCE_HOOK="1"   # inject PreToolUse hook (R5.7); --no-enforce-hook opts out
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --claude)  PLATFORM="claude"; shift;;
     --opencode) PLATFORM="opencode"; shift;;
+    --no-enforce-hook) ENFORCE_HOOK="0"; shift;;
     -h|--help)
-      echo "Usage: $0 [--claude|--opencode] [target_project_dir]"; exit 0;;
+      echo "Usage: $0 [--claude|--opencode] [--no-enforce-hook] [target_project_dir]"; exit 0;;
     *) TARGET="$1"; shift;;
   esac
 done
@@ -57,6 +59,7 @@ case "$PLATFORM" in
     [[ -d "$SHELL_SRC/commands" ]] && { mkdir -p "$DEST/commands"; cp -r "$SHELL_SRC/commands/." "$DEST/commands/"; }
     [[ -d "$SHELL_SRC/agents" ]]   && { mkdir -p "$DEST/agents";   cp -r "$SHELL_SRC/agents/."   "$DEST/agents/"; }
     [[ -d "$SHELL_SRC/skills" ]]   && { mkdir -p "$DEST/skills";   cp -r "$SHELL_SRC/skills/."   "$DEST/skills/"; }
+    [[ -d "$SHELL_SRC/hooks" ]]    && { mkdir -p "$DEST/hooks";    cp -r "$SHELL_SRC/hooks/."    "$DEST/hooks/"; }
     ;;
   opencode)
     [[ -d "$SHELL_SRC/command" ]]  && { mkdir -p "$DEST/command";  cp -r "$SHELL_SRC/command/."  "$DEST/command/"; }
@@ -79,14 +82,45 @@ cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 #    opencode assembly at runtime. Warn only (don't block a partial install); CI / tests
 #    enforce co-location (R5.8: CI 必 fail).
 _missing=()
-for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules; do
+for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules \
+         list_clusters list_scout_batches list_rule_jobs describe_artifact validate_inventory; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
 if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init scripts co-located: expand_scope / discover_controls / chunk_sources / plan_scout / merge_scout / assemble_rules"
+  echo "✓ mgh-init scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/describe_artifact/validate_inventory"
+fi
+
+# 4b) Distribution-purity self-check (R5.10; fail-soft per R5.8): shipped md MUST be
+#     free of dev-only provenance / dangling references (rule/decision ids, change-
+#     folder names, glasswing_docs/, task.*.md, dev-meta). Warn only on violation —
+#     don't block a partial install; CI / tests enforce purity.
+if py "$HERE/tools/check_distributed_purity.py" >/dev/null 2>&1; then
+  echo "✓ distribution-purity check passed (shipped md clean, R5.10)"
+else
+  echo "⚠ distribution-purity check FAILED (non-blocking, R5.8 fail-soft): shipped md carries dev-only provenance" >&2
+  echo "  run 'py tools/check_distributed_purity.py' for details; CI enforces purity" >&2
+fi
+
+# 5) PreToolUse hook injection (R5.7 deliverable; FD4). claude only — opencode has no
+#    equivalent PreToolUse capability, so warn + skip (fail-soft, R5.8). --no-enforce-hook
+#    opts out entirely; discipline then rests on the shell bright-lines + R5.9 checks.
+if [[ "$ENFORCE_HOOK" == "1" ]]; then
+  if [[ "$PLATFORM" == "claude" ]]; then
+    SETTINGS="$DEST/settings.json"
+    HOOK_CMD="py .claude/hooks/block_adhoc_scripts.py"
+    if py "$HERE/tools/install_hook.py" --settings "$SETTINGS" --hook-command "$HOOK_CMD" >/dev/null; then
+      echo "✓ injected PreToolUse hook (block-adhoc-scripts) into $SETTINGS (idempotent; --no-enforce-hook to skip)"
+    else
+      echo "⚠ hook injection failed (non-blocking, R5.8 fail-soft); discipline via shell bright-lines + R5.9" >&2
+    fi
+  else
+    echo "⚠ opencode: no PreToolUse hook injected (capability unsupported); discipline via shell bright-lines + R5.9" >&2
+  fi
+else
+  echo "• --no-enforce-hook: PreToolUse hook not injected; discipline via shell bright-lines + R5.9"
 fi
 
 echo "✓ installed $PLATFORM shell into $DEST"

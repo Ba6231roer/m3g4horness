@@ -97,17 +97,26 @@ flowchart LR
   即契约面,不读源码)。配 `tools/check_contracts.py`:提取双壳 MD 里所有 `*.py --flag`,对每个
   flag 跑 `py <script>.py --help` 断言存在。
 - **R5.2 编排器即宿主 agent + 黑盒纪律(本仓库立规,非上游同步项)**:**编排器 = 宿主 agent 本身**
-  (按命令 `.md` 用自身工具跑流水线,非写代码)——命令壳顶部须显式声明,并禁 agent 把它物化成脚本:
-  不得 `Write` 任何 `.py` 编排器/包装器(实测反例:`mgh_init.py`)。确定性脚本经 Bash 执行,**禁止
-  `Read` 进编排器上下文**;细节规则下沉 `core/prompts/`,仅 subagent 按需读。理由〔省上下文 + 防 agent
-  误改 + 平台无关〕须随规保留,勿软化。(措辞正引导优先见 R5.5①;`implement` 类 trigger 词易诱导
-  codegen,用「执行/跑」)。
+  (按命令 `.md` 用自身工具跑流水线,非写代码)——命令壳顶部须显式声明,并禁 agent 把它物化成脚本。
+  三条硬边界(`NEVER`,命中**真实失败形状**,承 `harden-mgh-init-orchestration-discipline` FD1——
+  真机首跑的失败全是一次性微脚本内省,非大编排器):
+  - (a) **大编排器**:`Write` 任何 `.py` 编排器/包装器(实测反例:`mgh_init.py`);
+  - (b) **一次性微脚本内省**:`Write` `py -c` 产物 / `_prep_*.py` / `_aggregate_*.py` / `<run>_helper.py`,
+    以及经 `Bash: py -c|python -c` 内省/重派生产物(`import json`/`open(`/`load(` 读 `.mgh-init/**`);
+  - (c) **读源码**:`Read` 叶子脚本 `.py` 源码进编排器上下文(报错看 stderr,不读源码)。
+  合法出口(implementation-intention,正引导优先见 R5.5①):工作清单 → `list_clusters`/
+  `list_scout_batches`/`list_rule_jobs`;瞄结构 → `describe_artifact.py`;派生量 → 产出者 stdout 字段。
+  确定性脚本经 Bash 执行;细节规则下沉 `core/prompts/`,仅 subagent 按需读。理由〔省上下文 + 防 agent
+  误改 + 平台无关〕须随规保留,勿软化。(`implement` 类 trigger 词易诱导 codegen,用「执行/跑」)。
 - **R5.3 确定性脚本稳定性契约**:
   - (a) **runtime 自包含**——零运行时依赖(承 R2)、`sys.path.insert(0, dir-of-__file__)` 自定位
     兄弟导入、读源/文本一律 `encoding="utf-8"`、任意 cwd 可直接 `py`、禁需 `python -c exec` 绕行。
   - (b) **CLI I/O 契约**——`stdout`=结构化 JSON、`stderr`=诊断/进度**严格分流**;退出码 `0/1/2`
     (成功/通用错/误用);幂等(create-if-not-exists);禁交互式 TTY(只吃 flag/env/stdin);
     闭集参数拒歧义输入 + 可操作报错;破坏性操作带 `--dry-run`;大输出默认摘要 + `--offset` 分页。
+    **扇出即脚本枚举**:所有 fan-out(tier)MUST 经 `list_*`/`describe_*` 脚本产 pending 清单
+    (T1→`list_clusters`、scout→`list_scout_batches`、T3→`list_rule_jobs`),编排器对清单迭代,
+    NEVER 直接挖 JSON / `py -c` 内省。
 - **R5.4 大仓可观测 + 无静默截断**:单遍 I/O、每候选 O(1);进度走 `stderr`、产物 JSON 走 `stdout`
   (契约不变);扫描前廉价计数 + 命中阈值前置建议 `--scope`+`--merge`(取代「跑满再超时」);
   截断须显式告警并继续。
@@ -124,10 +133,32 @@ flowchart LR
   `--help`/无参 → 打印 flag 表并 STOP(花 token 前先校验)。
 - **R5.7 评估驱动 + TDD-for-docs**:改 `core/prompts/**` 前先建 baseline(无该提示词跑 ≥5 次 capture
   失败模式,variance 是指标)→ blind A/B 对比 pass rate/tokens → 新命令由 A 实例写、全新 B 实例
-  大仓首跑、观察漂移 → 新失败模式回灌本节。能用 hook 做确定性闭环的,不写进 MD 靠 agent 自觉。
+  大仓首跑、观察漂移 → 新失败模式回灌本节。**交付物(非倡议)**:能用 hook 做确定性闭环的,不写进 MD
+  靠 agent 自觉——每个 `mgh-*` 命令的 #1 违例 MUST 配 PreToolUse hook(install 时注入目标仓);hook
+  缺席 = CI fail(对齐 R5.8)。当前兑现:`block-adhoc-scripts.py`(/mgh-init #1 违例=微脚本内省)。
 - **R5.8 安装自检 + 回归单测**:`install.sh` 镜像后校验脚本族同目录共存 + fail-soft(自检失败只
   warn 不阻断 install,CI 必 fail);任何 `.md`/脚本改动 bump 版本号;回归测覆盖 契约等价 / 导入
   鲁棒(非脚本目录 cwd 子进程)/ 性能不退化 / 零依赖 AST 扫描 / R5.1 CLI lint。
+- **R5.9 边界校验泛化(承 openspec validate-at-boundary)**:每个 stage 产物的产出者 MUST 暴露
+  `--check`(或独立 validator,如 `validate_inventory.py`);编排器跑完一步、进下一步前 MUST 运行之,
+  失败 fail-loud(退出码 2)回退重跑,**不带着破损产物继续**。范式源头:`assemble_rules.py --check`。
+  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout` `--check` + `validate_inventory.py`。
+- **R5.10 分发产物纯净性**:经 `install.sh` 装入目标项目的 md(命令壳 / agent 定义 / stage
+  提示词 / I/O 契约 / skills)MUST 仅含对目标 agent 有用的操作性内容,NEVER 携带只在本仓研发语境
+  才有意义的悬空引用——在目标项目里它们指向不存在的手册/编号/文件,浪费 token 且误导 agent
+  (目标项目常有自带 `AGENTS.md` 与无关编号)。禁引完整八类:① 研发铁律编号(`R5.x`/`R3`/`R1–R4`);
+  ② 失败/发现 ID(`FDn`);③ 设计决策 ID(`Dn`,含 `D9 = D12` 形态);④ openspec 变更夹名
+  (`(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst)-…`);⑤ 内部上游文档(`glasswing_docs/`);
+  ⑥ 仓根开发态文件指针(`task.*.md`,install 不分发);⑦ dev-meta 措辞(`承/兑现 R5.x`、`范式锚点`、
+  指本研发仓时的「本仓」);⑧ 上游溯源行话作谱系归因(`vvah`/`design_controls` 当归因词,非操作性
+  schema 字段)。按「删或嫁接」处理(design D8):目标不需要 → 删标记/引用句;目标必需 → 把最简 1–2 行
+  内容内联到恰当位置再删指针(省 token 优先,NEVER 整段搬运)。**保留**操作语义与输出产物路径
+  (`--check`/退出码 2/`<target>/AGENTS.md`/runtime 脚本调用 `.claude/mgh-core/scripts/*.py`/阶段标签
+  `T1`/`s1`..`s9`)。**受保护归因**(`core/prompts/**` 头的 `Source: vvaharness/...`、skills Apache 归因、
+  `core/docs/prompt-provenance.md`、操作性 `design_controls`、`CVE-*`)不在禁列,NEVER 当 dev-only 溯源剥除。
+  理由〔省 token + 防目标项目误读 + 平台无关〕须随规保留。前 7 类 + dev-meta(`承/兑现`/`范式锚点`)由
+  `tools/check_distributed_purity.py` 确定性强制(承 R5.7);第 8 类与「本仓」与受保护归因同形、机器难辨,
+  由提示词护栏 + 人工清理覆盖(install 自检 fail-soft、CI 测 `tests/test_distributed_md_purity.py` 必 fail,承 R5.8)。
 
 ## 目录布局
 
@@ -180,3 +211,8 @@ py tools/extract_prompts.py --out ./core/prompts
 - **tree-sitter 调用链后端规划中、未接入**(当前纯文本 regex + 框架 allowlist)。
 - `/mgh-init` 规则产物的**纯净性 lint 仅覆盖高精度工具内部 token**(工具名 + 特征脚本名 +
   内部路径);裸层级词(`T1`/`T2`/`scout`)与通用脚本名泄漏由提示词护栏覆盖、非确定性可测。
+
+## 可参考项目
+本项目部分实现方式、实现理念可参考如下已拉取到本地的项目代码仓
+1. C:\DEV\superpowers
+2. C:\DEV\OpenSpec

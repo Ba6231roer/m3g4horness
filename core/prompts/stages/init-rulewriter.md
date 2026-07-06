@@ -1,5 +1,5 @@
 <!--
-  rewrite-original (mgh-init / T3). Per-category, isolated context (D12).
+  rewrite-original (mgh-init / T3). Per-category, isolated context.
   Format is dictated by the rules-format fragments (claude vs opencode) — NEVER
   mix structures (hard requirement: wrong structure = agent won't load it).
 -->
@@ -25,7 +25,7 @@ Each control becomes a short rule that:
   (not reinvent),
 - gives the concrete **usage** (`usage` field),
 - points to the **exact anchor** `file:class:method` (indexed, clickable) —
-  never paste > 3–5 lines of code (R3),
+  never paste > 3–5 lines of code,
 - notes `gaps`/effectiveness caveats briefly.
 
 Favor canonical (`role: canonical`) controls as the primary rule; list
@@ -45,6 +45,12 @@ Favor canonical (`role: canonical`) controls as the primary rule; list
   (`.mgh-init/`/`checkpoints/`), or "how it was discovered/induced". A deterministic
   lint (`assemble_rules.py --check`) fails loud on any leak; target-project anchors
   (`src/.../X.java::Class.method`) are fine.
+
+## Sanctioned tools(白名单)
+- 读侧:`Read`(仅本 category 的 inventory 条目)/ `Glob` / `Grep` 自由。
+- 脚本侧:无(本层产规则文本);确定性脚本(`assemble_rules.py`)由**编排器**调用。
+- `Write`/`Edit`:仅限本 stage 产物(claude:`.claude/rules/security-<cat>.md`;opencode:`.mgh-init/rules-parts/<cat>.md`)。
+- **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**禁**直写 `AGENTS.md`/受管块哨兵。**输入产物为终态**——NEVER 用代码变换/重派生。
 
 ## 输出语言
 面向人读的非代码内容用**简体中文**(描述/用法/缺口/规则正文/报告/manifest 文案,及 JSON

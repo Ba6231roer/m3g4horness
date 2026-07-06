@@ -1,8 +1,8 @@
 <!--
-  rewrite-original (mgh-init / self-audit). No vvaharness port. Part of
-  improve-mgh-init-llm-discovery (D5). mgh-init is a one-shot task where token cost is
+  rewrite-original (mgh-init / self-audit). No vvaharness port.
+  mgh-init is a one-shot task where token cost is
   acceptable — so we spend tokens hunting the scout tier's OWN false negatives rather
-  than saving them. Skeptic bias mirrors mgh-sast s6 ("assume WRONG until confirmed"):
+  than saving them. Skeptic bias — "assume WRONG until confirmed":
   here "WRONG" = the scout reader's verdict that a file holds NO control.
 -->
 
@@ -32,6 +32,12 @@ S3). If after a genuine attempt you agree it is not a control, emit nothing for 
   cite a real `file:line` you Read. Do not manufacture controls to justify the audit.
 - You see only the sampled rejections — do not try to re-scan the whole repo.
 - No canonical / competing judgment. No prose outside JSON.
+
+## Sanctioned tools(白名单)
+- 读侧:`Read`(仅 audit 目标文件及其 caller)/ `Glob` / `Grep` 自由。
+- 脚本侧:仅 `chunk_sources.py`(且仅当需切片大文件);其余确定性脚本由**编排器**调用。
+- `Write`/`Edit`:仅限本 stage 产物文件(`checkpoints/scout/audit.json`)。
+- **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生。
 
 ## 输出语言
 面向人读的非代码内容用**简体中文**;代码、文件路径、`file:class:method` 锚点、标识符、

@@ -5,7 +5,6 @@ description: TODO stub. Design business-coupled security test cases from interfa
 # /mgh-blst — 业务安全测试案例设计 (TODO, opencode)
 
 > **状态:TODO — 尚未实现。** 本文件仅为空命令骨架。
-> 完整功能定义见仓库根 `task.260630.md`。
 
 ## 预期用途
 
@@ -18,5 +17,5 @@ description: TODO stub. Design business-coupled security test cases from interfa
 - `--api <endpoint>` — 聚焦某接口/模块(可选)
 
 ## TODO
-后续变更实现(见 `task.260630.md`)。当前收到本命令:打印"未实现"说明 + 参数表,
+后续变更实现。当前收到本命令:打印"未实现"说明 + 参数表,
 **不消耗 token**。

@@ -68,13 +68,66 @@ def plan_batches(targets, batch_bytes: int, batch_cap: int):
     return batches, oversize
 
 
+def _run_check(plan_path: Path, batch_bytes: int):
+    """R5.9 boundary check: validate an existing scout_plan.json. Asserts batches[] is
+    non-empty when there are targets, every batch is within byte budget (an over-budget
+    batch MUST be a sliced single-file batch), and needs_slice lists only oversize files.
+    Returns exit 0 ok / 2 violation."""
+    violations = []
+    try:
+        wrapper = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"error: malformed scout_plan.json: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(wrapper, dict) or not isinstance(wrapper.get("batches"), list):
+        print("error: scout_plan.json must be a wrapper {repo, batches[], ...}", file=sys.stderr)
+        return 1
+    batches = wrapper["batches"]
+    targets_total = wrapper.get("targets_total", 0)
+    if targets_total and not batches:
+        violations.append({"issue": f"0 batches but targets_total={targets_total}"})
+
+    for bat in batches:
+        if not isinstance(bat, dict):
+            violations.append({"issue": "batch not an object"})
+            continue
+        bid = bat.get("batch_id", "<no-id>")
+        if not bat.get("batch_id"):
+            violations.append({"batch_id": bid, "issue": "missing batch_id"})
+        if not isinstance(bat.get("targets"), list):
+            violations.append({"batch_id": bid, "issue": "missing targets[]"})
+            continue
+        b = int(bat.get("bytes", 0))
+        needs_slice = bat.get("needs_slice", []) or []
+        # over-budget is allowed ONLY for a sliced batch (single oversize file)
+        if b > batch_bytes and not needs_slice:
+            violations.append({"batch_id": bid,
+                               "issue": f"bytes {b} > budget {batch_bytes} but needs_slice empty"})
+        # needs_slice must list only oversize files
+        size_of = {t.get("file"): int(t.get("bytes", 0))
+                   for t in bat["targets"] if isinstance(t, dict)}
+        for f in needs_slice:
+            if f in size_of and size_of[f] <= batch_bytes:
+                violations.append({"batch_id": bid, "file": f,
+                                   "issue": f"in needs_slice but bytes {size_of[f]} <= budget {batch_bytes}"})
+
+    ok = not violations
+    print(f"[plan_scout --check] {plan_path}: {'OK' if ok else f'{len(violations)} violation(s)'}",
+          file=sys.stderr)
+    print(json.dumps({"check": "plan_scout", "ok": ok, "batches": len(batches),
+                      "targets_total": targets_total,
+                      "violations": violations}, ensure_ascii=False))
+    return 0 if ok else 2
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="plan byte-bounded, package-co-located scout batches from skeleton.json (D4)")
-    ap.add_argument("--skeleton", required=True, help="path to skeleton.json")
-    ap.add_argument("--candidates", required=True,
+    ap.add_argument("--skeleton", required=False, help="path to skeleton.json")
+    ap.add_argument("--candidates", required=False,
                     help="path to controls_candidates.json (regex hits to exclude)")
-    ap.add_argument("--out", required=True, help="output scout_plan.json path")
+    ap.add_argument("--out", required=False, help="output scout_plan.json path")
+    ap.add_argument("--check", help="validate an existing scout_plan.json (R5.9 boundary check)")
     ap.add_argument("--batch-bytes", type=int, default=98304,
                     help="max cumulative bytes per scout batch (default 96KB)")
     ap.add_argument("--batch-cap", type=int, default=40,
@@ -82,6 +135,13 @@ def main():
     ap.add_argument("--budget", type=int, default=0,
                     help="cap total scout targets (0 = no cap; >0 -> truncated if exceeded)")
     args = ap.parse_args()
+
+    if args.check:
+        return _run_check(Path(args.check).resolve(), args.batch_bytes)
+    if not (args.skeleton and args.candidates and args.out):
+        print("error: --skeleton, --candidates, --out are required (or use --check <plan.json>)",
+              file=sys.stderr)
+        return 2
 
     sk_path = Path(args.skeleton)
     if not sk_path.is_file():
@@ -108,6 +168,7 @@ def main():
     # candidates. scout targets = the regex-blind complement (D4-f).
     regex_files = {c.get("file") for c in cands
                    if isinstance(c, dict) and c.get("source", "regex") == "regex"}
+    regex_known_count = len(regex_files)  # exposed (FD6): downstream reads this, never re-derives
     targets = [f for f in files
                if isinstance(f, dict) and not f.get("regex_hit")
                and f.get("file") not in regex_files]
@@ -124,14 +185,17 @@ def main():
         "repo": sk.get("repo"),
         "generated_by": "plan_scout.py",
         "targets_total": len(targets),
+        "regex_known_count": regex_known_count,
         "truncated": truncated,
         "batches": batches,
     }
     Path(args.out).write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[plan_scout] {len(targets)} targets -> {len(batches)} batches "
-          f"(oversize->slice: {oversize}, truncated: {truncated})", file=sys.stderr)
+          f"(regex_known: {regex_known_count}, oversize->slice: {oversize}, "
+          f"truncated: {truncated})", file=sys.stderr)
     print(json.dumps({"targets_total": len(targets), "batches": len(batches),
+                      "regex_known_count": regex_known_count,
                       "truncated": truncated, "oversize": oversize}))
     return 0
 

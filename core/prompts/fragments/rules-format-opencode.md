@@ -1,6 +1,6 @@
 <!--
   rules-format fragment — opencode (verified 2026-06).
-  Source: opencode.ai/docs/rules ; GitHub issue #11454 (.opencode/AGENTS.md NOT loaded).
+  Source: opencode.ai/docs/rules (.opencode/AGENTS.md NOT loaded).
   opencode loads AGENTS.md from project root (+ parents walking up). No
   path-scoping; no dot-directory support.
 -->
@@ -9,7 +9,7 @@
 
 opencode's project-level rules live in a single **root `AGENTS.md`**. It walks
 parent directories for more `AGENTS.md`; it does **not** load `.opencode/AGENTS.md`
-(issue #11454) and has no per-path scoping. So all categories go into ONE file,
+and has no per-path scoping. So all categories go into ONE file,
 as sections.
 
 ## Emission flow (two steps — T3 writes fragments, a script assembles)
@@ -46,7 +46,7 @@ as sections.
 - T3 MUST NOT emit any sentinel or write `AGENTS.md` directly; `assemble_rules.py`
   owns the single `<!-- security-controls:begin --> … <!-- security-controls:end -->`
   block. The neutral sentinel carries **no tool name**.
-- Anchors `file::Class.method` / `file:line`; no long code (R3).
+- Anchors `file::Class.method` / `file:line`; no long code.
 - **Rule-body purity**: describe ONLY the target project's control; `NEVER` mention
   this tool's name / scripts / pipeline tiers / internal paths — `assemble_rules.py
   --check` fails loud on any leak.

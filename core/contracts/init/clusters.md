@@ -34,9 +34,9 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
 
 | field | type | note |
 |---|---|---|
-| `cluster_id` | str | `{category}::{anchor\|pattern}::{sha8}`;确定性 T1 隔离/resume 单元(D9=D12) |
+| `cluster_id` | str | `{category}::{anchor\|pattern}::{sha8}`;确定性 T1 隔离/resume 单元 |
 | `category` | enum | init 8(见 `inventory.md`) |
-| `kind` | enum | vvah 6(`auth`\|`input-validation`\|`sandbox`\|`aslr`\|`cfi`\|`other`);`category→kind` 归一见 `inventory.md` |
+| `kind` | enum | 6(`auth`\|`input-validation`\|`sandbox`\|`aslr`\|`cfi`\|`other`);`category→kind` 归一见 `inventory.md` |
 | `shape` | enum | `centralized`(util/filter/config/interceptor 定义,按 anchor 归簇)\| `distributed`(注解跨文件散落,按 `category::pattern` 归簇) |
 | `evidence_files` | [file] | T1 必读文件集;centralized=成员去重,distributed=`usage_sites[:3]` |
 | `usage_sites` | [file] | distributed 上限 `--sample`;centralized=证据文件 + 少量直接调用方 |

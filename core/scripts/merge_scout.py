@@ -51,15 +51,55 @@ def _key(c):
     return (c.get("file"), a.get("class"), a.get("method"), c.get("category"))
 
 
+def _run_check(scout_path: Path):
+    """R5.9 boundary check: validate scout_candidates.json — every candidate MUST carry
+    `source:"scout"` and a concrete `file:line` anchor. Returns exit 0 ok / 2 violation."""
+    violations = []
+    try:
+        sc = json.loads(scout_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"error: malformed scout_candidates.json: {e}", file=sys.stderr)
+        return 1
+    cands = sc.get("candidates") if isinstance(sc, dict) else None
+    if not isinstance(cands, list):
+        print("error: scout_candidates.json must be a wrapper {repo, candidates[], unresolved}",
+              file=sys.stderr)
+        return 1
+    for i, c in enumerate(cands):
+        if not isinstance(c, dict):
+            violations.append({"index": i, "issue": "candidate not an object"})
+            continue
+        if c.get("source") != "scout":
+            violations.append({"index": i, "issue": f"source must be 'scout', got {c.get('source')!r}"})
+        if not c.get("file"):
+            violations.append({"index": i, "issue": "missing file"})
+        if not c.get("line"):
+            violations.append({"index": i, "issue": "missing line"})
+    ok = not violations
+    print(f"[merge_scout --check] {scout_path}: {'OK' if ok else f'{len(violations)} violation(s)'}",
+          file=sys.stderr)
+    print(json.dumps({"check": "merge_scout", "ok": ok, "candidates": len(cands),
+                      "violations": violations}, ensure_ascii=False))
+    return 0 if ok else 2
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="fold scout candidates into controls_candidates.json + clusters.json")
-    ap.add_argument("--candidates", required=True, help="controls_candidates.json (regex; rewritten)")
-    ap.add_argument("--scout", required=True, help="scout_candidates.json")
+    ap.add_argument("--candidates", required=False, help="controls_candidates.json (regex; rewritten)")
+    ap.add_argument("--scout", required=False, help="scout_candidates.json")
     ap.add_argument("--audit", help="checkpoints/scout/audit.json (optional, best-effort)")
-    ap.add_argument("--clusters", required=True, help="clusters.json (scout clusters appended)")
+    ap.add_argument("--clusters", required=False, help="clusters.json (scout clusters appended)")
+    ap.add_argument("--check", help="validate scout_candidates.json (R5.9 boundary check)")
     ap.add_argument("--sample", type=int, default=8)
     args = ap.parse_args()
+
+    if args.check:
+        return _run_check(Path(args.check).resolve())
+    if not (args.candidates and args.scout and args.clusters):
+        print("error: --candidates, --scout, --clusters are required "
+              "(or use --check <scout_candidates.json>)", file=sys.stderr)
+        return 2
 
     cd = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
     regex_cands = cd.get("candidates", [])

@@ -30,7 +30,7 @@ Producer: command orchestrator (i4). Consumer: humans, `/mgh-sra`, `/mgh-blst`, 
 
 ### Checkpoint units (`<target>/.mgh-init/checkpoints/<unit>.json`)
 
-Work-unit granularity = isolation unit = resume unit (D9 = D12):
+Work-unit granularity = isolation unit = resume unit:
 
 | stage | unit key | file |
 |---|---|---|

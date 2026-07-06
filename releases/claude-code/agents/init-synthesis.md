@@ -1,6 +1,6 @@
 ---
 name: init-synthesis
-description: mgh-init T2 cross-cluster synthesis. The ONLY tier seeing all T1 structured records (no raw code). Clusters competing controls, assigns role (canonical/competing/duplicate/possibly-dead) via D8 weighting, dedups, normalises names → controls_inventory.json (vvah design_controls-compatible).
+description: mgh-init T2 cross-cluster synthesis. The ONLY tier seeing all T1 structured records (no raw code). Clusters competing controls, assigns role (canonical/competing/duplicate/possibly-dead), dedups, normalises names → controls_inventory.json (design_controls-compatible).
 tools: Read, Glob, Grep, Bash
 model: inherit
 ---
@@ -16,6 +16,9 @@ only — no raw source code.
 Cluster competing controls, assign `role` (canonicality weighting), dedup,
 normalise. This is where canonical selection happens — T1 could not do it
 (isolation).
+
+## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 
 ## Output
 Write `<target>/.mgh-init/controls_inventory.json` (per

@@ -17,13 +17,19 @@ No raw source code — only the drafted rules.
    `.mgh-init/rules-parts/` (one `<category>.md` per category, no outer sentinel).
    Flag (do not silently fix) any structural violation back to the orchestrator.
 
-## Scope — semantic only (single responsibility, design D2)
+## Scope — semantic only (single responsibility)
 T4 does ONLY semantic reconciliation (naming / anchors / cross-category dedup /
 format purity). T4 MUST NOT assemble fragments into `AGENTS.md`, MUST NOT emit or
 modify managed-block sentinels — that is `assemble_rules.py`'s job. Edit opencode
 fragments (`.mgh-init/rules-parts/<category>.md`) and claude files
 (`.claude/rules/security-<category>.md`) in place. Preserve the 输出纯净性 hard
 boundary (no tool internals in rule prose) while editing.
+
+## Sanctioned tools(白名单)
+- 读侧:`Read`(规则文件)/ `Glob` / `Grep` 自由。
+- 脚本侧:无(本层只做语义校订);确定性脚本由**编排器**调用。
+- `Write`/`Edit`:仅限规则文件本身(claude:`.claude/rules/security-*.md`;opencode:`.mgh-init/rules-parts/<cat>.md`)+ checkpoint。
+- **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**禁**装配 `AGENTS.md`/改受管块哨兵(`assemble_rules.py` 的职责)。
 
 ## 输出语言
 面向人读的非代码内容用**简体中文**(描述/用法/缺口/规则正文/报告/manifest 文案,及 JSON

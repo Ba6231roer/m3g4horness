@@ -38,6 +38,13 @@ class TestZeroRuntimeDeps(unittest.TestCase):
         # explicit guard: the new script exists and is therefore covered by the glob
         self.assertTrue((SCRIPTS / "assemble_rules.py").is_file())
 
+    def test_new_init_scripts_are_scanned(self):
+        # harden-mgh-init-orchestration-discipline additions exist + are glob-scanned
+        for s in ("list_scout_batches", "list_rule_jobs", "describe_artifact",
+                  "validate_inventory"):
+            self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
+                            f"{s}.py missing — not covered by the zero-dep scan")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

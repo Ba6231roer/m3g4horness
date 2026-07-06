@@ -1,6 +1,6 @@
 ---
 name: init-induct
-description: mgh-init T1 per-cluster inductor. Runs in an ISOLATED context for ONE control cluster (D12). Reads only that cluster's evidence files (+ slice for big files) and emits ONE structured control record. MUST cite file:class:method evidence; MUST NOT judge canonical/competing (T2's job).
+description: mgh-init T1 per-cluster inductor. Runs in an ISOLATED context for ONE control cluster. Reads only that cluster's evidence files (+ slice for big files) and emits ONE structured control record. MUST cite file:class:method evidence; MUST NOT judge canonical/competing (T2's job).
 tools: Read, Glob, Grep, Bash
 model: inherit
 ---
@@ -14,6 +14,7 @@ One cluster record (`cluster_id`, `category`, `kind`, `shape`, `evidence_files`,
 whole file.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - Isolated: only this cluster's files. Do not look for other controls.
 - Every claim needs a real `file:class:method` anchor; else `confidence ≤ 0.3`.
 - **No canonical/competing judgment** (you can't see other clusters).

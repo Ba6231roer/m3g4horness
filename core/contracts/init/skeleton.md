@@ -1,8 +1,7 @@
 # Contract: `skeleton.json`
 
 Producer: `core/scripts/discover_controls.py` (i1, deterministic, stdlib; emitted in the
-**same single pass** as `controls_candidates.json` — no second walk, D2 of
-`improve-mgh-init-llm-discovery`). Consumer: `core/scripts/plan_scout.py` (scout batch
+**same single pass** as `controls_candidates.json` — no second walk). Consumer: `core/scripts/plan_scout.py` (scout batch
 planner) + audit trail.
 
 > **纯机械抽取,不含语义判定。** skeleton 只回答「这个文件结构长什么样」,**不**回答
@@ -48,4 +47,4 @@ A `FileSkeleton`:
 | `regex_hit` | bool | 是否被 i1 regex 命中(命中者已产候选,scout 不重复扫) |
 
 - **无损**:抽取不做任何「是否控制」判断;`regex_hit=false` 的文件**仍出现**在此(对 scout 可见)。
-- **单遍**:`discover_controls.py` 在既有 walk+read 循环里追加抽取,不新增遍历(FD3)。
+- **单遍**:`discover_controls.py` 在既有 walk+read 循环里追加抽取,不新增遍历。

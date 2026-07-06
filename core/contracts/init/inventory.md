@@ -1,7 +1,7 @@
 # Contract: `controls_inventory.json`
 
 Producer: `init-synthesis` (T2). Consumers: `init-rulewriter` (T3), `/mgh-sra`,
-`/mgh-blst`, future mgh-sast control intake. **Backward-compatible with vvah
+`/mgh-blst`, future mgh-sast control intake. **Backward-compatible with
 `design_controls`** (`kind`/`protects`/`notes`).
 
 Top-level:
@@ -21,14 +21,14 @@ A `Control`:
 | field | type | note |
 |---|---|---|
 | `name` | str (slug) | stable id, e.g. `spring-method-security` |
-| `kind` | enum | vvah 6: `auth`\|`sandbox`\|`input-validation`\|`aslr`\|`cfi`\|`other` |
+| `kind` | enum | 6: `auth`\|`sandbox`\|`input-validation`\|`aslr`\|`cfi`\|`other` |
 | `category` | enum | init 8 (table below) |
 | `description` | str | what it is, one–two lines |
 | `usage` | str | how a dev SHOULD invoke it (the rule payload) |
 | `evidence` | [`file:class:method`\|`file:line`] | **≥1** concrete anchor (indexed, no long code) |
 | `entry_points` | [file] | flows routed through it (call-graph reverse) |
-| `protects` | [fnmatch glob] | vvah-compat; derived from control + callers |
-| `notes` | str | vvah-compat free-form |
+| `protects` | [fnmatch glob] | `design_controls`-compat; derived from control + callers |
+| `notes` | str | `design_controls`-compat free-form |
 | `gaps` | [str] | coverage gaps / unresolved / effectiveness caveats |
 | `cluster_id` | str | groups competing controls |
 | `role` | enum | `canonical`\|`competing`\|`duplicate`\|`possibly-dead` (set in **T2**) |
@@ -42,7 +42,7 @@ A `Control`:
 | `authentication`, `authorization` | `auth` |
 | `data-masking`, `crypto`, `csrf`, `rate-limiting`, `audit-logging` | `other` |
 
-### vvah alias reuse (also accepted as `kind` on intake)
+### alias reuse (also accepted as `kind` on intake)
 
 `authn`/`authz`/`rbac`/`iam`/`sso`→`auth`; `waf`/`validation`/`sanitization`/`encoding`→`input-validation`;
 `seccomp`/`container`/`isolation`→`sandbox`.

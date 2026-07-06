@@ -503,10 +503,79 @@ def form_clusters(candidates, reverse, framework_files, seed_files, sample: int)
     return clusters
 
 
+def _run_check(outdir: Path):
+    """R5.9 boundary check: validate an existing out-dir's products without scanning.
+    Asserts controls_candidates.json + clusters.json wrappers, every candidate carries a
+    `source`, and cluster_id uniqueness. Returns exit 0 ok / 2 violation."""
+    violations = []
+    cand_path = outdir / "controls_candidates.json"
+    cl_path = outdir / "clusters.json"
+    cands, clusters = [], []
+
+    if not cand_path.is_file():
+        violations.append({"file": "controls_candidates.json", "issue": "missing"})
+    else:
+        try:
+            cd = json.loads(cand_path.read_text(encoding="utf-8"))
+            cands = cd.get("candidates") if isinstance(cd, dict) else None
+            if not isinstance(cands, list):
+                violations.append({"file": "controls_candidates.json",
+                                   "issue": "wrapper must be {repo,candidates[],...}"})
+        except (OSError, ValueError) as e:
+            violations.append({"file": "controls_candidates.json", "issue": f"malformed: {e}"})
+            cands = []
+    for i, c in enumerate(cands):
+        if not isinstance(c, dict):
+            violations.append({"file": "controls_candidates.json", "index": i,
+                               "issue": "candidate not an object"})
+            continue
+        if not c.get("source"):
+            violations.append({"file": "controls_candidates.json", "index": i,
+                               "issue": "candidate missing `source`"})
+        if not c.get("file"):
+            violations.append({"file": "controls_candidates.json", "index": i,
+                               "issue": "candidate missing `file`"})
+
+    if not cl_path.is_file():
+        violations.append({"file": "clusters.json", "issue": "missing"})
+    else:
+        try:
+            cl = json.loads(cl_path.read_text(encoding="utf-8"))
+            clusters = cl.get("clusters") if isinstance(cl, dict) else None
+            if not isinstance(clusters, list):
+                violations.append({"file": "clusters.json",
+                                   "issue": "wrapper must be {repo,clusters[],truncated}"})
+        except (OSError, ValueError) as e:
+            violations.append({"file": "clusters.json", "issue": f"malformed: {e}"})
+            clusters = []
+    seen_ids = set()
+    for i, cl_ in enumerate(clusters):
+        if not isinstance(cl_, dict):
+            violations.append({"file": "clusters.json", "index": i, "issue": "cluster not an object"})
+            continue
+        cid = cl_.get("cluster_id")
+        if not cid:
+            violations.append({"file": "clusters.json", "index": i, "issue": "missing cluster_id"})
+        elif cid in seen_ids:
+            violations.append({"file": "clusters.json", "index": i,
+                               "issue": f"duplicate cluster_id {cid}"})
+        else:
+            seen_ids.add(cid)
+
+    ok = not violations
+    print(f"[discover --check] {outdir}: {'OK' if ok else f'{len(violations)} violation(s)'}",
+          file=sys.stderr)
+    print(json.dumps({"check": "discover", "ok": ok,
+                      "candidates": len(cands), "clusters": len(clusters),
+                      "violations": violations}, ensure_ascii=False))
+    return 0 if ok else 2
+
+
 def main():
     ap = argparse.ArgumentParser(description="discover existing security controls")
-    ap.add_argument("--repo", required=True)
-    ap.add_argument("--out", required=True, help="output dir (candidates + clusters)")
+    ap.add_argument("--repo", required=False)
+    ap.add_argument("--out", required=False, help="output dir (candidates + clusters)")
+    ap.add_argument("--check", help="validate an existing out-dir's products (R5.9 boundary check)")
     ap.add_argument("--scope", help="path:<dir>|package:<pkg>|file:<glob>")
     ap.add_argument("--scope-mode", choices=["defined", "applicable"], default="defined")
     ap.add_argument("--language")
@@ -519,6 +588,12 @@ def main():
     ap.add_argument("--large-repo-threshold", type=int, default=15000,
                     help="advise --scope + --merge when source-file count exceeds this (FD4)")
     args = ap.parse_args()
+    if args.check:
+        return _run_check(Path(args.check).resolve())
+    if not args.repo or not args.out:
+        print("error: --repo and --out are required (or use --check <out-dir>)",
+              file=sys.stderr)
+        return 2
     repo = Path(args.repo).resolve()
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -576,8 +651,24 @@ def main():
         json.dumps({"repo": str(repo), "clusters": clusters,
                     "truncated": truncated}, indent=2, ensure_ascii=False),
         encoding="utf-8")
+    # big_files (FD6): #source files over --big-file-bytes (downstream commonly queries
+    # this for slicing decisions). Read the just-written skeleton for the true count;
+    # fall back to distinct big candidate files if skeleton is unavailable.
+    big_files = 0
+    sk_path = outdir / "skeleton.json"
+    if sk_path.is_file():
+        try:
+            sk = json.loads(sk_path.read_text(encoding="utf-8"))
+            big_files = sum(1 for f in sk.get("files", []) if isinstance(f, dict) and f.get("big"))
+        except (OSError, ValueError):
+            big_files = len({c["file"] for c in candidates if c.get("big_file")})
+    else:
+        big_files = len({c["file"] for c in candidates if c.get("big_file")})
+
     print(json.dumps({"candidates": len(candidates), "clusters": len(clusters),
-                      "unresolved": len(unresolved), "out_of_scope": len(set(out_of_scope)),
+                      "unresolved": len(unresolved), "unresolved_count": len(unresolved),
+                      "big_files": big_files,
+                      "out_of_scope": len(set(out_of_scope)),
                       "truncated": truncated, "scanned": scanned}))
     return 0
 

@@ -1,5 +1,5 @@
 ---
-description: mgh-init T2 cross-cluster synthesis. The ONLY tier seeing all T1 structured records (no raw code). Clusters competing controls, assigns role (canonical/competing/duplicate/possibly-dead) via D8 weighting, dedups, normalises → controls_inventory.json (vvah design_controls-compatible).
+description: mgh-init T2 cross-cluster synthesis. The ONLY tier seeing all T1 structured records (no raw code). Clusters competing controls, assigns role (canonical/competing/duplicate/possibly-dead), dedups, normalises → controls_inventory.json (design_controls-compatible).
 mode: subagent
 permission:
   read: allow
@@ -20,6 +20,9 @@ only — no raw source code.
 ## Task
 Cluster competing controls, assign `role` (canonicality weighting), dedup,
 normalise. Canonical selection happens here — T1 could not (isolation).
+
+## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 
 ## Output
 Write `<target>/.mgh-init/controls_inventory.json` (per

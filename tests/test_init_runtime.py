@@ -161,5 +161,44 @@ class TestListClustersStandalone(unittest.TestCase):
         self.assertEqual(len(data["pending"]), 2)
 
 
+class TestNewScriptsStandalone(unittest.TestCase):
+    """FD2 family: the new enumeration / describe / validate scripts run as subprocesses
+    from a NON-script cwd (self-contained, import-robust, R5.3a)."""
+
+    def setUp(self):
+        self.cwd = Path(tempfile.mkdtemp(prefix="mgh_new_rt_"))
+
+    def _run(self, script, *args):
+        return subprocess.run([PY, str(script), *args], cwd=str(self.cwd),
+                              capture_output=True, text=True, encoding="utf-8")
+
+    def test_list_scout_batches_help_is_contract(self):
+        r = self._run(SCRIPTS / "list_scout_batches.py", "--help")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("--scout-plan", r.stdout)
+
+    def test_describe_artifact_runs_from_non_script_cwd(self):
+        art = self.cwd / "a.json"
+        art.write_text('{"x":[1,2,3]}', encoding="utf-8")
+        r = self._run(SCRIPTS / "describe_artifact.py", "--in", str(art), "--keys")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["keys"], ["x"])
+
+    def test_validate_inventory_help_is_contract(self):
+        r = self._run(SCRIPTS / "validate_inventory.py", "--help")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("--inventory", r.stdout)
+
+    def test_list_rule_jobs_runs_from_non_script_cwd(self):
+        inv = self.cwd / "inv.json"
+        inv.write_text(json.dumps({"format": "opencode",
+                                   "controls": [{"name": "a", "category": "crypto"}]}),
+                       encoding="utf-8")
+        r = self._run(SCRIPTS / "list_rule_jobs.py", "--inventory", str(inv),
+                      "--format", "opencode")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["total"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

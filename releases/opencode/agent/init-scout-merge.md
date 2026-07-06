@@ -18,6 +18,7 @@ All scout-reader batch records (`<target>/.mgh-init/checkpoints/scout/*.json`, e
 `audit.json`). No raw source code.
 
 ## Hard constraints
+- **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
 - Structured records only — drop any candidate lacking `file:line` evidence.
 - **Scout-vs-scout only**: do NOT reconcile against the regex candidate set (T2's job).
 - Every emitted candidate keeps `source: "scout"`.

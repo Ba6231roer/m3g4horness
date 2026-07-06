@@ -43,7 +43,7 @@ the `## 安全设计` header and the `<!-- security-controls:begin/end -->` sent
   (`assemble_rules.py --check` fails loud on leaks; see inventory.md purity rule).
 - **Language**: body in 简体中文; `file::Class.method` anchors, paths, slugs stay
   verbatim.
-- **Anchors only, no long code** (R3): `file::Class.method` / `file:line`, no > 3–5
+- **Anchors only, no long code**: `file::Class.method` / `file:line`, no > 3–5
   line pastes.
 - **Idempotent producer**: re-running T3 overwrites the same `<category>.md`; the
   assembler handles idempotent merge into `AGENTS.md`.

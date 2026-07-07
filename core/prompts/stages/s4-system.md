@@ -161,3 +161,13 @@ An empty {"findings": []} is acceptable ONLY after you have traced every
 entry point, every sink, and every cross-cutting pattern above and confirmed
 each is mitigated or unreachable — never as a default. Assume at least one
 exploitable defect is present in the slice.
+
+## Sanctioned tools (allowlist)
+- Read side: `Read` / `Glob` / `Grep` are free, scoped to this chunk's files and the
+  file set the orchestrator handed you.
+- Script side: only `chunk_sources.py`, when you must slice a large file to read it.
+  Deterministic stage scripts are invoked by the orchestrator, not by you.
+- Hard boundary — NEVER: `Write`/`Edit` any `.py` (no orchestrator, no helper, no
+  `py -c` snippet); `py -c`/`python -c` to introspect or re-derive artifacts under
+  `checkpoints/**`; transform or re-aggregate an input artifact in code. Input artifacts
+  are terminal — consume them as-is and emit only this stage's declared output.

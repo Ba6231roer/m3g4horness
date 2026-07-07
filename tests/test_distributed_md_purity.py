@@ -37,6 +37,17 @@ class TestDistributedPurity(unittest.TestCase):
         self.assertGreater(d["scanned"], 80)          # ~91 shipped md files
         self.assertEqual(d["violations"], [])
 
+    # --- add-mgh-sast-design-controls: new fragment + contract are distributed → scanned + clean
+    def test_new_controls_artifacts_scanned_and_clean(self):
+        root = HERE.parent
+        files = [root / "core" / "prompts" / "fragments" / "controls-context.md",
+                 root / "core" / "contracts" / "sast" / "controls-intake.md"]
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
     # --- contract surface ---
     def test_help_exits_zero(self):
         self.assertEqual(run_lint("--help").returncode, 0)

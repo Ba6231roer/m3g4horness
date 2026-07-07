@@ -135,14 +135,14 @@ flowchart LR
   失败模式,variance 是指标)→ blind A/B 对比 pass rate/tokens → 新命令由 A 实例写、全新 B 实例
   大仓首跑、观察漂移 → 新失败模式回灌本节。**交付物(非倡议)**:能用 hook 做确定性闭环的,不写进 MD
   靠 agent 自觉——每个 `mgh-*` 命令的 #1 违例 MUST 配 PreToolUse hook(install 时注入目标仓);hook
-  缺席 = CI fail(对齐 R5.8)。当前兑现:`block-adhoc-scripts.py`(/mgh-init #1 违例=微脚本内省)。
+  缺席 = CI fail(对齐 R5.8)。当前兑现:`block-adhoc-scripts.py`(/mgh-init + /mgh-sast #1 违例=微脚本内省;同一 hook 双运行域 `MGH_INIT_ACTIVE`/`MGH_SAST_ACTIVE`)。
 - **R5.8 安装自检 + 回归单测**:`install.sh` 镜像后校验脚本族同目录共存 + fail-soft(自检失败只
   warn 不阻断 install,CI 必 fail);任何 `.md`/脚本改动 bump 版本号;回归测覆盖 契约等价 / 导入
   鲁棒(非脚本目录 cwd 子进程)/ 性能不退化 / 零依赖 AST 扫描 / R5.1 CLI lint。
 - **R5.9 边界校验泛化(承 openspec validate-at-boundary)**:每个 stage 产物的产出者 MUST 暴露
   `--check`(或独立 validator,如 `validate_inventory.py`);编排器跑完一步、进下一步前 MUST 运行之,
   失败 fail-loud(退出码 2)回退重跑,**不带着破损产物继续**。范式源头:`assemble_rules.py --check`。
-  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout` `--check` + `validate_inventory.py`。
+  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout` `--check` + `validate_inventory.py` + `prefilter`/`dedup`/`emit_sarif` `--check`(/mgh-sast 确定性阶段)。
 - **R5.10 分发产物纯净性**:经 `install.sh` 装入目标项目的 md(命令壳 / agent 定义 / stage
   提示词 / I/O 契约 / skills)MUST 仅含对目标 agent 有用的操作性内容,NEVER 携带只在本仓研发语境
   才有意义的悬空引用——在目标项目里它们指向不存在的手册/编号/文件,浪费 token 且误导 agent

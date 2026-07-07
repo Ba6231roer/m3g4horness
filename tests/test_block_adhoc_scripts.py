@@ -3,13 +3,16 @@
 """block_adhoc_scripts.py PreToolUse hook decision matrix (R5.7 deliverable, FD4).
 
 Double-column assertions: PASS legitimate leaf-script invocations + whitelisted writes;
-BLOCK py -c introspection + ad-hoc .py writes. Active only inside MGH_INIT_ACTIVE=1.
+BLOCK py -c introspection + ad-hoc .py writes. Active only inside a mgh run-domain
+(MGH_INIT_ACTIVE=1 for /mgh-init, MGH_SAST_ACTIVE=1 for /mgh-sast).
 """
 import contextlib, importlib.util, io, json, os, sys, unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "releases" / "claude-code" / "hooks" / "block_adhoc_scripts.py"
+
+_DOMAIN_ENV = {"init": "MGH_INIT_ACTIVE", "sast": "MGH_SAST_ACTIVE"}
 
 
 def _load():
@@ -19,25 +22,38 @@ def _load():
     return mod
 
 
-class TestBlockAdhocScripts(unittest.TestCase):
+def _run_hook(mod, payload, domain="init", active="1"):
+    """Invoke mod.main() with the given run-domain env set; isolate the other mgh env
+    so the test is deterministic. Returns (exit_code, stderr)."""
+    key = _DOMAIN_ENV[domain]
+    other = _DOMAIN_ENV["sast" if domain == "init" else "init"]
+    old_val = os.environ.get(key)
+    old_other = os.environ.pop(other, None)
+    os.environ[key] = active
+    old_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(payload))
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = mod.main()
+    finally:
+        sys.stdin = old_stdin
+        if old_val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old_val
+        if old_other is not None:
+            os.environ[other] = old_other
+    return code, err.getvalue()
+
+
+class TestBlockAdhocScriptsInit(unittest.TestCase):
+    """/mgh-init run-domain (MGH_INIT_ACTIVE=1)."""
+
     def setUp(self):
         self.m = _load()
 
     def _run(self, payload, active="1"):
-        old_env = os.environ.get("MGH_INIT_ACTIVE")
-        os.environ["MGH_INIT_ACTIVE"] = active
-        old_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(payload))
-        out, err = io.StringIO(), io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = self.m.main()
-        finally:
-            sys.stdin = old_stdin
-            if old_env is None:
-                os.environ.pop("MGH_INIT_ACTIVE", None)
-            else:
-                os.environ["MGH_INIT_ACTIVE"] = old_env
-        return code, err.getvalue()
+        return _run_hook(self.m, payload, domain="init", active=active)
 
     # --- PASS (legitimate) ---
     def test_inactive_passes_introspection_silently(self):
@@ -80,6 +96,53 @@ class TestBlockAdhocScripts(unittest.TestCase):
             "file_path": "_prep_scout_batches.py"}})
         self.assertEqual(code, 2)
         self.assertIn("_prep_scout_batches.py", err)
+
+
+class TestBlockAdhocScriptsSast(unittest.TestCase):
+    """/mgh-sast run-domain (MGH_SAST_ACTIVE=1) — mirror of the init column
+    (harden-mgh-sast-orchestration-discipline FD4 / task 5.4)."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _run(self, payload, active="1"):
+        return _run_hook(self.m, payload, domain="sast", active=active)
+
+    # --- PASS (legitimate) ---
+    def test_inactive_passes_introspection_silently(self):
+        code, _ = self._run({"tool_name": "Bash", "tool_input": {
+            "command": 'py -c "import json; json.load(open(\'x.json\'))"'}}, active="")
+        self.assertEqual(code, 0)
+
+    def test_pass_legit_leaf_invocation(self):
+        code, _ = self._run({"tool_name": "Bash", "tool_input": {
+            "command": "py .claude/mgh-core/scripts/prefilter.py --in checkpoints/s4_candidates.json --out checkpoints/s5_filtered.json"}})
+        self.assertEqual(code, 0)
+
+    def test_pass_list_chunks_invocation(self):
+        code, _ = self._run({"tool_name": "Bash", "tool_input": {
+            "command": "py .claude/mgh-core/scripts/list_chunks.py --chunks checkpoints/s3_chunks.json"}})
+        self.assertEqual(code, 0)
+
+    def test_pass_whitelisted_py_write(self):
+        code, _ = self._run({"tool_name": "Write", "tool_input": {
+            "file_path": ".claude/mgh-core/scripts/list_verify_jobs.py"}})
+        self.assertEqual(code, 0)
+
+    # --- BLOCK (violations) ---
+    def test_block_introspection_py_c(self):
+        code, err = self._run({"tool_name": "Bash", "tool_input": {
+            "command": 'py -c "import json; json.load(open(\'security-scan/checkpoints/s5_filtered.json\'))"'}})
+        self.assertEqual(code, 2)
+        self.assertIn("list_verify_jobs", err)   # sast recipe points at sast primitives
+        self.assertIn("mgh-sast", err)           # domain-labelled message
+
+    def test_block_adhoc_py_write(self):
+        code, err = self._run({"tool_name": "Write", "tool_input": {
+            "file_path": "_prep_chunks.py"}})
+        self.assertEqual(code, 2)
+        self.assertIn("_prep_chunks.py", err)
+        self.assertIn("mgh-sast", err)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,12 @@ optionally drops findings whose file/path is clearly out-of-scope noise
 Usage:
   py prefilter.py --in s4_candidates.json --out s5_filtered.json
                   [--min-confidence 0.4] [--scope-file scope_manifest.json]
+  py prefilter.py --check <s5_filtered.json>   # boundary check (R5.9)
+
+--check validates an EXISTING s5 product: every kept finding MUST carry
+file / line_start / vuln_class / source_ref / sink_ref (s6 verify needs them all).
+stdout = {"ok":bool,"checked":N,"violations":[{"index","missing"}...]}; stderr =
+diagnostics. Exit codes: 0 ok · 1 missing/malformed · 2 violation or misuse.
 """
 from __future__ import annotations
 import argparse
@@ -68,14 +74,61 @@ def run(candidates, min_conf, scope_set):
     return kept, dropped
 
 
+# R5.9 boundary check: s6 verify consumes every kept finding and needs these fields.
+_CHECK_FIELDS = ("file", "line_start", "vuln_class", "source_ref", "sink_ref")
+
+
+def _present(v):
+    if v is None:
+        return False
+    if isinstance(v, str):
+        return bool(v.strip())
+    return True  # ints (line_start) are present when not None
+
+
+def _check(path: str) -> int:
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: artifact not found: {p}", file=sys.stderr)
+        return 1
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"error: malformed JSON: {e}", file=sys.stderr)
+        return 1
+    findings = data.get("kept", data.get("findings", data if isinstance(data, list) else []))
+    violations = []
+    for i, f in enumerate(findings):
+        if not isinstance(f, dict):
+            violations.append({"index": i, "missing": ["(not an object)"]})
+            continue
+        missing = [k for k in _CHECK_FIELDS if not _present(f.get(k))]
+        if missing:
+            violations.append({"index": i, "missing": missing})
+    ok = not violations
+    print(f"[prefilter --check] {len(findings)} finding(s), {len(violations)} violation(s)",
+          file=sys.stderr)
+    print(json.dumps({"ok": ok, "checked": len(findings), "violations": violations},
+                     ensure_ascii=False))
+    return 0 if ok else 2
+
+
 def main():
     ap = argparse.ArgumentParser(description="s5 deterministic pre-filter")
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--in", dest="inp", help="s4_candidates.json (produce mode)")
+    ap.add_argument("--out", help="s5_filtered.json output (produce mode)")
     ap.add_argument("--min-confidence", type=float, default=MIN_CONF_DEFAULT)
     ap.add_argument("--scope-file", default=None,
                     help="scope_manifest.json with in_scope[] to enforce")
+    ap.add_argument("--check", metavar="<s5_filtered.json>",
+                    help="boundary check (R5.9): validate an existing s5 product, exit 0/2")
     args = ap.parse_args()
+    if args.check:
+        return _check(args.check)
+    if not args.inp or not args.out:
+        print("error: produce mode needs --in and --out (or use --check <path>)",
+              file=sys.stderr)
+        return 2
     data = json.loads(Path(args.inp).read_text(encoding="utf-8"))
     candidates = data.get("findings", data if isinstance(data, list) else [])
     scope_set = None

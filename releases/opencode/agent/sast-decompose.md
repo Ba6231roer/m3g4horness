@@ -28,3 +28,11 @@ Write `checkpoints/s3_chunks.json`:
 Assign a specialist lens per chunk where relevant (one of the default-active
 `crypto, logic-bug, access-control, batch-etl, iac`; see
 `lenses/specialist-hints.md`).
+
+## Hard constraints
+You are a stage subagent, not the orchestrator — emit only this stage's declared output.
+- NEVER `Write`/`Edit` a `.py` file (no orchestrator, no helper script, no `py -c` snippet).
+- NEVER run `py -c`/`python -c` to introspect or re-derive artifacts; read inputs with `Read`.
+- Input artifacts are terminal — consume as-is; do not transform or re-aggregate them in code.
+(The permission frontmatter above already denies script authoring; this states the intent
+so it is never loosened.)

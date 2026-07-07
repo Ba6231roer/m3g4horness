@@ -10,6 +10,13 @@ with the score), maps CWE ids, and writes SARIF 2.1.0.
 Usage:
   py emit_sarif.py --in findings.json --out report.sarif
        [--application-id 12345] [--repo-name myapp] [--tool mgh-sast]
+  py emit_sarif.py --check <report.sarif>   # boundary check (R5.9)
+
+--check validates an EXISTING SARIF product: version 2.1.0, >=1 run, each run has
+tool.driver.name + a non-empty invocations[] (provenance), and every result has a
+ruleId + >=1 location. stdout =
+{"ok":bool,"runs":N,"results":M,"violations":[...]}; stderr = diagnostics.
+Exit codes: 0 ok · 1 missing/malformed · 2 violation or misuse.
 """
 from __future__ import annotations
 import argparse
@@ -173,6 +180,8 @@ def emit(findings, tool, repo_name, app_id):
             "tool": {"driver": {
                 "name": tool, "informationUri": "https://example.invalid/mgh-sast",
                 "rules": list(rules.values())}},
+            "invocations": [{"executionSuccessful": True,
+                             "commandLine": "mgh-sast emit_sarif"}],
             "results": results,
             "properties": {"applicationId": app_id, "repositoryName": repo_name},
         }],
@@ -180,14 +189,63 @@ def emit(findings, tool, repo_name, app_id):
     return sarif
 
 
+def _check(path: str) -> int:
+    """R5.9 boundary check: validate SARIF 2.1.0 structure + run.invocations presence."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: artifact not found: {p}", file=sys.stderr)
+        return 1
+    try:
+        sarif = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"error: malformed JSON: {e}", file=sys.stderr)
+        return 1
+    violations = []
+    if not isinstance(sarif, dict) or sarif.get("version") != "2.1.0":
+        violations.append({"sarif_version": sarif.get("version") if isinstance(sarif, dict) else None})
+    runs = sarif.get("runs") if isinstance(sarif, dict) else None
+    if not isinstance(runs, list) or not runs:
+        violations.append({"runs": "missing or empty"})
+    total_results = 0
+    if not violations:
+        for ri, run in enumerate(runs):
+            driver = ((run.get("tool") or {}).get("driver") or {})
+            if not (driver.get("name") or "").strip():
+                violations.append({"run": ri, "missing": "tool.driver.name"})
+            invs = run.get("invocations")
+            if not isinstance(invs, list) or not invs:
+                violations.append({"run": ri, "missing": "invocations[]"})
+            for res in run.get("results") or []:
+                total_results += 1
+                if not res.get("ruleId"):
+                    violations.append({"run": ri, "result": "missing ruleId"})
+                if not res.get("locations"):
+                    violations.append({"run": ri, "result": "missing locations"})
+    ok = not violations
+    print(f"[emit_sarif --check] {len(runs) if isinstance(runs, list) else 0} run(s), "
+          f"{total_results} result(s), {len(violations)} violation(s)", file=sys.stderr)
+    print(json.dumps({"ok": ok, "runs": len(runs) if isinstance(runs, list) else 0,
+                      "results": total_results, "violations": violations},
+                     ensure_ascii=False))
+    return 0 if ok else 2
+
+
 def main():
     ap = argparse.ArgumentParser(description="s9 SARIF 2.1.0 emission")
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--in", dest="inp", help="findings.json (produce mode)")
+    ap.add_argument("--out", help="report.sarif output (produce mode)")
     ap.add_argument("--application-id", default="")
     ap.add_argument("--repo-name", default="")
     ap.add_argument("--tool", default="mgh-sast")
+    ap.add_argument("--check", metavar="<report.sarif>",
+                    help="boundary check (R5.9): validate an existing SARIF product, exit 0/2")
     args = ap.parse_args()
+    if args.check:
+        return _check(args.check)
+    if not args.inp or not args.out:
+        print("error: produce mode needs --in and --out (or use --check <path>)",
+              file=sys.stderr)
+        return 2
     data = json.loads(Path(args.inp).read_text(encoding="utf-8"))
     findings = data.get("findings", data if isinstance(data, list) else [])
     enrich(findings)

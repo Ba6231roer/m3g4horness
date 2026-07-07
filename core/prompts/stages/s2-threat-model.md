@@ -59,3 +59,12 @@ Respond with ONLY a JSON object — no prose, no markdown fences:
 }
 
 Coverage rule: every trust_boundary MUST appear as the surface of ≥1 threat.
+
+## Sanctioned tools (allowlist)
+- Read side: `Read` / `Glob` / `Grep` are free, scoped to this stage's inputs and the
+  file set the orchestrator handed you.
+- Script side: none. Deterministic stage scripts are invoked by the orchestrator, not by you.
+- Hard boundary — NEVER: `Write`/`Edit` any `.py` (no orchestrator, no helper, no
+  `py -c` snippet); `py -c`/`python -c` to introspect or re-derive artifacts under
+  `checkpoints/**`; transform or re-aggregate an input artifact in code. Input artifacts
+  are terminal — consume them as-is and emit only this stage's declared output.

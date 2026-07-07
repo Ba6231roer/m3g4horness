@@ -29,3 +29,11 @@ The orchestrator collects all chunks into `checkpoints/s4_candidates.json`.
 
 If you find nothing after tracing every entry/sink, emit `{"findings": []}` only
 after genuinely confirming each path is mitigated/unreachable.
+
+## Hard constraints
+You are a stage subagent, not the orchestrator — emit only this stage's declared output.
+- NEVER `Write`/`Edit` a `.py` file (no orchestrator, no helper script, no `py -c` snippet).
+- NEVER run `py -c`/`python -c` to introspect or re-derive artifacts; read inputs with `Read`.
+- Input artifacts are terminal — consume as-is; do not transform or re-aggregate them in code.
+(The permission frontmatter above already denies script authoring; this states the intent
+so it is never loosened.)

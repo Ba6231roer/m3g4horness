@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """R5.9 stage-boundary --check tests: good artifact -> exit 0, broken -> exit 2.
 
-Covers discover_controls / plan_scout / merge_scout --check + validate_inventory.
+Covers discover_controls / plan_scout / merge_scout --check + validate_inventory
+(/mgh-init) and prefilter / dedup / emit_sarif --check (/mgh-sast deterministic stages).
 """
 import contextlib, importlib.util, io, json, sys, tempfile, unittest
 from pathlib import Path
@@ -124,6 +125,81 @@ class TestValidateInventory(unittest.TestCase):
     def test_bad_missing_evidence(self):
         self._inv([{"name": "a", "kind": "auth", "category": "authorization", "evidence": []}])
         self.assertEqual(_run(self.d, ["--inventory", str(self.dir / "inv.json")]), 2)
+
+
+class TestPrefilterCheck(unittest.TestCase):
+    def setUp(self):
+        self.d = _load("prefilter")
+        self.dir = Path(tempfile.mkdtemp(prefix="mgh_pfchk_"))
+
+    def _s5(self, kept):
+        (self.dir / "s5.json").write_text(
+            json.dumps({"kept": kept, "dropped": [], "stats": {}}, ensure_ascii=False),
+            encoding="utf-8")
+
+    def test_good(self):
+        self._s5([{"file": "a.java", "line_start": 10, "vuln_class": "injection",
+                   "source_ref": "a.java:10", "sink_ref": "b.java:1"}])
+        self.assertEqual(_run(self.d, ["--check", str(self.dir / "s5.json")]), 0)
+
+    def test_bad_missing_source_ref(self):
+        self._s5([{"file": "a.java", "line_start": 10, "vuln_class": "injection",
+                   "source_ref": "", "sink_ref": "b.java:1"}])
+        self.assertEqual(_run(self.d, ["--check", str(self.dir / "s5.json")]), 2)
+
+
+class TestDedupCheck(unittest.TestCase):
+    def setUp(self):
+        self.d = _load("dedup")
+        self.dir = Path(tempfile.mkdtemp(prefix="mgh_ddchk_"))
+
+    def _s7(self, findings):
+        (self.dir / "s7.json").write_text(
+            json.dumps({"findings": findings}, ensure_ascii=False), encoding="utf-8")
+
+    def test_good_idempotent(self):
+        self._s7([
+            {"id": "F1", "title": "SQLi login", "file": "a.java", "line_start": 10,
+             "cwe": "CWE-89", "vuln_class": "injection", "confidence": 0.9},
+            {"id": "F2", "title": "XSS reflect", "file": "b.java", "line_start": 20,
+             "cwe": "CWE-79", "vuln_class": "injection", "confidence": 0.8}])
+        self.assertEqual(_run(self.d, ["--check", str(self.dir / "s7.json")]), 0)
+
+    def test_bad_residual_near_dup(self):
+        # same file/cwe/line-bucket + identical title -> re-clusters (would_merge > 0)
+        self._s7([
+            {"id": "F1", "title": "SQLi login", "file": "a.java", "line_start": 10,
+             "cwe": "CWE-89", "vuln_class": "injection", "confidence": 0.9},
+            {"id": "F2", "title": "SQLi login", "file": "a.java", "line_start": 11,
+             "cwe": "CWE-89", "vuln_class": "injection", "confidence": 0.8}])
+        self.assertEqual(_run(self.d, ["--check", str(self.dir / "s7.json")]), 2)
+
+
+class TestEmitSarifCheck(unittest.TestCase):
+    def setUp(self):
+        self.d = _load("emit_sarif")
+        self.dir = Path(tempfile.mkdtemp(prefix="mgh_sarchk_"))
+
+    def _produce(self, findings):
+        (self.dir / "in.json").write_text(
+            json.dumps({"findings": findings}, ensure_ascii=False), encoding="utf-8")
+        _run(self.d, ["--in", str(self.dir / "in.json"), "--out", str(self.dir / "r.sarif")])
+
+    def test_good(self):
+        self._produce([{"title": "t", "file": "a.java", "line_start": 10, "cwe": "CWE-89",
+                        "vuln_class": "injection", "source_ref": "a.java:10",
+                        "sink_ref": "b.java:1", "confidence": 0.9,
+                        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                        "impact": "x"}])
+        self.assertEqual(_run(self.d, ["--check", str(self.dir / "r.sarif")]), 0)
+
+    def test_bad_version(self):
+        self._produce([{"file": "a.java", "line_start": 1, "cwe": "CWE-89",
+                        "source_ref": "a.java:1", "sink_ref": "b.java:1"}])
+        sarif = json.loads((self.dir / "r.sarif").read_text(encoding="utf-8"))
+        sarif["version"] = "2.0.0"
+        (self.dir / "bad.sarif").write_text(json.dumps(sarif), encoding="utf-8")
+        self.assertEqual(_run(self.d, ["--check", str(self.dir / "bad.sarif")]), 2)
 
 
 if __name__ == "__main__":

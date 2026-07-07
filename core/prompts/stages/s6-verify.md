@@ -59,3 +59,12 @@ FALSE_POSITIVE (it feeds severity calibration downstream).
 Last two lines of your reply MUST match exactly:
 VERDICT: TRUE_POSITIVE|FALSE_POSITIVE (confidence: N/10) — brief reason
 CVSS: CVSS:3.1/AV:_/AC:_/PR:_/UI:_/S:_/C:_/I:_/A:_
+
+## Sanctioned tools (allowlist)
+- Read side: `Read` / `Glob` / `Grep` are free, scoped to the cited finding's file and
+  its callers.
+- Script side: none. Deterministic stage scripts are invoked by the orchestrator, not by you.
+- Hard boundary — NEVER: `Write`/`Edit` any `.py` (no orchestrator, no helper, no
+  `py -c` snippet); `py -c`/`python -c` to introspect or re-derive artifacts under
+  `checkpoints/**`; transform or re-aggregate an input artifact in code. Input artifacts
+  are terminal — consume them as-is and emit only this stage's declared output.

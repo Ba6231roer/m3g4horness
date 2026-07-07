@@ -27,7 +27,17 @@ SCRIPTS = ROOT / "core" / "scripts"
 DEFAULT_SHELLS = [
     ROOT / "releases" / "claude-code" / "commands" / "mgh-init.md",
     ROOT / "releases" / "opencode" / "command" / "mgh-init.md",
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-sast.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-sast.md",
 ]
+# mgh-sast shells and the shell-level (non-script) flags their flag table MUST advertise
+# (--controls is the shell's own flag, not a *.py flag, so the bash-block extractor below
+# does not see it — assert it directly, mirrored across both shells).
+SAST_SHELLS = [
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-sast.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-sast.md",
+]
+SAST_SHELL_REQUIRED_FLAGS = ["--controls"]
 PY = sys.executable
 
 # A CLI flag is `--long` or `-s` preceded by a non-word boundary (whitespace/start),
@@ -99,6 +109,16 @@ def main():
                 if f not in declared:
                     failures.append(
                         f"{shell.name}: `{script}` uses {f!r} not declared in --help")
+
+    # shell-level flags: the mgh-sast flag table must advertise --controls (R5.1 mirror).
+    for shell in SAST_SHELLS:
+        if not shell.is_file():
+            failures.append(f"shell not found: {shell}")
+            continue
+        text = shell.read_text(encoding="utf-8")
+        for flag in SAST_SHELL_REQUIRED_FLAGS:
+            if flag not in text:
+                failures.append(f"{shell.name}: flag table missing required {flag!r}")
 
     if failures:
         print(f"✗ {len(failures)} contract violation(s):", file=sys.stderr)

@@ -9,6 +9,14 @@ rest into `duplicates`. Deterministic: same input -> same output.
 
 Usage:
   py dedup.py --in s6_verdicts.json --out s7_findings.json [--line-window 5]
+  py dedup.py --check <s7_findings.json>   # boundary check (R5.9)
+
+--check validates an EXISTING s7 product by re-running the SAME clustering
+(deterministic thresholds, NOT recomputing the canonical set) and asserting no
+further merges would occur (idempotent = no residual near-duplicate cluster), plus
+each canonical finding carries `file`. stdout =
+{"ok":bool,"findings":N,"would_merge":M,"violations":[...]}; stderr = diagnostics.
+Exit codes: 0 ok · 1 missing/malformed · 2 violation or misuse.
 """
 from __future__ import annotations
 import argparse
@@ -74,13 +82,51 @@ def run(findings, window=5, title_thresh=0.6):
     return canonical, duplicates
 
 
+def _check(path: str, window: int, title_thresh: float) -> int:
+    """R5.9 boundary check: re-cluster the canonical findings with the SAME
+    deterministic thresholds and assert idempotency (no further merges). A product
+    that still merges had a residual near-duplicate cluster = broken artifact."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: artifact not found: {p}", file=sys.stderr)
+        return 1
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"error: malformed JSON: {e}", file=sys.stderr)
+        return 1
+    findings = data.get("findings", data if isinstance(data, list) else [])
+    violations = []
+    for i, f in enumerate(findings):
+        if not isinstance(f, dict) or not (f.get("file") or "").strip():
+            violations.append({"index": i, "missing": ["file"]})
+    canon, _ = run(findings, window, title_thresh)
+    would_merge = len(findings) - len(canon)  # >0 => residual near-dups that re-cluster
+    if would_merge > 0:
+        violations.append({"residual_near_duplicates": would_merge})
+    ok = not violations
+    print(f"[dedup --check] {len(findings)} finding(s), would_merge={would_merge}, "
+          f"{len(violations)} violation(s)", file=sys.stderr)
+    print(json.dumps({"ok": ok, "findings": len(findings), "would_merge": would_merge,
+                      "violations": violations}, ensure_ascii=False))
+    return 0 if ok else 2
+
+
 def main():
     ap = argparse.ArgumentParser(description="s7 dedup")
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--in", dest="inp", help="s6_verdicts.json (produce mode)")
+    ap.add_argument("--out", help="s7_findings.json output (produce mode)")
     ap.add_argument("--line-window", type=int, default=5)
     ap.add_argument("--title-thresh", type=float, default=0.6)
+    ap.add_argument("--check", metavar="<s7_findings.json>",
+                    help="boundary check (R5.9): validate an existing s7 product, exit 0/2")
     args = ap.parse_args()
+    if args.check:
+        return _check(args.check, args.line_window, args.title_thresh)
+    if not args.inp or not args.out:
+        print("error: produce mode needs --in and --out (or use --check <path>)",
+              file=sys.stderr)
+        return 2
     data = json.loads(Path(args.inp).read_text(encoding="utf-8"))
     findings = data.get("findings", data if isinstance(data, list) else [])
     canon, dups = run(findings, args.line_window, args.title_thresh)

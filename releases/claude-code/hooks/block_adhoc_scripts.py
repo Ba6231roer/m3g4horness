@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-block_adhoc_scripts — PreToolUse hook enforcing /mgh-init orchestrator discipline.
+block_adhoc_scripts — PreToolUse hook enforcing /mgh-init + /mgh-sast orchestrator
+discipline (R5.2 at runtime, R5.7 deliverable).
 
-Active ONLY inside the /mgh-init run-domain (env MGH_INIT_ACTIVE=1, set by the
-orchestrator at step 0). Outside it: exit 0 silently (zero day-to-day noise).
-hardens R5.2 at runtime (R5.7 deliverable): blocks the two real-world failure shapes
-from new_issue.txt —
+Active ONLY inside a mgh run-domain: env MGH_INIT_ACTIVE=1 (/mgh-init) OR
+MGH_SAST_ACTIVE=1 (/mgh-sast), set by the orchestrator at step 0. Outside both: exit 0
+silently (zero day-to-day noise). Blocks the two real-world failure shapes —
   (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( /
       .json), and
   (b) Write/Edit of an ad-hoc `*.py` not on the sanctioned whitelist.
@@ -35,13 +35,22 @@ _INTRO_TOKENS = ("import json", "open(", "load(", ".json")
 # the repo layout (core/scripts) and the installed layout (.claude/mgh-core/scripts).
 _WL_SEGMENTS = {"tests", "tools", "hooks"}
 
-_RECIPE = (
-    "mgh-init orchestrator discipline (R5.2): use a sanctioned primitive —\n"
-    "  - work-list   -> list_clusters.py / list_scout_batches.py / list_rule_jobs.py\n"
-    "  - structure   -> describe_artifact.py --keys/--sample/--shape/--field\n"
-    "  - derived qty -> the producer's stdout field (regex_known_count / big_files / ...)\n"
-    "  NEVER py -c / python -c introspection, NEVER Write ad-hoc .py in /mgh-init."
-)
+# Per-domain sanctioned work-list primitives (the recipe points the agent at the right
+# one). describe_artifact.py + producer stdout are shared across domains.
+_WORKLIST = {
+    "mgh-init": "list_clusters.py / list_scout_batches.py / list_rule_jobs.py",
+    "mgh-sast": "list_chunks.py / list_verify_jobs.py",
+}
+
+
+def _recipe(domain: str) -> str:
+    return (
+        f"{domain} orchestrator discipline (R5.2): use a sanctioned primitive —\n"
+        f"  - work-list   -> {_WORKLIST[domain]}\n"
+        "  - structure   -> describe_artifact.py --keys/--sample/--shape/--field\n"
+        "  - derived qty -> the producer's stdout field\n"
+        f"  NEVER py -c / python -c introspection, NEVER Write ad-hoc .py in {domain}."
+    )
 
 
 def _is_introspect_py_c(cmd: str) -> bool:
@@ -64,8 +73,11 @@ def _is_blocked_py_write(path: str) -> bool:
 
 
 def main():
-    if os.environ.get("MGH_INIT_ACTIVE", "") != "1":
-        return 0  # outside run-domain: pass silently
+    init = os.environ.get("MGH_INIT_ACTIVE", "") == "1"
+    sast = os.environ.get("MGH_SAST_ACTIVE", "") == "1"
+    if not (init or sast):
+        return 0  # outside any run-domain: pass silently
+    domain = "mgh-sast" if sast else "mgh-init"  # sast wins if both (rare)
     try:
         payload = json.load(sys.stdin)
     except (OSError, ValueError):
@@ -77,13 +89,13 @@ def main():
         cmd = (ti.get("command") or "")
         if _is_introspect_py_c(cmd):
             sys.stderr.write(
-                f"blocked: ad-hoc `py -c` introspection in /mgh-init run-domain.\n  {_RECIPE}\n")
+                f"blocked: ad-hoc `py -c` introspection in {domain} run-domain.\n  {_recipe(domain)}\n")
             return 2
     elif tool in ("Write", "Edit"):
         path = (ti.get("file_path") or ti.get("path") or "")
         if _is_blocked_py_write(path):
             sys.stderr.write(
-                f"blocked: Write/Edit of ad-hoc .py in /mgh-init run-domain: {path}\n  {_RECIPE}\n")
+                f"blocked: Write/Edit of ad-hoc .py in {domain} run-domain: {path}\n  {_recipe(domain)}\n")
             return 2
     return 0
 

@@ -27,3 +27,11 @@ Write `checkpoints/s6_verdicts.json`: a list of findings, each with added
 `verdict` (`TRUE`|`FALSE_POSITIVE`) and `cvss_vector`
 (`CVSS:3.1/AV:.../AC:.../PR:.../UI:.../S:.../C:.../I:.../A:...`). Drop
 FALSE_POSITIVE items from the active set but keep them for the report appendix.
+
+## Hard constraints
+You are a stage subagent, not the orchestrator — emit only this stage's declared output.
+- NEVER `Write`/`Edit` a `.py` file (no orchestrator, no helper script, no `py -c` snippet).
+- NEVER run `py -c`/`python -c` to introspect or re-derive artifacts; read inputs with `Read`.
+- Input artifacts are terminal — consume as-is; do not transform or re-aggregate them in code.
+(The permission frontmatter above already denies script authoring; this states the intent
+so it is never loosened.)

@@ -45,6 +45,13 @@ class TestZeroRuntimeDeps(unittest.TestCase):
             self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
                             f"{s}.py missing — not covered by the zero-dep scan")
 
+    def test_new_sast_scripts_are_scanned(self):
+        # harden-mgh-sast-orchestration-discipline + add-mgh-sast-design-controls
+        # additions exist + are glob-scanned
+        for s in ("list_chunks", "list_verify_jobs", "load_controls"):
+            self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
+                            f"{s}.py missing — not covered by the zero-dep scan")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -34,3 +34,12 @@ IMPORTANT: Your FINAL output must be ONLY a JSON object with this exact schema
 
 Do NOT include raw source code in the output. Include file paths, line numbers,
 function names, and short snippets (max 120 chars each) only.
+
+## Sanctioned tools (allowlist)
+- Read side: `Read` / `Glob` / `Grep` are free, scoped to this stage's inputs and the
+  file set the orchestrator handed you.
+- Script side: none. Deterministic stage scripts are invoked by the orchestrator, not by you.
+- Hard boundary — NEVER: `Write`/`Edit` any `.py` (no orchestrator, no helper, no
+  `py -c` snippet); `py -c`/`python -c` to introspect or re-derive artifacts under
+  `checkpoints/**`; transform or re-aggregate an input artifact in code. Input artifacts
+  are terminal — consume them as-is and emit only this stage's declared output.

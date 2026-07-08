@@ -21,6 +21,7 @@ The `controls_inventory.json` entries for ONE category + the `--format` flag.
 - Follow EXACTLY one format fragment (`rules-format-claude.md` or
   `rules-format-opencode.md`). Never mix.
 - Rules point to concrete `file:class:method` anchors; ≤3–5 lines code.
+- **输出路径逐字**:`rule_path`/`done_marker` 是编排器逐字给定的**绝对路径**——恰好写该路径、touch 该 `.done`,**NEVER** 自行拼 `<target>/<category>` / NEVER 相对路径 / NEVER 写项目外(含盘符根)/ NEVER 直写 `AGENTS.md` 或受管块哨兵。cwd 不可假设;绝对路径对任意 cwd 安全。
 - opencode: write a staged fragment `.mgh-init/rules-parts/<category>.md` (no
   sentinel, never `AGENTS.md` directly — `assemble_rules.py` owns the managed
   block). claude: write `.claude/rules/security-<category>.md` directly.
@@ -28,5 +29,4 @@ The `controls_inventory.json` entries for ONE category + the `--format` flag.
   paths (`assemble_rules.py --check` lints and fails loud on leaks).
 
 ## Output
-Rule file (claude) or staged fragment (opencode) at the orchestrator-given
-path + touch `checkpoints/t3/<category>.<format>.json.done`.
+Write the orchestrator-given absolute `rule_path` + touch the absolute `done_marker`.

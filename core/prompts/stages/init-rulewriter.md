@@ -9,6 +9,13 @@ You are **T3 — per-category rule writer** for `/mgh-init`. You run in an
 entries whose `category` matches yours (assigned by orchestrator), and emit the
 rule(s) for the target agent **in exactly one format** (`--format`).
 
+## Input (given by the orchestrator)
+The `controls_inventory.json` entries for ONE category + the `--format` flag + two
+absolute paths given VERBATIM by the orchestrator:
+- `rule_path` — the exact file you MUST write your rule (claude) / staged fragment
+  (opencode) to.
+- `done_marker` — the exact `.done` path you MUST touch after.
+
 ## Format selection (mutually exclusive — pick the fragment that matches --format)
 - `--format claude` → follow `core/prompts/fragments/rules-format-claude.md`
   EXACTLY: one `.claude/rules/security-<category>.md` file, YAML frontmatter
@@ -58,7 +65,13 @@ Favor canonical (`role: canonical`) controls as the primary rule; list
 `paths:` 字段保持原样(英文/符号不变)。
 
 ## Output
-Write the rule file (claude: `.claude/rules/security-<category>.md`) or the staged
-fragment (opencode: `.mgh-init/rules-parts/<category>.md`) to the path given by the
-orchestrator, then touch
-`.mgh-init/checkpoints/t3/<category>.<format>.json.done`.
+Write EXACTLY the absolute path given by the input field `rule_path` — the rule file
+(claude) or the staged fragment (opencode) — then touch the absolute path given by the
+input field `done_marker`.
+
+**Hard boundary (`NEVER`)**: NEVER assemble or interpolate a path yourself (no
+`<target>`/`<category>` substitution); NEVER write a relative path; NEVER write anywhere
+outside the project tree (including a drive root); NEVER write `AGENTS.md` or a managed-
+block sentinel directly (existing constraint — `assemble_rules.py` owns the block). Your
+cwd is NOT assumed — `rule_path` is already absolute precisely so it is safe under any
+working directory. Use the field value verbatim.

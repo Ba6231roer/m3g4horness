@@ -17,15 +17,20 @@ stdout(结构化 JSON;stderr 仅诊断):
 
 `<BatchLite>`:
 ```json
-{"batch_id": "scout-001", "targets_count": 12, "bytes": 95230, "needs_slice": []}
+{"batch_id": "scout-001", "targets_count": 12, "bytes": 95230, "needs_slice": [],
+ "checkpoint_path": "<abs>/checkpoints/scout/scout-001.json",
+ "done_marker": "<abs>/checkpoints/scout/scout-001.json.done"}
 ```
 
 | field | note |
 |---|---|
 | `total` | `len(scout_plan.json::batches[])`(真批数) |
 | `done` | `#已 done` 批(`checkpoints/scout/<batch_id>.json.done` 存在) |
-| `pending[]` | 未 done 批,文件序;每项 `{batch_id,targets_count,bytes,needs_slice[]}` |
+| `pending[]` | 未 done 批,文件序;每项 `{batch_id,targets_count,bytes,needs_slice[],checkpoint_path,done_marker}` |
+| `checkpoint_path` | **绝对**;由 `--checkpoints`(已 `resolve()`)拼 `<batch_id>.json` 得出。编排器**逐字透传**给 scout subagent,subagent **恰好写该绝对路径**(NEVER 自拼 `<target>/<batch_id>`、NEVER 发明文件名、NEVER 相对路径)。 |
+| `done_marker` | **绝对**;`<checkpoint_path>.done`,subagent 写完产物后 touch 它。 |
 | `truncated` | 透传 `scout_plan.json::truncated`(无静默截断) |
 
 不变式:`total == done + len(pending)`。空 batches(`--no-scout` 或 0 target)→ `total:0`,
-退出码仍 `0`。退出码 `0/1/2`。
+退出码仍 `0`。退出码 `0/1/2`。`checkpoint_path`/`done_marker` **仅存在于本 stdout**,不写入磁盘
+产物(磁盘 `checkpoints/scout/<batch_id>.json` schema 不变)。

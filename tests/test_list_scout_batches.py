@@ -86,6 +86,33 @@ class TestListScoutBatches(unittest.TestCase):
         self.assertEqual(by["scout-002"]["needs_slice"], ["b.java"])
         self.assertEqual(by["scout-002"]["bytes"], 200)
 
+    def test_pending_emits_absolute_paths(self):
+        # FD1: each pending unit carries an authoritative ABSOLUTE checkpoint_path +
+        # done_marker so the orchestrator passes them verbatim (no <target>/<id> assembly).
+        cp = self.d / "checkpoints" / "scout"
+        code, out, _ = self._run(self._write(_BATCHES), cp)
+        self.assertEqual(code, 0)
+        by = {b["batch_id"]: b for b in json.loads(out)["pending"]}
+        for bid in ("scout-001", "scout-002", "scout-003"):
+            exp = str((cp / f"{bid}.json").resolve())
+            self.assertEqual(by[bid]["checkpoint_path"], exp)
+            self.assertEqual(by[bid]["done_marker"], exp + ".done")
+            self.assertTrue(Path(by[bid]["checkpoint_path"]).is_absolute())
+            self.assertTrue(Path(by[bid]["done_marker"]).is_absolute())
+
+    def test_resume_keeps_absolute_paths_on_remaining(self):
+        # partial .done -> done batch excluded, remaining pending still carry abs paths
+        p = self._write(_BATCHES)
+        cp = self.d / "checkpoints" / "scout"
+        self._mark_done("scout-002")
+        code, out, _ = self._run(p, cp)
+        data = json.loads(out)
+        self.assertEqual(len(data["pending"]), 2)
+        for item in data["pending"]:
+            self.assertTrue(Path(item["checkpoint_path"]).is_absolute())
+            self.assertTrue(item["checkpoint_path"].endswith(".json"))
+            self.assertTrue(item["done_marker"].endswith(".json.done"))
+
     def test_empty_batches(self):
         code, out, _ = self._run(self._write([]))
         self.assertEqual(code, 0)
@@ -172,6 +199,21 @@ class TestListRuleJobs(unittest.TestCase):
         code, out, _ = self._run(p, fmt="claude", target="/tmp/proj")
         rp = json.loads(out)["pending"][0]["rule_path"]
         self.assertIn(".claude/rules/security-crypto.md", rp)
+
+    def test_target_dot_emits_absolute_paths(self):
+        # FD1/FD5: --target defaults to "." yet rule_path + done_marker MUST be absolute
+        # (safe under any subagent cwd, incl. a Windows drive root).
+        p = self._write([{"name": "a", "category": "crypto"}])
+        cp = self.d / "checkpoints" / "t3"
+        code, out, _ = self._run(p, fmt="claude", checkpoints=cp, target=".")
+        data = json.loads(out)
+        item = data["pending"][0]
+        self.assertTrue(Path(item["rule_path"]).is_absolute(),
+                        "rule_path must be absolute even when --target defaults to '.'")
+        self.assertTrue(Path(item["done_marker"]).is_absolute())
+        self.assertIn(".claude/rules/security-crypto.md", item["rule_path"])
+        self.assertTrue(item["done_marker"].endswith("crypto.claude.json.done"))
+        self.assertEqual(item["done_marker"], str((cp / "crypto.claude.json.done").resolve()))
 
 
 if __name__ == "__main__":

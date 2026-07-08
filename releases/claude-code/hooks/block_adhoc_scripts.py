@@ -6,23 +6,28 @@ discipline (R5.2 at runtime, R5.7 deliverable).
 
 Active ONLY inside a mgh run-domain: env MGH_INIT_ACTIVE=1 (/mgh-init) OR
 MGH_SAST_ACTIVE=1 (/mgh-sast), set by the orchestrator at step 0. Outside both: exit 0
-silently (zero day-to-day noise). Blocks the two real-world failure shapes —
+silently (zero day-to-day noise). Blocks the real-world failure shapes —
   (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( /
       .json), and
   (b) Write/Edit of an ad-hoc `*.py` not on the sanctioned whitelist.
+  (c) [init domain only] Write/Edit whose resolved target falls OUTSIDE the resolved
+      MGH_TARGET tree — the fan-out checkpoint/rule path drifted to a non-project dir
+      (observed: a Windows drive root). MGH_TARGET missing -> degrade (pass, no block).
 On a hit: exit 2 (Claude Code blocks the call) + stderr recipe pointing at the
 sanctioned primitives (list_* / describe_artifact / producer stdout fields).
 
 Claude Code feeds the tool call as JSON on stdin:
   {"tool_name":"Bash|Write|Edit", "tool_input":{"command"|"file_path": ...}, ...}
 
-Zero runtime deps (Python >=3.10 stdlib: json/os/re/sys). Idempotent, stateless, no TTY.
+Zero runtime deps (Python >=3.10 stdlib: json/os/pathlib/re/sys). Idempotent, stateless,
+no TTY.
 """
 from __future__ import annotations
 import json
 import os
 import re
 import sys
+from pathlib import Path
 
 # A `py -c` / `python -c` / `python3 -c` invocation (preceded by start or a shell
 # delimiter, so it does not match a substring of another token).
@@ -72,6 +77,20 @@ def _is_blocked_py_write(path: str) -> bool:
     return True
 
 
+def _is_out_of_tree(path: str) -> bool:
+    """True iff a Write/Edit target resolves OUTSIDE the MGH_TARGET tree (init domain;
+    defense-in-depth for the fan-out output-path contract — turns a silent drift to a
+    non-project dir into a fail-loud). Returns False (pass, never block) when MGH_TARGET
+    is unset/blank (degrade), the path is empty, or either side will not resolve."""
+    target = os.environ.get("MGH_TARGET", "").strip()
+    if not target or not path:
+        return False
+    try:
+        return not Path(path).resolve().is_relative_to(Path(target).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def main():
     init = os.environ.get("MGH_INIT_ACTIVE", "") == "1"
     sast = os.environ.get("MGH_SAST_ACTIVE", "") == "1"
@@ -96,6 +115,13 @@ def main():
         if _is_blocked_py_write(path):
             sys.stderr.write(
                 f"blocked: Write/Edit of ad-hoc .py in {domain} run-domain: {path}\n  {_recipe(domain)}\n")
+            return 2
+        if init and _is_out_of_tree(path):
+            sys.stderr.write(
+                f"blocked: Write/Edit outside the MGH_TARGET tree in {domain} run-domain: "
+                f"{path}\n  target tree = {os.environ.get('MGH_TARGET', '?')}\n  {_recipe(domain)}\n"
+                f"  the output path MUST be the verbatim `checkpoint_path`/`rule_path` from "
+                f"`list_*` stdout (already absolute, under the target tree).\n")
             return 2
     return 0
 

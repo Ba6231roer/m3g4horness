@@ -7,11 +7,12 @@ description: Discover existing reusable security controls in a project (input-va
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `discover_controls.py` / `chunk_sources.py` / `plan_scout.py` / `merge_scout.py` / `assemble_rules.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。opencode 下 T3 每 category 写**暂存 fragment**(`.mgh-init/rules-parts/<cat>.md`),由 `assemble_rules.py` 装配进 `AGENTS.md` 单个中性受管块(见步骤 6b)。
 
 > **运行域 + hook**:`install.sh` 向本仓 `.claude/settings.json` 注入 PreToolUse
-> hook(`block-adhoc-scripts`),在 `/mgh-init` 运行域内拦 `py -c`/`python -c` 内省与越权
-> `Write *.py`(命中退出码 2 + stderr recipe 指向合法出口)。编排器**起步先**
-> `Bash: export MGH_INIT_ACTIVE=1` 标记运行域;opt-out = `install.sh --no-enforce-hook`
-> (纪律仍由下方铁律 + 边界校验兜底)。opencode 侧若 PreToolUse 能力缺失,install 时
-> stderr warn + 跳过(fail-soft),纪律由本节兜底。
+> hook(`block-adhoc-scripts`),在 `/mgh-init` 运行域内拦 `py -c`/`python -c` 内省、越权
+> `Write *.py`、**以及 resolved 目标不在 `MGH_TARGET` 子树内的 `Write`/`Edit`**(子树外写入,
+> 如盘符根;命中退出码 2 + stderr recipe 指向 `list_*` stdout 的 `checkpoint_path`)。编排器**起步先**
+> `Bash: export MGH_INIT_ACTIVE=1` 标记运行域,并在 discover 后 `export MGH_TARGET=<绝对 repo>`(供 hook
+> 判树;缺失则该条降级放行)。opt-out = `install.sh --no-enforce-hook`(纪律仍由下方铁律 + 边界校验兜底)。
+> opencode 侧若 PreToolUse 能力缺失,install 时 stderr warn + 跳过(fail-soft),纪律由本节兜底。
 
 You are the **orchestrator** of the mgh-init pipeline. Carry it out by running the
 deterministic leaf scripts (Bash) and spawning stage subagents. Shared assets live
@@ -40,10 +41,11 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 
 **implementation-intention(需 X → 触发器 Y,NEVER `py -c`)**——每个常被手搓的需求都有合法出口:
 - **工作清单** → `list_clusters.py`(T1)/ `list_scout_batches.py`(scout)/ `list_rule_jobs.py`(T3);
+- **某 fan-out 单元的输出路径** → `list_*` stdout `pending[]` 每项的 `checkpoint_path`(scout/T1)/ `rule_path`(T3)+ `done_marker`(均**绝对**);**NEVER** 自拼 `<target>/<id>`、**NEVER** `py -c` 算路径、**NEVER** 相对路径;
 - **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON);
 - **派生量** → 该量产出者的 stdout 字段(`discover` stdout `big_files`/`unresolved_count`;`plan_scout` stdout/`scout_plan.json` `regex_known_count`);**NEVER** 自写脚本算。
 
-**fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;doubt 时刻 inline 1 行 shape(如「`scout_plan.json::batches[]` 即你的工作清单,经 `list_scout_batches.py` 取」)。
+**fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;输出路径 = `list_*` stdout 的 `checkpoint_path`/`rule_path`(绝对),编排器**逐字透传**进 subagent task、subagent **恰好写该绝对路径**(零拼装、零占位符)。doubt 时刻 inline 1 行 shape(如「`scout_plan.json::batches[]` 即你的工作清单,经 `list_scout_batches.py` 取;每项 `checkpoint_path` 即该批产物绝对路径」)。
 
 **终态声明**:`merge_scout.py`/foldin 完成后,`scout_candidates.json` / `controls_candidates.json` / `clusters.json` 为**终态**——不再二次聚合 / 重切批(不出现 `_aggregate_scout.py` 之类重实现)。
 
@@ -53,12 +55,16 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 
 ```
 0. parse + self-check(发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`;扫描期向 stderr 打印进度)
-   · **起步**:`Bash: export MGH_INIT_ACTIVE=1`(声明运行域,激活 PreToolUse hook)
+   · **起步**:`Bash: export MGH_INIT_ACTIVE=1`(声明运行域,激活 PreToolUse hook,含子树外 Write/Edit 拦截)
+   · **MGH_TARGET**(供 hook 判树;opencode 无 PreToolUse 时该条空转):discover(step 2)写出的 `controls_candidates.json::repo` 即**绝对项目根**;编排器**逐字读**该字段并 `export MGH_TARGET=<repo>`,在 fan-out 前设置。取值经 `describe_artifact.py --field repo`(合法瞄结构出口),**NEVER** `py -c` 自算、**NEVER** 用裸 `.` 相对。
 1. IF --merge: merge partial inventories by evidence anchor → STOP
 2. i1 discover (Bash):
      py .opencode/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init [--scope .. --max-files ..]
    → controls_candidates.json (regex, `source:regex`) + clusters.json + skeleton.json  (skip on --resume if present & not --rebuild-cache)
    · 派生量直读 discover stdout:`candidates/clusters/unresolved_count/big_files`(NEVER `py -c` 自算)
+   · **MGH_TARGET**:discover 后取其产物 `repo` 字段(绝对根)——
+     `py .opencode/mgh-core/scripts/describe_artifact.py --in <target>/.mgh-init/controls_candidates.json --field repo`
+     → stdout `{"value":"<绝对 target>"}`;`export MGH_TARGET=<该 value>`(供 hook 判树;NEVER `py -c` 自算)。
    · 校验:`py .opencode/mgh-core/scripts/discover_controls.py --check <target>/.mgh-init`(wrapper + 每条 `source` + cluster_id 唯一;退出码 2 → 回退重跑)
 3. (optional) init-survey subagent → i1_enriched.json
    · **advisory + non-fatal**:产出仅作审计/T2 参考,**非 T1 输入**(T1 读 `clusters.json`);
@@ -71,11 +77,11 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
         [--batch-bytes .. --batch-cap .. --budget ..]
      · 批数涌现 = ceil(Σtarget_bytes / --scout-batch-bytes);按包内聚切批,每批字节≤预算且文件数≤cap。派生量 `regex_known_count` 在 stdout / `scout_plan.json` 顶层(NEVER 自算)。
      · 校验:`py .opencode/mgh-core/scripts/plan_scout.py --check <target>/.mgh-init/scout_plan.json`(batches 非空除非 0 target、每批 bytes≤预算、needs_slice 仅含超批文件;退出码 2 → 回退)。
-     [scout_plan.json::batches[]] → list_scout_batches.py → [stdout pending[]](禁手挖 `scout_plan` / `py -c`)
+     [scout_plan.json::batches[]] → list_scout_batches.py → [stdout pending[](每项含**绝对** `checkpoint_path`/`done_marker`)](禁手挖 `scout_plan` / `py -c`)
      py .opencode/mgh-core/scripts/list_scout_batches.py --scout-plan <target>/.mgh-init/scout_plan.json --checkpoints <target>/.mgh-init/checkpoints/scout
      per batch in `pending[]`(并行 ≤ max_concurrent,**每批一个隔离 subagent 上下文**;`--resume` 跳过已 `.done`):
        - if batch.needs_slice:先 `chunk_sources.py` 切片(**绝不**整文件喂 LLM)
-       - spawn init-scout({batch, repo root, regex_known[]}) → checkpoints/scout/<batch_id>.json + .done
+       - spawn init-scout({batch, repo root, regex_known[], checkpoint_path, done_marker}) → 恰好写 `checkpoint_path`(绝对) + touch `done_marker`
      spawn init-scout-merge(只见全部 scout 批记录,无原始码)→ scout_candidates.json + checkpoints/scout/merge.json.done
      · 校验:`py .opencode/mgh-core/scripts/merge_scout.py --check <target>/.mgh-init/scout_candidates.json`(每条 `source:"scout"` + file:line;退出码 2 → 回退)。
      spawn init-scout-audit(随机 ≈--scout-audit-pct 的 scout 拒绝项)→ checkpoints/scout/audit.json + .done
@@ -86,20 +92,19 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
      · **终态**:`scout_candidates.json` / `controls_candidates.json` / `clusters.json` 此时为终态——不再二次聚合 / 重切批(NEVER `_aggregate_scout.py`)。
 4. T1 FAN-OUT — 经确定性脚本枚举(**禁手搓** `py -c` 内省;`clusters.json` 是包装字典
    `{repo,clusters[],truncated}`,对顶层 `len()` 得 3 **不是**簇数):
-   [clusters.json::clusters[]] → list_clusters.py → [stdout pending[]]
+   [clusters.json::clusters[]] → list_clusters.py → [stdout pending[](每项含**绝对** `checkpoint_path`/`done_marker`)]
      py .opencode/mgh-core/scripts/list_clusters.py --clusters <target>/.mgh-init/clusters.json --checkpoints <target>/.mgh-init/checkpoints/t1
      → stdout `{repo,total,done,pending[],truncated}`;`total` = 真簇数(= discover stdout `clusters` 字段)
-   per cluster in `pending[]`(NOT 顶层;`--resume` 跳过已 `.done`)→ (big file: chunk_sources slice first) spawn init-induct
-   → checkpoints/t1/<cluster_id>.json + .done
+   per cluster in `pending[]`(NOT 顶层;`--resume` 跳过已 `.done`)→ (big file: chunk_sources slice first) spawn init-induct(带 cluster 记录 + slices + checkpoint_path + done_marker)
+   → 恰好写 `checkpoint_path`(绝对) + touch `done_marker`
 5. T2: init-synthesis (all T1 records, no raw code) → controls_inventory.json
    · 校验:`py .opencode/mgh-core/scripts/validate_inventory.py --inventory <target>/.mgh-init/controls_inventory.json`(`design_controls` 兼容字段 + 每条 evidence 锚点 + category→kind 归一;退出码 2 → 回退重跑)
 6. T3 FAN-OUT — 经确定性脚本枚举(**禁手挖** inventory / `py -c`):
-   [controls_inventory.json::controls[].category] → list_rule_jobs.py --format <format> → [stdout pending[]]
+   [controls_inventory.json::controls[].category] → list_rule_jobs.py --format <format> → [stdout pending[](每项含**绝对** `rule_path`/`done_marker`)]
      py .opencode/mgh-core/scripts/list_rule_jobs.py --inventory <target>/.mgh-init/controls_inventory.json --format <format> --checkpoints <target>/.mgh-init/checkpoints/t3 --target <target>
-     → stdout `{total,done,pending[],format}`;`pending[]` 每项 `{category,format,rule_path}`
-   per category in `pending[]`(WITHOUT `.done`;`--resume` 跳过)→ spawn init-rulewriter with --format
-   → claude: `.claude/rules/security-<cat>.md`;opencode: **暂存 fragment** `.mgh-init/rules-parts/<cat>.md`(中性、无哨兵,**禁**直写 `AGENTS.md`)
-   + checkpoints/t3/<cat>.<format>.json.done
+     → stdout `{total,done,pending[],format}`;`pending[]` 每项 `{category,format,rule_path,done_marker}`(均绝对)
+   per category in `pending[]`(WITHOUT `.done`;`--resume` 跳过)→ spawn init-rulewriter with --format + rule_path + done_marker
+   → 恰好写 `rule_path`(绝对;opencode: **暂存 fragment** `.mgh-init/rules-parts/<cat>.md`,中性、无哨兵,**禁**直写 `AGENTS.md`)+ touch `done_marker`
 6b. (opencode only) ASSEMBLE + LINT (Bash, deterministic):
      py .opencode/mgh-core/scripts/assemble_rules.py --target <target> --format opencode
    → 合并全部 fragment 进 `<target>/AGENTS.md` 单个 `<!-- security-controls:begin --> … :end -->`

@@ -21,7 +21,12 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - total       = len(batches[])
   - done        = #batches whose checkpoint unit is complete
   - pending[]   = batches not yet done, in file order; each item:
-      {batch_id, targets_count, bytes, needs_slice[]}
+      {batch_id, targets_count, bytes, needs_slice[],
+       checkpoint_path, done_marker}
+  - checkpoint_path = ABSOLUTE path the scout subagent MUST write its checkpoint to
+                      (<resolved --checkpoints>/<batch_id>.json); passed verbatim by the
+                      orchestrator so the subagent NEVER assembles/interpolates a path.
+  - done_marker     = ABSOLUTE `.done` marker path (<checkpoint_path>.done) to touch.
   - truncated   = passthrough of the wrapper's `truncated` flag (no silent loss)
 
 Exit codes (R5.3b): 0 ok (incl. empty batches) · 1 scout_plan.json missing/malformed ·
@@ -62,12 +67,20 @@ def _done_ids(checkpoints_dir: Path):
     return done
 
 
-def _lite(batch: dict) -> dict:
+def _lite(batch: dict, checkpoints_dir: Path) -> dict:
+    bid = batch.get("batch_id")
+    base = checkpoints_dir / f"{bid}.json"
     return {
-        "batch_id": batch.get("batch_id"),
+        "batch_id": bid,
         "targets_count": len(batch.get("targets", [])),
         "bytes": batch.get("bytes", 0),
         "needs_slice": batch.get("needs_slice", []),
+        # Absolute output paths (checkpoints_dir is already .resolve()'d in main): the
+        # single authoritative value the orchestrator passes VERBATIM to the scout
+        # subagent and the subagent writes VERBATIM — no <target>/<batch_id> placeholder
+        # assembly, no relative path (safe under any subagent cwd, incl. Windows drive root).
+        "checkpoint_path": str(base),
+        "done_marker": str(base.with_name(base.name + ".done")),
     }
 
 
@@ -99,7 +112,7 @@ def main():
                        else (plan_path.parent / "checkpoints" / "scout").resolve())
     done = _done_ids(checkpoints_dir)
 
-    pending = [_lite(b) for b in batches
+    pending = [_lite(b, checkpoints_dir) for b in batches
                if isinstance(b, dict) and b.get("batch_id") not in done]
     result = {
         "repo": wrapper.get("repo"),

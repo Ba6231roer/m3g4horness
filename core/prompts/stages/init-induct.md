@@ -13,6 +13,9 @@ candidates; you do NOT see other clusters (by design).
   `shape`, `evidence_files[]`, `usage_sites[]`).
 - The candidate hits for this cluster.
 - For big files: a **slice** (from `chunk_sources.py`), NOT the whole file.
+- `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
+  MUST write your checkpoint to.
+- `done_marker` (absolute, given VERBATIM) — the exact `.done` path you MUST touch after.
 
 ## Task
 Induce what security control this cluster represents and how it should be used.
@@ -65,5 +68,11 @@ shapes). Produce ONE structured control record:
 `kind`/`cluster_id`/`confidence`/`evidence`/`source`)与目标项目锚点原样保留,不受此约束。
 
 ## Output
-Write `.mgh-init/checkpoints/t1/<cluster_id>.json` (the record above) and
-touch `.mgh-init/checkpoints/t1/<cluster_id>.json.done`.
+Write EXACTLY the absolute path given by the input field `checkpoint_path` (the record
+above), then touch the absolute path given by the input field `done_marker`.
+
+**Hard boundary (`NEVER`)**: NEVER assemble or interpolate a path yourself (no
+`<target>`/`<cluster_id>` substitution); NEVER write a relative path; NEVER write anywhere
+outside the project tree (including a drive root). Your cwd is NOT assumed —
+`checkpoint_path` is already absolute precisely so it is safe under any working directory.
+Use the field value verbatim.

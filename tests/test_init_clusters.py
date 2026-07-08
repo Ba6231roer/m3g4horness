@@ -165,6 +165,21 @@ class TestListClusters(unittest.TestCase):
         self.assertEqual(by["data-masking::mask::cd34"]["evidence_files"], ["b.java"])
         self.assertEqual(by["data-masking::mask::cd34"]["shape"], "distributed")
 
+    def test_pending_emits_absolute_paths(self):
+        # FD1: each pending cluster carries an authoritative ABSOLUTE checkpoint_path +
+        # done_marker (cluster_id may contain '::' — used verbatim in the filename).
+        p = self._write(_LC_CLUSTERS)
+        cp = self.d / "checkpoints" / "t1"
+        code, out, _ = self._run(p, cp)
+        self.assertEqual(code, 0)
+        for item in json.loads(out)["pending"]:
+            cid = item["cluster_id"]
+            exp = str((cp / f"{cid}.json").resolve())
+            self.assertEqual(item["checkpoint_path"], exp)
+            self.assertEqual(item["done_marker"], exp + ".done")
+            self.assertTrue(Path(item["checkpoint_path"]).is_absolute())
+            self.assertTrue(Path(item["done_marker"]).is_absolute())
+
     def test_empty_clusters(self):
         p = self._write([])
         code, out, _ = self._run(p)

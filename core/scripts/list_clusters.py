@@ -21,7 +21,12 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - total       = len(clusters[])             (the REAL count, not len(wrapper))
   - done        = #clusters whose checkpoint unit is complete
   - pending[]   = clusters not yet done, in file order; each item:
-      {cluster_id, category, kind, shape, evidence_files[], candidate_count}
+      {cluster_id, category, kind, shape, evidence_files[], candidate_count,
+       checkpoint_path, done_marker}
+  - checkpoint_path = ABSOLUTE path the T1 subagent MUST write its checkpoint to
+                      (<resolved --checkpoints>/<cluster_id>.json); passed verbatim by the
+                      orchestrator so the subagent NEVER assembles/interpolates a path.
+  - done_marker     = ABSOLUTE `.done` marker path (<checkpoint_path>.done) to touch.
   - truncated   = passthrough of the wrapper's `truncated` flag (no silent loss)
 
 Exit codes (R5.3b): 0 ok (incl. empty clusters) · 1 clusters.json missing/malformed ·
@@ -63,14 +68,22 @@ def _done_ids(checkpoints_dir: Path):
     return done
 
 
-def _lite(cluster: dict) -> dict:
+def _lite(cluster: dict, checkpoints_dir: Path) -> dict:
+    cid = cluster.get("cluster_id")
+    base = checkpoints_dir / f"{cid}.json"
     return {
-        "cluster_id": cluster.get("cluster_id"),
+        "cluster_id": cid,
         "category": cluster.get("category"),
         "kind": cluster.get("kind"),
         "shape": cluster.get("shape"),
         "evidence_files": cluster.get("evidence_files", []),
         "candidate_count": len(cluster.get("candidate_ids", [])),
+        # Absolute output paths (checkpoints_dir is already .resolve()'d in main): the
+        # single authoritative value the orchestrator passes VERBATIM to the T1 subagent
+        # and the subagent writes VERBATIM — no relative path / no placeholder assembly
+        # (safe under any subagent cwd, incl. Windows drive root).
+        "checkpoint_path": str(base),
+        "done_marker": str(base.with_name(base.name + ".done")),
     }
 
 
@@ -102,7 +115,7 @@ def main():
                        else (clusters_path.parent / "checkpoints" / "t1").resolve())
     done = _done_ids(checkpoints_dir)
 
-    pending = [_lite(c) for c in clusters
+    pending = [_lite(c, checkpoints_dir) for c in clusters
                if isinstance(c, dict) and c.get("cluster_id") not in done]
     result = {
         "repo": wrapper.get("repo"),

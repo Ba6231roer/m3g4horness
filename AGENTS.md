@@ -116,13 +116,21 @@ flowchart LR
     闭集参数拒歧义输入 + 可操作报错;破坏性操作带 `--dry-run`;大输出默认摘要 + `--offset` 分页。
     **扇出即脚本枚举**:所有 fan-out(tier)MUST 经 `list_*`/`describe_*` 脚本产 pending 清单
     (T1→`list_clusters`、scout→`list_scout_batches`、T3→`list_rule_jobs`),编排器对清单迭代,
-    NEVER 直接挖 JSON / `py -c` 内省。
+    NEVER 直接挖 JSON / `py -c` 内省。**枚举脚本亦产每个待跑单元的确切绝对输出路径**——`pending[]`
+    每项 MUST 含 `checkpoint_path`(scout/T1)/ `rule_path`(T3)+ `done_marker`,均 `Path.resolve()` 绝对
+    (对 subagent 任意 cwd 安全,含 Windows 盘符相对);编排器**逐字透传**、subagent **逐字写**,
+    NEVER 拼路径 / NEVER 占位符(`<target>`/`<id>`)/ NEVER 相对路径。`MGH_TARGET`(= discover `repo`
+    绝对根)供 PreToolUse hook 判树:运行域内 `Write`/`Edit` resolved 目标不在其子树 → fail-loud
+    (退出码 2)。承 `harden-mgh-init-fanout-output-paths`(治「输出路径漂到盘符根」)。
 - **R5.4 大仓可观测 + 无静默截断**:单遍 I/O、每候选 O(1);进度走 `stderr`、产物 JSON 走 `stdout`
   (契约不变);扫描前廉价计数 + 命中阈值前置建议 `--scope`+`--merge`(取代「跑满再超时」);
   截断须显式告警并继续。
 - **R5.5 指令性 MD 措辞**(给 subagent 的 SYSTEM 提示词 / 命令壳纪律段):
   - ① **shaping 失败用 recipe,不用 prohibition**——`Don't X` 类禁令改写为「该做什么」;**硬边界**
-    (跨 format 产物不混、零依赖)才用 `NEVER`。
+    (跨 format 产物不混、零依赖)才用 `NEVER`。**fan-out 路径 recipe**:「需某单元输出路径 → 读 `list_*`
+    stdout `pending[].checkpoint_path`/`rule_path`(绝对,逐字透传给 subagent);NEVER 自拼 `<target>/<id>`、
+    NEVER `py -c` 算路径、NEVER 写相对路径」——硬边界(`NEVER`)因路径拼装命中真实失败(盘符根漂移)。理由
+    〔省拼装 + 对任意 cwd 安全 + 防 D 盘根漂移〕随规保留。
   - ② **禁 nuance/exemption 子句**(`Don't X unless…`、「此限制不适用代码块」)。
   - ③ 显式废对冲词 + RFC-2119 normative 动词(`MUST/SHALL` 取代 `should/may`,机器可检)。
   - ④ 验收用可证伪清单 + schema 示例(非散文);命令行示例逐字可执行;无长代码块(承 R3)。

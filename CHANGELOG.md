@@ -14,6 +14,40 @@ end-to-end verification is still pending (see *Pending* below).
 
 ---
 
+## [0.1.5] — 2026-07-07
+
+### Fixed
+- **`/mgh-init` fan-out checkpoints occasionally landed outside the project tree**
+  (observed: a Windows drive root, e.g. `D:\xxx.json`). Root cause: the scout/T1/T3
+  output paths were soft — placeholder templates / relative paths assembled twice (once
+  by the orchestrator, once by the subagent); a misplaced subagent cwd resolved a
+  relative path to the drive root. The enumeration scripts (`list_scout_batches.py` /
+  `list_clusters.py` / `list_rule_jobs.py`) did not emit paths at all, so both agents
+  had to assemble them.
+- Fix: each enumerator now emits a **single authoritative absolute** `checkpoint_path`
+  (scout/T1) / `rule_path` (T3) + `done_marker` per pending unit (via `Path.resolve()`).
+  The orchestrator passes these **verbatim**; the stage prompts + double-shell agent
+  defs treat them as **verbatim input fields** with a `NEVER`-boundary against
+  self-assembly / invented filenames / relative paths / out-of-tree writes.
+- **Defense-in-depth**: the `block-adhoc-scripts` PreToolUse hook (claude, `MGH_INIT_ACTIVE`
+  run-domain) now also blocks `Write`/`Edit` whose resolved target is **outside the
+  `MGH_TARGET` tree** (fail-loud, exit 2, recipe points at `list_*` stdout). `MGH_TARGET`
+  is sourced from discover's absolute `repo` (via `describe_artifact --field repo`, never
+  `py -c`); missing → degrade (pass). `--no-enforce-hook` opt-out unchanged; opencode
+  (no PreToolUse) warns + skips.
+- **AGENTS.md**: R5.3(b) extended (enumerators MUST emit exact absolute output paths);
+  R5.5① gains a fan-out path recipe.
+- New contract `core/contracts/init/cluster-enumeration.md` (T1 previously had no
+  enumeration contract); `scout-enumeration.md` / `rule-jobs.md` gain the path fields.
+- All additive: on-disk artifact schemas unchanged; no new runtime deps; no new CLI flags
+  (`check_contracts` 0 violations). 181 tests pass.
+
+### Upgrade
+- Re-run `./install.sh --claude <target>` (or `--opencode`) to refresh the hook + shells
+  + stage prompts. Existing checkpoints/rules are unaffected (schema unchanged).
+
+---
+
 ## [0.1.1] — 2026-06-29
 
 ### Fixed

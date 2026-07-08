@@ -20,9 +20,15 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - total       = #distinct categories in the inventory
   - done        = #categories whose T3 checkpoint marker exists
   - pending[]   = categories not yet done; each item:
-      {category, format, rule_path}
-  - rule_path   = claude  -> <target>/.claude/rules/security-<cat>.md
-                  opencode-> <target>/.mgh-init/rules-parts/<cat>.md
+      {category, format, rule_path, done_marker}
+  - rule_path   = ABSOLUTE (target resolved via Path.resolve(); absolute even when
+                  --target defaults to "."):
+                  claude  -> <abs target>/.claude/rules/security-<cat>.md
+                  opencode-> <abs target>/.mgh-init/rules-parts/<cat>.md
+                  Passed verbatim by the orchestrator; the rulewriter subagent NEVER
+                  assembles/interpolates a path.
+  - done_marker = ABSOLUTE `.done` marker path
+                  (<abs checkpoints>/<cat>.<format>.json.done) to touch.
 
 Exit codes (R5.3b): 0 ok (incl. empty inventory) · 1 inventory missing/malformed ·
 2 misuse (argparse). Idempotent, read-only, no TTY.
@@ -101,8 +107,14 @@ def main():
                        else (inv_path.parent / "checkpoints" / "t3").resolve())
     done = _done_categories(checkpoints_dir, args.format)
 
+    # Resolve target ONCE to an absolute path (FD5): the rulewriter subagent's cwd is not
+    # assumed, so a relative rule_path is unsafe (would resolve to the drive root on a
+    # misplaced cwd). rule_path / done_marker are the single authoritative values the
+    # orchestrator passes VERBATIM — no <target>/<category> assembly downstream.
+    target_abs = str(Path(args.target).resolve())
     pending = [{"category": cat, "format": args.format,
-                "rule_path": _rule_path(args.target, cat, args.format)}
+                "rule_path": _rule_path(target_abs, cat, args.format),
+                "done_marker": str(checkpoints_dir / f"{cat}.{args.format}.json.done")}
                for cat in categories if cat not in done]
     result = {
         "total": len(categories),

@@ -25,6 +25,9 @@ Your job: read the code the regex skipped and find the security controls it miss
   NEVER the whole file).
 - The repo root (so you can Read / Glob / Grep).
 - `regex_known[]`: controls the regex already found (names/files). Do not re-report these.
+- `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
+  MUST write your checkpoint to.
+- `done_marker` (absolute, given VERBATIM) — the exact `.done` path you MUST touch after.
 
 ## Task
 For each target, **adaptively** decide whether it holds a security control the regex
@@ -84,8 +87,14 @@ For every confirmed control, emit a Candidate-subset anchor:
 `anchor`/`file`/`line`/`confidence`)与目标项目锚点原样保留。
 
 ## Output
-Write `<target>/.mgh-init/checkpoints/scout/<batch_id>.json`:
+Write EXACTLY the absolute path given by the input field `checkpoint_path`:
 ```json
 {"batch_id": "...", "candidates": [<anchor>, ...], "unresolved": ["<file>", ...]}
 ```
-Then touch `<target>/.mgh-init/checkpoints/scout/<batch_id>.json.done`.
+Then touch the absolute path given by the input field `done_marker`.
+
+**Hard boundary (`NEVER`)**: NEVER assemble or interpolate a path yourself (no
+`<target>`/`<batch_id>` substitution); NEVER invent a filename (e.g. `xxxraw.json`);
+NEVER write a relative path; NEVER write anywhere outside the project tree (including a
+drive root). Your cwd is NOT assumed — `checkpoint_path` is already absolute precisely so
+it is safe under any working directory. Use the field value verbatim.

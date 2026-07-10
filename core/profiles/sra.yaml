@@ -1,0 +1,19 @@
+# mgh-sra profile — default (Claude Code / opencode host agent for every LLM tier)
+# SPDX-License-Identifier: Apache-2.0
+# Mirrors init.yaml semantics: every LLM role inherits the host model.
+# a1 prepare_augment is a deterministic script (no model).
+version: 1
+roles:
+  clarify:     {model: inherit}     # a2 — single context over whole change (cross-cap dedup)
+  augment:     {model: inherit}     # a3 — per-capability fan-out (one context per capability)
+  consistency: {model: inherit}     # a4 — cross-capability dedup / conflict resolve
+allowed_tools: [Read, Glob, Grep, Bash]
+budget:
+  per_stage_usd: 15.0
+  max_turns: 30
+# Isolation-first fan-out: a3 spawns one subagent context per capability.
+# sra acts on a single small change; no resume/sharding/scout/scope/merge (intentionally narrow).
+fanout:
+  augment_per_capability: true      # a3 one subagent context per capability (isolation)
+  consistency: true                 # a4 default on (quality-first); --skip-consistency disables
+  max_concurrent: 8                 # host-permitting; collapse to sequential if 1

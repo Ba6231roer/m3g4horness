@@ -13,10 +13,10 @@ opencode)的**安全工作流工具族**,所有命令共享前缀 `mgh-`。
 | ----------- | ------- | ------------------------------------------------- |
 | `/mgh-sast` | ✅ 可用    | 9 阶段 agentic SAST。零运行时依赖地复刻 vvaharness 流水线(详见下节)。 |
 | `/mgh-init` | ✅ 可用    | 发现存量安全控制 → 生成 Agent rules。隔离优先三层流水线(确定性发现 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ claude/opencode rules(二选一,结构不混)。详见 `openspec/changes/add-mgh-init/`。 |
-| `/mgh-sra`  | 🚧 TODO | openspec `propose` 后补充 specs/tasks 安全设计内容。        |
+| `/mgh-sra`  | ✅ 可用    | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-sra/`。 |
 | `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑设计强耦合安全测试案例。                              |
 
-> TODO 命令目前仅为**空骨架**,功能定义见仓库根 [`task.260630.md`](task.260630.md)。
+> TODO 命令目前仅为**空骨架**,功能定义见仓库根 [`task.260630.md`](task.260630.md)。`/mgh-sra` 产出的项目级 `business_context.json`(`roles[]`/`interface_authz[]`/`sensitive_fields[]`)为未来 `/mgh-blst` 预留消费口。
 
 ## mgh-sast 与原项目 vvaharness 的关系(必读)
 
@@ -142,8 +142,17 @@ flowchart LR
 - **R5.7 评估驱动 + TDD-for-docs**:改 `core/prompts/**` 前先建 baseline(无该提示词跑 ≥5 次 capture
   失败模式,variance 是指标)→ blind A/B 对比 pass rate/tokens → 新命令由 A 实例写、全新 B 实例
   大仓首跑、观察漂移 → 新失败模式回灌本节。**交付物(非倡议)**:能用 hook 做确定性闭环的,不写进 MD
-  靠 agent 自觉——每个 `mgh-*` 命令的 #1 违例 MUST 配 PreToolUse hook(install 时注入目标仓);hook
-  缺席 = CI fail(对齐 R5.8)。当前兑现:`block-adhoc-scripts.py`(/mgh-init + /mgh-sast #1 违例=微脚本内省;同一 hook 双运行域 `MGH_INIT_ACTIVE`/`MGH_SAST_ACTIVE`)。
+  靠 agent 自觉——每个 `mgh-*` 命令的 #1 违例 MUST 配运行时 hook(install 时注入目标仓,**双端对等**):
+  claude = `.claude/settings.json` 的 PreToolUse 命令;**opencode = `.opencode/plugins/` 的 `tool.execute.before`
+  `.ts` 插件**(opencode 的 hook 面即 JS/TS 插件,等价事件 `tool.execute.before`/`tool.execute.after`;
+  **移植缺口非能力缺口**)。hook 缺席 = CI fail(对齐 R5.8)。**R2 定性**:`.ts` 插件是 opencode 宿主原生胶水
+  (由 opencode 自带 Bun 运行、非 `pip` 依赖,类比 claude 的 `settings.json` hook 配置),仅做事件归一化 + 管道
+  + 据退出码阻断;**判定逻辑单一来源在 Python 标准库守卫 `block_adhoc_scripts.py`**(双端字节级 parity 守卫,
+  `tests/test_opencode_hook_parity.py`;零依赖 AST 扫描只扫 `*.py`,`.ts` 不在扫描集)。当前兑现:`block-adhoc-scripts`
+  (双端:claude PreToolUse + opencode `.ts` 插件;同一守卫不改;`/mgh-init`+`/mgh-sast`+`/mgh-sra` #1 违例=微脚本内省
+  + 越权 `*.py` + 子树外写;三运行域 `MGH_{INIT,SAST,SRA}_ACTIVE`)。**可靠性边界(opencode)**:opencode 插件进程**不继承**
+  mid-session bash 导出的 env(`shell.ts::shellEnv` 只读 `process.env` 不回写),故 `MGH_*_ACTIVE` 仅在 opencode 启动时
+  已就绪才激活守卫;未激活时 fail-soft,纪律由命令壳明线 + R5.9 边界校验兜底。
 - **R5.8 安装自检 + 回归单测**:`install.sh` 镜像后校验脚本族同目录共存 + fail-soft(自检失败只
   warn 不阻断 install,CI 必 fail);任何 `.md`/脚本改动 bump 版本号;回归测覆盖 契约等价 / 导入
   鲁棒(非脚本目录 cwd 子进程)/ 性能不退化 / 零依赖 AST 扫描 / R5.1 CLI lint。

@@ -35,5 +35,5 @@ You are a stage subagent, not the orchestrator — emit only this stage's declar
 - NEVER `Write`/`Edit` a `.py` file (no orchestrator, no helper script, no `py -c` snippet).
 - NEVER run `py -c`/`python -c` to introspect or re-derive artifacts; read inputs with `Read`.
 - Input artifacts are terminal — consume as-is; do not transform or re-aggregate them in code.
-(The frontmatter denies edit; bash is allowed for surface search but MUST NOT be used
-for `py -c` introspection or `.py` authoring — see the NEVER lines above.)
+(The frontmatter denies file Write/Edit; Bash is allowed for surface search but MUST
+NOT be used for `py -c` introspection or `.py` authoring — see the NEVER lines above.)

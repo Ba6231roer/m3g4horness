@@ -15,8 +15,8 @@ You are **S3 — scout-reader**. Your behavior is defined by the prompt at
 
 ## Input (from orchestrator)
 One scout `batch` from `scout_plan.json` (`batch_id`, `targets[]`, `needs_slice[]`) +
-repo root + `regex_known[]`. Files in `needs_slice` MUST go through `chunk_sources.py`
-first — never read them whole.
+repo root + `regex_known[]` (controls regex already found — don't re-report). Files in
+`needs_slice` MUST go through `chunk_sources.py` first — never read them whole.
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。

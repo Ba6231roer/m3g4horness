@@ -6,13 +6,15 @@ description: Discover existing reusable security controls in a project (input-va
 
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `discover_controls.py` / `chunk_sources.py` / `plan_scout.py` / `merge_scout.py` / `assemble_rules.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。opencode 下 T3 每 category 写**暂存 fragment**(`.mgh-init/rules-parts/<cat>.md`),由 `assemble_rules.py` 装配进 `AGENTS.md` 单个中性受管块(见步骤 6b)。
 
-> **运行域 + hook**:`install.sh` 向本仓 `.claude/settings.json` 注入 PreToolUse
-> hook(`block-adhoc-scripts`),在 `/mgh-init` 运行域内拦 `py -c`/`python -c` 内省、越权
+> **运行域 + hook**:`install.sh` 向本仓 `.opencode/plugins/` 注入 `tool.execute.before`
+> 插件(`block-adhoc-scripts`),在 `/mgh-init` 运行域内拦 `py -c`/`python -c` 内省、越权
 > `Write *.py`、**以及 resolved 目标不在 `MGH_TARGET` 子树内的 `Write`/`Edit`**(子树外写入,
-> 如盘符根;命中退出码 2 + stderr recipe 指向 `list_*` stdout 的 `checkpoint_path`)。编排器**起步先**
+> 如盘符根;命中阻断 + stderr recipe 指向 `list_*` stdout 的 `checkpoint_path`)。插件把事件归一化后
+> 管道喂**同一** Python 守卫(`.opencode/hooks/block_adhoc_scripts.py`,与 claude 端零差异)。编排器**起步先**
 > `Bash: export MGH_INIT_ACTIVE=1` 标记运行域,并在 discover 后 `export MGH_TARGET=<绝对 repo>`(供 hook
 > 判树;缺失则该条降级放行)。opt-out = `install.sh --no-enforce-hook`(纪律仍由下方铁律 + 边界校验兜底)。
-> opencode 侧若 PreToolUse 能力缺失,install 时 stderr warn + 跳过(fail-soft),纪律由本节兜底。
+> **可靠性边界**:opencode 插件进程**不继承** mid-session bash 导出的 env,故 `MGH_INIT_ACTIVE` 仅在 opencode
+> 启动时已就绪才激活守卫;未激活则纪律由下方铁律 + 各 producer `--check` 兜底。
 
 You are the **orchestrator** of the mgh-init pipeline. Carry it out by running the
 deterministic leaf scripts (Bash) and spawning stage subagents. Shared assets live
@@ -56,7 +58,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 ```
 0. parse + self-check(发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`;扫描期向 stderr 打印进度)
    · **起步**:`Bash: export MGH_INIT_ACTIVE=1`(声明运行域,激活 PreToolUse hook,含子树外 Write/Edit 拦截)
-   · **MGH_TARGET**(供 hook 判树;opencode 无 PreToolUse 时该条空转):discover(step 2)写出的 `controls_candidates.json::repo` 即**绝对项目根**;编排器**逐字读**该字段并 `export MGH_TARGET=<repo>`,在 fan-out 前设置。取值经 `describe_artifact.py --field repo`(合法瞄结构出口),**NEVER** `py -c` 自算、**NEVER** 用裸 `.` 相对。
+   · **MGH_TARGET**(供 hook 判树;守卫未激活时该条空转):discover(step 2)写出的 `controls_candidates.json::repo` 即**绝对项目根**;编排器**逐字读**该字段并 `export MGH_TARGET=<repo>`,在 fan-out 前设置。取值经 `describe_artifact.py --field repo`(合法瞄结构出口),**NEVER** `py -c` 自算、**NEVER** 用裸 `.` 相对。
 1. IF --merge: merge partial inventories by evidence anchor → STOP
 2. i1 discover (Bash):
      py .opencode/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init [--scope .. --max-files ..]

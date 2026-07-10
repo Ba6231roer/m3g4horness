@@ -47,3 +47,12 @@ A `Finding` object:
 `severity` is ALWAYS derived from the CVSS 3.1 base-score band and can never
 disagree with `cvss_score` (see `emit_sarif.py::severity_band`):
 Critical 9.0–10.0 · High 7.0–8.9 · Medium 4.0–6.9 · Low 0.1–3.9 · Info (no path).
+
+## sra 增补 + 业务记忆契约
+
+`/mgh-sra`(openspec 安全设计补充)的 I/O 与业务记忆契约:
+
+| File | Scope | Shape |
+|---|---|---|
+| `sra/augmentation.md` | sra 增补 I/O | `change_context.json` / draft(`gaps[]`+`security_requirements[]`+`security_tasks[]`)/ `sra_manifest.json` + 各 producer `--check` |
+| `sra/business-context.md` | 项目级业务记忆 | `business_context.json`(`roles[]`/`domains[]`/`sensitive_fields[]`/`interface_authz[]`/`clarifications[]`)+ `clarification` shape + `merge_memory` 幂等累积 |

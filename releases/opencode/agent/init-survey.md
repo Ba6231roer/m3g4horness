@@ -1,5 +1,5 @@
 ---
-description: mgh-init i1 LLM-assist surveyor. Sanity-checks/enriches deterministic discover_controls.py output (controls_candidates.json + clusters.json). Does NOT decide canonical (T2) or emit rules (T3).
+description: mgh-init i1 LLM-assist surveyor. Sanity-checks/enriches the deterministic discover_controls.py output (controls_candidates.json + clusters.json) — corrects miscategorised clusters and flags obvious false positives as low-confidence. Does NOT decide canonical (T2) or emit rules (T3).
 mode: subagent
 permission:
   read: allow

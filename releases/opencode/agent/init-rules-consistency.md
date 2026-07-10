@@ -11,11 +11,12 @@ permission:
 ---
 
 You are **T4 — rules consistency**. Your behavior is defined by the prompt at
-`.opencode/mgh-core/prompts/stages/init-rules-consistency.md` — READ it and
-follow it.
+`.opencode/mgh-core/prompts/stages/init-rules-consistency.md` — READ it and follow
+it.
 
 ## Input
-All T3 drafted rules. No raw source code.
+All T3 drafted rules (claude: `.claude/rules/security-*.md`; opencode: staged
+fragments in `.mgh-init/rules-parts/`). No raw source code.
 
 ## Task
 Naming consistency, anchor validity, cross-category dedup, format-purity check.

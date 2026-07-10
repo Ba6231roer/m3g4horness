@@ -106,3 +106,23 @@ py tests/test_deterministic.py
 > `init-scout-audit` subagent + `plan_scout.py` / `merge_scout.py` 脚本 + `skeleton.json` 契约)
 > 找出自研/非规范词命名的控制——regex ∪ scout 双源并集,每条候选带 `source`。设计见
 > `openspec/changes/improve-mgh-init-llm-discovery/`。
+
+---
+
+## 附录:`/mgh-sra` 的原创性登记(非移植)
+
+`/mgh-sra`(openspec 安全设计补充)是 **rewrite-original**,无任何 vvaharness 来源,不属移植
+同步范围。它是 m3g4horness 原创工作流链的中段:`/mgh-init`(记存量控制)→ **`/mgh-sra`**(在
+`propose` 后、`apply` 前对变更 specs/tasks 做维度驱动的安全缺口分析 + 三信号语义匹配存量控制 +
+批量澄清问答沉淀跨迭代业务记忆)→ `/mgh-blst`(据角色/越权范式设计业务耦合测试,TODO)。
+
+| 维度 | 说明 |
+|---|---|
+| 来源 | **原创**(无 vvah SYSTEM 可移植) |
+| 保真度 | **不适用(原创)** |
+| 与上游唯一相关概念 | 消费 `/mgh-init` 产出的 `controls_inventory.json`(`design_controls`-compatible)作信号-1 候选,但**不 import** init 内部(`prepare_augment.py` 自持 `json.load` 读) |
+| 上游同步 | 不需要(无上游) |
+
+> 保真度标记:`core/prompts/stages/sra-*.md` 与 `core/prompts/fragments/security-dimensions.md`
+> 均标 `rewrite-original`,不带 `Source: vvaharness/...` 溯源注释。设计见
+> `openspec/changes/add-mgh-sra/`。

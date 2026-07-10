@@ -6,12 +6,13 @@ description: 9-stage agentic SAST (survey → threat-model → decompose → dee
 
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(bash / spawn agent / read / write / edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `prefilter.py` / `dedup.py` / `emit_sarif.py` / `list_chunks.py` / `list_verify_jobs.py` / `describe_artifact.py` 里,直接 `bash` 调用即可,无需 `read` 其源码,也不要另写 `.py` 去包装或重实现。
 
-> **运行域 + hook**:`install.sh` 向本仓 `.claude/settings.json` 注入 PreToolUse
-> hook(`block-adhoc-scripts`),在 `/mgh-sast` 运行域内拦 `py -c`/`python -c` 内省与越权
-> `Write *.py`(命中退出码 2 + stderr recipe 指向合法出口)。编排器**起步先**
+> **运行域 + hook**:`install.sh` 向本仓 `.opencode/plugins/` 注入 `tool.execute.before`
+> 插件(`block-adhoc-scripts`),在 `/mgh-sast` 运行域内拦 `py -c`/`python -c` 内省与越权
+> `Write *.py`(命中阻断 + stderr recipe 指向合法出口)。插件归一化后管道喂**同一** Python 守卫
+> (`.opencode/hooks/block_adhoc_scripts.py`,与 claude 端零差异)。编排器**起步先**
 > `bash: export MGH_SAST_ACTIVE=1` 标记运行域;opt-out = `install.sh --no-enforce-hook`
-> (纪律仍由下方铁律 + 边界校验兜底)。opencode 侧若 PreToolUse 能力缺失,install 时
-> stderr warn + 跳过(fail-soft),纪律由本节兜底。
+> (纪律仍由下方铁律 + 边界校验兜底)。**可靠性边界**:opencode 插件进程不继承 mid-session bash 导出的
+> env,故 `MGH_SAST_ACTIVE` 仅在 opencode 启动时已就绪才激活守卫。
 
 You are the **orchestrator** of a 9-stage SAST pipeline. Spawn stage agents (opencode
 subagents) and run deterministic stage scripts (bash). Shared assets live at

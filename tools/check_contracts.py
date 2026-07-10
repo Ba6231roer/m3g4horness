@@ -29,6 +29,8 @@ DEFAULT_SHELLS = [
     ROOT / "releases" / "opencode" / "command" / "mgh-init.md",
     ROOT / "releases" / "claude-code" / "commands" / "mgh-sast.md",
     ROOT / "releases" / "opencode" / "command" / "mgh-sast.md",
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-sra.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-sra.md",
 ]
 # mgh-sast shells and the shell-level (non-script) flags their flag table MUST advertise
 # (--controls is the shell's own flag, not a *.py flag, so the bash-block extractor below

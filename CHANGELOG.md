@@ -14,6 +14,29 @@ end-to-end verification is still pending (see *Pending* below).
 
 ---
 
+## [0.1.6] — 2026-07-10
+
+### Added
+- **opencode runtime-discipline hook parity.** opencode now gets the same orchestrator-discipline
+  enforcement Claude Code has. `install.sh --opencode` injects a `tool.execute.before` plugin
+  (`.opencode/plugins/block_adhoc_scripts.ts`) that normalizes the tool event into Claude's
+  PreToolUse stdin shape and pipes it to the **same** platform-neutral Python guard
+  (`block_adhoc_scripts.py`, now also mirrored to `.opencode/hooks/`). The guard is unchanged —
+  single decision source, byte-parity guarded by `tests/test_opencode_hook_parity.py`. New
+  `tools/install_opencode_plugin.py` mirrors `tools/install_hook.py` (idempotent, merge-aware,
+  `--remove`). This corrects the prior wrong premise that "opencode has no PreToolUse capability":
+  opencode's hook surface is JS/TS plugins (`tool.execute.before`/`tool.execute.after`) — this was
+  a porting gap, now closed (not a capability gap).
+
+### Known limitation (honest boundary)
+- opencode's plugin process does **not** inherit env vars exported mid-session via `bash` (its shell
+  tool builds env from `process.env` and never writes back). So `export MGH_*_ACTIVE=1` inside a run
+  may not reach the guard; the runtime gate activates only when the env is present at opencode
+  launch (e.g. `MGH_*_ACTIVE=1 opencode run`). The shell bright-lines + per-stage `--check` boundary
+  validation remain the real backstop either way (fail-soft). Verified against opencode v1.17.15.
+
+---
+
 ## [0.1.5] — 2026-07-07
 
 ### Fixed

@@ -116,7 +116,10 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
      py .claude/mgh-core/scripts/assemble_rules.py --target <target> --format <format>
    · opencode: 合并全部暂存 fragment 进 `<target>/AGENTS.md` 单个中性受管块(幂等、迁移旧 `mgh-init:` 块、内置 lint)
    · claude: 无装配(T3 已直写文件),仅对 `.claude/rules/security-*.md` 做纯净性 lint
-   · 命中禁用 token(工具名/脚本名/层级/内部路径)= 规则正文泄漏;fail-loud(退出码 2),回 T3 修正后重跑
+   · lint(fail-loud 退出码 2)= 规则正文泄漏:T3 禁 front matter / inventory schema 字段
+     (`found_controls`/`evidence_count`)/ 过程散文(`扫描器模式定义` 等)/ 无源码锚点的控制;lint 覆盖
+     工具内部 token + schema 字段 + 特征过程散文(opencode 另查 `---` YAML 围栏;claude `paths:` frontmatter 豁免)。
+     回 T3 修正后重跑
 7. T4 (unless --skip-consistency): spawn init-rules-consistency
      → in-place edits to rule files (claude) / staged fragments (opencode) + checkpoints/t4/.done
 8. i4: write init_manifest.json + report.md; print artifact paths + disclaimers
@@ -135,7 +138,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 | T1 induct | subagent `init-induct` (fan out per cluster) | `core/prompts/stages/init-induct.md` |
 | T2 synthesis | subagent `init-synthesis` | `core/prompts/stages/init-synthesis.md` |
 | T3 rulewriter | subagent `init-rulewriter` (fan out per category) | `core/prompts/stages/init-rulewriter.md` + `fragments/rules-format-{claude,opencode}.md` |
-| T3 assemble/lint | **script** | `core/scripts/assemble_rules.py` (opencode: single neutral block + legacy migration; both formats: `--check` purity lint) |
+| T3 assemble/lint | **script** | `core/scripts/assemble_rules.py` (opencode: single neutral block + legacy migration; both formats: `--check` purity lint: tool tokens + schema fields + YAML fences[opencode] + discovery prose) |
 | T4 consistency | subagent `init-rules-consistency` (opt) | `core/prompts/stages/init-rules-consistency.md` |
 | scout plan | **script** | `core/scripts/plan_scout.py` (byte-budget + pkg-co-located batches) |
 | scout enumerate | **script** | `core/scripts/list_scout_batches.py` (pending 批清单;闭合与 T1 的不对称) |

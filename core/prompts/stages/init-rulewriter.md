@@ -27,16 +27,48 @@ absolute paths given VERBATIM by the orchestrator:
   `AGENTS.md` (idempotent, preserves user content, migrates legacy blocks).
 
 ## Rule body (both formats)
-Each control becomes a short rule that:
-- states **what the existing control is** and **that new code MUST reuse it**
-  (not reinvent),
-- gives the concrete **usage** (`usage` field),
-- points to the **exact anchor** `file:class:method` (indexed, clickable) —
-  never paste > 3–5 lines of code,
-- notes `gaps`/effectiveness caveats briefly.
+
+A rule SHALL correspond to ONE existing control that has a **concrete source anchor**
+(`file:class:method` / `file:line`) in the target project. mgh-init's sole job is to
+surface existing reusable implementations so later coding tasks reuse them; a rule
+with no source anchor carries nothing to reuse.
+
+Each rule SHALL:
+- lead with the target project's **actual class / method / config name** (e.g.
+  `AuthConfig` / `TokenAuthenticationService`), then state **what the existing control
+  is** and **that new code MUST reuse it** (not reinvent) — a control id (`C-*-001`)
+  is optional, and if included SHALL carry **no** process suffix (`NEVER`
+  `(缺失)` / `(扫描器…)` / `(扫描器模式定义)` / `(not found)`);
+- give the concrete **usage** (`usage` field);
+- point to the **exact anchor** `file:class:method` / `file:line` (indexed,
+  clickable); NEVER paste > 3–5 lines of code;
+- note a **caveat on the existing control's effectiveness** only when relevant (e.g.
+  "covers POST, not GET"); NEVER use a caveat as a "control is missing / not found"
+  placeholder line.
+
+### Omit controls with no implementation (hard boundary)
+
+- A control whose `evidence[]` is empty, whose `role` is `possibly-dead` with **no
+  anchor**, or whose notes are only "expected but not found" HAS no reusable
+  implementation → emit **no rule** for it. Such gaps stay in the human-facing
+  `report.md` / `init_manifest.json` (full disclosure); the rule body MUST NOT carry
+  "design gap / not-found" prose.
+- If **every** control in your category has no source anchor → write **no fragment
+  file at all** (opencode) / **no rule file** (claude), and STILL touch `done_marker`
+  (so `--resume` treats the category as handled). NEVER produce an empty file or a
+  bare `### <Category>` heading with no body — that is noise in the root context.
+
+### Anchor = source, not discovery (hard boundary)
+
+- The anchor field (`锚点:` / `Anchor`) SHALL point at **target-project source** only.
+- NEVER point the anchor at scanner internals, regex definitions, or "how it was
+  discovered / induced". The rule body SHALL describe **what the project's control is
+  and how to reuse it**; NEVER describe what a scanner / regex "defines" or "expects"
+  (e.g. NEVER write `扫描器定义了 @RateLimit` / `扫描器模式定义` / `锚点：扫描器内部正则定义`).
 
 Favor canonical (`role: canonical`) controls as the primary rule; list
-`competing`/`possibly-dead` as "also present — verify which applies".
+`competing` / `possibly-dead` as "also present — verify which applies" — and only
+when they carry a source anchor.
 
 ## Non-destructive + 输出纯净性(硬边界)
 - **opencode**: write ONLY the staged fragment `.mgh-init/rules-parts/<category>.md`

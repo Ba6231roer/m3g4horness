@@ -57,6 +57,11 @@ For every confirmed control, emit a Candidate-subset anchor:
 ## Hard rules
 - **Every proposal MUST be grounded**: `evidence_snippet` + `file:line` MUST come from a
   file you actually Read (or sliced via `chunk_sources.py`). No evidence → do not emit.
+- **Every candidate MUST carry a non-empty `category`** (one of the 8 enums in the schema
+  above). If you cannot assign one, do not emit the candidate.
+- **`evidence_snippet` SHALL be a JSON-safe substring**: a single line; replace every `"`
+  with `'`; strip every `\`. It MUST be structurally incapable of breaking the enclosing
+  JSON string — exclude the breaking characters rather than hand-escaping them.
 - **Precision over recall.** A false proposal wastes a T1 subagent. If a file is clearly
   not a security control, say nothing for it. "This batch has no controls" is a valid,
   common outcome — emit an empty list, do not invent.

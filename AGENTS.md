@@ -226,8 +226,10 @@ py tools/extract_prompts.py --out ./core/prompts
 - 调用图是**文本/AST 级**,漏动态分派/反射/DI/**框架路由**(Spring `@*Mapping`/Feign/AOP/
   `@Autowired`/JPA);未解析项写进 `scope_manifest.unresolved[]` 供报告披露。
 - **tree-sitter 调用链后端规划中、未接入**(当前纯文本 regex + 框架 allowlist)。
-- `/mgh-init` 规则产物的**纯净性 lint 仅覆盖高精度工具内部 token**(工具名 + 特征脚本名 +
-  内部路径);裸层级词(`T1`/`T2`/`scout`)与通用脚本名泄漏由提示词护栏覆盖、非确定性可测。
+- `/mgh-init` 规则产物的**纯净性 lint 覆盖高精度形状**:工具内部 token(工具名 + 特征脚本名 +
+  内部路径)+ inventory schema 字段(`found_controls`/`evidence_count`)+ opencode YAML 围栏(`---`)+
+  特征过程散文短语(`扫描器模式定义` 等);裸通用词(`category`/`缺失`/泛指 `锚点`)与裸层级词
+  (`T1`/`T2`/`scout`)、通用脚本名仍仅提示词护栏覆盖、非确定性可测。
 
 ## 可参考项目
 本项目部分实现方式、实现理念可参考如下已拉取到本地的项目代码仓

@@ -5,12 +5,18 @@
 Runs the script as a REAL subprocess from a NON-script cwd (FD2 family robustness —
 also covers task 7.2: import/cwd self-containment). Run: py -3 tests/test_assemble_rules.py
 """
-import json, subprocess, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "core" / "scripts" / "assemble_rules.py"
 PY = sys.executable  # real interpreter when launched via `py -3`
+
+# The child prints JSON with `ensure_ascii=False` (Chinese lint tokens). On Windows
+# the child's pipe stdout defaults to the console codepage (cp936); decoding those
+# bytes as UTF-8 would fail and leave stdout=None. Normalize the boundary so Chinese
+# token assertions are reliable cross-platform (does not change the script contract).
+_CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 def _write(p: Path, text: str):
@@ -28,7 +34,8 @@ class TestAssembleOpencode(unittest.TestCase):
 
     def _run(self, *args):
         return subprocess.run([PY, str(SCRIPT), "--target", str(self.target), *args],
-                              cwd=str(self.cwd), capture_output=True, text=True, encoding="utf-8")
+                              cwd=str(self.cwd), env=_CHILD_ENV,
+                              capture_output=True, text=True, encoding="utf-8")
 
     def _seed(self):
         _write(self.parts / "audit-logging.md",
@@ -104,6 +111,70 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
         self.assertTrue(json.loads(r.stdout)["lint"]["ok"])
 
+    def test_check_fails_loud_on_inventory_schema_field(self):
+        # N1: controls_inventory.json schema field names leaked into the body.
+        _write(self.parts / "authentication.md",
+               "### 认证\n- **AuthConfig**: Bearer Token。锚点: src/A.java::A.b\n"
+               "found_controls:\n  - C-AUTHN-001\nevidence_count: 1\n")
+        r = self._run("--format", "opencode", "--check")
+        self.assertEqual(r.returncode, 2)
+        summ = json.loads(r.stdout)
+        self.assertFalse(summ["lint"]["ok"])
+        toks = {v["token"] for v in summ["lint"]["violations"]}
+        self.assertIn("found_controls", toks)
+        self.assertIn("evidence_count", toks)
+
+    def test_check_fails_loud_on_yaml_fence(self):
+        # N1: a `---` YAML front-matter fence inside the opencode managed block.
+        _write(self.parts / "authentication.md",
+               "---\ncategory: authentication\n---\n"
+               "### 认证\n- **AuthConfig**: 锚点: src/A.java::A.b\n")
+        r = self._run("--format", "opencode", "--check")
+        self.assertEqual(r.returncode, 2)
+        summ = json.loads(r.stdout)
+        self.assertFalse(summ["lint"]["ok"])
+        self.assertTrue(any(v["token"] == "--- YAML fence"
+                            for v in summ["lint"]["violations"]))
+
+    def test_check_fails_loud_on_discovery_prose(self):
+        # N2: scanner/regex internals + anchor mispointed at scanner internals.
+        _write(self.parts / "authentication.md",
+               "### 认证\n- C-AUTHN-001(扫描器模式定义) 检测模式。"
+               "锚点：扫描器内部正则定义\n")
+        r = self._run("--format", "opencode", "--check")
+        self.assertEqual(r.returncode, 2)
+        summ = json.loads(r.stdout)
+        self.assertFalse(summ["lint"]["ok"])
+        toks = {v["token"] for v in summ["lint"]["violations"]}
+        self.assertIn("扫描器模式定义", toks)
+        self.assertIn("扫描器内部正则", toks)
+        self.assertIn("锚点：扫描器", toks)  # full-width-colon variant
+
+    def test_no_empty_heading_when_category_fragment_absent(self):
+        # N3 / D5: a category with no implementation -> T3 writes NO fragment
+        # file; assemble MUST NOT emit an empty `### <Category>` heading for it.
+        _write(self.parts / "audit-logging.md",
+               "### 审计日志\n- **AuditFilter**: 锚点: src/A.java::A.b\n")
+        _write(self.parts / "authorization.md",
+               "### 鉴权\n- **方法级安全**: 锚点: src/C.java::C.d\n")
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertIn("### 审计日志", body)
+        self.assertIn("### 鉴权", body)
+        self.assertNotIn("access-control", body)   # absent category not present
+        self.assertNotIn("访问控制", body)            # no empty heading either
+
+    def test_runs_from_unrelated_cwd(self):
+        # R5.3a: self-locating; runs from a cwd unrelated to script dir AND target.
+        self._seed()
+        other_cwd = Path(tempfile.mkdtemp(prefix="mgh_cwd_"))
+        r = subprocess.run([PY, str(SCRIPT), "--target", str(self.target),
+                            "--format", "opencode"], cwd=str(other_cwd),
+                           env=_CHILD_ENV, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        self.assertTrue(json.loads(r.stdout)["lint"]["ok"])
+
 
 class TestLintClaude(unittest.TestCase):
     def setUp(self):
@@ -111,6 +182,7 @@ class TestLintClaude(unittest.TestCase):
 
     def _run(self, *args):
         return subprocess.run([PY, str(SCRIPT), "--target", str(self.target), *args],
+                              env=_CHILD_ENV,
                               capture_output=True, text=True, encoding="utf-8")
 
     def test_claude_check_fails_on_leak(self):
@@ -125,6 +197,17 @@ class TestLintClaude(unittest.TestCase):
                "---\npaths: [\"src/**\"]\n---\n# 安全\n- **CipherUtil**: AES 封装。锚点: src/C.java::C.b\n")
         r = self._run("--format", "claude", "--check")
         self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+
+    def test_claude_paths_frontmatter_and_bare_words_not_flagged(self):
+        # claude legitimately uses `paths:` front matter (fence check is opencode-only),
+        # and bare `category`/`缺失`/`锚点` are excluded from the token set (no FP).
+        _write(self.target / ".claude" / "rules" / "security-crypto.md",
+               "---\npaths:\n  - \"src/**\"\n---\n"
+               "# 安全\n- 这是个 category 字段。某控制缺失。锚点: src/C.java::C.b\n")
+        r = self._run("--format", "claude", "--check")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        summ = json.loads(r.stdout)
+        self.assertTrue(summ["lint"]["ok"])
 
 
 if __name__ == "__main__":

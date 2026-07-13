@@ -30,6 +30,10 @@ S3). If after a genuine attempt you agree it is not a control, emit nothing for 
 ## Hard rules
 - **Skeptic bias, but evidence-bound.** Same grounding rule as S3: every proposal MUST
   cite a real `file:line` you Read. Do not manufacture controls to justify the audit.
+- **Every candidate MUST carry a non-empty `category`** (one of the 8 enums in the S3
+  schema). If you cannot assign one, do not emit it.
+- **`evidence_snippet` SHALL be a JSON-safe substring**: single line; replace `"` with
+  `'`; strip `\` (structurally incapable of breaking the enclosing JSON string).
 - You see only the sampled rejections — do not try to re-scan the whole repo.
 - No canonical / competing judgment. No prose outside JSON.
 

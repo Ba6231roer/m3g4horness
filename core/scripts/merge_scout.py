@@ -26,13 +26,17 @@ from discover_controls import form_clusters  # reuse grouping logic, no drift
 
 
 def _normalize(c, i):
-    """Bring a scout Candidate-subset up to the full Candidate shape form_clusters expects."""
+    """Bring a scout Candidate-subset up to the full Candidate shape form_clusters expects.
+    Returns None when `category` is missing/empty so the caller skips + warns (a category is
+    required downstream — never fabricate one)."""
+    if not c.get("category"):
+        return None
     a = c.get("anchor") or {}
     return {
         "id": c.get("id") or f"S-{i:04d}",
         "file": c["file"],
         "line": c.get("line"),
-        "category": c["category"],
+        "category": c.get("category"),
         "kind": c.get("kind"),
         "pattern": c.get("pattern") or a.get("class") or a.get("method") or "",
         "anchor": a,
@@ -51,20 +55,74 @@ def _key(c):
     return (c.get("file"), a.get("class"), a.get("method"), c.get("category"))
 
 
+def _json_err_detail(e, path):
+    """Structured JSON-parse error detail (R5.3b): lineno/colno/msg + a nearby byte window
+    (±40 chars around the error position). Uniform across _run_check (exit 2) and main()
+    (exit 1) so diagnostics stay consistent at both boundaries."""
+    detail = {"error": "malformed JSON", "file": str(path)}
+    if isinstance(e, json.JSONDecodeError):
+        doc = e.doc or ""
+        lo, hi = max(0, e.pos - 40), min(len(doc), e.pos + 40)
+        nearby = doc[lo:hi].replace("\r", "\\r").replace("\n", "\\n")
+        detail.update({"lineno": e.lineno, "colno": e.colno, "msg": e.msg, "nearby": nearby})
+    else:
+        detail["msg"] = str(e)
+    return detail
+
+
+def _load_json(path_str):
+    """Read + parse JSON for main() fold-in. Returns (data, None) on success or
+    (None, detail) on a read/parse failure, where detail = {error, file, msg, lineno?,
+    colno?, nearby?}. Lets main() emit a structured stdout error + stderr diagnostic and
+    return exit 1 with NO uncaught traceback on malformed input."""
+    p = Path(path_str)
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as e:
+        return None, {"error": "unreadable file", "file": str(p), "msg": str(e)}
+    try:
+        return json.loads(raw), None
+    except ValueError as e:
+        return None, _json_err_detail(e, p)
+
+
+def _emit_load_error(detail):
+    """Structured stdout error JSON + actionable stderr (R5.3b). Caller returns exit 1."""
+    where = (f"line {detail['lineno']} col {detail['colno']}: {detail['msg']} "
+             f"near: {detail.get('nearby')!r}" if "lineno" in detail else detail.get("msg", ""))
+    print(f"error: cannot load {detail.get('file')}: {where}", file=sys.stderr)
+    print(json.dumps({"status": "error", **detail}, ensure_ascii=False))
+
+
 def _run_check(scout_path: Path):
-    """R5.9 boundary check: validate scout_candidates.json — every candidate MUST carry
-    `source:"scout"` and a concrete `file:line` anchor. Returns exit 0 ok / 2 violation."""
+    """R5.9 boundary check: validate scout_candidates.json. Every candidate MUST carry
+    `source:"scout"`, a concrete `file:line` anchor, and a non-empty `category`; the file
+    MUST parse as JSON. Any boundary failure (malformed JSON / unreadable / bad wrapper /
+    field violation) returns exit 2 so the orchestrator gate reruns S4; success exit 0."""
     violations = []
     try:
-        sc = json.loads(scout_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        print(f"error: malformed scout_candidates.json: {e}", file=sys.stderr)
-        return 1
+        raw = scout_path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"error: cannot read scout_candidates.json ({scout_path}): {e}", file=sys.stderr)
+        print(json.dumps({"check": "merge_scout", "ok": False, "error": "unreadable",
+                          "file": str(scout_path), "msg": str(e)}, ensure_ascii=False))
+        return 2
+    try:
+        sc = json.loads(raw)
+    except ValueError as e:
+        detail = _json_err_detail(e, scout_path)
+        where = (f"line {detail['lineno']} col {detail['colno']}: {detail['msg']} "
+                 f"near: {detail.get('nearby')!r}" if "lineno" in detail else detail.get("msg", ""))
+        print(f"error: malformed scout_candidates.json ({scout_path}): {where}", file=sys.stderr)
+        print(json.dumps({"check": "merge_scout", "ok": False, **detail}, ensure_ascii=False))
+        return 2
     cands = sc.get("candidates") if isinstance(sc, dict) else None
     if not isinstance(cands, list):
         print("error: scout_candidates.json must be a wrapper {repo, candidates[], unresolved}",
               file=sys.stderr)
-        return 1
+        print(json.dumps({"check": "merge_scout", "ok": False, "error": "not a wrapper",
+                          "file": str(scout_path)}, ensure_ascii=False))
+        return 2
     for i, c in enumerate(cands):
         if not isinstance(c, dict):
             violations.append({"index": i, "issue": "candidate not an object"})
@@ -75,6 +133,8 @@ def _run_check(scout_path: Path):
             violations.append({"index": i, "issue": "missing file"})
         if not c.get("line"):
             violations.append({"index": i, "issue": "missing line"})
+        if not c.get("category"):
+            violations.append({"index": i, "issue": "missing category"})
     ok = not violations
     print(f"[merge_scout --check] {scout_path}: {'OK' if ok else f'{len(violations)} violation(s)'}",
           file=sys.stderr)
@@ -101,9 +161,16 @@ def main():
               "(or use --check <scout_candidates.json>)", file=sys.stderr)
         return 2
 
-    cd = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
+    cd, err = _load_json(args.candidates)
+    if err:
+        _emit_load_error(err)
+        return 1
     regex_cands = cd.get("candidates", [])
-    sc = json.loads(Path(args.scout).read_text(encoding="utf-8"))
+
+    sc, err = _load_json(args.scout)
+    if err:
+        _emit_load_error(err)
+        return 1
     scout_cands = list(sc.get("candidates", []))
     if args.audit and Path(args.audit).is_file():
         try:
@@ -121,7 +188,19 @@ def main():
             continue
         seen.add(k)
         fresh_raw.append(c)
-    fresh = [_normalize(c, i) for i, c in enumerate(fresh_raw)]
+    # normalize; skip + warn on any candidate missing category (belt-and-suspenders for the
+    # audit path, which does not pass through --check)
+    fresh = []
+    skipped = 0
+    for i, c in enumerate(fresh_raw):
+        n = _normalize(c, i)
+        if n is None:
+            print(f"[merge_scout] warn: scout candidate #{i} "
+                  f"({c.get('file', '?')}:{c.get('line', '?')}) missing category - skipped",
+                  file=sys.stderr)
+            skipped += 1
+            continue
+        fresh.append(n)
 
     # reuse discover's grouping logic (empty reverse -> no graph-derived usage_sites)
     scout_clusters = form_clusters(list(fresh), {}, set(), None, args.sample)
@@ -131,17 +210,22 @@ def main():
     Path(args.candidates).write_text(
         json.dumps(cd, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    cl = json.loads(Path(args.clusters).read_text(encoding="utf-8"))
+    cl, err = _load_json(args.clusters)
+    if err:
+        _emit_load_error(err)
+        return 1
     if not isinstance(cl.get("clusters"), list):
         cl["clusters"] = []
     cl["clusters"] = cl["clusters"] + scout_clusters
     Path(args.clusters).write_text(
         json.dumps(cl, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"[merge_scout] +{len(fresh)} scout candidates, +{len(scout_clusters)} scout clusters",
+    print(f"[merge_scout] +{len(fresh)} scout candidates, +{len(scout_clusters)} scout clusters"
+          + (f", {skipped} skipped (missing category)" if skipped else ""),
           file=sys.stderr)
     print(json.dumps({"scout_candidates_added": len(fresh),
-                      "scout_clusters_added": len(scout_clusters)}))
+                      "scout_clusters_added": len(scout_clusters),
+                      "skipped": skipped}))
     return 0
 
 

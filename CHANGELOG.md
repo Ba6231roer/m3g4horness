@@ -35,6 +35,24 @@ end-to-end verification is still pending (see *Pending* below).
   launch (e.g. `MGH_*_ACTIVE=1 opencode run`). The shell bright-lines + per-stage `--check` boundary
   validation remain the real backstop either way (fail-soft). Verified against opencode v1.17.15.
 
+### Fixed
+- **`/mgh-init` scout→merge fold-in crashed on two kinds of malformed `scout_candidates.json`**
+  (raw traceback, empty stdout, orchestrator unable to decide). (1) A candidate missing its
+  `category` field hit a `KeyError` in `merge_scout._normalize`; (2) a broken JSON string value
+  (e.g. an `evidence_snippet` with mis-escaped quotes / backslashes) raised `JSONDecodeError` —
+  and `merge_scout.py --check` returned exit `1` (not `2`), so the orchestrator gate (which only
+  rolls back on exit 2) let it through to `main()`, which had no `try/except`.
+- Fix (defense-in-depth, three layers): `--check` now also asserts every candidate carries a
+  non-empty `category`, and returns exit `2` for malformed JSON with `lineno`/`colno`/`msg` + a
+  nearby byte window; `main()` wraps all `json.loads` (`--candidates` / `--scout` / `--clusters`)
+  so a malformed input yields a structured stdout error + exit `1` with NO traceback, and
+  `_normalize` now skips + warns on any category-less candidate (count surfaced as `skipped` in
+  the success summary) — covering the `audit_found[]` path that bypasses `--check`.
+  `discover_controls.form_clusters` is untouched (skipped candidates never reach it).
+- The S3 / S4 / audit stage prompts now require a non-empty `category` on every candidate and a
+  JSON-safe `evidence_snippet` (single line; `"` → `'`; strip `\`) — structurally incapable of
+  breaking the enclosing JSON string. Covered by `tests/test_merge_scout.py`.
+
 ---
 
 ## [0.1.5] — 2026-07-07

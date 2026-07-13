@@ -25,7 +25,7 @@ as sections.
 
 ```markdown
 ### <Category>
-- **<Control name>**: <一句话>. 用法: <usage>. 锚点: `src/.../X.java::Class.method`. 缺口: <gap if any>.
+- **<Control name>**: <一句话>. 用法: <usage>. 锚点: `src/.../X.java::Class.method`. 有效性注意: <仅既有控制的有效性,如「只覆盖 POST」;无则省略>
 - ...
 ```
 
@@ -40,16 +40,26 @@ as sections.
 ```
 
 ## Rules
+- **No front matter (hard boundary)**: opencode has **no** path-scoping and **no**
+  front matter (only claude uses `paths:`). A fragment SHALL start with
+  `### <Category>`; NEVER open with a `---` YAML fence; NEVER carry inventory-schema
+  field names (`found_controls` / `evidence_count` / `category:` / `source:` /
+  `evidence:`) as front matter or metadata. `assemble_rules.py --check` fails loud
+  (exit 2) on any `---` fence or schema-field leak inside the managed block.
 - **输出语言**:各 category 小节正文用**简体中文**;中性哨兵标记、文件路径、
   `file::Class.method` 锚点、slug 保持原样(英文/符号不变)。上方模板仅示结构,实际产出中文正文。
 - ONE root `AGENTS.md`. Do NOT create `.opencode/AGENTS.md`.
 - T3 MUST NOT emit any sentinel or write `AGENTS.md` directly; `assemble_rules.py`
   owns the single `<!-- security-controls:begin --> … <!-- security-controls:end -->`
   block. The neutral sentinel carries **no tool name**.
-- Anchors `file::Class.method` / `file:line`; no long code.
+- Anchors `file::Class.method` / `file:line` SHALL point at **target-project source**
+  only (e.g. `src/.../X.java::Class.method`); NEVER point at scanner / regex internals
+  or "how it was discovered"; no long code.
 - **Rule-body purity**: describe ONLY the target project's control; `NEVER` mention
-  this tool's name / scripts / pipeline tiers / internal paths — `assemble_rules.py
-  --check` fails loud on any leak.
+  this tool's name / scripts / pipeline tiers / internal paths / scanner-or-regex
+  definitions — `assemble_rules.py --check` fails loud on any leak. A control with no
+  source anchor gets **no rule**; if the whole category has no implementation, write
+  **no fragment file** and still touch `done_marker` (see `init-rulewriter.md`).
 - **Never** emit `.claude/rules/` in this format (that is Claude Code).
 
 > Verified against opencode docs as of 2026-06; record in `init_manifest.json`.

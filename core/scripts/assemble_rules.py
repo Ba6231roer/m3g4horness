@@ -42,11 +42,26 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"format":"...","block":"security-controls"|null,"categories":[...],
    "migrated_legacy_blocks":N,"lint":{"ok":bool,"violations":[{"file,line,token}]},"written":bool}
 
-Purity lint — high-precision forbidden tokens (design D4): near-zero false positives
-on target projects. Generic script names (dedup.py / prefilter.py / emit_sarif.py /
+Purity lint — high-precision forbidden shapes (near-zero false positives on target
+projects; scope = mgh-init's own shipped rules, never target source). Three token
+families + one opencode-only structural check:
+  (a) tool-internal identifiers — tool name + distinctive script basenames + internal
+      paths (e.g. mgh-init / discover_controls.py / .mgh-init/);
+  (b) inventory-schema field names — `found_controls` / `evidence_count`
+      (controls_inventory.json headers leaked as front matter / metadata);
+  (c) discovery-prose phrases — `扫描器模式定义` / `扫描器内部正则` / `扫描器定义` /
+      `锚点:扫描器` (half-width) / `锚点：扫描器` (full-width) — scanner/regex internals
+      leaked into the rule body or the anchor field.
+  (d) opencode-only structural check — any `---` YAML-fence line inside the opencode
+      managed block = front-matter leak (opencode fragments carry NO front matter).
+      claude legitimately uses `paths:` front matter, so this fence check runs
+      opencode-only (claude gets the token check, never the fence check).
+Bare generic words (`category` / `缺失` / bare `锚点` / standalone `source:`·`evidence:`
+keys) and generic script names (dedup.py / prefilter.py / emit_sarif.py /
 expand_scope.py) and bare tier words (T1/T2/T3/scout) are intentionally EXCLUDED
-(target projects may legitimately contain them) — those are covered by the prompt
-guardrail (init-induct/scout/synthesis/rulewriter), which is non-deterministic.
+(false-positive risk on target projects) — those are covered by the prompt guardrail
+(init-rulewriter / rules-format fragments), which is non-deterministic. Edit in
+lock-step with the honesty boundary in AGENTS.md.
 
 Exit codes (R5.3b): 0 ok · 1 general error (target not a dir) ·
 2 misuse (argparse) or purity-lint violation (fail-loud).
@@ -70,15 +85,29 @@ BLOCK_HEADER = "## 安全设计 — 复用,勿重造"
 _LEGACY_BEGIN = re.compile(r"^\s*<!--\s*mgh-init:begin", re.IGNORECASE)
 _LEGACY_END = re.compile(r"^\s*<!--\s*mgh-init:end", re.IGNORECASE)
 
-# High-precision forbidden tokens (design D4). Generic script names + bare tier
-# words are excluded (false-positive risk on target projects); the prompt
-# guardrail covers those. Edit in lock-step with the honesty boundary in AGENTS.md.
+# High-precision forbidden tokens — three families, near-zero false positives on
+# target projects (scope = mgh-init's own shipped rules). Bare generic words
+# (`category` / `缺失` / `锚点`) and generic script names are EXCLUDED (false-positive
+# risk) — the prompt guardrail (init-rulewriter / rules-format fragments) covers
+# those. Edit in lock-step with the honesty boundary in AGENTS.md.
 FORBIDDEN_TOKENS = [
+    # (a) tool-internal identifiers — tool name + distinctive script basenames + paths
     "mgh-init", "mgh_core", "mgh-core", "megahorn", "megahorness",
     "discover_controls.py", "chunk_sources.py", "plan_scout.py",
     "merge_scout.py", "list_clusters.py", "assemble_rules.py",
     ".mgh-init/",
+    # (b) inventory-schema field names — controls_inventory.json headers leaked as
+    #     front matter / metadata into shipped rules
+    "found_controls", "evidence_count",
+    # (c) discovery-prose phrases — scanner/regex internals leaked into the body / anchor
+    "扫描器模式定义", "扫描器内部正则", "扫描器定义",
+    "锚点:扫描器", "锚点：扫描器",
 ]
+
+# opencode-only structural check: a `---` YAML-fence line inside the managed block =
+# leaked front matter (opencode fragments carry NO front matter). claude legitimately
+# uses `paths:` front matter, so this is enforced opencode-only via _lint's flag.
+_YAML_FENCE = re.compile(r"^---+\s*$")
 
 
 def _strip_legacy_blocks(text):
@@ -118,13 +147,21 @@ def _compose_block(frags):
     return "\n".join(body).rstrip() + "\n"
 
 
-def _lint(text, file_label):
-    """Return [{file,line,token}] for forbidden tokens found in text (1-based lines)."""
+def _lint(text, file_label, check_yaml_fence=False):
+    """Return [{file,line,token}] for forbidden tokens in text (1-based lines).
+
+    The `---` YAML-fence check is opencode-only: opencode fragments carry NO front
+    matter, so a fence line inside the managed block = a leaked inventory header.
+    claude legitimately uses `paths:` front matter, so claude MUST call with
+    check_yaml_fence=False (token check only, never the fence check).
+    """
     violations = []
     for i, line in enumerate(text.splitlines(), start=1):
         for tok in FORBIDDEN_TOKENS:
             if tok in line:
                 violations.append({"file": file_label, "line": i, "token": tok})
+        if check_yaml_fence and _YAML_FENCE.match(line):
+            violations.append({"file": file_label, "line": i, "token": "--- YAML fence"})
     return violations
 
 
@@ -146,7 +183,7 @@ def _opencode(args, parts_dir, out_path):
     frags = _read_fragments(parts_dir)
     categories = sorted(c for c, _ in frags)
     full_block = f"{BLOCK_BEGIN}\n{_compose_block(frags)}{BLOCK_END}"
-    violations = _lint(full_block, str(out_path))
+    violations = _lint(full_block, str(out_path), check_yaml_fence=True)
 
     existing = out_path.read_text(encoding="utf-8") if out_path.is_file() else ""
     _, legacy_on_disk = _strip_legacy_blocks(existing)  # count only (no write here)

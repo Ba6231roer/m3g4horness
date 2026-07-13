@@ -21,6 +21,10 @@ the small candidate JSON each S3 reader produced.
 ## Hard rules
 - Operate only on structured records. If a record lacks `file:line` evidence, drop it
   (S3 was told to ground everything; an ungrounded one is noise).
+- **NEVER drop `category`** when deduping / normalizing / merging. Every emitted candidate
+  keeps a non-empty `category`; if a merged record would lose it, drop that record instead.
+- **`evidence_snippet` SHALL stay a JSON-safe substring**: single line; replace `"` with
+  `'`; strip `\` (a merged snippet MUST remain JSON-legal — never hand-escape it).
 - **DO NOT judge canonical / competing / duplicate against the REGEX candidates.** You
   cannot see the regex candidate set — that cross-source reconciliation is T2's job.
   Your scope is scout-vs-scout only.

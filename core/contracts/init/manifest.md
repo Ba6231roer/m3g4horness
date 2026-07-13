@@ -22,7 +22,7 @@ Producer: command orchestrator (i4). Consumer: humans, `/mgh-sra`, `/mgh-blst`, 
     "LLM-induced candidates — human review required",
     "scout coverage is partial, not whole-repo — see scout.* counts; generic-name + low-fan-in controls may be missed (--no-scout falls back to regex-only)",
     "scout is non-deterministic — cluster count may vary run-to-run (regex-source clusters stay deterministic)",
-    "rules purity lint covers only high-precision tool-internal tokens (tool name + distinctive script names + internal paths); bare tier words (T1/T2/scout) and generic script names are covered by the prompt guardrail, not the deterministic lint"
+    "rules purity lint covers high-precision shapes: tool-internal tokens (tool name + distinctive script names + internal paths) + inventory-schema fields (found_controls/evidence_count) + opencode YAML fences (---) + discovery-prose phrases (扫描器模式定义 etc.); bare generic words (category/缺失/锚点), bare tier words (T1/T2/scout), and generic script names remain prompt-guardrail-only, not the deterministic lint"
   ],
   "artifacts": {"candidates":".mgh-init/controls_candidates.json","inventory":".mgh-init/controls_inventory.json","rules-parts(opencode)":".mgh-init/rules-parts/*.md","rules":"<target>/.claude/rules|<target>/AGENTS.md (security-controls block)","report":".mgh-init/report.md"}
 }

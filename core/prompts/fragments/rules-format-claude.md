@@ -33,16 +33,24 @@ New code handling <what> MUST use the existing <control> rather than reimplement
 ```
 
 ## Rules
+- **`paths:` is the ONLY front matter (hard boundary)**: NEVER copy inventory-schema
+  field names (`found_controls` / `evidence_count` / `category:` / `source:` /
+  `evidence:`) into the front matter or the rule body — they are
+  `controls_inventory.json` internals, not rule content.
 - **输出语言**:规则正文用**简体中文**;`paths:` frontmatter、文件路径、`file::Class.method`
   锚点、slug、枚举值保持原样(英文/符号不变)。下方模板仅示结构,实际产出中文正文。
 - `paths:` is derived from the controls' `protects` globs; omit the field only if
   no meaningful path scope exists.
 - One file per category. Filename `security-<category>.md`.
-- Anchors are `file::Class.method` or `file:line` — clickable, no long code.
+- Anchors (`file::Class.method` / `file:line`) SHALL point at **target-project source**
+  only; NEVER point at scanner / regex internals or "how it was discovered" —
+  clickable, no long code.
 - **Rule-body purity**: describe ONLY the target project's control; `NEVER` mention
   this tool's name / scripts / pipeline tiers (`T1`/`T2`/`T3`/`scout`) / internal
-  paths — `assemble_rules.py --format claude --check` lints these files and fails
-  loud on any leak.
+  paths / scanner-or-regex definitions — `assemble_rules.py --format claude --check`
+  lints these files and fails loud on any leak. A control with no source anchor gets
+  **no rule**; if the whole category has no implementation, write **no rule file** and
+  still touch `done_marker` (see `init-rulewriter.md`).
 - **Never** emit `AGENTS.md` or `.opencode/...` in this format (that is opencode).
 
 > Verified against Claude Code docs as of 2026-06; record the verification date

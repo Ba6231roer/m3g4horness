@@ -48,6 +48,64 @@ class TestDistributedPurity(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["violations"], [])
 
+    # --- improve-mgh-init-codegraph-enrichment: new codegraph artifacts are distributed → scanned + clean
+    def test_new_codegraph_artifacts_scanned_and_clean(self):
+        root = HERE.parent
+        files = [root / "core" / "prompts" / "fragments" / "codegraph-hint.md",
+                 root / "core" / "prompts" / "stages" / "init-resolve.md",
+                 root / "core" / "contracts" / "init" / "resolved.md",
+                 root / "releases" / "claude-code" / "agents" / "init-resolve.md",
+                 root / "releases" / "opencode" / "agent" / "init-resolve.md"]
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
+    # --- improve-mgh-sra-codegraph-enrichment: edited SRA codegraph artifacts are distributed → scanned + clean
+    def test_sra_codegraph_artifacts_scanned_and_clean(self):
+        root = HERE.parent
+        files = [root / "core" / "prompts" / "stages" / "sra-augment.md",
+                 root / "core" / "prompts" / "stages" / "sra-clarify.md",
+                 root / "core" / "prompts" / "stages" / "sra-consistency.md",
+                 root / "core" / "contracts" / "sra" / "augmentation.md",
+                 root / "releases" / "claude-code" / "agents" / "sra-augment.md",
+                 root / "releases" / "claude-code" / "agents" / "sra-clarify.md",
+                 root / "releases" / "claude-code" / "agents" / "sra-consistency.md",
+                 root / "releases" / "opencode" / "agent" / "sra-augment.md",
+                 root / "releases" / "opencode" / "agent" / "sra-clarify.md",
+                 root / "releases" / "opencode" / "agent" / "sra-consistency.md"]
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
+    # --- add-mgh-srr: new SRR command shells + contract are distributed → scanned + clean.
+    #     SRR reuses the sra stage prompts (no new prompts), so only the two shells + the
+    #     intake/report contract are new distributed md.
+    def test_srr_artifacts_scanned_and_clean(self):
+        root = HERE.parent
+        files = [root / "releases" / "claude-code" / "commands" / "mgh-srr.md",
+                 root / "releases" / "opencode" / "command" / "mgh-srr.md",
+                 root / "core" / "contracts" / "srr" / "intake-report.md"]
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
+    # --- codegraph as an operational external-tool reference is NOT a dev-meta violation
+    def test_codegraph_reference_not_flagged(self):
+        body = ("When codegraph=on, call codegraph_explore or `codegraph explore` (Bash);\n"
+                "emit source:\"codegraph\" candidates with a resolved_path[].\n")
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "f.md"
+            f.write_text(body, encoding="utf-8")
+            r = run_lint("--files", str(f))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)["violations"], [])
+
     # --- contract surface ---
     def test_help_exits_zero(self):
         self.assertEqual(run_lint("--help").returncode, 0)

@@ -1,0 +1,23 @@
+# mgh-srr profile — default (Claude Code / opencode host agent for every LLM tier)
+# SPDX-License-Identifier: Apache-2.0
+# /mgh-srr is a port-adapter over /mgh-sra's middle engine: it reuses the SAME sra
+# subagents (sra-clarify / sra-augment / sra-consistency) verbatim — no new stage prompt
+# or subagent is introduced. Only the two deterministic adapters are srr-specific:
+#   r1 ingest  = core/scripts/ingest_requirements.py  (freeform-text -> change_context.json)
+#   r2 render  = core/scripts/render_report.py         (drafts -> plain security_review_report.md)
+# Every LLM role inherits the host model (mirrors sra.yaml / init.yaml semantics).
+version: 1
+roles:
+  clarify:     {model: inherit}     # reused sra-clarify (a2) — single context over whole doc
+  augment:     {model: inherit}     # reused sra-augment (a3) — per-section fan-out
+  consistency: {model: inherit}     # reused sra-consistency (a4) — cross-section dedup
+allowed_tools: [Read, Glob, Grep, Bash]
+budget:
+  per_stage_usd: 15.0
+  max_turns: 30
+# Isolation-first fan-out, identical shape to sra: a3 spawns one subagent context per
+# pending unit (default 1 = whole doc; --split = one per top-level section).
+fanout:
+  augment_per_section: true         # a3 one subagent context per ingest pending[] unit
+  consistency: true                 # a4 default on (quality-first); --skip-consistency disables
+  max_concurrent: 8                 # host-permitting; collapse to sequential if 1

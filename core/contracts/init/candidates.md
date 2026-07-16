@@ -34,7 +34,7 @@ A `Candidate` (one control-shaped hit):
   "cluster_id": "authorization::SecurityConfig",
   "entry_points": ["src/main/java/com/bank/api/TransferController.java"],
   "big_file": false,
-  "source": "regex|scout|regex+scout"
+  "source": "regex|scout|regex+scout|codegraph"
 }
 ```
 
@@ -45,8 +45,10 @@ A `Candidate` (one control-shaped hit):
 - `cluster_id` = `category::anchor` (deterministic T1 isolation unit).
 - `entry_points` = immediate caller files of `file` (from reverse call graph).
 - `big_file` = file bytes > `--big-file-bytes` (feed via chunk_sources slice, not whole).
-- `source` ∈ `{regex, scout, regex+scout}`(可选,additive):候选来源——regex fast-path
-  或 LLM scout 发现层;缺省视作 `regex`。
+- `source` ∈ `{regex, scout, regex+scout, codegraph}`(可选,additive):候选来源——regex fast-path、
+  LLM scout 发现层、或 `init-resolve` 经 codegraph 解析 `unresolved[]` 得到的候选;缺省视作 `regex`。
+  `codegraph` 候选 additive 并入(见 `core/contracts/init/resolved.md`),与 `regex`/`scout` 同为结构标识,
+  适用相同纯净性规则;该值的出现 MUST NOT 使人读字段引入 codegraph 工具名或「经索引解析」之类过程描述。
 - `unresolved[]` = framework-routed/Feign/AOP/DI files with no textual edge (call-graph blind spot).
 - `out_of_scope[]` = cross-module controls whose def-site is outside `--scope` (disclosed, not dropped).
 

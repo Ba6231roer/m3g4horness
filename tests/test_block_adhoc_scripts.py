@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "releases" / "claude-code" / "hooks" / "block_adhoc_scripts.py"
 
 _DOMAIN_ENV = {"init": "MGH_INIT_ACTIVE", "sast": "MGH_SAST_ACTIVE",
-               "sra": "MGH_SRA_ACTIVE"}
+               "sra": "MGH_SRA_ACTIVE", "srr": "MGH_SRR_ACTIVE"}
 
 
 def _load():
@@ -279,6 +279,96 @@ class TestBlockAdhocScriptsSra(unittest.TestCase):
         other = tempfile.mkdtemp(prefix="mgh_other_")
         code, _ = self._run_with_target({"tool_name": "Edit", "tool_input": {
             "file_path": f"{other}/spec.md"}}, target)
+        self.assertEqual(code, 2)
+
+    def test_subtree_guard_degrades_without_target(self):
+        code, _ = self._run_with_target({"tool_name": "Write", "tool_input": {
+            "file_path": "D:/xxxraw.json"}}, None)
+        self.assertEqual(code, 0)
+
+
+class TestBlockAdhocScriptsSrr(unittest.TestCase):
+    """/mgh-srr run-domain (MGH_SRR_ACTIVE=1) — mirrors the sra column (same three guards:
+    introspection / ad-hoc .py / out-of-tree). MGH_TARGET is the project root, so review-dir
+    draft/report and shared project-memory writes are in-tree."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _run(self, payload, active="1"):
+        return _run_hook(self.m, payload, domain="srr", active=active)
+
+    def _run_with_target(self, payload, target):
+        old = os.environ.get("MGH_TARGET")
+        if target is None:
+            os.environ.pop("MGH_TARGET", None)
+        else:
+            os.environ["MGH_TARGET"] = target
+        try:
+            return self._run(payload)
+        finally:
+            if old is None:
+                os.environ.pop("MGH_TARGET", None)
+            else:
+                os.environ["MGH_TARGET"] = old
+
+    # --- PASS (legitimate) ---
+    def test_inactive_passes_introspection_silently(self):
+        code, _ = self._run({"tool_name": "Bash", "tool_input": {
+            "command": 'py -c "import json; json.load(open(\'x.json\'))"'}}, active="")
+        self.assertEqual(code, 0)
+
+    def test_pass_legit_leaf_invocation(self):
+        code, _ = self._run({"tool_name": "Bash", "tool_input": {
+            "command": "py .claude/mgh-core/scripts/ingest_requirements.py --doc req.md"}})
+        self.assertEqual(code, 0)
+
+    def test_pass_whitelisted_py_write(self):
+        code, _ = self._run({"tool_name": "Write", "tool_input": {
+            "file_path": ".claude/mgh-core/scripts/render_report.py"}})
+        self.assertEqual(code, 0)
+
+    def test_pass_in_tree_draft_write(self):
+        target = tempfile.mkdtemp(prefix="mgh_srr_")
+        code, _ = self._run_with_target({"tool_name": "Write", "tool_input": {
+            "file_path": f"{target}/.mgh-srr/drafts/freeform-review.md"}}, target)
+        self.assertEqual(code, 0)
+
+    def test_pass_in_tree_shared_memory_write(self):
+        # srr shares sra's project-level business memory
+        target = tempfile.mkdtemp(prefix="mgh_srr_")
+        code, _ = self._run_with_target({"tool_name": "Write", "tool_input": {
+            "file_path": f"{target}/.mgh-sra/business_context.json"}}, target)
+        self.assertEqual(code, 0)
+
+    # --- BLOCK (violations) ---
+    def test_block_introspection_py_c(self):
+        code, err = self._run({"tool_name": "Bash", "tool_input": {
+            "command": 'py -c "import json; json.load(open(\'.mgh-srr/change_context.json\'))"'}})
+        self.assertEqual(code, 2)
+        self.assertIn("ingest_requirements", err)   # srr recipe points at srr primitives
+        self.assertIn("mgh-srr", err)               # domain-labelled message
+
+    def test_block_adhoc_py_write(self):
+        code, err = self._run({"tool_name": "Write", "tool_input": {
+            "file_path": "_aggregate_report.py"}})
+        self.assertEqual(code, 2)
+        self.assertIn("_aggregate_report.py", err)
+        self.assertIn("mgh-srr", err)
+
+    def test_block_out_of_tree_drive_root(self):
+        target = tempfile.mkdtemp(prefix="mgh_srr_")
+        code, err = self._run_with_target({"tool_name": "Write", "tool_input": {
+            "file_path": "D:/xxxraw.json"}}, target)
+        self.assertEqual(code, 2)
+        self.assertIn("MGH_TARGET tree", err)
+        self.assertIn("draft_path", err)        # recipe points at producer stdout field
+
+    def test_block_out_of_tree_other_dir(self):
+        target = tempfile.mkdtemp(prefix="mgh_srr_")
+        other = tempfile.mkdtemp(prefix="mgh_other_")
+        code, _ = self._run_with_target({"tool_name": "Edit", "tool_input": {
+            "file_path": f"{other}/report.md"}}, target)
         self.assertEqual(code, 2)
 
     def test_subtree_guard_degrades_without_target(self):

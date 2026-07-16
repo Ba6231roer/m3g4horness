@@ -52,6 +52,45 @@ class TestZeroRuntimeDeps(unittest.TestCase):
             self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
                             f"{s}.py missing — not covered by the zero-dep scan")
 
+    def test_codegraph_never_imported(self):
+        # improve-mgh-init-codegraph-enrichment: codegraph is a HOST capability
+        # (MCP tool / external CLI consumed in the LLM layer), never a Python
+        # runtime dependency. This change adds ZERO .py; assert no shipped script
+        # may ever `import codegraph` (the general stdlib/sibling test would also
+        # catch it, but this documents the host-only invariant explicitly).
+        offenders = []
+        for py in sorted(SCRIPTS.glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for n in node.names:
+                        if n.name.split(".")[0] == "codegraph":
+                            offenders.append(f"{py.name}: import {n.name}")
+                elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                    if node.module.split(".")[0] == "codegraph":
+                        offenders.append(f"{py.name}: from {node.module} import ...")
+        self.assertFalse(offenders, "codegraph imported (must be host-only):\n  " +
+                         "\n  ".join(offenders))
+
+    def test_sra_codegraph_change_adds_no_scripts(self):
+        # improve-mgh-sra-codegraph-enrichment: codegraph enters the mgh-sra LLM
+        # layer ONLY (a2/a3 subagent MCP/CLI + orchestrator Bash detection). This
+        # change adds ZERO .py and MUST NOT touch the SRA deterministic contracts.
+        # Assert the three SRA producer scripts are present (unchanged surface);
+        # the general stdlib/sibling + codegraph-never-imported tests above prove
+        # no new dependency and no codegraph import sneaks in via a new script.
+        for s in ("prepare_augment", "merge_augment", "merge_memory"):
+            self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
+                            f"{s}.py missing — SRA deterministic contract broken")
+
+    def test_new_srr_scripts_are_scanned(self):
+        # add-mgh-srr: two new deterministic adapter scripts (stdlib only, incl. zipfile +
+        # xml.etree for .docx/.xlsx). Assert they exist and are therefore covered by the
+        # zero-dep glob scan above (the general test proves they import stdlib/sibling only).
+        for s in ("ingest_requirements", "render_report"):
+            self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
+                            f"{s}.py missing — not covered by the zero-dep scan")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

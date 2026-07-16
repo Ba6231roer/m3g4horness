@@ -54,6 +54,16 @@ For every confirmed control, emit a Candidate-subset anchor:
 }
 ```
 
+## codegraph enrichment(仅当编排器信号 `codegraph=on`)
+当 task 输入含 `codegraph=on` 信号时,**遵循** `core/prompts/fragments/codegraph-hint.md`:对 batch
+里的目标符号 / 调用路径 / 框架路由,**先**用 MCP `codegraph_explore`(主)或 CLI `codegraph explore`
+(Bash,MCP 不可用时)取逐字源码 + 调用路径 + blast radius,**仅**对 codegraph 未覆盖项(非索引语言 /
+超 `--big-file-bytes` / 索引未含 / codegraph `⚠️ pending` 点名的文件)回退 `Read`/`Glob`/`Grep`。
+**主谓非「可」**——SHALL 优先 codegraph;NEVER 对 codegraph 已返回源码的同一文件再 `Read`(那会让
+codegraph 沦为纯开销)。codegraph 是定位/上下文化工具,不替你判 category/kind。
+信号为 `codegraph=off` 或缺失时:**完全忽略本段**,工具使用与产出与无 codegraph 时逐字一致(零
+codegraph 调用)。
+
 ## Hard rules
 - **Every proposal MUST be grounded**: `evidence_snippet` + `file:line` MUST come from a
   file you actually Read (or sliced via `chunk_sources.py`). No evidence → do not emit.
@@ -75,7 +85,7 @@ For every confirmed control, emit a Candidate-subset anchor:
 - No prose outside the JSON. No pasted code > 3 lines.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅本 batch 的 target 文件/slice)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(仅本 batch 的 target 文件/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - 脚本侧:仅 `chunk_sources.py`(且仅当 `needs_slice` 切片大文件);其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件(`checkpoints/scout/<batch_id>.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入 batch 为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。

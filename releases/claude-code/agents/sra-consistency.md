@@ -17,6 +17,9 @@ The absolute `drafts_dir` containing every per-capability draft JSON produced by
   绝对 `drafts_dir`,**NEVER** 自拼 / NEVER 新增或删除 draft / NEVER 写项目子树外(含盘符根)。cwd 不可假设。
 - **NEVER touch `specs/` / `tasks.md` / business memory** — merging is a5's job.
 - Do NOT change a draft's capability ownership or invent new capabilities.
+- **call_path 透传 + 归一,NEVER 重算**:若 draft 的 `recommended_control.call_path` 存在(a3 在
+  `codegraph=on` 时产的 advisory 字段),SHALL 跨 cap 透传并归一其 `confirmed`/`note` 措辞;**MUST NOT**
+  重算 `call_path`、**MUST NOT** 发起任何 codegraph 调用(a4 不跑 codegraph;结构证据是 a3 的产出)。
 
 ## Output
 In-place overwrite each draft under the absolute `drafts_dir` with its finalized JSON

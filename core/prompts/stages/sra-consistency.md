@@ -17,7 +17,11 @@ per-capability drafts (a3 ran in isolated contexts and could not). You reconcile
 2. **消冲突**:两条 draft 对同一锚点给出矛盾建议 → 以「更显式代码声明 + 更高 evidence 置信」者为准,
    另一条降级或删除,并在保留条目 `reason` 注明。
 3. **同控制多类引用归一**:同一控制被多个 capability 引用 → 每处 `evidence`/`rule_path` 保持一致,
-   措辞统一「复用勿重造」。
+   措辞统一「复用勿重造」。若该控制带 `recommended_control.call_path`(a3 在 `codegraph=on` 时产的 advisory
+   结构字段),SHALL **透传 + 归一措辞**:同一控制多 cap 引用时 `call_path` 的 `confirmed` 取值与 `note` 表述
+   保持一致(取交集语义——任一 cap 判 `confirmed:false` → 该控制此接口口径按 `false` 归一,`note` 统一);
+   **MUST NOT 重算** `call_path`(a4 不跑 codegraph、不重发 `codegraph_explore`;结构证据是 a3 的产出,a4 仅跨
+   cap 去重 / 消冲突 / 归一措辞)。`codegraph=off` 时各 draft 本就无 `call_path` 字段,本步对该字段无操作。
 4. **锚点再核验**:丢弃 a3 偶发的无锚定残留;`recommended_control` 的 `evidence` 须为真实锚点。
 
 ## 输出(原地覆写各 draft)
@@ -28,7 +32,8 @@ per-capability drafts (a3 ran in isolated contexts and could not). You reconcile
 - 读侧:`Read`(仅 `<drafts_dir>` 下 draft)/ `Glob` / `Grep` 自由。
 - `Write`/`Edit`:仅限 `<drafts_dir>` 下**既有** draft 文件(原地覆写)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;新增/删除 draft 文件;
-  碰 `specs/`/`tasks.md`/记忆。路径逐字用 `<drafts_dir>` 给定值,**NEVER** 自拼 / NEVER 相对 /
+  碰 `specs/`/`tasks.md`/记忆;**重算 `call_path` 或发起任何 codegraph 调用**(结构证据是 a3 的产出,a4 仅
+  透传 + 归一措辞,见 Task 3)。路径逐字用 `<drafts_dir>` 给定值,**NEVER** 自拼 / NEVER 相对 /
   NEVER 写项目子树外(含盘符根);cwd 不可假设。
 
 ## 输出语言 / 纯净性

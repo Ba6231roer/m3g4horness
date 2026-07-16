@@ -32,6 +32,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 - `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)
 - `--resume` · `--rebuild-cache` · `--merge <partials-dir>` · `--skip-consistency` · `--config <profile>` (default `init`)
 - `--no-scout` (skip LLM scout discovery; legacy regex-only) · `--scout-budget <N>` (0=全量) · `--scout-batch-bytes <N>` (默认 96KB) · `--scout-batch-cap <N>` (默认 40) · `--scout-audit-pct <N>` (默认 15)
+- `--no-codegraph` (skip optional codegraph enrichment; legacy behavior). codegraph 检测默认 `auto`:仅当 `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用;`--no-codegraph` 或不可用 → 富化 off(行为等价于引入 codegraph 前)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
 
@@ -59,6 +60,9 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 0. parse + self-check(发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`;扫描期向 stderr 打印进度)
    · **起步**:`Bash: export MGH_INIT_ACTIVE=1`(声明运行域,激活 PreToolUse hook,含子树外 Write/Edit 拦截)
    · **MGH_TARGET**(供 hook 判树;守卫未激活时该条空转):discover(step 2)写出的 `controls_candidates.json::repo` 即**绝对项目根**;编排器**逐字读**该字段并 `export MGH_TARGET=<repo>`,在 fan-out 前设置。取值经 `describe_artifact.py --field repo`(合法瞄结构出口),**NEVER** `py -c` 自算、**NEVER** 用裸 `.` 相对。
+   · **codegraph 检测**(花 token 之前):`Bash: if test -d <target>/.codegraph && command -v codegraph >/dev/null 2>&1; then echo on; else echo off; fi`
+     → `codegraph=on|off`。默认 `auto`(可用即启用);传 `--no-codegraph` 或检测不可用 → `codegraph=off`。该信号**逐字透传**进
+     scout/induct/survey/resolve subagent task 输入(仅 `codegraph=on` 时这些 stage 启用 codegraph 外科式上下文 + 执行 `init-resolve` stage)。
 1. IF --merge: merge partial inventories by evidence anchor → STOP
 2. i1 discover (Bash):
      py .opencode/mgh-core/scripts/discover_controls.py --repo <target> --out <target>/.mgh-init [--scope .. --max-files ..]
@@ -92,6 +96,18 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
         --clusters <target>/.mgh-init/clusters.json
      · 候选集并入 `source:"scout"`;clusters.json **追加** scout 簇(regex 簇与其 usage_sites 不变)。复用 `discover_controls.form_clusters`,无逻辑漂移。
      · **终态**:`scout_candidates.json` / `controls_candidates.json` / `clusters.json` 此时为终态——不再二次聚合 / 重切批(NEVER `_aggregate_scout.py`)。
+3c. (optional, codegraph-gated) init-resolve — 仅当 `codegraph=on` **且** `unresolved[]` 非空时执行;
+     排空文本/AST 图结构性漏掉的框架路由 / DI / AOP / interface→impl / 反射控制。**non-fatal + bounded**:
+     [controls_candidates.json::unresolved[]] → describe_artifact.py --field → init-resolve subagent → [resolved.json]
+     · 取 `unresolved[]` 清单(合法瞄结构出口,**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON):
+       `py .opencode/mgh-core/scripts/describe_artifact.py --in <target>/.mgh-init/controls_candidates.json --field unresolved`
+       → stdout `{"field":"unresolved","value":["<file>",...]}`;空列表 → 跳过本 stage(摘要披露)。
+     · spawn init-resolve({unresolved[], repo root, checkpoint_path=<target>/.mgh-init/resolved.json(绝对),
+       done_marker=<target>/.mgh-init/checkpoints/resolve/.done(绝对)}, codegraph=on)
+       → 恰好写 `checkpoint_path`(绝对)+ touch `done_marker`(产 `{repo, resolved[]{…source:"codegraph", resolved_path[]}, unresolved_residual[]}`,见 `core/contracts/init/resolved.md`)
+     · **additive 并入 T1 候选流**:`resolved[]` 按既有 `category::anchor` 簇键由编排器路由到对应簇的 candidate hits(additive;**不** mutate regex/scout 候选、**不**改任何确定性脚本;簇形成语义与既有 form_clusters 一致)。`source:"codegraph"` 结构标签一路保留进 inventory/manifest。`unresolved_residual[]` 残留计 manifest `codegraph.unresolved_residual`。
+     · **MGH_TARGET / 子树守卫**:`resolved.json` 写在 `<target>/.mgh-init/` 下,既有子树守卫覆盖;`checkpoint_path` 是编排器**逐字给定**的绝对路径(NEVER 拼装 `<target>/<id>`、NEVER 占位符、NEVER 相对)。
+     · **fail-soft / non-fatal**:`codegraph=off` / `unresolved[]` 为空 / 清单过大超单 subagent 上下文预算 → 跳过整 stage + 摘要披露,流水线**不阻断**、不报致命错(对标 init-survey 的 optional/advisory/non-fatal 语义)。T1 从 `clusters.json` 正常扇出不受影响。
 4. T1 FAN-OUT — 经确定性脚本枚举(**禁手搓** `py -c` 内省;`clusters.json` 是包装字典
    `{repo,clusters[],truncated}`,对顶层 `len()` 得 3 **不是**簇数):
    [clusters.json::clusters[]] → list_clusters.py → [stdout pending[](每项含**绝对** `checkpoint_path`/`done_marker`)]
@@ -117,6 +133,8 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
      该 category fragment 后重跑 6b
 7. T4 (unless --skip-consistency): init-rules-consistency
 8. i4: init_manifest.json + report.md; print artifact paths + disclaimers
+   · manifest 含 `codegraph:{available,used,resolved_count,unresolved_residual}`:`available`=检测到 `.codegraph/`+CLI;`used`=`codegraph=on` 且 `init-resolve` 实跑;`resolved_count`/`unresolved_residual` 取自 `resolved.json`(经
+     `py .opencode/mgh-core/scripts/describe_artifact.py --in <target>/.mgh-init/resolved.json --field resolved --count` 计数,NEVER `py -c`);`codegraph=off` 时 `used=false`/`resolved_count=0`,不出现解析计数。report.md 同步披露 codegraph 用量 + 残留盲区。
 ```
 
 ### Stage → component map
@@ -127,6 +145,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 | i1 big-file slice | **script** | `core/scripts/chunk_sources.py` |
 | artifact inspect | **script** | `core/scripts/describe_artifact.py` (瞄结构合法出口;NEVER `py -c`/`Read` 整份大 JSON) |
 | i1 survey (opt) | subagent `init-survey` | `core/prompts/stages/init-survey.md` |
+| resolve (opt) | subagent `init-resolve` (codegraph-gated, single context) | `core/prompts/stages/init-resolve.md` + `fragments/codegraph-hint.md` |
 | T1 enumerate | **script** | `core/scripts/list_clusters.py` (pending work-list;包 `clusters.json` 包装字典) |
 | T3 enumerate | **script** | `core/scripts/list_rule_jobs.py` (pending 按-category 清单;禁手挖 inventory) |
 | T1 induct | subagent `init-induct` (fan out per cluster) | `core/prompts/stages/init-induct.md` |
@@ -182,3 +201,4 @@ py .opencode/mgh-core/scripts/assemble_rules.py --target . --format opencode
 - Call-graph textual/AST — misses AOP/reflection/DI/framework-routing; surface `unresolved[]`.
 - ≥1.5M-line repos: prefer `--scope` per module + `--merge`.
 - **Scout coverage is partial, not whole-repo**:`init_manifest.json` 记 `scout.{skeleton_total, scout_targets, batches, deep_read_files, audit_sampled, audit_found}`;只声称真实数字,**不声称全仓覆盖**。Scout 非确定(簇数 run-to-run 可能变化);残留盲区:泛型包+泛型类名+无安全导入+低扇因控制可能漏(`--no-scout` 回退纯 regex)。
+- **codegraph 富化是可选 + 辅助**:`init_manifest.json` 记 `codegraph.{available,used,resolved_count,unresolved_residual}`;codegraph 解析缩小但**不归零** `unresolved[]`(反射 / DI 容器 / 运行时分派残留),resolved = LLM+codegraph 候选,需人工复核。**不声称全解析**。`--no-codegraph` 一键回退引入前行为。

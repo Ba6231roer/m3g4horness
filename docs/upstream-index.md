@@ -126,3 +126,23 @@ py tests/test_deterministic.py
 > 保真度标记:`core/prompts/stages/sra-*.md` 与 `core/prompts/fragments/security-dimensions.md`
 > 均标 `rewrite-original`,不带 `Source: vvaharness/...` 溯源注释。设计见
 > `openspec/changes/add-mgh-sra/`。
+
+## 附录:`/mgh-srr` 的原创性登记(非移植)
+
+`/mgh-srr`(自由文本安全需求评审)是 **rewrite-original**,无任何 vvaharness 来源,不属移植
+同步范围。它是 `/mgh-sra` 中间引擎的**端口-适配器**:换上「自由文本输入适配器」
+(`ingest_requirements.py`)+「普通报告输出适配器」(`render_report.py`),**中间引擎逐字复用 sra**
+(sra-clarify / sra-augment / sra-consistency + security-dimensions + codegraph-hint + `merge_memory.py`,
+零新增提示词)。专为无 openspec 的纯文字需求(word/txt/md/excel/透传)场景,产出普通报告 + 台账,
+NEVER 触 openspec。
+
+| 维度 | 说明 |
+|---|---|
+| 来源 | **原创**(无 vvah SYSTEM 可移植) |
+| 保真度 | **不适用(原创)** |
+| 与上游唯一相关概念 | 复用 sra 引擎,后者消费 `controls_inventory.json`(`design_controls`-compatible);srr 自身不 import init 内部 |
+| 上游同步 | 不需要(无上游) |
+
+> 保真度标记:srr **零新增提示词**(复用 `sra-*.md` + fragments);两新确定性脚本
+> `core/scripts/ingest_requirements.py` / `render_report.py` 不带 `Source: vvaharness/...`
+> 溯源注释。设计见 `openspec/changes/add-mgh-srr/`。

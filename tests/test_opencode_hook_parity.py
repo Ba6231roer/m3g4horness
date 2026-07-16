@@ -49,7 +49,7 @@ def normalize(tool: str, args: dict):
 def _run_guard(mod, payload, domain_env, target=None):
     """Feed a normalized payload to the guard. domain_env is one of MGH_*_ACTIVE, or None to
     simulate 'outside any run-domain' (guard MUST pass silently). Returns (exit_code, stderr)."""
-    keys = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE")
+    keys = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE")
     old_active = {k: os.environ.pop(k, None) for k in keys}
     old_target = os.environ.get("MGH_TARGET")
     for k in keys:
@@ -127,6 +127,28 @@ class TestNormalizationParity(unittest.TestCase):
         # domain_env=None -> no MGH_*_ACTIVE set -> guard sees no active domain -> exit 0
         code, _ = _run_guard(self.m, normalize("bash", {"command": 'py -c "import json"'}),
                                domain_env=None)
+        self.assertEqual(code, 0)
+
+    # --- MGH_SRR_ACTIVE: the new /mgh-srr run-domain decides identically on both ends ---
+    def test_srr_domain_introspection_blocked(self):
+        code, err = self._oc("bash",
+            {"command": 'py -c "import json; json.load(open(\'x.json\'))"'},
+            domain_env="MGH_SRR_ACTIVE")
+        self.assertEqual(code, 2)
+        self.assertIn("mgh-srr", err)
+        self.assertIn("ingest_requirements", err)   # srr recipe points at srr primitives
+
+    def test_srr_domain_out_of_tree_blocked(self):
+        target = tempfile.mkdtemp(prefix="mgh_srr_op_")
+        code, err = self._oc("write", {"filePath": "D:/raw.json"},
+                             domain_env="MGH_SRR_ACTIVE", target=target)
+        self.assertEqual(code, 2)
+        self.assertIn("MGH_TARGET tree", err)
+
+    def test_srr_domain_in_tree_passes(self):
+        target = tempfile.mkdtemp(prefix="mgh_srr_op_")
+        code, _ = self._oc("write", {"filePath": f"{target}/.mgh-srr/drafts/x.md"},
+                           domain_env="MGH_SRR_ACTIVE", target=target)
         self.assertEqual(code, 0)
 
 

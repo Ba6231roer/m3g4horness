@@ -11,12 +11,14 @@
 | `/mgh-sast` | ✅ 可用    | 9 阶段 agentic SAST（survey → threat-model → decompose → deep-dive → prefilter → verify → dedup → chain → SARIF）。零运行时依赖地复刻 vvaharness 流水线。                                                                |
 | `/mgh-init` | ✅ 可用    | 发现存量安全控制（输入校验/脱敏/鉴权/加密等）→ 生成 Agent rules（Claude Code `.claude/rules/` 或 opencode `AGENTS.md`，二选一不混用）。隔离优先流水线；产出 `controls_inventory.json`（与 vvah `design_controls` schema 兼容）。                         |
 | `/mgh-sra`  | ✅ 可用    | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析**（敏感数据/注入/横纵越权等 9 维度）+ **三信号语义匹配存量控制**（维度契合 / 业务域相似 / 业务事实）+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出；幂等非破坏性受管块合并。原创（无 vvah 源）。 |
+| `/mgh-srr`  | ✅ 可用    | **无 openspec** 的自由文本需求（word/txt/md/excel/透传）安全评审。端口-适配器：确定性 intake 抽取 → **逐字复用 sra 中间引擎**（零新增提示词）→ 确定性 render 产**普通报告 + 台账**（NEVER 触 openspec）。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底；与 sra 共享 `business_context.json`。原创（无 vvah 源）。 |
 | `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑与 mgh-init 的 rules，设计与业务强耦合的安全测试案例（如换账户/auth 检验越权）。                                                                                                                                            |
 
-## 三命令如何配合
+## 命令如何配合
 
-mgh-* 三命令覆盖「设计 → 编码 → 扫描」全周期的安全工作流，共享 `controls_inventory.json`
-这条控制流主线，互相衔接而非孤立：
+mgh-* 命令覆盖「设计 → 编码 → 扫描」全周期的安全工作流，共享 `controls_inventory.json`
+这条控制流主线，互相衔接而非孤立（`/mgh-sra` 与 `/mgh-srr` 同属设计阶段：sra 管 openspec 变更、
+srr 管无 openspec 的自由文本需求）：
 
 ```mermaid
 flowchart LR
@@ -25,9 +27,13 @@ flowchart LR
   INIT --> RULES["Agent rules<br/>.claude/rules/ · AGENTS.md"]
   SRA["/mgh-sra<br/>每次 openspec 变更<br/>补安全设计缺口"]
   INV -.->|"三信号匹配"| SRA
-  MEM[("business_context.json<br/>项目级·跨迭代累积")]
+  SRR["/mgh-srr<br/>无 openspec·自由文本需求<br/>安全评审报告"]
+  INV -.->|"--rules 三信号匹配"| SRR
+  MEM[("business_context.json<br/>项目级·跨迭代累积<br/>sra/srr 共用")]
   MEM <-.->|"读 / 写"| SRA
+  MEM <-.->|"读 / 写"| SRR
   SRA -->|"受管块追加"| SPECS["变更 specs/tasks"]
+  SRR -->|"普通报告"| SRRPT["security_review_report.md<br/>+ srr_manifest.json"]
   CODE["已写代码"] --> SAST["/mgh-sast<br/>按需扫描"]
   INV -.->|"--controls 注入<br/>降 FP / 阻断 chain"| SAST
   SAST --> RPT["report.md + SARIF 2.1"]
@@ -37,7 +43,8 @@ flowchart LR
 ```
 
 - **`/mgh-init`** 回答「项目**已有什么**安全设计」→ 一次性跑（大仓可分块），产 inventory + rules。
-- **`/mgh-sra`** 在**设计阶段**（openspec `propose` 后）回答「变更**漏了什么**」→ 接存量控制 + 累积业务记忆。
+- **`/mgh-sra`** 在**设计阶段**（openspec `propose` 后）回答「变更**漏了什么」→ 接存量控制 + 累积业务记忆。
+- **`/mgh-srr`** 是 sra 的「无 openspec」孪生入口 → 只有原始需求文档（word/txt/md/excel）时，在编码前回答「需求**漏了什么**」，产出普通报告（不碰 openspec）。
 - **`/mgh-sast`** 在**编码后**回答「代码**哪里有问题**」→ 注入存量控制降误报、产 SARIF。
 
 ## `/mgh-sast` — 9 阶段 agentic SAST
@@ -104,6 +111,11 @@ i1 discover(确定性·regex 扫源)
 - 产 `controls_inventory.json`（与 vvah `design_controls` schema 兼容）——是 `/mgh-sra`
   （三信号匹配）与 `/mgh-sast --controls`（注入降 FP）的**共享输入**。
 - 大仓友好：`--scope` 按模块切片 + `--merge` 合并；`--resume` 续跑；`--rebuild-cache` 重建调用图。
+- **(可选) codegraph 富化**：目标项目已建 `.codegraph/` 索引时，自动启用一个 `init-resolve` 阶段——用
+  codegraph 的框架路由图解析文本/AST 调用图漏掉的 DI/AOP/反射/`@PreAuthorize` 类控制（落在 `unresolved[]`
+  里的），作为 `source:"codegraph"` 候选**增量**并入下游归纳。零新增运行时依赖（codegraph 是宿主 MCP/CLI，
+  不被任何 `.py` import）；`--no-codegraph` 关闭、行为等价引入前。`init_manifest.json` 记 `codegraph.{available,
+  used, resolved_count, unresolved_residual}`。
 
 ```
 # Claude Code:产 .claude/rules/security-*.md
@@ -135,6 +147,7 @@ i1 discover(确定性·regex 扫源)
 | `--rebuild-cache` | 强制重建调用图（默认按 mtime 跳过）。 |
 | `--skip-consistency` | 跳过 T4 一致性校验。 |
 | `--no-scout` | 跳过 LLM scout 发现（纯 regex，旧行为）。 |
+| `--no-codegraph` | 跳过可选 codegraph 富化（默认 `auto`：仅当 `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用 `init-resolve` 阶段；关闭 = 行为等价引入前）。 |
 | `--config <profile>` | 角色配置（默认 `init`）。 |
 | `--max-files` / `--big-file-bytes` / `--sample` / `--large-repo-threshold` | 大仓 / 大文件调优（默认值与细节见命令 `--help`）。 |
 | `--scout-budget` / `--scout-batch-bytes` / `--scout-batch-cap` / `--scout-audit-pct` | scout 批次规划调优（见命令 `--help`）。 |
@@ -153,6 +166,12 @@ i1 discover(确定性·regex 扫源)
   完整性 / 审计 / 限流 / 密钥配置）逐维度扫变更，产出**具体、可锚定**的缺口（非泛泛 OWASP 清单）。
 - **三信号匹配存量控制**：① 维度契合（确定性预筛 `category`）② 业务域相似（控制 `entry_points`/
   `protects`）③ 业务事实（记忆 / 问答）→ 准确接「该用哪个既有设计」，含业务理解层。
+- **(可选) codegraph 结构确认**：目标项目已建 `.codegraph/` 索引时，a3 对**已三信号命中**的推荐控制额外做
+  **请求路径结构确认**——用 codegraph 的框架路由图查"该控制是否真接在这条缺口接口的请求路径上"，把信号②
+  从语义猜测升级为结构证据，记为 advisory `recommended_control.call_path:{confirmed,path[],source:"codegraph",
+  note}`（外加 data-flow/liveness/domain-sibling 三个改善 `risk`/`note`/`reason` 的辅助侧面）。有界 + 失败软降
+  （超预算只查每缺口 top-1 控制、`confirmed` 绝不伪造、不覆盖代码/用户断言）；`--no-codegraph` 关闭、行为等价
+  引入前。`sra_manifest.json` 记 `call_path_confirmed`/`call_path_residual` + 第 5 条边界。
 - **批量澄清问答 + 跨迭代业务记忆**：判不出的业务事实（角色 / 业务域 / 必屏蔽字段 / 已知越权
   范式）→ 批量一次问用户（带默认猜测，可秒批/改/跳过）→ 沉淀为项目级
   `<project>/.mgh-sra/business_context.json`，下轮迭代问得更少、匹配更准。
@@ -168,12 +187,48 @@ i1 discover(确定性·regex 扫源)
 
 > `--rules` 接受 mgh-init 的 `controls_inventory.json` 文件**或**其输出目录（如 `.mgh-init/`）。
 > 无 `--rules` 时 sra 仍跑（仅产通用增补，不做存量控制匹配）。其余 flag：`--skip-consistency`
-> 跳过跨类去重、`--config <profile>`（默认 `sra`）。
+> 跳过跨类去重、`--no-codegraph` 关闭可选 codegraph 结构确认（默认 `auto`：仅当
+> `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用）、`--config <profile>`（默认 `sra`）。
 
 **产物**（落 `<change-root>/.mgh-sra/`）：`change_context.json`、`clarifications.json`、
 `drafts/<cap>.md`、`sra_manifest.json`；受管块追加进变更 `specs/<cap>/spec.md` + `tasks.md`。
 项目级跨变更：`<project>/.mgh-sra/business_context.json`（roles/domains/sensitive_fields/
 interface_authz/business_rules）。
+
+## `/mgh-srr` — 自由文本安全需求评审（无 openspec）
+
+`/mgh-sra` 的能力**绑死在 openspec 上**，但真实世界大量需求是 word/txt/md/excel 的原始文字描述——
+既无 openspec 结构，也可能根本没有具体接口/字段。`/mgh-srr`（Security Requirements Review）就是给这类
+需求开的**并列入口**：读一份自由文本文档 → 过一遍 9 个安全维度 → 产出一份**普通、简要的评审报告**，
+**不需要 openspec、也不碰任何 openspec 内容**。
+
+它是 `/mgh-sra` 中间引擎的**端口-适配器**——只换两个"转换头"，中间引擎（9 维度查缺口 + 三信号配对存量 +
+批量澄清 + 项目记忆）**逐字复用、零新增提示词**：
+
+```
+intake 适配器(ingest_requirements.py)  →  复用 sra 引擎(clarify/augment/consistency)  →  render 适配器(render_report.py)
+自由文本需求(word/txt/md/excel/透传)        同一套安全分析能力                         普通报告 + 台账(绝不写 openspec)
+```
+
+- **混合三层格式接入**：`.txt/.md/.csv/.json` 原生读（完美）；`.docx`/`.xlsx` 用**标准库** `zipfile`+
+  `xml.etree` 尽力抽（跨 run 拼接防断词）+ **降级如实标注**（日期/格式/列表损失）；**永远留 `--text`/stdin
+  透传兜底**（抽不好就贴文本，零损失）。`.doc`/`.xls`/扫描 PDF/加密 → 报错给转换 recipe，不产半成品。
+- **接口/字段/角色降级为可选 hint**：自由文本可能根本没有；AI 直接读全文找缺口并锚到段落标题。
+- **与 sra 共享项目记忆**：读写同一个 `<project>/.mgh-sra/business_context.json`，跨 sra/srr 累积一份。
+- **(可选) codegraph 富化**：目标已建 `.codegraph/` 索引时，复用的 a3 对已推荐控制做请求路径结构确认
+  （advisory）；`--no-codegraph` 关闭，行为等价引入前。
+
+```
+/mgh-srr --doc 需求.docx                       # 评审一份 word 需求(默认整篇 1 单元)
+/mgh-srr --doc 需求.md --rules .mgh-init       # 接入 mgh-init inventory 做三信号复用匹配
+/mgh-srr --doc 需求.md --split                 # 按 markdown 大标题切成多单元并行评审
+/mgh-srr --text "粘贴的需求文字"               # 透传(无抽取损失,兜底口)
+/mgh-srr --doc 需求.docx --no-interactive      # 澄清问全用默认猜测、不暂停问用户
+```
+
+**产物**（落 `<project>/.mgh-srr/`）：`change_context.json`、`clarifications.json`、`drafts/<unit>.md`、
+`security_review_report.md`（简体中文·简要·面向人读）、`srr_manifest.json`（counts + 6 条 boundaries）。
+**NEVER 触 `openspec/`**。项目级跨 sra/srr 共用：`<project>/.mgh-sra/business_context.json`。
 
 ## 安装
 
@@ -224,11 +279,11 @@ m3g4horness/
 │   ├── contracts/            # 阶段 I/O JSON 契约
 │   └── docs/                 # prompt-provenance, NOTICE
 ├── releases/claude-code/     # Claude Code 壳 → 镜像进 .claude/
-│   ├── commands/{mgh-sast,mgh-init,mgh-sra,mgh-blst}.md
+│   ├── commands/{mgh-sast,mgh-init,mgh-sra,mgh-srr,mgh-blst}.md
 │   ├── agents/{sast-*,sra-*}.md
 │   └── hooks/block_adhoc_scripts.py        # 运行时纪律守卫(PreToolUse 命令调)
 ├── releases/opencode/        # opencode 壳 → 镜像进 .opencode/
-│   ├── command/{mgh-sast,mgh-init,mgh-sra,mgh-blst}.md
+│   ├── command/{mgh-sast,mgh-init,mgh-sra,mgh-srr,mgh-blst}.md
 │   ├── agent/{sast-*,sra-*}.md
 │   ├── hooks/block_adhoc_scripts.py        # 同一守卫(与 claude 端字节级 parity)
 │   └── plugins/block_adhoc_scripts.ts      # tool.execute.before 插件 → 归一化后管道喂守卫
@@ -250,6 +305,8 @@ m3g4horness/
 **`/mgh-init`**
 - 控制为 LLM **归纳候选**，需人工复核；**存在≠有效**（同 CVE-2025-41248）。
 - 调用图文本/AST 级，漏 AOP/反射/DI/框架路由；残留写进 `unresolved[]`。
+- **(可选) codegraph `init-resolve`** 解析缩小但**不归零** `unresolved[]`（反射 / DI 容器 / 运行时分派残留）；
+  resolved = LLM+codegraph 候选，需人工复核、**不声称全解析**。`--no-codegraph` 回退纯文本调用图行为。
 - scout 覆盖是**部分非全仓**（`init_manifest.json` 记真实审视/深读/自检数，**不声称全仓覆盖**）；
   scout 非确定，簇数 run-to-run 可能变化。
 - ≥1.5M 行大仓：优先 `--scope` 按模块 + `--merge`，勿单次全仓跑。
@@ -258,6 +315,15 @@ m3g4horness/
 - 增补为 LLM **候选**，需人工复核；覆盖**取决于变更声明 + 已记业务事实**（未声明/未记的看不到）。
 - 引用控制**断言存在不断言有效**；业务记忆为**用户断言，非代码真相**
   （显式代码/proposal 声明 > 用户记忆 > 默认猜测；冲突时代码为准）。
+- **(可选) codegraph 结构确认是辅助意见非定论**：它自己也解不动反射 / DI / 运行时分派，故 `call_path`
+  缩小但**不归零**「误接」；台账如实披露 `call_path_confirmed` / `call_path_residual`、**不声称全确认**，
+  `--no-codegraph` 可关。
+
+**`/mgh-srr`**
+- 评审为 LLM **候选**，需人工复核；**报告质量受输入完整度上界约束**——含糊的需求文档只能产锚点稀疏的泛化缺口。
+- **输入抽取对 `.docx`/`.xlsx` 是尽力而为**（日期/格式/列表降级，报告标注）；`--text`/stdin 透传无降级。
+- 引用控制**断言存在不断言有效**；业务记忆为**用户断言，非代码真相**（与 sra 同一条记忆、同样的优先级）。
+- (可选) codegraph 同 sra：advisory 非定论，`--no-codegraph` 可关。
 
 **运行时纪律 hook（opencode 端边界）**
 - claude 与 opencode 现已**对等**注入 `block-adhoc-scripts` 守卫（同一 Python 判定逻辑、零漂移）。
@@ -266,5 +332,5 @@ m3g4horness/
   才激活（如 `MGH_INIT_ACTIVE=1 opencode run`）。未激活时纪律由命令壳铁律 + 各 producer `--check`
   边界校验兜底（fail-soft）。已据 opencode v1.17.15 源码核验。
 
-耗 token。善用成本控制 flag：sast 的 `--estimate` / `--stop-after` / `--budget`；sra 的
+耗 token。善用成本控制 flag：sast 的 `--estimate` / `--stop-after` / `--budget`；sra/srr 的
 `--dry-run` / `--no-interactive`；init 的 `--scope` / `--no-scout`。详见 `core/docs/`。

@@ -14,9 +14,10 @@ opencode)的**安全工作流工具族**,所有命令共享前缀 `mgh-`。
 | `/mgh-sast` | ✅ 可用    | 9 阶段 agentic SAST。零运行时依赖地复刻 vvaharness 流水线(详见下节)。 |
 | `/mgh-init` | ✅ 可用    | 发现存量安全控制 → 生成 Agent rules。隔离优先三层流水线(确定性发现 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ claude/opencode rules(二选一,结构不混)。详见 `openspec/changes/add-mgh-init/`。 |
 | `/mgh-sra`  | ✅ 可用    | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-sra/`。 |
+| `/mgh-srr` | ✅ 可用    | **无 openspec** 的自由文本需求(word/txt/md/excel/透传)安全评审。端口-适配器:确定性 intake 适配器(`ingest_requirements.py`)产出 sra 同 shape 上下文 → **逐字复用 sra 中间引擎**(clarify/augment/consistency 零新增提示词)→ 确定性 render 适配器(`render_report.py`)产**普通报告 + 台账**(NEVER 触 openspec)。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底;与 sra 共享 `business_context.json`。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-srr/`。 |
 | `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑设计强耦合安全测试案例。                              |
 
-> TODO 命令目前仅为**空骨架**,功能定义见仓库根 [`task.260630.md`](task.260630.md)。`/mgh-sra` 产出的项目级 `business_context.json`(`roles[]`/`interface_authz[]`/`sensitive_fields[]`)为未来 `/mgh-blst` 预留消费口。
+> TODO 命令目前仅为**空骨架**,功能定义见仓库根 [`task.260630.md`](task.260630.md)。`/mgh-sra` 与 `/mgh-srr` 产出的项目级 `business_context.json`(`roles[]`/`interface_authz[]`/`sensitive_fields[]`)为未来 `/mgh-blst` 预留消费口。
 
 ## mgh-sast 与原项目 vvaharness 的关系(必读)
 
@@ -149,8 +150,8 @@ flowchart LR
   (由 opencode 自带 Bun 运行、非 `pip` 依赖,类比 claude 的 `settings.json` hook 配置),仅做事件归一化 + 管道
   + 据退出码阻断;**判定逻辑单一来源在 Python 标准库守卫 `block_adhoc_scripts.py`**(双端字节级 parity 守卫,
   `tests/test_opencode_hook_parity.py`;零依赖 AST 扫描只扫 `*.py`,`.ts` 不在扫描集)。当前兑现:`block-adhoc-scripts`
-  (双端:claude PreToolUse + opencode `.ts` 插件;同一守卫不改;`/mgh-init`+`/mgh-sast`+`/mgh-sra` #1 违例=微脚本内省
-  + 越权 `*.py` + 子树外写;三运行域 `MGH_{INIT,SAST,SRA}_ACTIVE`)。**可靠性边界(opencode)**:opencode 插件进程**不继承**
+  (双端:claude PreToolUse + opencode `.ts` 插件;同一守卫不改;`/mgh-init`+`/mgh-sast`+`/mgh-sra`+`/mgh-srr` #1 违例=微脚本内省
+  + 越权 `*.py` + 子树外写;四运行域 `MGH_{INIT,SAST,SRA,SRR}_ACTIVE`)。**可靠性边界(opencode)**:opencode 插件进程**不继承**
   mid-session bash 导出的 env(`shell.ts::shellEnv` 只读 `process.env` 不回写),故 `MGH_*_ACTIVE` 仅在 opencode 启动时
   已就绪才激活守卫;未激活时 fail-soft,纪律由命令壳明线 + R5.9 边界校验兜底。
 - **R5.8 安装自检 + 回归单测**:`install.sh` 镜像后校验脚本族同目录共存 + fail-soft(自检失败只
@@ -159,7 +160,7 @@ flowchart LR
 - **R5.9 边界校验泛化(承 openspec validate-at-boundary)**:每个 stage 产物的产出者 MUST 暴露
   `--check`(或独立 validator,如 `validate_inventory.py`);编排器跑完一步、进下一步前 MUST 运行之,
   失败 fail-loud(退出码 2)回退重跑,**不带着破损产物继续**。范式源头:`assemble_rules.py --check`。
-  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout` `--check` + `validate_inventory.py` + `prefilter`/`dedup`/`emit_sarif` `--check`(/mgh-sast 确定性阶段)。
+  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout` `--check` + `validate_inventory.py` + `prefilter`/`dedup`/`emit_sarif` `--check`(/mgh-sast 确定性阶段)+ `prepare_augment`/`merge_augment`/`merge_memory` `--check`(/mgh-sra)+ `ingest_requirements`/`render_report` `--check`(/mgh-srr)。
 - **R5.10 分发产物纯净性**:经 `install.sh` 装入目标项目的 md(命令壳 / agent 定义 / stage
   提示词 / I/O 契约 / skills)MUST 仅含对目标 agent 有用的操作性内容,NEVER 携带只在本仓研发语境
   才有意义的悬空引用——在目标项目里它们指向不存在的手册/编号/文件,浪费 token 且误导 agent
@@ -232,6 +233,7 @@ py tools/extract_prompts.py --out ./core/prompts
   (`T1`/`T2`/`scout`)、通用脚本名仍仅提示词护栏覆盖、非确定性可测。
 
 ## 可参考项目
-本项目部分实现方式、实现理念可参考如下已拉取到本地的项目代码仓
+本项目部分实现方式、实现理念、工具使用可参考如下已拉取到本地的项目代码仓
 1. C:\DEV\superpowers
 2. C:\DEV\OpenSpec
+3. C:\DEV\codegraph

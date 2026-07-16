@@ -14,6 +14,93 @@ end-to-end verification is still pending (see *Pending* below).
 
 ---
 
+## [0.1.8] — 2026-07-15
+
+### Added
+- **`/mgh-srr` — freeform-text security requirements review (no openspec needed).** A new command
+  for the common case where requirements arrive as raw text (word/txt/md/excel or pasted) with no
+  openspec structure — and possibly no concrete interfaces/fields at all. It is a **port-adapter
+  over the `/mgh-sra` middle engine**: a deterministic input adapter (`ingest_requirements.py`)
+  extracts the doc into an sra-shape `change_context.json`, the existing sra engine (sra-clarify /
+  sra-augment / sra-consistency + 9 dimensions + three-signal control reuse + batched clarification
+  + project memory) is **reused verbatim with zero new prompts**, and a deterministic output adapter
+  (`render_report.py`) renders a plain, brief Simplified-Chinese `security_review_report.md` +
+  `srr_manifest.json` that **never touches openspec/**.
+  - **Mixed three-tier input**: `.txt/.md/.csv/.json` read natively (perfect); `.docx`/`.xlsx`
+    best-effort via stdlib `zipfile` + `xml.etree` (joining all `<w:t>` within each `<w:p>` so text
+    never token-fragments) with **explicit degradation flags** (dates-as-serial / list-markers /
+    embedded-objects / merged-cells); a permanent `--text` / stdin **passthrough** escape hatch
+    (zero degradation). Unsupported formats (`.doc`/`.xls`/scanned PDF/encrypted) exit 2 with a
+    conversion recipe and emit no partial artifact.
+  - Interfaces / fields / roles are **optional, non-load-bearing hints** (freeform text may have
+    none); the LLM reads the full text and anchors gaps to section headings. Default = one review
+    unit; `--split` fans out per markdown `#`/`##` heading (script-enumerated fan-out).
+  - **Shares** `<project>/.mgh-sra/business_context.json` with `/mgh-sra` (one accumulating file
+    across both tools; same schema, contract unchanged). Optional codegraph enrichment is inherited
+    from the reused sra engine (`--no-codegraph` opts out, reproducing pre-codegraph behavior).
+  - **Runtime discipline**: a new `MGH_SRR_ACTIVE` run-domain on the **unchanged**
+    `block-adhoc-scripts` guard (claude PreToolUse + opencode `.ts` plugin, byte-identical twin),
+    covering the review dir + shared project memory under `MGH_TARGET`. Same fail-soft reliability
+    boundary on opencode as the other domains.
+- Zero new runtime dependencies (R2): `.docx`/`.xlsx` use only the Python standard library. SRR
+  reuses all sra stage prompts + fragments + `merge_memory.py` (no duplication — asserted by the
+  new `test_mgh_srr_codegraph_parity.py` reuse-not-duplication tests).
+
+### Known limitation (honest boundary)
+- `/mgh-srr` input extraction is best-effort for `.docx`/`.xlsx` (dates / formats / list markers
+  degraded — flagged in the report); review coverage is bounded by input completeness, so a vague
+  requirement document yields only sparse, anchor-light gaps. The `--text`/stdin passthrough has no
+  degradation. All other sra boundaries (LLM candidates need human review; controls asserted to
+  exist not to be effective; memory is user-asserted; codegraph is optional advisory) apply unchanged.
+
+---
+
+## [0.1.7] — 2026-07-15
+
+### Added
+- **Optional codegraph enrichment for `/mgh-init` and `/mgh-sra` (coordinated pair).**
+  When the target project has a precomputed codegraph index (`<target>/.codegraph/`)
+  **and** the `codegraph` tool on PATH, both commands use it as an optional,
+  detection-gated enrichment backend consumed entirely in the **LLM layer** — never
+  `import`ed by any `.py`, so zero new runtime dependencies (R2) and zero changes to the
+  deterministic script contracts (R5.3). Detection defaults to `auto`; `--no-codegraph`
+  opts out and reproduces pre-codegraph behavior exactly (fail-soft).
+  - **`/mgh-init`**: a new optional `init-resolve` stage (codegraph-gated, single context)
+    resolves the framework-routed / DI / AOP / interface→impl / reflection controls the
+    text/AST call graph collects into `unresolved[]`, emitting additive
+    `source:"codegraph"` candidates with a real `resolved_path[]`. scout/induct/survey
+    stages prefer `codegraph_explore` (MCP) / `codegraph explore` (CLI) for surgical
+    context. `init_manifest.json` gains a `codegraph:{available,used,resolved_count,
+    unresolved_residual}` block.
+  - **`/mgh-sra`**: `sra-augment` (a3) gains an inline **call-path structural-evidence
+    confirmation** — for gaps that already matched all three reuse signals, codegraph
+    confirms whether the recommended control is actually wired onto the gap endpoint's
+    request path, recorded as advisory `recommended_control.call_path:{confirmed,
+    path[],source:"codegraph",note}` (plus data-flow / liveness / domain-sibling
+    advisory facets). This upgrades signal-2 "business-domain similarity" from a semantic
+    guess toward structural evidence, directly targeting SRA's "controls are asserted to
+    exist, not to be effective" blind spot. Bounded + fail-soft (top-1 control per gap
+    under budget; `confirmed` never fabricated; never overrides code evidence or user
+    `business_context.json`). `sra_manifest.json` gains `counts.call_path_confirmed` /
+    `call_path_residual` + a 5th honesty boundary; the existing four stay intact.
+- **Shared codegraph steering fragment** `core/prompts/fragments/codegraph-hint.md`,
+  co-owned by both changes. Prescriptive by intent — "SHALL prefer codegraph, Read only
+  as fallback", never the permissive "you may" — to avoid the known trap where a subagent
+  keeps self-Reading and codegraph becomes pure overhead.
+- **Dual-platform parity (R5.7)**: claude + opencode both reach codegraph via MCP
+  (`codegraph_explore`), with CLI (`codegraph explore`) Bash fallback. The existing
+  `block-adhoc-scripts` guard is unchanged — codegraph MCP/CLI calls do not hit any of its
+  ad-hoc-script surfaces — so **no new hook** is introduced.
+
+### Known limitation (honest boundary)
+- codegraph is itself a static analyzer: reflection / DI-container / runtime dispatch
+  remain unresolved, so call-path confirmation shrinks but does not zero out mis-wiring.
+  `call_path` is LLM+codegraph advisory needing human review; manifests disclose
+  `call_path_residual` / `unresolved_residual` and never claim "fully confirmed".
+- opencode's plugin process does not inherit env vars exported mid-session, so the
+  `codegraph=on` signal activates reliably only when present at opencode launch; the CLI
+  Bash fallback + shell bright-lines cover the gap (fail-soft).
+
 ## [0.1.6] — 2026-07-10
 
 ### Added

@@ -11,7 +11,7 @@
 // What NEVER lives here: run-domain env gating, introspection regexes, the .py whitelist, the
 // MGH_TARGET subtree guard — ALL of that is the Python guard's job. This file MUST NOT
 // reimplement any of it (single decision source, zero drift). The guard reads the run-domain
-// from its inherited process env (MGH_{INIT,SAST,SRA}_ACTIVE); outside a run it exits 0 silently.
+// from its inherited process env (MGH_{INIT,SAST,SRA,SRR}_ACTIVE); outside a run it exits 0 silently.
 //
 // Blocking contract: throw inside `tool.execute.before` aborts the tool call (the error message
 // surfaces to the model). The guard writes a remediation "recipe" to stderr on a hit and exits

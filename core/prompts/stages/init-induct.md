@@ -37,6 +37,17 @@ shapes). Produce ONE structured control record:
 }
 ```
 
+## codegraph enrichment(仅当编排器信号 `codegraph=on`)
+当 task 输入含 `codegraph=on` 信号时,**遵循** `core/prompts/fragments/codegraph-hint.md`:读 `evidence_files`
+前**先**用 MCP `codegraph_explore`(主)或 CLI `codegraph explore`(Bash,MCP 不可用时)取该簇符号的逐字
+源码 + 调用路径 + blast radius,**仅**对 codegraph 未覆盖项(非索引语言 / 超 `--big-file-bytes` / 索引未含 /
+codegraph `⚠️ pending` 点名的文件)回退 `Read`。**主谓非「可」**——SHALL 优先 codegraph;NEVER 对 codegraph
+已返回源码的同一文件再 `Read`。
+codegraph 返回的 blast radius(谁依赖该控制 / 是否落在活请求路径 vs 死代码)作 **advisory 证据**:它强化
+「existence ≠ effectiveness」(CVE-2025-41248:`@PreAuthorize` 在参数化类型上的绕过)的判断——若 blast radius
+显示控制未接入请求路径或处死代码区,降低 `confidence`、记入 `gaps`;**它不替你判 category/kind,也不证明有效**。
+信号为 `codegraph=off` 或缺失时:**完全忽略本段**,行为与无 codegraph 时逐字一致(零 codegraph 调用)。
+
 ## Hard rules
 - **Every field must be grounded**: `evidence` MUST contain ≥1 real `file:class:method`
   (or `file:line`) you actually read. No evidence → `confidence ≤ 0.3` and state
@@ -49,7 +60,7 @@ shapes). Produce ONE structured control record:
 - No prose outside the JSON. No pasted code > 3 lines.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 input 给定文件/slice)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(仅 input 给定文件/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - 脚本侧:仅 `chunk_sources.py`(且仅当需切片大文件);其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。

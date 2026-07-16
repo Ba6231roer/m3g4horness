@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-block_adhoc_scripts — PreToolUse hook enforcing /mgh-init + /mgh-sast + /mgh-sra
+block_adhoc_scripts — PreToolUse hook enforcing /mgh-init + /mgh-sast + /mgh-sra + /mgh-srr
 orchestrator discipline (R5.2 at runtime, R5.7 deliverable).
 
 Active ONLY inside a mgh run-domain: env MGH_INIT_ACTIVE=1 (/mgh-init) OR
-MGH_SAST_ACTIVE=1 (/mgh-sast) OR MGH_SRA_ACTIVE=1 (/mgh-sra), set by the orchestrator at
-step 0. Outside all three: exit 0 silently (zero day-to-day noise). Blocks the real-world
-failure shapes —
+MGH_SAST_ACTIVE=1 (/mgh-sast) OR MGH_SRA_ACTIVE=1 (/mgh-sra) OR MGH_SRR_ACTIVE=1 (/mgh-srr),
+set by the orchestrator at step 0. Outside all four: exit 0 silently (zero day-to-day
+noise). Blocks the real-world failure shapes —
   (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( /
       .json), and
   (b) Write/Edit of an ad-hoc `*.py` not on the sanctioned whitelist.
-  (c) [init + sra domains] Write/Edit whose resolved target falls OUTSIDE the resolved
-      MGH_TARGET tree — the fan-out draft/checkpoint/memory path drifted to a non-project
-      dir (observed: a Windows drive root). For sra, MGH_TARGET is the project root, which
-      covers BOTH the change subtree (<project>/openspec/changes/<change>/) AND the project
-      memory (<project>/.mgh-sra/). MGH_TARGET missing -> degrade (pass, no block).
+  (c) [init + sra + srr domains] Write/Edit whose resolved target falls OUTSIDE the resolved
+      MGH_TARGET tree — the fan-out draft/checkpoint/memory/report path drifted to a non-project
+      dir (observed: a Windows drive root). For sra/srr, MGH_TARGET is the project root, which
+      covers BOTH the working subtree (<project>/openspec/changes/<change>/ for sra;
+      <project>/.mgh-srr/ for srr) AND the shared project memory (<project>/.mgh-sra/).
+      MGH_TARGET missing -> degrade (pass, no block).
 On a hit: exit 2 (Claude Code blocks the call) + stderr recipe pointing at the
 sanctioned primitives (list_* / prepare_augment / describe_artifact / producer stdout).
 
@@ -49,6 +50,7 @@ _WORKLIST = {
     "mgh-init": "list_clusters.py / list_scout_batches.py / list_rule_jobs.py",
     "mgh-sast": "list_chunks.py / list_verify_jobs.py",
     "mgh-sra": "prepare_augment.py / merge_augment.py / merge_memory.py",
+    "mgh-srr": "ingest_requirements.py / render_report.py / merge_memory.py",
 }
 
 
@@ -99,10 +101,13 @@ def main():
     init = os.environ.get("MGH_INIT_ACTIVE", "") == "1"
     sast = os.environ.get("MGH_SAST_ACTIVE", "") == "1"
     sra = os.environ.get("MGH_SRA_ACTIVE", "") == "1"
-    if not (init or sast or sra):
+    srr = os.environ.get("MGH_SRR_ACTIVE", "") == "1"
+    if not (init or sast or sra or srr):
         return 0  # outside any run-domain: pass silently
-    # precedence (rare to have two): sast > sra > init
-    domain = "mgh-sast" if sast else ("mgh-sra" if sra else "mgh-init")
+    # precedence (rare to have two): sast > sra > srr > init
+    domain = ("mgh-sast" if sast else
+              "mgh-sra" if sra else
+              "mgh-srr" if srr else "mgh-init")
     try:
         payload = json.load(sys.stdin)
     except (OSError, ValueError):
@@ -122,9 +127,10 @@ def main():
             sys.stderr.write(
                 f"blocked: Write/Edit of ad-hoc .py in {domain} run-domain: {path}\n  {_recipe(domain)}\n")
             return 2
-        # subtree guard: init (checkpoint/rule paths) + sra (draft/memory/merge paths).
-        # MGH_TARGET is the project root for sra, covering change subtree + project memory.
-        if (init or sra) and _is_out_of_tree(path):
+        # subtree guard: init (checkpoint/rule paths) + sra (draft/memory/merge paths) +
+        # srr (draft/report/memory paths). MGH_TARGET is the project root for sra/srr,
+        # covering working subtree + shared project memory.
+        if (init or sra or srr) and _is_out_of_tree(path):
             sys.stderr.write(
                 f"blocked: Write/Edit outside the MGH_TARGET tree in {domain} run-domain: "
                 f"{path}\n  target tree = {os.environ.get('MGH_TARGET', '?')}\n  {_recipe(domain)}\n"

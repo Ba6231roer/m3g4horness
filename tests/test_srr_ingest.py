@@ -298,5 +298,85 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestFocus(unittest.TestCase):
+    """--focus embedding (same shape as sra) + closed-set validation + --check."""
+
+    def test_focus_embedded_same_shape_as_sra(self):
+        p = make_project()
+        rc, out, _ = run(["--text", "POST /api/x bankCardNo", "--out", ".mgh-srr", "--focus",
+                          '{"dimensions":["sensitive-data"],"facets":{"sensitive-data":["bank-card"]}}'], cwd=p)
+        self.assertEqual(rc, 0)
+        f = json.loads(out)["focus"]
+        self.assertEqual(f["dimensions"], ["sensitive-data"])
+        self.assertEqual(f["facets"], {"sensitive-data": ["bank-card"]})
+        self.assertIn("directive", f)
+
+    def test_focus_null_when_absent(self):
+        p = make_project()
+        rc, out, _ = run(["--text", "x", "--out", ".mgh-srr"], cwd=p)
+        self.assertIsNone(json.loads(out)["focus"])
+
+    def test_invalid_focus_exits2_no_context(self):
+        p = make_project()
+        rc, out, err = run(["--text", "x", "--out", ".mgh-srr", "--focus",
+                            '{"dimensions":["bogus"]}'], cwd=p)
+        self.assertEqual(rc, 2)
+        self.assertIn("bogus", err)
+        self.assertFalse((p / ".mgh-srr" / "change_context.json").exists())
+
+    def test_check_rejects_malformed_focus_field(self):
+        p = make_project()
+        run(["--text", "x", "--out", ".mgh-srr"], cwd=p)
+        d = ctx_of(p)
+        d["focus"] = {"dimensions": ["nope"]}
+        (p / ".mgh-srr" / "change_context.json").write_text(
+            json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        rc, out, _ = run(["--check", ".mgh-srr/change_context.json"], cwd=p)
+        self.assertEqual(rc, 2)
+        self.assertFalse(json.loads(out)["ok"])
+
+
+class TestSensitiveCatalog(unittest.TestCase):
+    """--sensitive-catalog embedding (same shape as sra) + closed-set validation + --check."""
+
+    def test_catalog_embedded_same_shape_as_sra(self):
+        p = make_project()
+        rc, out, _ = run(["--text", "POST /api/x bankCardNo", "--out", ".mgh-srr",
+                          "--sensitive-catalog",
+                          '{"version":1,"items":{"financial/card-no":{"label":"银行卡号","mask":"partial","rule":"保留后4位"}}}'],
+                          cwd=p)
+        self.assertEqual(rc, 0)
+        sc = json.loads(out)["sensitive_catalog"]
+        self.assertEqual([it["key"] for it in sc["items"]], ["financial/card-no"])
+        self.assertEqual(sc["counts"]["items"], 1)
+        self.assertIn("directive", sc)
+
+    def test_catalog_null_when_absent(self):
+        p = make_project()
+        rc, out, _ = run(["--text", "x", "--out", ".mgh-srr"], cwd=p)
+        self.assertIsNone(json.loads(out)["sensitive_catalog"])
+
+    def test_invalid_catalog_exits2_no_context(self):
+        p = make_project()
+        rc, out, err = run(["--text", "x", "--out", ".mgh-srr", "--sensitive-catalog",
+                            '{"version":1,"items":{"biometric/iris":{"label":"i","mask":"mostly","rule":null}}}'],
+                           cwd=p)
+        self.assertEqual(rc, 2)
+        self.assertIn("mask", err)
+        self.assertFalse((p / ".mgh-srr" / "change_context.json").exists())
+
+    def test_check_rejects_malformed_catalog_field(self):
+        p = make_project()
+        run(["--text", "x", "--out", ".mgh-srr"], cwd=p)
+        d = ctx_of(p)
+        d["sensitive_catalog"] = {"version": 1, "categories": ["bogus"],
+                                  "items": [], "counts": {}}
+        (p / ".mgh-srr" / "change_context.json").write_text(
+            json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        rc, out, _ = run(["--check", ".mgh-srr/change_context.json"], cwd=p)
+        self.assertEqual(rc, 2)
+        self.assertFalse(json.loads(out)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

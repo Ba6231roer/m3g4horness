@@ -33,7 +33,9 @@ codegraph-hint + `merge_memory.py` + `business_context.json` 契约,零复制零
  "memory":{...or null...},
  "rules_source":"<path>|none","memory_source":"<path>|none",
  "dry_run":false,"truncated":false,
- "degraded":[]}
+ "degraded":[],
+ "focus":{...or null...},
+ "sensitive_catalog":{...or null...}}
 ```
 
 | field | srr delta vs sra |
@@ -49,6 +51,8 @@ codegraph-hint + `merge_memory.py` + `business_context.json` 契约,零复制零
 | `pending[]` | 默认 1 项(整篇);`--split` 多项;每项 `draft_path`/`done_marker` 均 `Path.resolve()` **绝对**且在 `project_root` 子树内 |
 | `memory` | 读 `<project>/.mgh-sra/business_context.json`(**与 sra 同文件**,缺失为 `null`) |
 | `degraded` | **srr 新增字段**;`string[]`,标注 `.docx`/`.xlsx` 尽力抽取丢失的保真度(如 `docx-best-effort`/`list-markers-lost`/`dates-as-serial`/`cell-formats-lost`);text-native 与 `--text`/stdin 透传恒为 `[]` |
+| `focus` | `--focus` 解析(`focus_scope` 闭集);**与 sra 同 shape/语义**(`{dimensions[],facets{},directive}` 或 `null`)。无 `--focus` = `null` = 全 9 维度(行为不变);`directive` 逐字透传复用的 a2/a3(零新增提示词) |
+| `sensitive_catalog` | `--sensitive-catalog` 解析(`sensitive_catalog` 闭集);**与 sra 同 shape/语义**(`{version,source,categories[],items[],counts{},directive}` 或 `null`,见 `../sensitive-catalog.md`)。无 `--sensitive-catalog` = `null` = 仅现行 6 facet(行为不变);`directive` + `items[]` 逐字透传复用的 a2/a3(零新增提示词)。与 `--focus` 正交 |
 
 **不变式**(承 sra):所有 `draft_path` MUST 解析后位于 `project_root` 子树内(供 hook 判树);
 `change`/`change` 文本**逐字**进 `requirements[].body`(子助手语义读全文,缺口锚到 section 标题)。
@@ -73,6 +77,8 @@ security_requirements[], security_tasks[]}`。`gaps[].anchor` 锚到 section 标
 
 > 输入:<doc 名与抽取方式(text-native|docx-best-effort|xlsx-best-effort|透传)>;
 > 控制来源:<rules_source|none>;项目记忆:<memory_source|none>。
+> 聚焦维度:<dims>(本次仅扫描聚焦维度,范围外未覆盖)   ← 仅 `focus` 非 null 时出现
+> 敏感数据目录:<字段数> 项 / <类别数> 类(据公司目录逐项查脱敏,目录外仅 6 facet)   ← 仅 `sensitive_catalog` 非 null 时出现
 
 ## 缺口(按维度)
 ### <dimension>
@@ -93,11 +99,18 @@ security_requirements[], security_tasks[]}`。`gaps[].anchor` 锚到 section 标
 
 ```json
 {"doc":"<name>","rules_source":"<path>|none","memory_source":"<path>|none",
+ "focus":["<维度键>", ...]|null,
+ "sensitive_catalog":{"counts":{...},"source":"<path>|inline|stdin"}|null,
  "counts":{"gaps":N,"augmented_requirements":N,"referenced_controls":N,
    "clarifications_asked":N,"unconfirmed_defaults":N,
    "call_path_confirmed":N,"call_path_residual":N},
- "boundaries":["<六条·见下>"]}
+ "boundaries":["<六或七或八条·见下>"]}
 ```
+
+| field | note |
+|---|---|
+| `focus` | 本次聚焦的维度列表(= `change_context.focus.dimensions`);`null` = 全 9 维度(未收窄)。`focus` 非 null 时 `boundaries[]` 增一条「本次仅扫描聚焦维度,范围外维度未覆盖」,报告头注聚焦维度 |
+| `sensitive_catalog` | 本次生效目录的 `counts{items,full,partial,categories}` + `source`;`null` = 未用目录(仅 6 facet)。非 null 时 `boundaries[]` 增一条「据公司敏感数据目录逐项查脱敏,目录外字段类型仅按现行 6 facet 识别」,报告头注目录覆盖范围(字段数 + 类别) |
 
 | counts field | note |
 |---|---|
@@ -109,20 +122,25 @@ security_requirements[], security_tasks[]}`。`gaps[].anchor` 锚到 section 标
 | `call_path_confirmed` | `recommended_control.call_path.confirmed=true` 条数(仅 codegraph=on 时 > 0) |
 | `call_path_residual` | `confirmed=false|null` 条数;codegraph=off 时二者均 0 |
 
-`boundaries[]`(可识别字段、MUST 全含 6 条):
+`boundaries[]`(可识别字段、MUST 全含 6 条;`focus` 非 null 时增第 7 条;`sensitive_catalog` 非 null 时增第 8 条):
 1. **SRR 专属**:输入抽取对 `.docx`/`.xlsx` 是尽力而为(日期/格式/列表降级);评审覆盖受**输入完整度**上界约束——含糊的需求文档只能产锚点稀疏的泛化缺口;
 2. 增补/缺口为 **LLM 候选,需人工复核**;
 3. 覆盖**取决于需求文档声明 + 已记业务事实**(未声明/未记的看不到);
 4. 引用控制**断言存在不断言有效**(承 mgh-init CVE-2025-41248);
 5. 业务记忆为**用户断言,非代码真相**(显式代码/proposal 声明 > 用户记忆 > 默认猜测);
-6. **codegraph 结构确认是可选 advisory**(承 sra 第 5 条):`call_path` 确认 N / 残留 M,**不声称全确认**;codegraph=off 时 `call_path_confirmed`/`call_path_residual` 均 0。
+6. **codegraph 结构确认是可选 advisory**(承 sra 第 5 条):`call_path` 确认 N / 残留 M,**不声称全确认**;codegraph=off 时 `call_path_confirmed`/`call_path_residual` 均 0;
+7. **(仅 `focus` 非 null 时)维度聚焦收窄了范围**:本次仅扫描聚焦维度(及维度内聚焦 facet),范围外维度**未覆盖**;
+8. **(仅 `sensitive_catalog` 非 null 时)据公司敏感数据目录逐项查脱敏**:目录内字段类型据 mask 规则逐项查脱敏缺口,目录**外**字段类型仅按现行 6 facet 识别(目录非穷尽所有敏感字段)。
 
 ## `--check` 边界校验(各 producer 暴露)
 
 - `ingest_requirements --check <change_context.json>`:`change_context` 结构完整(顶层字段 +
   `capabilities[]`/`requirements[]`/`pending[]`) + `pending[]` 路径绝对且在 `project_root` 子树内
-  + `degraded` 为合法 `string[]`。退出码 2 fail-loud。
+  + `degraded` 为合法 `string[]` + `focus` 字段 shape(若存在:dimensions 闭集、facets 维度匹配且闭集、`null` 合法)
+  + `sensitive_catalog` 字段 shape(若存在:items[] 各项 category 闭集、mask 枚举、key `<category>/<field-type>` 合法、
+  label 非空、counts 自洽、`null` 合法)。退出码 2 fail-loud。
 - `render_report --check <out-dir>`:`security_review_report.md` + `srr_manifest.json` shape 完整
-  + counts 字段齐 + boundaries 含 6 条 + **无 `openspec/` 路径被触及**(out-dir 不与 openspec 重叠)。
+  + counts 字段齐 + boundaries 含 ≥6 条 + `focus` 非 null 时含第 7 条聚焦披露 + `sensitive_catalog` 非 null 时含
+  第 8 条目录披露 + **无 `openspec/` 路径被触及**(out-dir 不与 openspec 重叠)。
 
 失败退出码 2 fail-loud,编排器回退重跑,**不带着破损产物继续**。

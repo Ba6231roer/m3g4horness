@@ -15,6 +15,8 @@ augmented memory; you do NOT see other capabilities (cross-cap dedup is a4's job
 - **增补后**记忆 `memory`(`roles[]`/`domains[]`/`sensitive_fields[]`/`interface_authz[]`/
   `business_rules[]`/`clarifications[]`)——a2 已把用户答案写回。
 - 安全维度目录 `core/prompts/fragments/security-dimensions.md`(**逐维度**查缺口)。
+- `focus.directive`(可选,编排器逐字透传 `change_context.focus.directive`;无 directive = 全 9 维度,不收窄)。
+- `sensitive_catalog`(可选,编排器**逐字透传** `change_context.sensitive_catalog`:含 `directive` + `items[]`,每项 `{key,category,label,mask,rule}`;无目录 = `null`,仅现行 6 facet 识别敏感数据)。
 - `draft_path` + `done_marker`(绝对,编排器逐字给定)——你**恰好写** draft 到 `draft_path`、
   touch `done_marker`。
 
@@ -22,6 +24,24 @@ augmented memory; you do NOT see other capabilities (cross-cap dedup is a4's job
 对该 capability 的 requirements 与业务面,**逐维度**过一遍(读目录 9 维度)。每命中一条
 **具体缺口**——MUST 锚定一条具体的 requirement / endpoint / field(它保护什么),标 `dimension`
 + 风险简述。无锚定的泛泛清单式缺口(如「应防 SQL 注入」未指向任一接口)**MUST 丢弃**。
+
+**维度聚焦(当传入 `focus.directive`)**:SHALL **仅**对指令列出的维度(及维度内列出的 facet)查缺口;
+范围外的维度 **SHALL 不产缺口**;对收窄到 facet 的维度(如 sensitive-data 仅 id-card+bank-card),仅对
+列出 facet 锚定的字段产缺口,未列出 facet 的字段缺口**不产**。范围内缺口的锚定 / 丢弃 / 三信号匹配 /
+codegraph 规则**不变**。无 directive → 逐维度扫全 9 维度(现行行为)。
+
+**敏感数据目录(当传入非空 `sensitive_catalog`)**:SHALL 据 `items[]` 对每个字段类型**逐项**查脱敏缺口——
+据该项 `mask` + `rule` 判该字段在 **at-rest / in-transit / log / response** 四处是否按规则脱敏;未按规则脱敏即产
+一条 `dimension:"sensitive-data"` 缺口,该缺口 MUST 锚定具体 requirement / endpoint / field 并标
+`catalog_key`(= 该项 `key`,如 `biometric/iris`、`financial/card-no`),风险简述指向**未按 mask 规则脱敏**的具体
+表现(如「响应体返回完整银行卡号,未按 partial 保留后 4 位」)。据**既有三信号匹配**(Task 2)命中 `category:
+data-masking` 控制(`dimensions` 含 `sensitive-data`)时,为该缺口附 `recommended_control` + `evidence` +
+「**复用勿另起脱敏封装**」措辞(目录说「该屏蔽什么」,存量控制说「有什么脱敏封装」,你连两者);关联是
+**advisory**——无 `--rules` 或无三信号命中时,缺口**仍产出**(仅「应满足的安全属性」requirement,无控制锚点),
+**MUST NOT** 因无控制硬丢缺口。目录覆盖层与 `--focus` 覆盖层**叠加**:`focus` 先收窄维度,目录**仅在
+sensitive-data 在 focus 范围内时生效**(focus 排除 sensitive-data 时目录项缺口不产出);目录**不**改其余 8 维度的扫描。
+`sensitive_catalog: null` → 仅按现行 6 facet(id-card/bank-card/phone/email/password/token)识别敏感数据,行为与
+引入目录前逐字一致。
 
 ## Task 2 — 三信号匹配存量控制(仅当有 `candidate_controls`)
 对每条缺口,用**三个信号**找该用的存量设计:
@@ -85,6 +105,7 @@ codegraph;NEVER 对 codegraph 已返回源码的同一文件再 `Read`(那会让
 {"capability":"<cap>",
  "gaps":[{"dimension":"<键>","anchor":{"requirement":"..","endpoint":"..","field":".."},
    "risk":"<为何是缺口>",
+   "catalog_key":"<category>/<field-type> | null",
    "recommended_control":{"name":"..","evidence":"file:c:m","rule_path":"..","reason":"<业务域相似理由>",
      "call_path":{"confirmed":true|false|null,"path":[{"file":"..","line":N,"edge":".."}],"source":"codegraph","note":"<简体中文>"}}|null,
    "matched_signals":{"dimension_fit":true,"business_domain":true,"business_fact":true}}],
@@ -92,7 +113,8 @@ codegraph;NEVER 对 codegraph 已返回源码的同一文件再 `Read`(那会让
  "security_tasks":["- [ ] <安全任务·锚定+控制>"]}
 ```
 `recommended_control.call_path` **仅当 `codegraph=on` 时**出现(`source:"codegraph"`;`confirmed:null` =
-未判定 / 裁剪);`codegraph=off` 时该字段**缺省**(valid)。每个 security_requirement / security_task SHALL
+未判定 / 裁剪);`codegraph=off` 时该字段**缺省**(valid)。`catalog_key` **仅当 `sensitive_catalog` 非 null 且该缺口
+由目录字段类型驱动时**出现(= 驱动它的目录项 `key`);无目录 / 非目录驱动时为 `null` 或缺省(valid)。每个 security_requirement / security_task SHALL
 锚定 (a) 它保护的 requirement/接口/字段;有匹配控制时再锚 (b) 控制 `evidence` + 规则路径 + 「复用勿重造」
 (`call_path.confirmed:true` → 强化该措辞;`false` → 降级置信 + caveat)。缺口缺业务事实时(信号-3 缺失)在该
 缺口标注「据默认猜测·未确认」,不阻断产出。
@@ -125,5 +147,6 @@ codegraph;NEVER 对 codegraph 已返回源码的同一文件再 `Read`(那会让
 
 ## Output
 Write EXACTLY the absolute `draft_path`(draft JSON 上述 shape),then touch the absolute `done_marker`。
-逐维度覆盖、每缺口锚定、三信号匹配(文件重叠非充分)、无锚定缺口丢弃;`codegraph=on` 时对已推荐控制做
+逐维度覆盖、每缺口锚定、三信号匹配(文件重叠非充分)、无锚定缺口丢弃;`sensitive_catalog` 非 null 时对其 `items[]`
+逐项查脱敏缺口(标 `catalog_key`,据三信号关联 `data-masking` 控制,无控制仍产缺口);`codegraph=on` 时对已推荐控制做
 call-path 等 advisory 结构证据确认(bounded/fail-soft,`confirmed` 不伪造),`codegraph=off` 时该步缺省。

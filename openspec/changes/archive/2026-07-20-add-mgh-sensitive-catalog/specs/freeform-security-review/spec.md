@@ -1,18 +1,5 @@
-# freeform-security-review Specification
+## MODIFIED Requirements
 
-## Purpose
-
-Port-adapter pipeline for the `/mgh-srr` command: a freeform-text security review that does
-**not** touch openspec. A deterministic intake adapter (`ingest_requirements.py`) ingests
-`.txt` / `.md` / `.csv` / `.json` natively, `.docx` / `.xlsx` via stdlib best-effort extraction,
-or `--text` / stdin passthrough, and emits a `change_context.json` of the same shape as
-`/mgh-sra`'s `prepare_augment.py`. The sra middle engine (`sra-clarify` / `sra-augment` /
-`sra-consistency`, shared fragments, `merge_memory.py`, `business_context.json`) is reused
-verbatim with no new stage prompts. A deterministic render adapter (`render_report.py`) emits
-a plain `security_review_report.md` + `srr_manifest.json` under an out-dir, never writing
-under `openspec/`. Zero runtime dependencies; boundary validation (`--check`) at every step;
-honesty boundaries disclosed in the report and manifest.
-## Requirements
 ### Requirement: Freeform-text intake produces sra-compatible context
 
 The `/mgh-srr` input adapter (`ingest_requirements.py`) SHALL accept freeform requirement text from
@@ -64,67 +51,6 @@ this change.
 - **WHEN** `ingest_requirements.py` is run with an invalid `--sensitive-catalog` (unknown category / illegal mask / malformed key)
 - **THEN** it exits 2 with an actionable stderr message, emits no `change_context.json`, and no LLM subagent is spawned
 
-### Requirement: Intake is non-load-bearing on interface/field extraction
-
-The adapter SHALL treat extracted `endpoints` / `data_fields` / `role_hints` as **optional hints** (they MAY
-be empty), because freeform requirement text MAY contain no concrete interface or field information. The review
-SHALL still proceed by LLM semantic reading of the full text, with gaps anchored to requirement/section headings.
-
-#### Scenario: doc lacking interfaces/fields still yields reviewable context
-- **WHEN** the input text contains no recognizable endpoints or field names
-- **THEN** the adapter emits `endpoints` / `data_fields` / `role_hints` as empty arrays and the downstream review still produces gaps anchored to section/requirement headings
-
-### Requirement: Fan-out is script-enumerated, single-unit by default
-
-The adapter SHALL emit exactly one `pending[]` item (the whole document as one review scope) by default.
-With `--split`, the adapter SHALL deterministically split by markdown heading levels into multiple `pending[]`
-items, each carrying an absolute `draft_path` + `done_marker` resolved within the project subtree. The
-orchestrator SHALL iterate only this script-produced list and MUST NOT self-assemble paths.
-
-#### Scenario: default single review unit
-- **WHEN** `/mgh-srr` runs without `--split`
-- **THEN** `change_context.json.pending` contains exactly one item whose `draft_path` and `done_marker` are absolute and within the project subtree
-
-#### Scenario: split produces heading-based units
-- **WHEN** `/mgh-srr` runs with `--split` on a document with multiple markdown headings
-- **THEN** `pending[]` contains one item per top-level section, each with an absolute `draft_path`
-
-### Requirement: Middle engine reused verbatim, no duplication
-
-`/mgh-srr` SHALL reuse the existing sra stage prompts (`sra-clarify.md`, `sra-augment.md`,
-`sra-consistency.md`), fragments (`security-dimensions.md`, `codegraph-hint.md`), `merge_memory.py`, and
-the `business_context.json` contract **without copying or forking** them. No new stage prompt or subagent SHALL
-be created for the middle engine.
-
-#### Scenario: same prompts consumed by both entry points
-- **WHEN** either `/mgh-sra` or `/mgh-srr` drives the middle engine
-- **THEN** both resolve the identical `core/prompts/stages/sra-*.md` and `fragments/*.md` files (single source of truth)
-
-### Requirement: Output is a plain report that never touches openspec
-
-The output adapter (`render_report.py`) SHALL read finalized drafts (+ optional memory) and emit a human-readable
-`security_review_report.md` (简体中文, brief, by dimension/anchor: gaps + optional reuse suggestions + asked
-clarifications + boundaries) plus `srr_manifest.json` (counts + boundaries). All output SHALL land under an
-out-dir (default `<project>/.mgh-srr/`, overridable via `--out`) and MUST NOT write anywhere under `openspec/`.
-
-#### Scenario: report and manifest written under out-dir
-- **WHEN** the review completes
-- **THEN** `security_review_report.md` and `srr_manifest.json` exist under the configured out-dir
-
-#### Scenario: openspec tree untouched
-- **WHEN** `/mgh-srr` runs to completion
-- **THEN** no file under any `openspec/` directory is created or modified
-
-### Requirement: Shared cross-tool business memory
-
-`/mgh-srr` SHALL persist clarification answers to the **same** `<project>/.mgh-sra/business_context.json` used by
-`/mgh-sra` (same schema, same file), so business memory accumulates across both tools and remains consumable by
-future `/mgh-blst`. The memory contract SHALL NOT be modified by this change.
-
-#### Scenario: srr and sra accumulate one memory file
-- **WHEN** a project runs `/mgh-srr` then `/mgh-sra` (or vice versa)
-- **THEN** both read and write the same `business_context.json`, with answers accumulated by `fact_key` without duplication
-
 ### Requirement: Per-stage boundary validation
 
 `ingest_requirements.py` and `render_report.py` SHALL each expose a `--check` mode (R5.9). The orchestrator SHALL
@@ -173,15 +99,3 @@ only via the legacy 6 facets** (so the reader does not mistake the catalog for a
 #### Scenario: Catalog-applied run discloses its coverage
 - **WHEN** `/mgh-srr` runs with `--sensitive-catalog` (37 items)
 - **THEN** `security_review_report.md` notes the catalog coverage (37 items across 10 categories) and `srr_manifest.json` carries `sensitive_catalog` (`counts` + `source`) plus a boundary line disclosing that masking gaps were checked per catalog items and out-of-catalog fields used only the 6 facets; a run without `--sensitive-catalog` carries `sensitive_catalog: null` and no such line
-
-### Requirement: Runtime discipline and zero runtime dependencies
-
-`/mgh-srr` SHALL run under the `MGH_SRR_ACTIVE` run-domain (parallel to `MGH_SRA_ACTIVE`) with the
-`block-adhoc-scripts` guard active on both claude (`PreToolUse`) and opencode (`.ts` plugin) ends, blocking adhoc
-`py -c` introspection, unauthorized `Write *.py`, and out-of-subtree writes. The new scripts SHALL use only the
-Python standard library (no `pip` dependency; R2); `.docx`/`.xlsx` handling via `zipfile` + `xml.etree`.
-
-#### Scenario: hook blocks adhoc script in SRR domain
-- **WHEN** the orchestrator (with `MGH_SRR_ACTIVE=1`) attempts a `py -c` introspection or an out-of-subtree write
-- **THEN** the `block-adhoc-scripts` guard fails the call (exit code 2) with a stderr recipe, identical behavior on both claude and opencode ends
-

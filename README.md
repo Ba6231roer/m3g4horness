@@ -183,11 +183,13 @@ i1 discover(确定性·regex 扫源)
 /mgh-sra --change <name> --rules .mgh-init       # 接入 mgh-init inventory 做三信号匹配
 /mgh-sra --change <name> --no-interactive        # 澄清问用默认猜测、不暂停问用户
 /mgh-sra --change <name> --dry-run               # 仅解析产 change_context.json，不写 specs/tasks/记忆
+/mgh-sra --change <name> --focus '{"dimensions":["horizontal-authz","vertical-authz"]}'  # 只查越权(范围外不查)
 ```
 
 > `--rules` 接受 mgh-init 的 `controls_inventory.json` 文件**或**其输出目录（如 `.mgh-init/`）。
-> 无 `--rules` 时 sra 仍跑（仅产通用增补，不做存量控制匹配）。其余 flag：`--skip-consistency`
-> 跳过跨类去重、`--no-codegraph` 关闭可选 codegraph 结构确认（默认 `auto`：仅当
+> 无 `--rules` 时 sra 仍跑（仅产通用增补，不做存量控制匹配）。`--focus <JSON|路径>` 收窄到指定维度
+> （及维度内 facet），不传 = 全 9 维度（见下方「维度聚焦」小节）。其余 flag：
+> `--skip-consistency` 跳过跨类去重、`--no-codegraph` 关闭可选 codegraph 结构确认（默认 `auto`：仅当
 > `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用）、`--config <profile>`（默认 `sra`）。
 
 **产物**（落 `<change-root>/.mgh-sra/`）：`change_context.json`、`clarifications.json`、
@@ -224,11 +226,59 @@ intake 适配器(ingest_requirements.py)  →  复用 sra 引擎(clarify/augment
 /mgh-srr --doc 需求.md --split                 # 按 markdown 大标题切成多单元并行评审
 /mgh-srr --text "粘贴的需求文字"               # 透传(无抽取损失,兜底口)
 /mgh-srr --doc 需求.docx --no-interactive      # 澄清问全用默认猜测、不暂停问用户
+/mgh-srr --doc 需求.md --focus '{"dimensions":["sensitive-data"],"facets":{"sensitive-data":["id-card","bank-card"]}}'  # 敏感数据只查身份证+银行卡
 ```
 
 **产物**（落 `<project>/.mgh-srr/`）：`change_context.json`、`clarifications.json`、`drafts/<unit>.md`、
 `security_review_report.md`（简体中文·简要·面向人读）、`srr_manifest.json`（counts + 6 条 boundaries）。
 **NEVER 触 `openspec/`**。项目级跨 sra/srr 共用：`<project>/.mgh-sra/business_context.json`。
+
+## 维度聚焦（`--focus`）：收窄扫描范围
+
+`/mgh-sra` 与 `/mgh-srr` **默认扫全 9 个安全维度**。`--focus` 把本次扫描**收窄**到指定维度（甚至维度内
+某几个子项 facet），省掉无关维度的噪音。**不传 = 全 9 维度**（默认行为不变）。两命令同形（sra 经
+`prepare_augment.py`、srr 经 `ingest_requirements.py`，确定性 a1/r1 阶段闭集校验，任何 LLM 之前）。
+
+**完整可枚举值清单**（下面是全集，等价于不传 `--focus`；收窄 = 删掉不要的维度，对 `sensitive-data`/
+`injection` 再删掉不要的 facet，其余 7 维度无 facet、整维收窄）：
+
+```json
+{
+  "dimensions": [
+    "sensitive-data", "injection", "horizontal-authz", "vertical-authz",
+    "authentication", "integrity", "audit", "rate-limiting", "secrets"
+  ],
+  "facets": {
+    "sensitive-data": ["id-card", "bank-card", "phone", "email", "password", "token"],
+    "injection":      ["sqli", "xss", "command-injection", "path-traversal", "ssrf", "deserialization", "xxe"]
+  }
+}
+```
+
+**三种输入形态**（值以 `{` 起首 = inline JSON；否则 = JSON 文件路径，前导 `@` 可选）：
+
+```bash
+/mgh-sra --change <name> --focus '{"dimensions":["horizontal-authz"]}'   # inline JSON
+/mgh-sra --change <name> --focus config/focus.json                       # 裸路径(可存成项目文件反复用)
+/mgh-sra --change <name> --focus @config/focus.json                      # @ 前缀(可选)
+```
+
+**典型收窄示例**：
+
+```jsonc
+// 只查越权(横向 + 纵向)
+{"dimensions": ["horizontal-authz", "vertical-authz"]}
+
+// 敏感数据只查身份证 + 银行卡(手机/邮箱/密码/token 的缺口不产)
+{"dimensions": ["sensitive-data"], "facets": {"sensitive-data": ["id-card", "bank-card"]}}
+
+// 全量维度,但注入只查 SQLi + XSS
+{"dimensions": "*", "facets": {"injection": ["sqli", "xss"]}}
+```
+
+> 收窄后,聚焦维度 + 一条「范围外维度未覆盖」边界会写进 `sra_manifest.json` / `srr_manifest.json`
+> (srr 报告头也标注聚焦维度),免得你误把聚焦运行当成全量。未知维度/facet、空维度集等违例 → 退出码 2 早停。
+> 闭集真相源 + 可枚举值:`focus_scope.py --list`。
 
 ## 安装
 

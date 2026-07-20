@@ -140,7 +140,7 @@ def _anchor_str(anchor):
     return " / ".join(parts) if parts else "(无具体锚点·泛化缺口)"
 
 
-def _render_report(doc, agg, degraded, rules_source, memory_source, clarifications):
+def _render_report(doc, agg, degraded, rules_source, memory_source, clarifications, focus, catalog):
     """Render security_review_report.md (简体中文, brief, human-readable)."""
     L = []
     L.append(f"# 安全需求评审报告:{doc}")
@@ -153,6 +153,16 @@ def _render_report(doc, agg, degraded, rules_source, memory_source, clarificatio
                  f"项目记忆:{memory_source}。")
     L.append(intro)
     L.append("")
+    focus_dims = focus.get("dimensions") if isinstance(focus, dict) else None
+    if focus_dims:
+        labels = "、".join(_DIMENSION_LABEL.get(d, d) for d in focus_dims)
+        L.append(f"> 聚焦维度:{labels}(本次仅扫描聚焦维度,范围外维度未覆盖)。")
+        L.append("")
+    catalog_counts = catalog.get("counts") if isinstance(catalog, dict) else None
+    if catalog_counts:
+        L.append(f"> 敏感数据目录:{catalog_counts.get('items', 0)} 项 / {catalog_counts.get('categories', 0)} 类"
+                 f"(据公司目录逐项查脱敏,目录外字段类型仅按现行 6 facet 识别)。")
+        L.append("")
 
     gaps = agg["gaps"]
     if not gaps:
@@ -294,7 +304,9 @@ def _run_render(args):
     clarifications = _read_clarifications(clarify_path)
     unconfirmed = _count_unconfirmed(clarifications, memory)
 
-    report_md = _render_report(doc, agg, degraded, rules_source, memory_source, clarifications)
+    focus = ctx.get("focus") if isinstance(ctx, dict) else None
+    catalog = ctx.get("sensitive_catalog") if isinstance(ctx, dict) else None
+    report_md = _render_report(doc, agg, degraded, rules_source, memory_source, clarifications, focus, catalog)
 
     counts = {
         "gaps": len(agg["gaps"]),
@@ -305,12 +317,25 @@ def _run_render(args):
         "call_path_confirmed": agg["cp_confirmed"],
         "call_path_residual": agg["cp_residual"],
     }
+    focus_dims = focus.get("dimensions") if isinstance(focus, dict) else None
+    catalog_counts = catalog.get("counts") if isinstance(catalog, dict) else None
+    catalog_source = catalog.get("source") if isinstance(catalog, dict) else None
+    boundaries = list(_BOUNDARIES)
+    if focus_dims:
+        boundaries.append(
+            "维度聚焦收窄了范围:本次仅扫描聚焦维度(及维度内聚焦 facet),范围外维度未覆盖。")
+    if catalog_counts:
+        boundaries.append(
+            "据公司敏感数据目录逐项查脱敏:目录内字段类型据 mask 规则逐项查脱敏缺口,目录外字段类型仅按现行 6 facet 识别(目录非穷尽所有敏感字段)。")
     manifest = {
         "doc": doc,
         "rules_source": rules_source,
         "memory_source": memory_source,
+        "focus": focus_dims,
+        "sensitive_catalog": ({"counts": catalog_counts, "source": catalog_source}
+                              if catalog_counts else None),
         "counts": counts,
-        "boundaries": list(_BOUNDARIES),
+        "boundaries": boundaries,
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -320,9 +345,11 @@ def _run_render(args):
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = {"report": str(report_path), "manifest": str(manifest_path),
-               "counts": counts, "boundaries": len(_BOUNDARIES), "checked": False}
+               "counts": counts, "boundaries": len(boundaries), "checked": False}
     print(f"[render_report] doc={doc} gaps={counts['gaps']} reqs={counts['augmented_requirements']} "
           f"ref_controls={counts['referenced_controls']} clarifications={counts['clarifications_asked']} "
+          f"focus={'narrowed' if focus_dims else 'all9'} "
+          f"catalog={(catalog_counts.get('items') if catalog_counts else 'none')} "
           f"call_path={counts['call_path_confirmed']}/{counts['call_path_residual']} -> {report_path}",
           file=sys.stderr)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -361,6 +388,14 @@ def _run_check(out_arg):
                 violations.append("manifest boundaries[] missing or < 6")
             elif not any(("输入完整度" in x or "尽力而为" in x) for x in b if isinstance(x, str)):
                 violations.append("manifest missing the SRR-specific input-completeness boundary")
+            mf = m.get("focus")
+            if isinstance(mf, list) and mf:
+                if not any(("聚焦维度" in x or "范围外" in x) for x in b if isinstance(x, str)):
+                    violations.append("manifest focus non-null but boundaries[] missing the focus-narrowing disclosure")
+            msc = m.get("sensitive_catalog")
+            if isinstance(msc, dict) and msc.get("counts"):
+                if not any(("目录" in x and "6 facet" in x) for x in b if isinstance(x, str)):
+                    violations.append("manifest sensitive_catalog non-null but boundaries[] missing the catalog-coverage disclosure")
     if report.is_file():
         rt = report.read_text(encoding="utf-8")
         if "openspec/" in rt:

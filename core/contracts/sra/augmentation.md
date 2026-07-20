@@ -20,7 +20,9 @@ Producer / Consumer: `/mgh-sra` 编排器与 sra-clarify / sra-augment / sra-con
    "entry_points":[...],"evidence":[...],"file_overlap":false}],
  "pending":[{"capability":"<cap>","draft_path":"<abs>","done_marker":"<abs>"}],
  "memory":{...or null...},
- "rules_source":"<path>|none","truncated":false}
+ "rules_source":"<path>|none","truncated":false,
+ "focus":{...or null...},
+ "sensitive_catalog":{...or null...}}
 ```
 
 | field | source | note |
@@ -35,8 +37,42 @@ Producer / Consumer: `/mgh-sra` 编排器与 sra-clarify / sra-augment / sra-con
 | `clarify_path` | `prepare_augment` 派生 | `clarifications.json` 的**绝对**路径;a2 sra-clarify 逐字写它(编排器读它批量发问) |
 | `pending[]` | 按 capability 枚举 | 每项 `draft_path`/`done_marker` 均 `Path.resolve()` **绝对**;无 capability specs 时单项 `capability:"security-augmentation"` |
 | `memory` | 读 `<project>/.mgh-sra/business_context.json` | 缺失为 `null`(空记忆起步) |
+| `focus` | `--focus` 解析(`focus_scope` 闭集校验) | `{dimensions[],facets{},directive}` 或 `null`。无 `--focus` = `null` = 全 9 维度(行为不变);`directive`(简体中文句子)由编排器**逐字透传** a2/a3(NEVER 重解析) |
+| `sensitive_catalog` | `--sensitive-catalog` 解析(`sensitive_catalog` 闭集校验) | `{version,source,categories[],items[],counts{},directive}` 或 `null`(见 `../sensitive-catalog.md`)。无 `--sensitive-catalog` = `null` = 仅现行 6 facet(行为不变);`directive` 由编排器**逐字透传** a2/a3(NEVER 重算)。与 `--focus` 正交,可同时传 |
 
 **不变式**:所有 `draft_path` MUST 解析后位于 `project_root` 子树内(供 PreToolUse hook 判树)。
+
+## 维度聚焦(`focus` 字段)— 默认不动、可参数化收窄
+
+`--focus <inline-json|path>`(inline JSON 值以 `{` 起首,或 JSON 文件路径,前导 `@` 可选)收窄逐维度扫描范围:
+
+- 解析 + 闭集校验在确定性 a1 阶段完成(任何 LLM subagent 之前);闭集违例(未知维度/facet、facet 维度不匹配、
+  空维度集)→ 退出码 2 fail-loud,不产 `change_context.json`,不消耗 token。
+- `dimensions` 为 9 维度键子集(或 `"*"`/缺省 = 全 9);`facets` 仅对 `sensitive-data` / `injection` 两维度有效
+  (per-dimension facet 白名单,键见 `security-dimensions.md`)。9 维度键 + facet 键的闭集真相源 = `focus_scope.py`。
+- 解析后:`focus` 非 null 时含 `directive`(确定性简体中文,按 registry 顺序;同输入字节一致,可复现);
+  全 9 维度且无 facet 收窄 → `focus: null`(不渲染 directive,编排器不注入收窄)。
+- 收窄语义:编排器把 `focus.directive` 逐字塞进 a2/a3 task 输入;a2/a3 仅对列出维度(及维度内列出 facet)产缺口/
+  发澄清,范围外不产;范围内缺口的锚定 / 丢弃 / 三信号 / codegraph 规则**不变**。
+- **向后兼容(硬门)**:无 `--focus` → `focus: null` → 下游行为与引入聚焦前逐字一致。
+
+## 敏感数据目录(`sensitive_catalog` 字段)— 默认 6 facet、可声明必屏蔽策略
+
+`--sensitive-catalog <inline-json|@path|->`(inline JSON 值以 `{` 起首,`-` = stdin,或 JSON 文件路径,前导 `@`
+可选)声明**本公司强制脱敏清单**(policy 输入,非学到的记忆),扩展 sensitive-data 维度能识别的字段类型 +
+每项屏蔽规则。与 `--focus` **正交**(focus = 收窄本次扫描;目录 = 声明必屏蔽策略、扩展识别)。详见
+`../sensitive-catalog.md`。
+
+- 解析 + 闭集校验在确定性 a1 阶段完成(任何 LLM subagent 之前);闭集违例(未知 category、非法 mask、
+  key/shape 不合法)→ 退出码 2 fail-loud,不产 `change_context.json`,不消耗 token。
+- category 闭集 10 类(PIPL/GB-T 35273)+ `mask` 枚举 `{full,partial}` 硬闭集;`field-type` 键与 `rule` 开放。
+  闭集真相源 = `sensitive_catalog.py`。
+- 解析后:`sensitive_catalog` 非 null 时含 `directive`(确定性简体中文,按 registry 顺序;同输入字节一致)。
+- 消费语义:编排器把 `sensitive_catalog`(含 `directive` + `items[]`)**逐字透传** a2/a3;a3 据 `items[]` 逐项查
+  脱敏缺口(据 `mask`+`rule` 判 at-rest/in-transit/log/response),缺口标 `catalog_key`,经既有三信号关联
+  `data-masking` 控制(advisory;无控制仍产缺口);a2 据目录字段类型发相关澄清。与 `--focus` 叠加:目录仅在
+  sensitive-data 在 focus 范围内时生效。
+- **向后兼容(硬门)**:无 `--sensitive-catalog` → `sensitive_catalog: null` → 下游行为与引入目录前逐字一致(仅 6 facet)。
 
 > **codegraph 富化不触本契约**:`change_context.json` schema **不变**——`candidate_controls` 仍是 `prepare_augment.py`
 > 的文本抽取(信号-1,`_ENDPOINT_RX`/`_ROLE_HAS_RX`/`_SENS_SUBSTR` 文本正则)。codegraph 是宿主能力(MCP / CLI),
@@ -72,11 +108,18 @@ draft 是**结构化 JSON**(写在绝对 `draft_path`),含可渲染的 spec / ta
 
 ```json
 {"change":"<name>","rules_source":"<path>|none","memory_source":"<path>|none",
+ "focus":["<维度键>", ...]|null,
+ "sensitive_catalog":{"counts":{...},"source":"<path>|inline|stdin"}|null,
  "counts":{"capabilities":N,"gaps":N,"augmented_requirements":N,"augmented_tasks":N,
    "referenced_controls":N,"clarifications_asked":N,"unconfirmed_defaults":N,
    "call_path_confirmed":N,"call_path_residual":N},
  "boundaries":["<五条诚实边界·见下>"]}
 ```
+
+| field | note |
+|---|---|
+| `focus` | 本次聚焦的维度列表(= `change_context.focus.dimensions`);`null` = 全 9 维度(未收窄)。`focus` 非 null 时 `boundaries[]` SHALL 增一条「本次仅扫描聚焦维度,范围外维度未覆盖」 |
+| `sensitive_catalog` | 本次生效目录的 `counts{items,full,partial,categories}` + `source`;`null` = 未用目录(仅 6 facet)。非 null 时 `boundaries[]` SHALL 增一条「据公司敏感数据目录逐项查脱敏,目录外字段类型仅按现行 6 facet 识别」(防误以为目录穷尽所有敏感字段) |
 
 | counts field | note |
 |---|---|
@@ -96,7 +139,10 @@ draft 是**结构化 JSON**(写在绝对 `draft_path`),含可渲染的 spec / ta
 ## `--check` 边界校验(各 producer 暴露)
 
 - `prepare_augment --check`:inventory(若给)well-formed(`controls[]` + 每条 `name`/`evidence`)
-  + `change_context` 结构完整(顶层字段 + `pending[]` 路径绝对且在子树内)。
+  + `change_context` 结构完整(顶层字段 + `pending[]` 路径绝对且在子树内)+ `focus` 字段 shape(若存在:dimensions
+  闭集、facets 维度匹配且闭集、`null` 合法)+ `sensitive_catalog` 字段 shape(若存在:items[] 各项 category 闭集、
+  mask 枚举、key `<category>/<field-type>` 合法、label 非空、counts 自洽、`null` 合法)。`--check` 多态:路径为
+  inventory 文件/目录 → 校 inventory;为 `change_context.json` → 校结构 + focus + sensitive_catalog。
 - `merge_augment --check`:合并仅动受管块、块外字节不变。
 - `merge_memory --check`:记忆 shape + `fact_key` 无冲突。
 

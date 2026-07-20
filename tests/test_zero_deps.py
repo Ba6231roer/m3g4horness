@@ -91,6 +91,21 @@ class TestZeroRuntimeDeps(unittest.TestCase):
             self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
                             f"{s}.py missing — not covered by the zero-dep scan")
 
+    def test_focus_scope_is_scanned(self):
+        # add-mgh-dimension-focus: new closed-set focus registry script (stdlib only).
+        # Assert it exists and is therefore covered by the zero-dep glob scan above; it is
+        # sibling-imported by prepare_augment + ingest_requirements (no third-party import).
+        self.assertTrue((SCRIPTS / "focus_scope.py").is_file(),
+                        "focus_scope.py missing — not covered by the zero-dep scan")
+
+    def test_sensitive_catalog_is_scanned(self):
+        # add-mgh-sensitive-catalog: new closed-set sensitive-data catalog registry script
+        # (stdlib only). Assert it exists and is therefore covered by the zero-dep glob scan
+        # above; it is sibling-imported by prepare_augment + ingest_requirements (no
+        # third-party import). Orthogonal to focus_scope (masking policy, not narrowing).
+        self.assertTrue((SCRIPTS / "sensitive_catalog.py").is_file(),
+                        "sensitive_catalog.py missing — not covered by the zero-dep scan")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

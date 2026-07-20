@@ -173,5 +173,52 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestFocus(unittest.TestCase):
+    """focus disclosure: report header note + manifest focus + 7th boundary when focused."""
+
+    def _render(self, p, focus):
+        drafts = [{"capability": "freeform-review", "gaps": [
+            {"dimension": "sensitive-data", "anchor": {"field": "bankCardNo"}, "risk": "r"}],
+            "security_requirements": [], "security_tasks": []}]
+        ctx_extra = {"focus": focus} if focus is not None else None
+        out = write_run(p, drafts, ctx_extra=ctx_extra)
+        run(["--drafts-dir", str(out / "drafts"), "--out", str(out)], cwd=p)
+        m = json.loads((out / "srr_manifest.json").read_text(encoding="utf-8"))
+        rep = (out / "security_review_report.md").read_text(encoding="utf-8")
+        return out, m, rep
+
+    def test_focused_run_discloses_scope(self):
+        p = make_project()
+        focus = {"dimensions": ["sensitive-data"], "facets": {"sensitive-data": ["bank-card"]},
+                 "directive": "..."}
+        out, m, rep = self._render(p, focus)
+        self.assertEqual(m["focus"], ["sensitive-data"])
+        self.assertEqual(len(m["boundaries"]), 7)
+        self.assertTrue(any("范围外" in b for b in m["boundaries"]))
+        self.assertIn("聚焦维度", rep)
+
+    def test_no_focus_no_extra_disclosure(self):
+        p = make_project()
+        out, m, rep = self._render(p, None)
+        self.assertIsNone(m["focus"])
+        self.assertEqual(len(m["boundaries"]), 6)
+        self.assertFalse(any("范围外" in b for b in m["boundaries"]))
+        self.assertNotIn("聚焦维度", rep)
+
+    def test_check_validates_focus_boundary(self):
+        p = make_project()
+        focus = {"dimensions": ["horizontal-authz"], "directive": "..."}
+        out, _, _ = self._render(p, focus)
+        rc, sout, _ = run(["--check", str(out)], cwd=p)
+        self.assertEqual(rc, 0)
+        self.assertTrue(json.loads(sout)["ok"])
+        # tamper: drop the focus boundary while focus is non-null -> check must catch it
+        m = json.loads((out / "srr_manifest.json").read_text(encoding="utf-8"))
+        m["boundaries"] = [b for b in m["boundaries"] if "范围外" not in b]
+        (out / "srr_manifest.json").write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+        rc, sout, _ = run(["--check", str(out)], cwd=p)
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -11,7 +11,9 @@ You are **a2 — sra-clarify**. Your behavior is defined by the prompt at
 ## Input (from orchestrator)
 `change_context` (capabilities/requirements/endpoints/data_fields/role_hints/
 candidate_controls + loaded `memory`), the security-dimensions directory, the
-absolute `clarify_path` to write, and the `codegraph=on|off` signal (verbatim).
+absolute `clarify_path` to write, the optional `focus.directive` (verbatim; when present,
+clarify ONLY its listed dimensions — see stage prompt Task), and the `codegraph=on|off`
+signal (verbatim).
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`** — subagent script discipline; deterministic

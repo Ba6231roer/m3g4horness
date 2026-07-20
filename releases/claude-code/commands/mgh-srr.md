@@ -33,6 +33,14 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
 - `--doc <path|dir|->`(输入:`.txt/.md/.csv/.json/.docx/.xlsx` 文件、目录(扫支持文件)、`-`=stdin)
 - `--text <str>`(透传:逐字用、跳过抽取;无 `--doc`/`--text` 时读 stdin)
 - `--rules <path>`(可选:mgh-init 的 `controls_inventory.json` 文件**或**其输出目录如 `.mgh-init/`)
+- `--focus <inline-json|path>`(可选:维度聚焦,收窄本次扫描的安全维度 + 维度内 facet。inline JSON 值以 `{`
+  起首,或指向一个 JSON 文件(前导 `@` 可选)。r1 确定性解析 + 闭集校验(任何 LLM 之前);非法 → 退出码 2
+  早停。与 `/mgh-sra` 同 shape/语义;复用的 a2/a3 subagent 据其收窄扫描(零新增提示词)。不传 = 全 9 维度,行为不变。
+  值清单见 `focus_scope.py --list`)
+- `--sensitive-catalog <inline-json|@path|->`(可选:公司强制脱敏目录。inline JSON 值以 `{` 起首,`-`=stdin,或指向一个
+  JSON 文件(前导 `@` 可选)。r1 确定性解析 + 闭集校验(任何 LLM 之前);非法 → 退出码 2 早停。与 `/mgh-sra` 同
+  shape/语义;复用的 a2/a3 subagent 据其逐项查脱敏缺口(零新增提示词)。与 `--focus` 正交。不传 = 仅现行 6 facet,
+  行为不变。默认模板见 `sensitive_catalog.py --list`)
 - `--split`(按 markdown `#`/`##` 切成多个评审单元扇出;默认整篇 = 1 单元)
 - `--out <dir>`(评审工作目录,默认 `<project>/.mgh-srr/`;报告 + 产物落此)
 - `--no-interactive`(澄清问用 `default_guess`、不暂停问用户;产物标「未确认·默认」)
@@ -66,10 +74,12 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
 0. parse + self-check(宿主 agent/model 可用;否则 STOP 给修复提示)
    · **起步**:`Bash: export MGH_SRR_ACTIVE=1`(声明运行域,激活 PreToolUse hook,含子树外 Write/Edit 拦截)
 1. r1 ingest(Bash,确定性):
-     py .claude/mgh-core/scripts/ingest_requirements.py --doc <path|dir|-> [--text <str>] [--rules <path>] [--split] [--out <dir>] [--dry-run] [--no-interactive]
+     py .claude/mgh-core/scripts/ingest_requirements.py --doc <path|dir|-> [--text <str>] [--rules <path>] [--focus <inline-json|path>] [--sensitive-catalog <inline-json|@path|->] [--split] [--out <dir>] [--dry-run] [--no-interactive]
    → stdout = 结构化 change_context.json;产物落 <out-dir>/change_context.json
    · 读该 stdout 取:`pending[]`(每项绝对 draft_path/done_marker)、`clarify_path`、`candidate_controls`、
-     `memory`、`project_root`、`requirements[]`、`degraded`(**NEVER** `py -c` 重挖)
+     `memory`、`project_root`、`requirements[]`、`degraded`、`focus`、`sensitive_catalog`(**NEVER** `py -c` 重挖)。
+     `focus.directive`(简体中文句子;`focus: null` 时缺省)**逐字透传**进 a2/a3 subagent task(NEVER 重解析 / NEVER 自拼);
+     `sensitive_catalog`(含 `directive`+`items[]`;`null` 时缺省)**逐字透传**进 a2/a3 subagent task(NEVER 重算 / NEVER 自拼)
    · **MGH_TARGET**(供 hook 判树):取该 stdout `project_root`(绝对项目根)→ `export MGH_TARGET=<project_root>`
      (覆盖评审目录 `<project>/.mgh-srr/` + 项目记忆 `<project>/.mgh-sra/` 两类写入;NEVER 用裸 `.` 相对)
    · **codegraph 检测**(发起任何 LLM subagent 之前;零 LLM token):
@@ -81,7 +91,7 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
      degraded 合法;退出码 2 → 回退重跑)。`--rules` 的 inventory well-formed 在 ingest 内自检(畸形即退出 2)。
    · `--dry-run`:到此处 STOP(仅 change_context.json + stdout 摘要,不进 a2–a4/render)
 2. a2 clarify(复用 1 subagent,单上下文扫全文):
-     spawn sra-clarify({change_context 摘要 + memory + 维度目录路径 + clarify_path(绝对) + codegraph 信号(逐字)})
+     spawn sra-clarify({change_context 摘要 + memory + 维度目录路径 + clarify_path(绝对) + focus.directive(逐字,若非 null) + sensitive_catalog(逐字,若非 null) + codegraph 信号(逐字)})
      → 恰好写 clarify_path:`{"clarifications":[{id,capability,dimension,question,why_it_matters,default_guess,fact_key}, ...]}`
      · `codegraph=on`(可选 / codegraph-gated / non-fatal):sra-clarify 经 codegraph 预解析**减问**(不覆盖用户/代码/已记);
        `codegraph=off` 时无预解析、行为等价引入前
@@ -94,7 +104,7 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
 4. a3 augment(复用 subagent;per-unit 扇出,≤ max_concurrent):
    for each item in change_context.pending[](读 r1 stdout;逐字透传 draft_path/done_marker):
      spawn sra-augment(隔离上下文,一个评审单元一个;给:该单元的 requirements[] + 相关 endpoints/data_fields/role_hints
-       + candidate_controls + **增补后** memory + 维度目录路径 + draft_path(绝对) + done_marker(绝对) + codegraph 信号(逐字))
+       + candidate_controls + **增补后** memory + 维度目录路径 + focus.directive(逐字,若非 null) + sensitive_catalog(逐字,若非 null) + draft_path(绝对) + done_marker(绝对) + codegraph 信号(逐字))
      → 恰好写 draft_path(结构化 JSON draft)+ touch done_marker
      · `codegraph=on`(可选 / codegraph-gated / non-fatal / bounded):sra-augment 对**已三信号命中、已推荐控制**的缺口做
        call-path advisory 确认(写 `recommended_control.call_path`);`codegraph=off` / 无 `--rules` → 不产 `call_path`
@@ -102,7 +112,12 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
      spawn sra-consistency({drafts_dir = <out-dir>/drafts(绝对)}) → 原地覆写各 draft 定稿(跨单元去重、消冲突)
 6. r2 render(Bash,确定性):
      py .claude/mgh-core/scripts/render_report.py --drafts-dir <out-dir>/drafts --out <out-dir>
-   → security_review_report.md(简体中文·简要·面向人读)+ srr_manifest.json(_counts + 6 条 boundaries);NEVER 写 openspec/
+   → security_review_report.md(简体中文·简要·面向人读)+ srr_manifest.json(_counts + 6/7 条 boundaries);NEVER 写 openspec/
+   · render 读 `change_context.focus`:`focus` 非 null 时报告头注聚焦维度 + `srr_manifest.json` 记 `focus`(维度列表)
+     + `boundaries[]` 增一条「本次仅扫描聚焦维度,范围外维度未覆盖」;`focus: null` 时无额外行/边界
+   · render 读 `change_context.sensitive_catalog`:非 null 时报告头注目录覆盖范围(字段数 + 类别)+
+     `srr_manifest.json` 记 `sensitive_catalog`(`counts`+`source`)+ `boundaries[]` 增一条「据目录逐项查脱敏,
+     目录外仅 6 facet」;`sensitive_catalog: null` 时无额外行/边界
    · 校验:`py render_report.py --check <out-dir>`(报告/manifest shape + 无 openspec/ 被触及;退出码 2 → 回退)
    · 校验:`py merge_memory.py --check <MGH_TARGET>/.mgh-sra/business_context.json`(shape + fact_key 无冲突)
 7. 打印产物路径 + 边界声明
@@ -127,6 +142,12 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
 
 ```bash
 py .claude/mgh-core/scripts/ingest_requirements.py --doc <path|-> --rules .mgh-init --out .mgh-srr
+py .claude/mgh-core/scripts/ingest_requirements.py --doc <path|-> --focus '{"dimensions":["sensitive-data"],"facets":{"sensitive-data":["id-card","bank-card"]}}' --out .mgh-srr
+py .claude/mgh-core/scripts/ingest_requirements.py --doc <path|-> --sensitive-catalog @.mgh-sra/sensitive_catalog.json --out .mgh-srr
+py .claude/mgh-core/scripts/focus_scope.py --list
+py .claude/mgh-core/scripts/focus_scope.py --parse '{"dimensions":["horizontal-authz"]}'
+py .claude/mgh-core/scripts/sensitive_catalog.py --list
+py .claude/mgh-core/scripts/sensitive_catalog.py --check @.mgh-sra/sensitive_catalog.json
 py .claude/mgh-core/scripts/ingest_requirements.py --check .mgh-srr/change_context.json
 py .claude/mgh-core/scripts/describe_artifact.py --in .mgh-srr/change_context.json --keys
 py .claude/mgh-core/scripts/merge_memory.py --memory <MGH_TARGET>/.mgh-sra/business_context.json --answers <answers.json>
@@ -151,6 +172,11 @@ py .claude/mgh-core/scripts/render_report.py --check .mgh-srr
 - 覆盖**取决于需求文档声明 + 已记业务事实**(未声明 / 未记的看不到)。
 - 引用控制**断言存在不断言有效**(存在 ≠ 有效)。
 - 业务记忆为**用户断言,非代码真相**(显式代码/proposal 声明 > 用户记忆 > 默认猜测;冲突时代码为准)。
+- **维度聚焦(`--focus`)收窄了扫描范围**:本次仅扫描聚焦维度(及维度内聚焦 facet),范围外维度**未覆盖**;
+  `focus: null` = 全 9 维度(默认)。报告头注 + manifest 披露聚焦维度 + 一条「范围外未覆盖」边界。
+- **敏感数据目录(`--sensitive-catalog`)驱动了脱敏缺口检测**:本次据公司目录字段类型逐项查脱敏,缺口标
+  `catalog_key`;目录**外**字段类型仅按现行 6 facet 识别——**目录非穷尽所有敏感字段**。`sensitive_catalog: null`
+  = 仅 6 facet(默认)。报告头注 + manifest 披露目录覆盖范围 + 一条「目录外仅 6 facet」边界。
 - **codegraph 结构确认是可选 advisory**:`codegraph=on` 时 manifest 记 `counts.call_path_confirmed`/`call_path_residual`
   + `boundaries[]` 披露(确认 N / 残留 M,**不声称全确认**);`--no-codegraph` 一键回退引入前行为。
 - **SRR 专属**:输入抽取对 `.docx`/`.xlsx` 有已知降级(日期 / 格式 / 列表编号);`--text`/stdin 透传无降级;

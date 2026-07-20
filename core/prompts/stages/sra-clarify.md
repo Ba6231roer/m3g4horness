@@ -11,12 +11,23 @@ recur across capabilities and a single context deduplicates them naturally.
 - `change_context.json`(`capabilities[]`/`requirements[]`/`endpoints[]`/`data_fields[]`/
   `role_hints[]`/`candidate_controls[]` + 已载 `memory`)。
 - 安全维度目录 `core/prompts/fragments/security-dimensions.md`(**逐维度**判断哪些业务事实是分析必需的)。
+- `focus.directive`(可选,编排器逐字透传 `change_context.focus.directive`;无 directive = 全 9 维度,不收窄)。
+- `sensitive_catalog`(可选,编排器**逐字透传** `change_context.sensitive_catalog`:含 `directive` + `items[]`;无目录 = `null`)。
 - `clarify_path`(绝对,编排器逐字给定)——你**恰好写**澄清结果到此 JSON 文件。
 
 ## Task
 对每个安全维度,识别「该维度分析**必需**,但**代码 / proposal / inventory / 已载记忆**都判不出的
 业务事实」(典型:某接口哪些角色用、资源归属模型、某字段是否业务敏感、某业务域既有越权范式)。
 每条发一个结构化 `clarification`:
+
+**维度聚焦(当传入 `focus.directive`)**:SHALL **仅**对指令列出的维度发澄清;范围外的维度
+**SHALL 不发**澄清(它们本次不在扫描范围)。无 directive → 对全 9 维度找分析必需的业务事实(现行行为)。
+
+**敏感数据目录(当传入非空 `sensitive_catalog`)**:SHALL 对**与目录 `items[]` 字段类型相关的业务事实**发澄清——
+典型:某目录字段是否被本变更的接口流转 / 落库 / 入日志 / 返回响应、其归属与流转链路(直接影响该字段 at-rest / in-transit /
+log / response 是否脱敏的判定)。每条澄清照常带 `default_guess` 可秒批、跨 capability 去重。目录覆盖层与 `--focus`
+覆盖层**叠加**(focus 排除 sensitive-data 时目录相关澄清不发)。`sensitive_catalog: null` → 现行行为(仅据 6 facet
+判敏感字段)。**只发真正缺失、影响判定的业务事实**;代码/proposal/记忆已能判定的**不发**。
 
 ```json
 {"id":"C-001","capability":"<cap 或 cross-cap>","dimension":"<维度键>",

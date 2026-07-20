@@ -14,6 +14,132 @@ end-to-end verification is still pending (see *Pending* below).
 
 ---
 
+## [0.1.10] — 2026-07-20
+
+### Added
+- **Sensitive-data catalog (`--sensitive-catalog`) for `/mgh-sra` + `/mgh-srr`.** Both commands now
+  accept `--sensitive-catalog <inline-json|@path|->` to declare a **company masking policy** — the
+  field types that MUST be masked, each with a `mask` level (`full` / `partial`) and a rule (e.g.
+  "保留后 4 位"). This extends sensitive-data recognition **beyond the legacy 6 facets**
+  (id-card / bank-card / phone / email / password / token) and drives **per-item masking-gap
+  detection**: for each catalog field type, the reused a2/a3 subagents check whether it is masked
+  per its rule at-rest / in-transit / log / response. The default is unchanged: omit the flag =
+  legacy 6 facets only (byte-equivalent behavior, a hard backward-compatibility gate). The catalog
+  is **orthogonal to `--focus`** (focus narrows *which dimensions*; the catalog declares *what must
+  be masked*) and the two may be passed together.
+  - **New deterministic script `core/scripts/sensitive_catalog.py`** — the closed-set single source
+    of truth for the 10 PIPL / GB-T 35273 categories (identity-doc / biometric / health / financial
+    / location / communication / device / vehicle / general-pii / legal) and the `{full, partial}`
+    mask enum; ships a **37-item default template**. CLI: `--list` / `--parse` / `--check`. Closed-set
+    violations (unknown category, illegal mask, malformed `<category>/<field-type>` key, missing
+    label, non-int `version`) exit **2** with an actionable message; malformed JSON / missing file
+    / unreadable stdin exit **1**. Renders a **deterministic** Simplified-Chinese policy directive
+    (registry order, not input order). Zero runtime deps (stdlib only), self-locating sibling
+    import; stdin read as UTF-8 on any console.
+  - **`prepare_augment.py` + `ingest_requirements.py`** parse + closed-set-validate
+    `--sensitive-catalog` in the deterministic a1/r1 stage (before any LLM token) via the shared
+    `sensitive_catalog` module, and embed the resolved `sensitive_catalog`
+    (`{version, source, categories[], items[], counts{}, directive}` or `null`) as a new top-level
+    `change_context.json` field. Their `--check` validates the field shape (null allowed).
+  - **Shared prompt overlay** in `sra-clarify.md` + `sra-augment.md`: when the orchestrator passes a
+    non-null `sensitive_catalog`, the subagents expand the sensitive-data pass to per-item masking
+    gaps (anchored to a concrete requirement/endpoint/field, tagged `catalog_key`), and link a gap
+    to a `data-masking` control via the existing three-signal matching (advisory — a gap is never
+    dropped for lack of a matching control). `/mgh-srr` reuses these prompts verbatim → obtains the
+    behavior with **zero new prompts**.
+  - **mgh-init linkage (consumption only)**: catalog-driven masking gaps reuse the existing
+    `data-masking → sensitive-data` dimension mapping already in `prepare_augment.py`; **no change
+    to mgh-init** discovery / inventory schema / rules.
+  - **Disclosure**: the orchestrator-written `sra_manifest.json` and `render_report.py`'s
+    `srr_manifest.json` carry a `sensitive_catalog` field (`counts` + `source`, or null); when a
+    catalog is active, a boundary line states **masking gaps were checked per the company catalog
+    items; field types outside the catalog were recognized only via the legacy 6 facets**, and the
+    srr report header notes the catalog coverage.
+  - **Shipped `.example` template**: a committed `core/scripts/sensitive_catalog.json.example`
+    (the 37-item PIPL/GB-T 35273 template) is the canonical artifact; `install.sh` copies it to
+    `.mgh-sra/sensitive_catalog.json.example` in the target project. It is **not auto-applied** —
+    the company must `cp` it to `sensitive_catalog.json` or pass `--sensitive-catalog @<path>` to
+    activate (backward-compat gate).
+  - New contract `core/contracts/sensitive-catalog.md`; `core/contracts/sra/augmentation.md` +
+    `srr/intake-report.md` document the new field; `security-dimensions.md` notes the catalog as the
+    6-facet extension point.
+  - New tests: `tests/test_sensitive_catalog.py` (registry / parse / closed-set violations / exit
+    codes / determinism / input forms incl. stdin / anti-drift: 37-items + committed `.example`
+    matches `DEFAULT_TEMPLATE` / zero-deps AST); `--sensitive-catalog` + `--check` coverage added
+    to `test_sra_prepare.py`, `test_srr_ingest.py`; `test_zero_deps.py` asserts
+    `sensitive_catalog.py` is scanned.
+
+### Changed
+- Four command shells (claude/opencode × sra/srr): `--sensitive-catalog` in the param/flag tables,
+  orchestration flow (read `change_context.sensitive_catalog`, pass verbatim into a2/a3), bash
+  examples, and an "Always disclose" catalog-coverage line. `tools/check_contracts.py` asserts the
+  new flags; `tools/check_distributed_purity.py` confirms the shipped md stay clean (R5.10).
+
+### Known limitation (honest boundary)
+- Per-item masking-gap detection is enforced by a **prompt overlay** (non-deterministic guardrail),
+  not a hard filter — the closed-set category/mask validation, the `change_context` embedding, and
+  the `--check` layers are deterministic, but which catalog items actually surface a gap depends on
+  the LLM pass. The catalog is **not** an exhaustive sensitive-field list (out-of-catalog fields use
+  only the 6 facets); this is disclosed in the manifest/report boundary.
+
+---
+
+## [0.1.9] — 2026-07-16
+
+### Added
+- **Dimension focus (`--focus`) for `/mgh-sra` + `/mgh-srr`.** Both commands now accept
+  `--focus <inline-json|path>` to **narrow** the per-dimension security scan to a subset of
+  the 9 dimensions, and — for the two dimensions whose catalog enumerates discrete
+  sub-categories — to a per-dimension facet whitelist. The default is unchanged: omit the
+  flag = scan all 9 dimensions (byte-equivalent behavior, a hard backward-compatibility
+  gate).
+  - **New deterministic script `core/scripts/focus_scope.py`** — the closed-set single
+    source of truth for the 9 dimension keys + the `sensitive-data` (id-card / bank-card /
+    phone / email / password / token) and `injection` (sqli / xss / command-injection /
+    path-traversal / ssrf / deserialization / xxe) facets; the other 7 dimensions have no
+    facets (whole-dimension focus). CLI: `--list` / `--parse` / `--render` / `--check`.
+    Closed-set violations (unknown dimension/facet, facet on a facet-less dimension, facet
+    for a dimension not in `dimensions`, empty `dimensions`) exit **2** with an actionable
+    message; malformed JSON / missing file exit **1**. Renders a **deterministic**
+    Simplified-Chinese directive (registry order, not input order; byte-identical across
+    runs); all-9 resolves to `null` (no narrowing). Zero runtime deps (stdlib only),
+    self-locating sibling import.
+  - **`prepare_augment.py` + `ingest_requirements.py`** parse + closed-set-validate
+    `--focus` in the deterministic a1/r1 stage (before any LLM token) via the shared
+    `focus_scope` module, and embed the resolved `focus` (`{dimensions[], facets{},
+    directive}` or `null`) as a new top-level `change_context.json` field. Their `--check`
+    validates the `focus` field shape (polymorphic in sra: inventory OR change_context).
+  - **Shared prompt overlay** in `sra-clarify.md` + `sra-augment.md`: when the orchestrator
+    passes a non-null `focus.directive`, both subagents restrict their per-dimension pass
+    to the listed dimensions/facets and emit nothing out-of-scope; in-scope anchoring /
+    three-signal / codegraph rules are unchanged. `/mgh-srr` reuses these prompts verbatim
+    → obtains the behavior with **zero new prompts**.
+  - **Disclosure**: the orchestrator-written `sra_manifest.json` and `render_report.py`'s
+    `srr_manifest.json` carry a `focus` field (dimension list or null); when focused, a
+    boundary line states **only the focused dimensions were scanned; out-of-scope
+    dimensions were not covered**, and the srr report header notes the in-scope dimensions.
+  - **Catalog annotated**: `security-dimensions.md` now tags the facet keys inline on the
+    `sensitive-data` / `injection` rows, in lockstep with the registry (anti-drift asserted
+    by `test_focus_scope.py`).
+- New tests: `tests/test_focus_scope.py` (registry / parse / closed-set violations / exit
+  codes / determinism / input forms / anti-drift); `--focus` + `--check` coverage added to
+  `test_sra_prepare.py`, `test_srr_ingest.py`, `test_srr_report.py`.
+
+### Changed
+- Four command shells (claude/opencode × sra/srr): `--focus` in the param/flag tables,
+  orchestration flow (read `change_context.focus.directive`, pass verbatim into a2/a3),
+  bash examples, and an "Always disclose" focus-scope line. `tools/check_contracts.py`
+  asserts the new flags; `tests/test_zero_deps.py` asserts `focus_scope.py` is scanned.
+
+### Known limitation (honest boundary)
+- The narrowing is enforced by a **prompt overlay** (non-deterministic guardrail), not a
+  hard filter — a focused run could in principle still emit a range-adjacent gap. Residual
+  non-determinism is disclosed the same way as the existing prompt-guardrail boundaries;
+  the closed-set / embedding / `--check` layers are deterministic. Focusing too narrowly
+  can miss real gaps — this is the user's explicit choice, disclosed in the manifest/report.
+
+---
+
 ## [0.1.8] — 2026-07-15
 
 ### Added

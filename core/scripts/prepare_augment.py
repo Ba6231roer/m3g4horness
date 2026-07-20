@@ -11,20 +11,37 @@ import load_controls / validate_inventory / any sibling command — reads the
 inventory with a self-contained json.load + minimal shape check (decoupled).
 
 CLI contract (`--help` is the contract surface, R5.1):
-  py prepare_augment.py --change <name> [--rules <path>] [--out <dir>]
-                        [--dry-run] [--no-interactive]
-  py prepare_augment.py --check <rules-path-or-dir>
+  py prepare_augment.py --change <name> [--rules <path>] [--focus <inline-json|path>]
+                        [--out <dir>] [--dry-run] [--no-interactive]
+  py prepare_augment.py --check <rules-path-or-dir|change_context.json>
 
   --change <name>   target change (default: newest dir under openspec/changes/)
   --rules <path>    mgh-init controls_inventory.json FILE or its output DIR
                     (e.g. <project>/.mgh-init); auto-discovered when a dir
+  --focus <json|path>  optional security-dimension focus (inline JSON beginning with
+                    `{` or a path to a JSON file; leading `@` tolerated). Narrows the
+                    per-dimension scan to a subset of the 9 dimensions + optional
+                    per-dimension facets. Parsed + closed-set-validated via the shared
+                    focus_scope module (sibling import) BEFORE any LLM; embedded as the
+                    `focus` field of change_context.json (object or null). Omit = all 9
+                    dimensions (behavior unchanged). Invalid → exit 2, no context emitted.
+  --sensitive-catalog <json|@path|->
+                    optional company masking-policy catalog (inline JSON beginning with
+                    `{`, `-` for stdin, or a path to a JSON file; leading `@` tolerated).
+                    Declares the field types that MUST be masked + their mask level/rule;
+                    extends sensitive-data recognition beyond the legacy 6 facets. Parsed
+                    + closed-set-validated via the shared sensitive_catalog module (sibling
+                    import) BEFORE any LLM; embedded as the `sensitive_catalog` field of
+                    change_context.json (object or null). Omit = legacy 6 facets only
+                    (behavior unchanged). Invalid → exit 2, no context emitted.
   --out <dir>       output dir (default: <change-root>/.mgh-sra)
   --dry-run         produce change_context.json + stdout summary only (orchestrator
                     skips the merge steps; flag echoed for the orchestrator)
   --no-interactive  clarification uses default guesses (flag echoed for orchestrator)
-  --check <path>    intake validation only: validate the inventory at <path> is
-                    well-formed (controls[] + each has name/evidence); exit 2 on
-                    violation. <path> may be a file or a dir (auto-discover).
+  --check <path>    intake validation only. <path> polymorphic: an inventory file/dir
+                    (controls[] + each has name/evidence) OR a produced change_context.json
+                    (top-level fields + pending[] absolute & in subtree + focus field
+                    shape + sensitive_catalog field shape); exit 2 on violation.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b): the full
 `change_context.json` object (the orchestrator reads `pending[]` from it; see
@@ -41,9 +58,15 @@ import re
 import sys
 from pathlib import Path
 
-# Self-locate so any future sibling import resolves under any cwd (R5.3a).
-# prepare_augment has no sibling import today; the guard keeps it self-contained.
+# Self-locate so the sibling import resolves under any cwd (R5.3a).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Shared focus-scope registry + parse/validate/render (single source of truth for the
+# --focus narrowing flag; closed-set-validated here, before any LLM subagent).
+import focus_scope
+# Shared sensitive-catalog registry + parse/validate/render (single source of truth
+# for the --sensitive-catalog company masking-policy flag; closed-set-validated here,
+# before any LLM subagent). Orthogonal to --focus.
+import sensitive_catalog
 
 # ── dimension ↔ category mapping (signal-1; mirrors security-dimensions.md) ──
 DIMENSIONS_BY_CATEGORY = {
@@ -296,6 +319,11 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
             "done_marker": str(draft_path.with_name(draft_path.name + ".done")),
         })
 
+    # --- focus (dimension narrowing; closed-set-validated here, before any LLM) ---
+    focus = _resolve_focus(args)
+    # --- sensitive-catalog (company masking policy; closed-set-validated here) ---
+    catalog = _resolve_sensitive_catalog(args)
+
     change_context = {
         "change": change,
         "change_root": str(change_root),
@@ -315,6 +343,8 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
         "memory_source": str(memory_path) if memory is not None else "none",
         "dry_run": bool(args.dry_run),
         "truncated": False,
+        "focus": focus,
+        "sensitive_catalog": catalog,
     }
 
     # --- structural invariant: pending paths under the project subtree (D8) ---
@@ -328,29 +358,128 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
     (out_dir / "change_context.json").write_text(
         json.dumps(change_context, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    focus_desc = ("all9" if focus is None
+                  else f"narrowed({len(focus['dimensions'])}d"
+                       + (f",{sum(len(v) for v in focus['facets'].values())}f)" if focus['facets'] else ")"))
+    catalog_desc = ("none" if catalog is None
+                    else f"{catalog['counts']['items']}items({catalog['counts']['categories']}cat)")
     print(f"[prepare_augment] change={change} caps={len(capabilities)} reqs={len(requirements)} "
           f"tasks={len(tasks)} endpoints={len(endpoints)} sens_fields={len(sens)} "
           f"candidate_controls={len(candidate_controls)} memory={'yes' if memory else 'no'} "
-          f"pending={len(pending)} -> {out_dir / 'change_context.json'}", file=sys.stderr)
+          f"focus={focus_desc} catalog={catalog_desc} pending={len(pending)} "
+          f"-> {out_dir / 'change_context.json'}",
+          file=sys.stderr)
     return change_context
 
 
-def _run_check(rules_arg):
-    path = Path(rules_arg)
+def _resolve_focus(args):
+    """Resolve --focus (inline JSON | path) via the shared focus_scope module BEFORE any
+    LLM subagent. Returns the resolved focus object or None (no --focus = all 9).
+    Prints actionable stderr + exits 1 (read/parse failure) / 2 (closed-set violation).
+    Shared with ingest_requirements via sibling import."""
+    if not getattr(args, "focus", None):
+        return None
     try:
-        inv_path, inv = _resolve_rules(path)
+        return focus_scope.resolve(args.focus)
+    except focus_scope.FocusInputError as e:
+        print(f"error: invalid --focus: {e}", file=sys.stderr)
+        sys.exit(1)
+    except focus_scope.FocusViolation as v:
+        for msg in v.messages:
+            print(f"error: invalid --focus: {msg}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _resolve_sensitive_catalog(args):
+    """Resolve --sensitive-catalog (inline JSON | @path | -) via the shared
+    sensitive_catalog module BEFORE any LLM subagent. Returns the resolved catalog
+    object or None (no flag = legacy 6 facets). Prints actionable stderr + exits 1
+    (read/parse failure) / 2 (closed-set violation). Shared with ingest_requirements."""
+    if not getattr(args, "sensitive_catalog", None):
+        return None
+    try:
+        return sensitive_catalog.resolve(args.sensitive_catalog)
+    except sensitive_catalog.CatalogInputError as e:
+        print(f"error: invalid --sensitive-catalog: {e}", file=sys.stderr)
+        sys.exit(1)
+    except sensitive_catalog.CatalogViolation as v:
+        for msg in v.messages:
+            print(f"error: invalid --sensitive-catalog: {msg}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _check_change_context(ctx):
+    """Validate a produced change_context.json: required top-level fields + pending[]
+    paths absolute & in project_root subtree + focus field shape (null = all 9, valid)."""
+    if not isinstance(ctx, dict):
+        return ["top-level JSON is not an object"]
+    violations = []
+    for f in ("change", "change_root", "project_root", "capabilities",
+              "requirements", "pending", "clarify_path"):
+        if f not in ctx:
+            violations.append(f"missing top-level field: {f}")
+    pr = ctx.get("project_root")
+    pending = ctx.get("pending")
+    if not isinstance(pending, list):
+        violations.append("pending is not a list")
+    else:
+        for item in pending:
+            if not isinstance(item, dict):
+                violations.append("pending item is not an object")
+                continue
+            dp = item.get("draft_path")
+            if not dp:
+                violations.append("pending item missing draft_path")
+                continue
+            try:
+                rp = Path(dp).resolve()
+                if not rp.is_absolute():
+                    violations.append(f"draft_path not absolute: {dp}")
+                elif pr and not rp.is_relative_to(Path(pr).resolve()):
+                    violations.append(f"draft_path outside project subtree: {dp}")
+            except (OSError, ValueError):
+                violations.append(f"draft_path unresolvable: {dp}")
+    if "focus" in ctx:
+        violations.extend(focus_scope.validate_resolved(ctx.get("focus")))
+    if "sensitive_catalog" in ctx:
+        violations.extend(sensitive_catalog.validate_resolved(ctx.get("sensitive_catalog")))
+    return violations
+
+
+def _run_check(target_arg):
+    path = Path(target_arg)
+    # polymorphic artifact resolution: inventory file/dir OR change_context.json file/dir
+    target_file = None
+    if path.is_file():
+        target_file = path
+    elif path.is_dir():
+        for cand in ("controls_inventory.json", "change_context.json"):
+            if (path / cand).is_file():
+                target_file = path / cand
+                break
+    if target_file is None:
+        print(f"error: not an inventory or change_context artifact: {path}", file=sys.stderr)
+        return 1
+    try:
+        data = json.loads(target_file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        print(f"error: could not read {path}: {e}", file=sys.stderr)
+        print(f"error: could not read {target_file}: {e}", file=sys.stderr)
         return 1
-    if inv is None:
-        print(f"error: not a controls_inventory.json file or .mgh-init dir: {path}", file=sys.stderr)
-        return 1
-    ok, violations, n = _check_inventory(inv)
-    summary = {"check": "augment-intake", "ok": ok, "controls": n, "violations": violations}
+    if isinstance(data, dict) and isinstance(data.get("controls"), list):
+        # inventory validation (existing path)
+        ok, violations, n = _check_inventory(data)
+        summary = {"check": "augment-intake", "ok": ok, "controls": n, "violations": violations}
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(f"[prepare_augment] --check {target_file}: inventory controls={n} ok={ok} "
+              f"violations={len(violations)}", file=sys.stderr)
+        return 0 if ok else 2
+    # otherwise: treat as a produced change_context.json (structure + focus field)
+    violations = _check_change_context(data)
+    summary = {"check": "augment-intake", "ok": not violations, "violations": violations}
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    print(f"[prepare_augment] --check {inv_path}: controls={n} ok={ok} "
+    print(f"[prepare_augment] --check {target_file}: change_context ok={not violations} "
           f"violations={len(violations)}", file=sys.stderr)
-    return 0 if ok else 2
+    return 0 if not violations else 2
 
 
 def main():
@@ -364,6 +493,14 @@ def main():
                     "signal-1 candidate pre-filter + absolute draft work-list")
     ap.add_argument("--change", help="target change name (default: newest under openspec/changes/)")
     ap.add_argument("--rules", help="mgh-init controls_inventory.json FILE or its output DIR")
+    ap.add_argument("--focus", default=None,
+                    help="optional security-dimension focus (inline JSON beginning with `{` or a "
+                         "JSON file path; leading `@` tolerated) — narrows the per-dimension scan. "
+                         "Omit = all 9 dimensions")
+    ap.add_argument("--sensitive-catalog", default=None, metavar="INLINE-JSON|@PATH|-",
+                    help="optional company masking-policy catalog (inline JSON beginning with `{`, "
+                         "`-` for stdin, or a JSON file path; leading `@` tolerated) — declares the "
+                         "field types that MUST be masked. Omit = legacy 6 facets only")
     ap.add_argument("--out", help="output dir (default: <change-root>/.mgh-sra)")
     ap.add_argument("--dry-run", action="store_true",
                     help="produce change_context.json + summary only (orchestrator skips merges)")

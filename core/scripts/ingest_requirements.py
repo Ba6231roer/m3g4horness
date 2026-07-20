@@ -14,8 +14,10 @@ Signal extraction + candidate-control derivation are reused from prepare_augment
 
 CLI contract (`--help` is the contract surface, R5.1):
   py ingest_requirements.py --doc <path|dir|-> [--text <str>] [--rules <path>]
-                            [--split] [--out <dir>] [--dry-run] [--no-interactive]
-  py ingest_requirements.py --text <str> [--rules <path>] [--out <dir>] [--dry-run]
+                            [--focus <inline-json|path>] [--split] [--out <dir>]
+                            [--dry-run] [--no-interactive]
+  py ingest_requirements.py --text <str> [--rules <path>] [--focus <inline-json|path>]
+                            [--out <dir>] [--dry-run]
   py ingest_requirements.py --check <change_context.json>
 
   --doc <path|dir|->   input: a .txt/.md/.csv/.json/.docx/.xlsx FILE, a DIR (scans
@@ -25,6 +27,24 @@ CLI contract (`--help` is the contract surface, R5.1):
   --rules <path>       optional mgh-init controls_inventory.json FILE or its output DIR
                        (e.g. <project>/.mgh-init); reused from sra for candidate-control
                        derivation (category -> dimensions + file overlap)
+  --focus <json|path>  optional security-dimension focus (inline JSON beginning with `{`
+                       or a path to a JSON file; leading `@` tolerated). Same shape +
+                       semantics as /mgh-sra's --focus (see focus_scope). Parsed + closed-
+                       set-validated via the shared focus_scope module (reused from sra)
+                       BEFORE any LLM; embedded as the `focus` field of change_context.json
+                       (object or null). Omit = all 9 dimensions (behavior unchanged). The
+                       reused a2/a3 subagents narrow their scan with ZERO new prompts.
+                       Invalid → exit 2, no context emitted.
+  --sensitive-catalog <json|@path|->
+                       optional company masking-policy catalog (inline JSON beginning with
+                       `{`, `-` for stdin, or a path to a JSON file; leading `@` tolerated).
+                       Same shape + semantics as /mgh-sra's --sensitive-catalog (see
+                       sensitive_catalog). Parsed + closed-set-validated via the shared
+                       sensitive_catalog module (reused from sra) BEFORE any LLM; embedded
+                       as the `sensitive_catalog` field of change_context.json (object or
+                       null). Omit = legacy 6 facets only (behavior unchanged). The reused
+                       a2/a3 subagents check per-item masking gaps with ZERO new prompts.
+                       Invalid → exit 2, no context emitted.
   --split              split by markdown `#`/`##` headings into multiple pending[] units
                        (fan-out = script enumeration; default = one unit = whole doc)
   --out <dir>          output dir (default: <project>/.mgh-srr)
@@ -34,7 +54,9 @@ CLI contract (`--help` is the contract surface, R5.1):
   --check <path>       intake validation only: validate the change_context.json at <path>
                        is structurally complete (top-level fields + capabilities[]/
                        requirements[]/pending[] + pending paths absolute & under
-                       project_root + degraded is a string[]); exit 2 on violation.
+                       project_root + degraded is a string[] + focus field shape if
+                       present + sensitive_catalog field shape if present); exit 2 on
+                       violation.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b): the full
 `change_context.json` object (the orchestrator reads `pending[]` / `clarify_path` /
@@ -367,6 +389,11 @@ def _emit_change_context(args, text, doc_name, degraded):
     sens, roles, files, endpoints = _sra._extract_signals(text)
     candidate_controls, rules_source = _candidate_controls(args, files)
 
+    # focus (dimension narrowing; reused sra resolver, closed-set-validated before any LLM)
+    focus = _sra._resolve_focus(args)
+    # sensitive-catalog (company masking policy; reused sra resolver, same shape as sra)
+    catalog = _sra._resolve_sensitive_catalog(args)
+
     # shared cross-tool business memory (same file as sra)
     memory_path = project_root / ".mgh-sra" / "business_context.json"
     memory = None
@@ -397,6 +424,8 @@ def _emit_change_context(args, text, doc_name, degraded):
         "dry_run": bool(args.dry_run),
         "truncated": False,
         "degraded": degraded,
+        "focus": focus,
+        "sensitive_catalog": catalog,
     }
 
     # structural invariant: pending draft paths under the project subtree (hook判树)
@@ -410,9 +439,16 @@ def _emit_change_context(args, text, doc_name, degraded):
     (out_dir / "change_context.json").write_text(
         json.dumps(change_context, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    focus_desc = ("all9" if focus is None
+                  else f"narrowed({len(focus['dimensions'])}d"
+                       + (f",{sum(len(v) for v in focus['facets'].values())}f)"
+                          if focus['facets'] else ")"))
+    catalog_desc = ("none" if catalog is None
+                    else f"{catalog['counts']['items']}items({catalog['counts']['categories']}cat)")
     print(f"[ingest_requirements] doc={doc_name} units={len(units)} reqs={len(requirements)} "
           f"endpoints={len(endpoints)} sens_fields={len(sens)} candidate_controls="
-          f"{len(candidate_controls)} memory={'yes' if memory else 'no'} degraded={degraded or 'no'} "
+          f"{len(candidate_controls)} memory={'yes' if memory else 'no'} "
+          f"focus={focus_desc} catalog={catalog_desc} degraded={degraded or 'no'} "
           f"-> {out_dir / 'change_context.json'}", file=sys.stderr)
     return change_context
 
@@ -459,6 +495,10 @@ def _run_check(path_arg: str):
         deg = ctx.get("degraded", [])
         if not isinstance(deg, list) or not all(isinstance(x, str) for x in deg):
             violations.append("degraded must be a list of strings")
+        if "focus" in ctx:
+            violations.extend(_sra.focus_scope.validate_resolved(ctx.get("focus")))
+        if "sensitive_catalog" in ctx:
+            violations.extend(_sra.sensitive_catalog.validate_resolved(ctx.get("sensitive_catalog")))
     ok = not violations
     summary = {"check": "srr-intake", "ok": ok, "violations": violations}
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -481,6 +521,15 @@ def main():
     ap.add_argument("--text", default=None,
                     help="passthrough text used verbatim (no extraction, no degraded flag)")
     ap.add_argument("--rules", help="optional mgh-init controls_inventory.json FILE or output DIR")
+    ap.add_argument("--focus", default=None,
+                    help="optional security-dimension focus (inline JSON beginning with `{` or a "
+                         "JSON file path; leading `@` tolerated) — same shape/semantics as /mgh-sra; "
+                         "narrows the per-dimension scan. Omit = all 9 dimensions")
+    ap.add_argument("--sensitive-catalog", default=None, metavar="INLINE-JSON|@PATH|-",
+                    help="optional company masking-policy catalog (inline JSON beginning with `{`, "
+                         "`-` for stdin, or a JSON file path; leading `@` tolerated) — same "
+                         "shape/semantics as /mgh-sra; declares field types that MUST be masked. "
+                         "Omit = legacy 6 facets only")
     ap.add_argument("--split", action="store_true",
                     help="split by markdown # / ## headings into multiple pending[] units")
     ap.add_argument("--out", help="output dir (default: <project>/.mgh-srr)")

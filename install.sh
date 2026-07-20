@@ -138,6 +138,22 @@ else
   echo "• --no-enforce-hook: block-adhoc-scripts enforcement not injected; discipline via shell bright-lines + R5.9"
 fi
 
+# 6) Land the PIPL/GB-T 35273 sensitive-catalog .example template (D11). The committed
+#    core/scripts/sensitive_catalog.json.example is the canonical 37-item template (kept in
+#    sync with sensitive_catalog.py::DEFAULT_TEMPLATE by tests/test_sensitive_catalog.py
+#    anti-drift). NOT auto-applied — the company MUST `cp` it to sensitive_catalog.json or
+#    pass `--sensitive-catalog @<path>` to activate (D9 backward-compat hard gate: no catalog
+#    = legacy 6 facets, behavior unchanged). Fail-soft (R5.8): warn only, don't block install.
+EXAMPLE_SRC="$CORE_SRC/scripts/sensitive_catalog.json.example"
+EXAMPLE_DIR="$TARGET/.mgh-sra"
+mkdir -p "$EXAMPLE_DIR"
+if [[ -f "$EXAMPLE_SRC" ]]; then
+  cp "$EXAMPLE_SRC" "$EXAMPLE_DIR/sensitive_catalog.json.example"
+  echo "✓ landed .mgh-sra/sensitive_catalog.json.example (PIPL/GB-T 35273 37-item template; NOT auto-applied — cp to sensitive_catalog.json or use --sensitive-catalog to activate)"
+else
+  echo "⚠ sensitive_catalog.json.example not landed (source missing: $EXAMPLE_SRC; non-blocking, R5.8 fail-soft)" >&2
+fi
+
 echo "✓ installed $PLATFORM shell into $DEST"
 echo "  commands: /mgh-sast, /mgh-init, /mgh-sra, /mgh-srr ($PLATFORM)"
 echo "Run /mgh-sast --help, /mgh-init --help, /mgh-sra --help, or /mgh-srr --help to verify."

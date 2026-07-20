@@ -15,8 +15,8 @@
 
 | 维度 | 维度键 | 检查什么 | 典型缺口 | 该维度缺口如何触发控制匹配(category) |
 |---|---|---|---|---|
-| 敏感数据 | `sensitive-data` | 触及 PII / 凭据 / 金融(身份证 / 银行卡 / 手机 / 邮箱 / 密码 / token)?at-rest · in-transit · log · response 是否声明屏蔽? | 返回体含银行卡号未脱敏 | `data-masking`(at-rest/response/log 屏蔽);`crypto`(传输 / 落地加密) |
-| 注入 | `injection` | 外部输入入口是否声明校验?SQLi / XSS / 命令注入 / 路径穿越 / SSRF / 反序列化 / XXE | 动态 `ORDER BY` 拼接;富文本未编码 | `input-validation`(参数校验 / 转义 / 参数化) |
+| 敏感数据 | `sensitive-data` | 触及 PII / 凭据 / 金融(身份证 `id-card` / 银行卡 `bank-card` / 手机 `phone` / 邮箱 `email` / 密码 `password` / token `token`)?at-rest · in-transit · log · response 是否声明屏蔽? | 返回体含银行卡号未脱敏 | `data-masking`(at-rest/response/log 屏蔽);`crypto`(传输 / 落地加密) |
+| 注入 | `injection` | 外部输入入口是否声明校验?SQLi `sqli` / XSS `xss` / 命令注入 `command-injection` / 路径穿越 `path-traversal` / SSRF `ssrf` / 反序列化 `deserialization` / XXE `xxe` | 动态 `ORDER BY` 拼接;富文本未编码 | `input-validation`(参数校验 / 转义 / 参数化) |
 | 横向越权·IDOR | `horizontal-authz` | 按 id / key 访问的资源是否校验**归属 / 租户**? | `GET /order/{id}` 未校验 id 归属 | `authorization`(归属 / 租户判定) |
 | 纵向越权 | `vertical-authz` | 是否暴露管理员级操作?是否角色校验? | 普通用户可调管理接口 | `authorization`(角色 / 权限判定);`authentication`(身份边界) |
 | 认证 | `authentication` | 新端点 / 资源是否在鉴权之后?session / token? | 新增公开端点暴露内部数据 | `authentication`(登录 / 会话 / token 校验) |
@@ -24,6 +24,14 @@
 | 审计 | `audit` | 安全相关操作是否记录(且不记敏感数据)? | 登录失败未审计;审计日志含明文卡号 | `audit-logging`(安全事件留痕) |
 | 限流·滥用 | `rate-limiting` | 高价值端点(登录 / OTP / 支付)是否限流? | 短信验证码无频控,可被刷 | `rate-limiting`(频控 / 配额) |
 | 密钥·配置 | `secrets` | 硬编码密钥 / 密钥轮换 / 配置敏感项? | 配置文件硬编码 API key | `crypto`(密钥管理 / 加密) |
+
+> **维度内 facet(供 `--focus` 收窄)**:仅 `sensitive-data` / `injection` 两维度在上表「检查什么」列
+> 枚举了离散子类,其 facet 键(上表反引号标注)即 `focus_scope` 闭集 registry 的 facet 键,二者锁步;
+> 其余 7 维度无 facet(整维收窄)。`--focus` 收窄时,仅对列出维度(及维度内列出 facet)查缺口 / 发澄清。
+
+> **敏感数据字段类型扩展(供 `--sensitive-catalog`)**:上表 6 facet 是产品级闭集(**不动**);公司可在项目级
+> 声明必屏蔽字段类型 + 屏蔽规则(`--sensitive-catalog` 或 `<project>/.mgh-sra/sensitive_catalog.json`,见
+> `core/contracts/sensitive-catalog.md`),a3 据此逐项查脱敏缺口(标 `catalog_key`),与 6 facet **叠加、不替换**。
 
 ## 维度 → category 触发关系(信号-1 维度契合)
 

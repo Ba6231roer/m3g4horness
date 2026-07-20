@@ -166,5 +166,158 @@ class TestPrepareAugment(unittest.TestCase):
             self.assertTrue(json.loads(r.stdout)["ok"])
 
 
+class TestFocus(unittest.TestCase):
+    """--focus embedding + closed-set validation + --check on the focus field."""
+
+    def test_focus_embedded_when_given(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            r = run("prepare_augment", "--change", "payment-change", "--focus",
+                    '{"dimensions":["horizontal-authz","vertical-authz"]}', cwd=td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            f = json.loads(r.stdout)["focus"]
+            self.assertEqual(f["dimensions"], ["horizontal-authz", "vertical-authz"])
+            self.assertIn("directive", f)
+
+    def test_focus_facet_whitelist(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            r = run("prepare_augment", "--change", "payment-change", "--focus",
+                    '{"dimensions":["sensitive-data"],"facets":{"sensitive-data":["bank-card"]}}', cwd=td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            f = json.loads(r.stdout)["focus"]
+            self.assertEqual(f["facets"], {"sensitive-data": ["bank-card"]})
+
+    def test_focus_null_when_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            ctx = json.loads(run("prepare_augment", "--change", "payment-change", cwd=td).stdout)
+            self.assertIsNone(ctx["focus"])
+
+    def test_invalid_focus_exits2_emits_no_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            r = run("prepare_augment", "--change", "payment-change", "--focus",
+                    '{"dimensions":["bogus"]}', cwd=td)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("bogus", r.stderr)
+            self.assertEqual(r.stdout, "")  # no change_context emitted
+
+    def _write_ctx(self, td, focus):
+        ch = td / "openspec" / "changes" / "payment-change"
+        cc = ch / ".mgh-sra" / "change_context.json"
+        cc.parent.mkdir(parents=True, exist_ok=True)
+        dp = str((ch / ".mgh-sra" / "drafts" / "payment-api.md").resolve())
+        cc.write_text(json.dumps({"change": "payment-change", "change_root": str(ch),
+            "project_root": str(td), "capabilities": [], "requirements": [],
+            "pending": [{"capability": "payment-api", "draft_path": dp, "done_marker": "x"}],
+            "clarify_path": "x", "focus": focus}), encoding="utf-8")
+        return cc
+
+    def test_check_rejects_malformed_focus_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            cc = self._write_ctx(td, {"dimensions": ["nope"]})
+            r = run("prepare_augment", "--check", str(cc), cwd=td)
+            self.assertEqual(r.returncode, 2)
+            self.assertFalse(json.loads(r.stdout)["ok"])
+
+    def test_check_accepts_focus_null(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            cc = self._write_ctx(td, None)
+            r = run("prepare_augment", "--check", str(cc), cwd=td)
+            self.assertEqual(r.returncode, 0)
+            self.assertTrue(json.loads(r.stdout)["ok"])
+
+
+class TestSensitiveCatalog(unittest.TestCase):
+    """--sensitive-catalog embedding + closed-set validation + --check on the field."""
+
+    def test_catalog_embedded_when_given(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            r = run("prepare_augment", "--change", "payment-change", "--sensitive-catalog",
+                    '{"version":1,"items":{"biometric/iris":{"label":"虹膜","mask":"full","rule":null},'
+                    '"financial/card-no":{"label":"银行卡号","mask":"partial","rule":"保留后4位"}}}',
+                    cwd=td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            sc = json.loads(r.stdout)["sensitive_catalog"]
+            self.assertEqual([it["key"] for it in sc["items"]],
+                             ["biometric/iris", "financial/card-no"])  # registry order
+            self.assertEqual(sc["counts"]["items"], 2)
+            self.assertIn("directive", sc)
+
+    def test_catalog_null_when_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            ctx = json.loads(run("prepare_augment", "--change", "payment-change", cwd=td).stdout)
+            self.assertIsNone(ctx["sensitive_catalog"])
+
+    def test_invalid_catalog_exits2_emits_no_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            r = run("prepare_augment", "--change", "payment-change", "--sensitive-catalog",
+                    '{"version":1,"items":{"astrology/zodiac":{"label":"x","mask":"full","rule":null}}}',
+                    cwd=td)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("astrology", r.stderr)
+            self.assertEqual(r.stdout, "")  # no change_context emitted
+
+    def test_catalog_and_focus_orthogonal(self):
+        # both flags at once: each resolves independently (D3 orthogonality)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            r = run("prepare_augment", "--change", "payment-change",
+                    "--focus", '{"dimensions":["sensitive-data"]}',
+                    "--sensitive-catalog", '{"version":1,"items":{"biometric/iris":{"label":"虹膜","mask":"full","rule":null}}}',
+                    cwd=td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ctx = json.loads(r.stdout)
+            self.assertEqual(ctx["focus"]["dimensions"], ["sensitive-data"])
+            self.assertEqual(ctx["sensitive_catalog"]["counts"]["items"], 1)
+
+    def _write_ctx(self, td, catalog):
+        ch = td / "openspec" / "changes" / "payment-change"
+        cc = ch / ".mgh-sra" / "change_context.json"
+        cc.parent.mkdir(parents=True, exist_ok=True)
+        dp = str((ch / ".mgh-sra" / "drafts" / "payment-api.md").resolve())
+        cc.write_text(json.dumps({"change": "payment-change", "change_root": str(ch),
+            "project_root": str(td), "capabilities": [], "requirements": [],
+            "pending": [{"capability": "payment-api", "draft_path": dp, "done_marker": "x"}],
+            "clarify_path": "x", "focus": None, "sensitive_catalog": catalog}),
+            encoding="utf-8")
+        return cc
+
+    def test_check_rejects_malformed_catalog_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            cc = self._write_ctx(td, {"version": 1, "categories": ["bogus"],
+                                      "items": [], "counts": {}})
+            r = run("prepare_augment", "--check", str(cc), cwd=td)
+            self.assertEqual(r.returncode, 2)
+            self.assertFalse(json.loads(r.stdout)["ok"])
+
+    def test_check_accepts_catalog_null(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td)
+            cc = self._write_ctx(td, None)
+            r = run("prepare_augment", "--check", str(cc), cwd=td)
+            self.assertEqual(r.returncode, 0)
+            self.assertTrue(json.loads(r.stdout)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -16,7 +16,9 @@ You are **a3 — sra-augment**. Your behavior is defined by the prompt at
 ## Input (from orchestrator)
 One capability's `requirements[]` + its `endpoints[]`/`data_fields[]`/`role_hints[]`,
 the `candidate_controls[]`, the augmented `memory`, the security-dimensions directory,
-the absolute `draft_path` + `done_marker`, and the `codegraph=on|off` signal (verbatim).
+the absolute `draft_path` + `done_marker`, the optional `focus.directive` (verbatim; when
+present, emit gaps ONLY for its listed dimensions/facets — see stage prompt Task 1), and
+the `codegraph=on|off` signal (verbatim).
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`** — subagent script discipline.

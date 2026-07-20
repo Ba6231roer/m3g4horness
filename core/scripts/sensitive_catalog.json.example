@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "provenance": "PIPL(个人信息保护法) / GB-T 35273(个人信息安全规范)个人敏感信息分类 + 公司合规加严",
+  "items": {
+    "identity-doc/id-number": {
+      "label": "身份证号",
+      "mask": "partial",
+      "rule": "保留前6后4位"
+    },
+    "identity-doc/officer-number": {
+      "label": "军官号",
+      "mask": "partial",
+      "rule": "保留末2位"
+    },
+    "identity-doc/passport-number": {
+      "label": "护照号",
+      "mask": "partial",
+      "rule": "保留末2位"
+    },
+    "identity-doc/driver-license-number": {
+      "label": "驾照档案号",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "identity-doc/housing-fund-account": {
+      "label": "公积金账号",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "identity-doc/social-security-number": {
+      "label": "社保号",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "identity-doc/residence-permit-number": {
+      "label": "居住证号",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "identity-doc/other-id": {
+      "label": "其他证件信息",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/photo": {
+      "label": "照片",
+      "mask": "partial",
+      "rule": "模糊面部区域"
+    },
+    "biometric/iris": {
+      "label": "虹膜",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/fingerprint": {
+      "label": "指纹",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/palmprint": {
+      "label": "掌纹",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/voiceprint": {
+      "label": "声纹",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/ear-shape": {
+      "label": "耳廓",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/face-features": {
+      "label": "面部识别特征",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/genetic-data": {
+      "label": "个人基因识别数据",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/genetic-disease": {
+      "label": "遗传疾病(个人生物特征)",
+      "mask": "full",
+      "rule": null
+    },
+    "biometric/other": {
+      "label": "其他生物特征信息",
+      "mask": "full",
+      "rule": null
+    },
+    "health/health-info": {
+      "label": "健康生理信息",
+      "mask": "partial",
+      "rule": "脱敏为健康类别"
+    },
+    "health/fertility": {
+      "label": "生育情况",
+      "mask": "partial",
+      "rule": "脱敏为是否生育"
+    },
+    "financial/card-no": {
+      "label": "银行卡卡号",
+      "mask": "partial",
+      "rule": "保留后4位"
+    },
+    "financial/card-expiry": {
+      "label": "银行卡有效期",
+      "mask": "partial",
+      "rule": "仅保留到期月"
+    },
+    "financial/asset-account": {
+      "label": "金融资产账号",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "financial/credit-info": {
+      "label": "征信信息",
+      "mask": "partial",
+      "rule": "脱敏为信用等级"
+    },
+    "location/precise": {
+      "label": "精确定位信息",
+      "mask": "partial",
+      "rule": "降精度至行政区"
+    },
+    "location/trajectory": {
+      "label": "行踪轨迹",
+      "mask": "full",
+      "rule": null
+    },
+    "communication/records": {
+      "label": "通信记录和内容",
+      "mask": "partial",
+      "rule": "保留元数据、脱敏正文"
+    },
+    "communication/net-account": {
+      "label": "网络账号",
+      "mask": "partial",
+      "rule": "保留平台名、掩账号"
+    },
+    "device/mac": {
+      "label": "MAC 地址",
+      "mask": "partial",
+      "rule": "保留厂商前缀"
+    },
+    "device/device-id": {
+      "label": "设备号(device id)",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "device/imei": {
+      "label": "IMEI",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "device/idfa": {
+      "label": "IDFA",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "vehicle/plate": {
+      "label": "车牌号",
+      "mask": "partial",
+      "rule": "保留省份与序号段"
+    },
+    "vehicle/vin": {
+      "label": "车辆识别码(车架号)",
+      "mask": "partial",
+      "rule": "保留末4位"
+    },
+    "general-pii/name": {
+      "label": "姓名",
+      "mask": "partial",
+      "rule": "保留姓"
+    },
+    "general-pii/address": {
+      "label": "详细地址",
+      "mask": "partial",
+      "rule": "截到行政区"
+    },
+    "legal/undisclosed-record": {
+      "label": "未公开的违法和犯罪记录",
+      "mask": "full",
+      "rule": null
+    }
+  }
+}

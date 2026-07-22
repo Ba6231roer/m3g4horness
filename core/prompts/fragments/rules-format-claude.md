@@ -51,7 +51,10 @@ New code handling <what> MUST use the existing <control> rather than reimplement
   lints these files and fails loud on any leak. A control with no source anchor gets
   **no rule**; if the whole category has no implementation, write **no rule file** and
   still touch `done_marker` (see `init-rulewriter.md`).
-- **Never** emit `AGENTS.md` or `.opencode/...` in this format (that is opencode).
+- **Never** emit `AGENTS.md` or `.opencode/...` in this format. (opencode instead
+  uses a concise **lazy-load index** in root `AGENTS.md` + per-category **detail files**
+  under `<rules-dir>/`, loaded on demand; claude stays path-scoped via `paths:` here —
+  the two structures MUST NOT mix.)
 
 > Verified against Claude Code docs as of 2026-06; record the verification date
 > in `init_manifest.json`. If the host version disagrees, prefer the host.

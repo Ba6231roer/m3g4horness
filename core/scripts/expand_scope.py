@@ -73,11 +73,20 @@ FRAMEWORK_RX = re.compile(
 ANNOTATION_LANGS = {"java", "php"}
 
 
-def walk_sources(repo: Path, limit_files: int = 20000):
+def walk_sources(repo: Path, limit_files: int = 20000,
+                 include_dotfiles: bool = False, dot_skipped: list | None = None):
     for p in repo.rglob("*"):
         if not p.is_file():
             continue
         if any(part in EXCLUDE_DIR for part in p.parts):
+            continue
+        # Dot-prefixed path component = non-first-party code by Unix convention
+        # (tooling/VCS/IDE/build/config/index: .opencode/.claude/.codegraph/.github/.env).
+        # Skip so these tool scripts are not induced as business security controls.
+        # EXCLUDE_DIR is kept (additive): it still owns the non-dot build/cache dirs.
+        if not include_dotfiles and any(part.startswith(".") for part in p.parts):
+            if dot_skipped is not None and SOURCE_EXT.get(p.suffix.lower()):
+                dot_skipped[0] += 1
             continue
         lang = SOURCE_EXT.get(p.suffix.lower())
         if lang:
@@ -87,7 +96,7 @@ def walk_sources(repo: Path, limit_files: int = 20000):
             return
 
 
-def build_call_graph(repo: Path):
+def build_call_graph(repo: Path, include_dotfiles: bool = False):
     """Return (forward, reverse, name_to_files, framework_files).
 
     forward:  caller_file -> {callee_file: weight}   (file-level, aggregated)
@@ -99,7 +108,7 @@ def build_call_graph(repo: Path):
     name_to_files = defaultdict(set)
     framework_files = set()
 
-    for path, lang in walk_sources(repo):
+    for path, lang in walk_sources(repo, include_dotfiles=include_dotfiles):
         rel = path.relative_to(repo).as_posix()
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -166,11 +175,12 @@ def package_to_dirs(repo: Path, pkg: str):
     return hits
 
 
-def collect_dir(repo: Path, dirpath: Path):
+def collect_dir(repo: Path, dirpath: Path, include_dotfiles: bool = False):
     out = []
     for p in dirpath.rglob("*"):
         if p.is_file() and SOURCE_EXT.get(p.suffix.lower()) and \
-           not any(part in EXCLUDE_DIR for part in p.parts):
+           not any(part in EXCLUDE_DIR for part in p.parts) and \
+           (include_dotfiles or not any(part.startswith(".") for part in p.parts)):
             out.append(p.relative_to(repo).as_posix())
     return out
 

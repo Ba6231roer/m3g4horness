@@ -142,10 +142,12 @@ class TestListRuleJobs(unittest.TestCase):
         self.m = _load("list_rule_jobs")
         self.d = Path(tempfile.mkdtemp(prefix="mgh_lrj_"))
 
-    def _run(self, inv, fmt="opencode", checkpoints=None, target="."):
+    def _run(self, inv, fmt="opencode", checkpoints=None, target=".", rules_dir=None):
         argv = ["list_rule_jobs.py", "--inventory", str(inv), "--format", fmt, "--target", target]
         if checkpoints:
             argv += ["--checkpoints", str(checkpoints)]
+        if rules_dir:
+            argv += ["--rules-dir", rules_dir]
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -214,6 +216,28 @@ class TestListRuleJobs(unittest.TestCase):
         self.assertIn(".claude/rules/security-crypto.md", item["rule_path"])
         self.assertTrue(item["done_marker"].endswith("crypto.claude.json.done"))
         self.assertEqual(item["done_marker"], str((cp / "crypto.claude.json.done").resolve()))
+
+    def test_opencode_rule_path_points_at_detail_dir(self):
+        # opencode rule_path = <abs target>/docs/security-controls/<cat>.md (default rules-dir),
+        # absolute even under --target ".".
+        p = self._write([{"name": "a", "category": "authentication"}])
+        cp = self.d / "checkpoints" / "t3"
+        code, out, _ = self._run(p, fmt="opencode", checkpoints=cp, target=".")
+        self.assertEqual(code, 0)
+        item = json.loads(out)["pending"][0]
+        self.assertTrue(Path(item["rule_path"]).is_absolute())
+        rp = item["rule_path"].replace("\\", "/")
+        self.assertTrue(rp.endswith("/docs/security-controls/authentication.md"), rp)
+        self.assertNotIn("rules-parts", rp)
+
+    def test_opencode_rules_dir_override(self):
+        # --rules-dir relocates the opencode detail dir; rule_path follows.
+        p = self._write([{"name": "a", "category": "crypto"}])
+        code, out, _ = self._run(p, fmt="opencode", target=str(self.d),
+                                 rules_dir="custom/security-rules")
+        self.assertEqual(code, 0)
+        rp = json.loads(out)["pending"][0]["rule_path"].replace("\\", "/")
+        self.assertTrue(rp.endswith("/custom/security-rules/crypto.md"), rp)
 
 
 if __name__ == "__main__":

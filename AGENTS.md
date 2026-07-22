@@ -231,6 +231,10 @@ py tools/extract_prompts.py --out ./core/prompts
   内部路径)+ inventory schema 字段(`found_controls`/`evidence_count`)+ opencode YAML 围栏(`---`)+
   特征过程散文短语(`扫描器模式定义` 等);裸通用词(`category`/`缺失`/泛指 `锚点`)与裸层级词
   (`T1`/`T2`/`scout`)、通用脚本名仍仅提示词护栏覆盖、非确定性可测。
+- `/mgh-init --format opencode` 输出为根 `AGENTS.md` 简洁**惰性索引块** + 每 category 一个
+  `docs/security-controls/<cat>.md` 详述文件;opencode 无路径作用域,按需加载是**语义性**的
+  (索引块指令驱动,非路径自动触发)——**非确定性可测**:agent 若跳过对应 Read 可能漏掉可复用
+  控制。claude 侧 `paths:` 路径作用域为确定性触发(已天然 lazy)。
 
 ## 可参考项目
 本项目部分实现方式、实现理念、工具使用可参考如下已拉取到本地的项目代码仓

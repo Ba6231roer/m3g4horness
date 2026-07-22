@@ -14,6 +14,7 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 CLI contract (`--help` is the contract surface, R5.1):
   py list_rule_jobs.py --inventory <controls_inventory.json>
        --format opencode|claude [--checkpoints <t3-dir>] [--target <dir>]
+       [--rules-dir <dir>]
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"total": N, "done": M, "pending": [<RuleJobLite>, ...], "format": "..."}
@@ -24,7 +25,9 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - rule_path   = ABSOLUTE (target resolved via Path.resolve(); absolute even when
                   --target defaults to "."):
                   claude  -> <abs target>/.claude/rules/security-<cat>.md
-                  opencode-> <abs target>/.mgh-init/rules-parts/<cat>.md
+                  opencode-> <abs target>/<rules-dir>/<cat>.md
+                              (--rules-dir default docs/security-controls;
+                               resolved against target, then Path.resolve())
                   Passed verbatim by the orchestrator; the rulewriter subagent NEVER
                   assembles/interpolates a path.
   - done_marker = ABSOLUTE `.done` marker path
@@ -45,11 +48,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def _rule_path(target: str, category: str, fmt: str) -> str:
-    base = target.rstrip("/")
+def _rule_path(target: str, rules_dir_abs: str, category: str, fmt: str) -> str:
+    """Absolute rule output path for one category.
+
+    claude  -> <abs target>/.claude/rules/security-<cat>.md
+    opencode-> <abs rules-dir>/<cat>.md  (rules-dir resolved against target)
+    """
     if fmt == "claude":
-        return f"{base}/.claude/rules/security-{category}.md"
-    return f"{base}/.mgh-init/rules-parts/{category}.md"
+        return f"{target.rstrip('/')}/.claude/rules/security-{category}.md"
+    return f"{rules_dir_abs.rstrip('/')}/{category}.md"
 
 
 def _done_categories(checkpoints_dir: Path, fmt: str):
@@ -80,6 +87,10 @@ def main():
                     help="T3 checkpoint dir (default: <inventory>/../checkpoints/t3)")
     ap.add_argument("--target", default=".",
                     help="target project root for rule_path (default .)")
+    ap.add_argument("--rules-dir",
+                    help="opencode rules detail dir (default <target>/docs/security-controls); "
+                         "opencode rule_path = <abs target>/<rules-dir>/<cat>.md "
+                         "(relative paths resolve against --target; ignored for claude)")
     args = ap.parse_args()
 
     inv_path = Path(args.inventory)
@@ -112,8 +123,15 @@ def main():
     # misplaced cwd). rule_path / done_marker are the single authoritative values the
     # orchestrator passes VERBATIM — no <target>/<category> assembly downstream.
     target_abs = str(Path(args.target).resolve())
+    # opencode detail dir (default docs/security-controls), resolved against the absolute
+    # target so rule_path is absolute under any subagent cwd. Ignored for claude.
+    rules_rel = args.rules_dir or "docs/security-controls"
+    rules_dir_path = Path(rules_rel)
+    if not rules_dir_path.is_absolute():
+        rules_dir_path = Path(target_abs) / rules_rel
+    rules_dir_abs = str(rules_dir_path.resolve())
     pending = [{"category": cat, "format": args.format,
-                "rule_path": _rule_path(target_abs, cat, args.format),
+                "rule_path": _rule_path(target_abs, rules_dir_abs, cat, args.format),
                 "done_marker": str(checkpoints_dir / f"{cat}.{args.format}.json.done")}
                for cat in categories if cat not in done]
     result = {

@@ -1,50 +1,67 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-assemble_rules — deterministic opencode rules assembler + purity lint for /mgh-init.
+assemble_rules — deterministic opencode rules index builder + purity lint for /mgh-init.
 
-T3 (init-rulewriter) writes ONE staged fragment per category to
-<target>/.mgh-init/rules-parts/<category>.md (neutral, no outer sentinels). This
-script merges them into a SINGLE neutral managed block in <target>/AGENTS.md:
+T3 (init-rulewriter) writes ONE shipped detail file per category directly to
+<target>/<rules-dir>/<category>.md (default <target>/docs/security-controls/<cat>.md;
+neutral, independent H1 document, no outer sentinels). This script builds a CONCISE
+lazy-load INDEX block in <target>/AGENTS.md that references them — the rule BODIES stay
+in the per-category detail files, so opencode's root context (which loads ALL of AGENTS.md
+eagerly) is not bloated. opencode has no path-scoping, so lazy loading is driven by a
+semantic directive in the index ("Read the detail file only when the task touches that
+domain"), verbatim-aligned with opencode docs ("Manual Instructions in AGENTS.md").
+
+The index block (owned by this script — T3 NEVER writes AGENTS.md):
 
     <!-- security-controls:begin -->
     ## 安全设计 — 复用,勿重造
-
-    ### <Category>
-    - **<Control>**: ... 锚点: src/.../X.java::Class.method
+    本项目已梳理出以下**既有可复用安全控制**...**按需加载**...读后内容即强制指令。
+    - 认证 → @docs/security-controls/authentication.md
+    - 授权 → @docs/security-controls/authorization.md
+    > 涉及以上领域的新代码 MUST 先 Read 对应文件、复用既有实现;无对应文件 = 该领域无梳理出的存量控制。
     <!-- security-controls:end -->
 
-Idempotent (R5.3b): replaces only the managed block (or appends if absent) and
-preserves user content. On first run it sweeps legacy branded blocks
-(<!-- mgh-init:begin(:cat)? --> ... <!-- mgh-init:end(:cat)? -->) so no orphaned
-duplicate remains. Also runs a deterministic purity lint (`--check` / always) that
-fails loud (exit 2) if tool-internal tokens leak into shipped rules (R5.7 closed
-loop). The neutral sentinel carries NO tool name, by contract.
+Index = a real snapshot of <rules-dir>/*.md: each line's display name is the detail
+file's first `#` heading (template strips the ` 安全控制` suffix), falling back to the
+filename stem; the `@` ref is the detail path relative to the target. A category T3 wrote
+no file for is simply absent (no orphan ref). Idempotent (R5.3b): replaces only the managed
+block (or appends if absent) and preserves user content. On first run it sweeps legacy
+branded blocks (<!-- mgh-init:begin(:cat)? --> ... <!-- mgh-init:end(:cat)? -->) so no
+orphaned duplicate remains. Reusing the SAME neutral sentinel means an old "full inline"
+block (this change's predecessor) is idempotently replaced by the index block on re-run —
+zero extra migration logic.
 
-claude format has NO assembly (T3 writes .claude/rules/security-<cat>.md directly);
-for claude this script is lint-only (scans those files).
+Also runs a deterministic purity lint (`--check` / always) that fails loud (exit 2) if
+tool-internal tokens leak into shipped detail files (R5.7 closed loop). The neutral
+sentinel carries NO tool name, by contract.
+
+claude format has NO index (T3 writes .claude/rules/security-<cat>.md directly, already
+lazy via `paths:` scoping); for claude this script is lint-only (scans those files).
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/re/sys/pathlib).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py assemble_rules.py --target <dir> --format opencode|claude
-       [--parts <dir>] [--out <path>] [--check] [--dry-run]
+       [--rules-dir <dir>] [--out <path>] [--check] [--dry-run]
 
-  --target    target project root (default .)
-  --format    opencode | claude (required)
-  --parts     staged-fragment dir (opencode only; default <target>/.mgh-init/rules-parts)
-  --out       opencode: AGENTS.md path (default <target>/AGENTS.md);
-              claude: rules dir to lint (default <target>/.claude/rules)
-  --check     lint only — do not write (opencode); lint existing rule files (claude)
-  --dry-run   compute but do not write (opencode normal mode)
+  --target     target project root (default .)
+  --format     opencode | claude (required)
+  --rules-dir  opencode detail-file dir (default <target>/docs/security-controls;
+               relative paths resolve against --target)
+  --out        opencode: AGENTS.md path (default <target>/AGENTS.md);
+               claude: rules dir to lint (default <target>/.claude/rules)
+  --check      lint only — do not write (opencode); lint existing rule files (claude)
+  --dry-run    compute but do not write (opencode normal mode)
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
-  {"format":"...","block":"security-controls"|null,"categories":[...],
-   "migrated_legacy_blocks":N,"lint":{"ok":bool,"violations":[{"file,line,token}]},"written":bool}
+  {"format":"...","block":"security-controls"|null,"rules_dir":"...",
+   "categories":[...],"migrated_legacy_blocks":N,
+   "lint":{"ok":bool,"violations":[{"file,line,token}]},"written":bool}
 
 Purity lint — high-precision forbidden shapes (near-zero false positives on target
-projects; scope = mgh-init's own shipped rules, never target source). Three token
-families + one opencode-only structural check:
+projects; scope = mgh-init's own shipped detail/rule files, never target source). Three
+token families + one opencode-only structural check:
   (a) tool-internal identifiers — tool name + distinctive script basenames + internal
       paths (e.g. mgh-init / discover_controls.py / .mgh-init/);
   (b) inventory-schema field names — `found_controls` / `evidence_count`
@@ -52,8 +69,8 @@ families + one opencode-only structural check:
   (c) discovery-prose phrases — `扫描器模式定义` / `扫描器内部正则` / `扫描器定义` /
       `锚点:扫描器` (half-width) / `锚点：扫描器` (full-width) — scanner/regex internals
       leaked into the rule body or the anchor field.
-  (d) opencode-only structural check — any `---` YAML-fence line inside the opencode
-      managed block = front-matter leak (opencode fragments carry NO front matter).
+  (d) opencode-only structural check — any `---` YAML-fence line inside an opencode
+      detail file = front-matter leak (opencode detail files carry NO front matter).
       claude legitimately uses `paths:` front matter, so this fence check runs
       opencode-only (claude gets the token check, never the fence check).
 Bare generic words (`category` / `缺失` / bare `锚点` / standalone `source:`·`evidence:`
@@ -82,8 +99,19 @@ BLOCK_BEGIN = "<!-- security-controls:begin -->"
 BLOCK_END = "<!-- security-controls:end -->"
 BLOCK_HEADER = "## 安全设计 — 复用,勿重造"
 
+# Lazy-load directive text (opencode has no path-scoping; loading is semantic). Verbatim
+# aligned with opencode docs "Manual Instructions in AGENTS.md".
+_LAZY_INTRO = ("本项目已梳理出以下**既有可复用安全控制**(存量实现,勿重新发明)。**按需加载**:"
+               "仅当要改动的代码涉及某领域时,用 Read 工具读对应文件;**勿预先全加载**"
+               "(省上下文)。读后内容即强制指令。")
+_LAZY_FOOTER = ("> 涉及以上领域的新代码 MUST 先 Read 对应文件、复用既有实现;"
+                "无对应文件 = 该领域无梳理出的存量控制。")
+
 _LEGACY_BEGIN = re.compile(r"^\s*<!--\s*mgh-init:begin", re.IGNORECASE)
 _LEGACY_END = re.compile(r"^\s*<!--\s*mgh-init:end", re.IGNORECASE)
+
+# First ATX heading of a detail file -> index display name (any level 1-6, space after #).
+_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 
 # High-precision forbidden tokens — three families, near-zero false positives on
 # target projects (scope = mgh-init's own shipped rules). Bare generic words
@@ -104,8 +132,8 @@ FORBIDDEN_TOKENS = [
     "锚点:扫描器", "锚点：扫描器",
 ]
 
-# opencode-only structural check: a `---` YAML-fence line inside the managed block =
-# leaked front matter (opencode fragments carry NO front matter). claude legitimately
+# opencode-only structural check: a `---` YAML-fence line inside a detail file =
+# leaked front matter (opencode detail files carry NO front matter). claude legitimately
 # uses `paths:` front matter, so this is enforced opencode-only via _lint's flag.
 _YAML_FENCE = re.compile(r"^---+\s*$")
 
@@ -129,29 +157,43 @@ def _strip_legacy_blocks(text):
     return "\n".join(out), count
 
 
-def _read_fragments(parts_dir):
-    """Sorted [(category, stripped_text)] for every <category>.md in parts_dir."""
-    frags = []
-    if parts_dir.is_dir():
-        for p in sorted(parts_dir.glob("*.md")):
-            frags.append((p.stem, p.read_text(encoding="utf-8").strip()))
-    return frags
+def _display_name(text, stem):
+    """Index display name for a detail file = first `#` heading text, with the template
+    suffix ` 安全控制` stripped for conciseness; falls back to the filename stem."""
+    for line in text.splitlines():
+        m = _HEADING.match(line.strip())
+        if m:
+            name = m.group(2).strip()
+            if name.endswith(" 安全控制"):
+                name = name[:-len(" 安全控制")].strip()
+            return name or stem
+    return stem
 
 
-def _compose_block(frags):
-    """Managed-block body (sentinels excluded): header + blank + each fragment."""
-    body = [BLOCK_HEADER, ""]
-    for _, text in frags:
-        body.append(text)
-        body.append("")
-    return "\n".join(body).rstrip() + "\n"
+def _index_ref(path, target):
+    """Detail-file path relative to the target (AGENTS.md dir), forward-slashed for the
+    `@` reference. Falls back to the basename if the file is outside the target tree."""
+    try:
+        return str(path.resolve().relative_to(target.resolve())).replace("\\", "/")
+    except ValueError:
+        return path.name
+
+
+def _compose_index_block(entries):
+    """Managed-block body (sentinels excluded): header + lazy directive + one line per
+    detail file + footer directive. `entries` = [(display_name, rel_ref), ...]."""
+    lines = [BLOCK_HEADER, "", _LAZY_INTRO, ""]
+    for display, rel in entries:
+        lines.append(f"- {display} → @{rel}")
+    lines += ["", _LAZY_FOOTER, ""]
+    return "\n".join(lines)
 
 
 def _lint(text, file_label, check_yaml_fence=False):
     """Return [{file,line,token}] for forbidden tokens in text (1-based lines).
 
-    The `---` YAML-fence check is opencode-only: opencode fragments carry NO front
-    matter, so a fence line inside the managed block = a leaked inventory header.
+    The `---` YAML-fence check is opencode-only: opencode detail files carry NO front
+    matter, so a fence line inside a detail file = a leaked inventory header.
     claude legitimately uses `paths:` front matter, so claude MUST call with
     check_yaml_fence=False (token check only, never the fence check).
     """
@@ -179,11 +221,18 @@ def _merge_into(content, full_block):
     return prefix + full_block + "\n"
 
 
-def _opencode(args, parts_dir, out_path):
-    frags = _read_fragments(parts_dir)
-    categories = sorted(c for c, _ in frags)
-    full_block = f"{BLOCK_BEGIN}\n{_compose_block(frags)}{BLOCK_END}"
-    violations = _lint(full_block, str(out_path), check_yaml_fence=True)
+def _opencode(args, rules_dir, out_path, target):
+    # Snapshot the detail dir: [(path, text)] sorted by filename for determinism.
+    files = sorted(rules_dir.glob("*.md")) if rules_dir.is_dir() else []
+    texts = [(p, p.read_text(encoding="utf-8")) for p in files]
+    entries = [(_display_name(text, p.stem), _index_ref(p, target)) for p, text in texts]
+    categories = [p.stem for p in files]
+    full_block = f"{BLOCK_BEGIN}\n{_compose_index_block(entries)}{BLOCK_END}"
+
+    # Purity lint: scan each detail file (tokens + opencode YAML fence).
+    violations = []
+    for p, text in texts:
+        violations.extend(_lint(text, str(p), check_yaml_fence=True))
 
     existing = out_path.read_text(encoding="utf-8") if out_path.is_file() else ""
     _, legacy_on_disk = _strip_legacy_blocks(existing)  # count only (no write here)
@@ -191,14 +240,14 @@ def _opencode(args, parts_dir, out_path):
     written, migrated = False, 0
 
     if args.check:
-        print(f"[assemble_rules] opencode --check: {len(frags)} category(ies), "
+        print(f"[assemble_rules] opencode --check: {len(files)} detail file(s), "
               f"{len(violations)} violation(s), {legacy_on_disk} legacy block(s) on disk",
               file=sys.stderr)
-    elif not frags:
-        print(f"warn: no staged fragments in {parts_dir}; {out_path} left unchanged",
+    elif not files:
+        print(f"warn: no detail files in {rules_dir}; {out_path} left unchanged",
               file=sys.stderr)
     elif violations:
-        # fail-loud: do NOT persist a polluted block
+        # fail-loud: do NOT persist a polluted index / detail snapshot
         print(f"[assemble_rules] {len(violations)} lint violation(s); "
               f"{out_path} NOT written", file=sys.stderr)
     else:
@@ -208,12 +257,13 @@ def _opencode(args, parts_dir, out_path):
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(new_content, encoding="utf-8")
             written = True
-        print(f"[assemble_rules] opencode -> {out_path}: {len(frags)} category(ies), "
+        print(f"[assemble_rules] opencode -> {out_path}: {len(files)} detail file(s), "
               f"{migrated} legacy block(s) migrated, written={written}", file=sys.stderr)
 
     return {
         "format": "opencode",
         "block": "security-controls",
+        "rules_dir": str(rules_dir),
         "categories": categories,
         "migrated_legacy_blocks": migrated,
         "lint": {"ok": len(violations) == 0, "violations": violations},
@@ -233,6 +283,7 @@ def _claude(rules_dir):
     return {
         "format": "claude",
         "block": None,
+        "rules_dir": str(rules_dir),
         "categories": [f.stem for f in files],
         "migrated_legacy_blocks": 0,
         "lint": {"ok": len(violations) == 0, "violations": violations},
@@ -242,13 +293,13 @@ def _claude(rules_dir):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="assemble opencode staged fragments into a single neutral "
-                    "managed block in AGENTS.md + purity lint (R5.3 leaf script)")
+        description="build the opencode lazy-load rules index in AGENTS.md from "
+                    "<rules-dir>/*.md detail files + purity lint (R5.3 leaf script)")
     ap.add_argument("--target", default=".", help="target project root (default .)")
     ap.add_argument("--format", required=True, choices=["opencode", "claude"],
                     help="opencode | claude (required)")
-    ap.add_argument("--parts", help="staged-fragment dir (opencode only; default "
-                    "<target>/.mgh-init/rules-parts)")
+    ap.add_argument("--rules-dir", help="opencode detail-file dir (default "
+                    "<target>/docs/security-controls; relative resolves against --target)")
     ap.add_argument("--out", help="opencode: AGENTS.md path (default <target>/AGENTS.md); "
                     "claude: rules dir to lint (default <target>/.claude/rules)")
     ap.add_argument("--check", action="store_true",
@@ -263,10 +314,13 @@ def main():
         return 1
 
     if args.format == "opencode":
-        parts_dir = (Path(args.parts).resolve() if args.parts
-                     else target / ".mgh-init" / "rules-parts")
+        if args.rules_dir:
+            rd = Path(args.rules_dir)
+            rules_dir = (rd if rd.is_absolute() else target / rd).resolve()
+        else:
+            rules_dir = (target / "docs" / "security-controls").resolve()
         out_path = Path(args.out).resolve() if args.out else target / "AGENTS.md"
-        summary = _opencode(args, parts_dir, out_path)
+        summary = _opencode(args, rules_dir, out_path, target)
     else:
         rules_dir = (Path(args.out).resolve() if args.out
                      else target / ".claude" / "rules")

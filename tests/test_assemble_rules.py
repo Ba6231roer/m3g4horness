@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for assemble_rules.py: opencode assembly + purity lint (R5.7 closed loop).
+"""Tests for assemble_rules.py: opencode lazy-index build + purity lint (R5.7 closed loop).
 
-Runs the script as a REAL subprocess from a NON-script cwd (FD2 family robustness —
-also covers task 7.2: import/cwd self-containment). Run: py -3 tests/test_assemble_rules.py
+opencode: T3 writes shipped detail files to <target>/<rules-dir>/<cat>.md; assemble_rules
+builds a CONCISE lazy-load index block in AGENTS.md (one `@<rel>` line per detail file) and
+purity-lints the detail files. claude: lint-only over .claude/rules/security-*.md.
+
+Runs the script as a REAL subprocess from a NON-script cwd (FD2 family robustness — also
+covers task 7.2: import/cwd self-containment). Run: py -3 tests/test_assemble_rules.py
 """
 import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
@@ -28,7 +32,7 @@ def _write(p: Path, text: str):
 class TestAssembleOpencode(unittest.TestCase):
     def setUp(self):
         self.target = Path(tempfile.mkdtemp(prefix="mgh_asm_"))
-        self.parts = self.target / ".mgh-init" / "rules-parts"
+        self.rules_dir = self.target / "docs" / "security-controls"
         self.agents = self.target / "AGENTS.md"
         self.cwd = self.target  # NON-script cwd (task 7.2)
 
@@ -38,12 +42,13 @@ class TestAssembleOpencode(unittest.TestCase):
                               capture_output=True, text=True, encoding="utf-8")
 
     def _seed(self):
-        _write(self.parts / "audit-logging.md",
-               "### 审计日志\n- **AuditFilter**: 登记每次请求。锚点: src/A.java::A.b\n")
-        _write(self.parts / "authorization.md",
-               "### 鉴权\n- **方法级安全**: @PreAuthorize。锚点: src/C.java::C.d\n")
+        _write(self.rules_dir / "authentication.md",
+               "# 认证 安全控制\n\n- **AuthConfig**: Bearer Token。锚点: src/A.java::A.b\n")
+        _write(self.rules_dir / "authorization.md",
+               "# 授权 安全控制\n\n- **方法级安全**: @PreAuthorize。锚点: src/C.java::C.d\n")
 
-    def test_assembles_single_neutral_block(self):
+    def test_builds_concise_index_block(self):
+        # 6.1: detail files -> AGENTS.md concise index (one @-ref line each + lazy directive).
         self._seed()
         r = self._run("--format", "opencode")
         self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
@@ -51,12 +56,28 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertEqual(body.count("<!-- security-controls:begin -->"), 1)
         self.assertEqual(body.count("<!-- security-controls:end -->"), 1)
         self.assertIn("## 安全设计 — 复用,勿重造", body)
-        self.assertIn("### 审计日志", body)
-        self.assertIn("### 鉴权", body)
+        self.assertIn("**按需加载**", body)                          # lazy directive present
+        # display name = first H1 minus the ` 安全控制` suffix; ref relative to target
+        self.assertIn("- 认证 → @docs/security-controls/authentication.md", body)
+        self.assertIn("- 授权 → @docs/security-controls/authorization.md", body)
+        # rule BODIES stay in detail files, NOT inlined into the index
+        self.assertNotIn("Bearer Token", body)
+        self.assertNotIn("@PreAuthorize", body)
         summ = json.loads(r.stdout)
-        self.assertEqual(summ["categories"], ["audit-logging", "authorization"])
+        self.assertEqual(summ["categories"], ["authentication", "authorization"])
         self.assertEqual(summ["block"], "security-controls")
         self.assertTrue(summ["lint"]["ok"])
+        self.assertIn("docs/security-controls", summ["rules_dir"].replace("\\", "/"))
+
+    def test_rules_dir_override(self):
+        # --rules-dir relocates detail files; index @-refs follow.
+        custom = self.target / "custom-rules"
+        _write(custom / "crypto.md",
+               "# 加密 安全控制\n\n- **CipherUtil**: AES。锚点: src/X.java::X.y\n")
+        r = self._run("--format", "opencode", "--rules-dir", "custom-rules")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertIn("- 加密 → @custom-rules/crypto.md", body)
 
     def test_idempotent_two_runs_one_block(self):
         self._seed()
@@ -67,6 +88,7 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertEqual(body.count("<!-- security-controls:end -->"), 1)
 
     def test_legacy_branded_block_migrated(self):
+        # 6.4: old `<!-- mgh-init:begin -->` branded block swept on first run.
         _write(self.agents,
                "# Proj\n\n用户内容。\n\n"
                "<!-- mgh-init:begin:audit-logging -->\n### 旧\n- 旧内容\n"
@@ -81,6 +103,21 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertEqual(body.count("<!-- security-controls:begin -->"), 1)
         self.assertEqual(json.loads(r.stdout)["migrated_legacy_blocks"], 1)
 
+    def test_old_inline_block_replaced_by_index(self):
+        # 6.4: old "full inline" block (SAME sentinel, pre-change output) -> index block.
+        _write(self.agents,
+               "# Proj\n\n<!-- security-controls:begin -->\n## 安全设计\n\n"
+               "### 旧全量内联\n- 一大堆旧规则正文\n<!-- security-controls:end -->\n\n尾部\n")
+        _write(self.rules_dir / "authentication.md",
+               "# 认证 安全控制\n\n- **AuthConfig**: 锚点: src/A.java::A.b\n")
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertNotIn("旧全量内联", body)               # old inline body gone
+        self.assertIn("尾部", body)                         # user content kept
+        self.assertIn("- 认证 → @docs/security-controls/authentication.md", body)
+        self.assertEqual(body.count("<!-- security-controls:begin -->"), 1)
+
     def test_user_content_preserved_when_block_appended(self):
         _write(self.agents, "# My Proj\n\n一些手写说明。\n")
         self._seed()
@@ -90,31 +127,39 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertIn("一些手写说明。", body)
 
     def test_check_fails_loud_on_leaked_script_name(self):
-        _write(self.parts / "crypto.md",
-               "### 加密\n- 由 discover_controls.py 发现。锚点: src/X.java::X.y\n")
+        _write(self.rules_dir / "crypto.md",
+               "# 加密 安全控制\n\n- 由 discover_controls.py 发现。锚点: src/X.java::X.y\n")
         r = self._run("--format", "opencode", "--check")
         self.assertEqual(r.returncode, 2)
         summ = json.loads(r.stdout)
         self.assertFalse(summ["lint"]["ok"])
         self.assertTrue(any(v["token"] == "discover_controls.py"
                             for v in summ["lint"]["violations"]))
-        # and a non-check (write) run must NOT persist a polluted block
+        # a non-check (write) run must NOT persist a polluted index
         r2 = self._run("--format", "opencode")
         self.assertEqual(r2.returncode, 2)
         body = self.agents.read_text(encoding="utf-8") if self.agents.exists() else ""
         self.assertNotIn("security-controls:begin", body)
 
     def test_bare_tier_token_not_flagged(self):
-        _write(self.parts / "input-validation.md",
-               "### 输入校验\n- **Sanitizer**: 复用。锚点: src/T1LineParser.java::T1LineParser.parse\n")
+        _write(self.rules_dir / "input-validation.md",
+               "# 输入校验 安全控制\n\n- **Sanitizer**: 复用。锚点: src/T1LineParser.java::T1LineParser.parse\n")
+        r = self._run("--format", "opencode", "--check")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        self.assertTrue(json.loads(r.stdout)["lint"]["ok"])
+
+    def test_bare_generic_words_not_flagged(self):
+        # bare `category` / `缺失` / `锚点` are EXCLUDED from the token set (no FP).
+        _write(self.rules_dir / "authentication.md",
+               "# 认证 安全控制\n\n- 这是个 category 字段。某控制缺失。锚点: src/A.java::A.b\n")
         r = self._run("--format", "opencode", "--check")
         self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
         self.assertTrue(json.loads(r.stdout)["lint"]["ok"])
 
     def test_check_fails_loud_on_inventory_schema_field(self):
-        # N1: controls_inventory.json schema field names leaked into the body.
-        _write(self.parts / "authentication.md",
-               "### 认证\n- **AuthConfig**: Bearer Token。锚点: src/A.java::A.b\n"
+        # 6.2: controls_inventory.json schema field names leaked into the body.
+        _write(self.rules_dir / "authentication.md",
+               "# 认证 安全控制\n\n- **AuthConfig**: Bearer Token。锚点: src/A.java::A.b\n"
                "found_controls:\n  - C-AUTHN-001\nevidence_count: 1\n")
         r = self._run("--format", "opencode", "--check")
         self.assertEqual(r.returncode, 2)
@@ -125,10 +170,10 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertIn("evidence_count", toks)
 
     def test_check_fails_loud_on_yaml_fence(self):
-        # N1: a `---` YAML front-matter fence inside the opencode managed block.
-        _write(self.parts / "authentication.md",
+        # 6.2: a `---` YAML front-matter fence inside an opencode detail file.
+        _write(self.rules_dir / "authentication.md",
                "---\ncategory: authentication\n---\n"
-               "### 认证\n- **AuthConfig**: 锚点: src/A.java::A.b\n")
+               "# 认证 安全控制\n\n- **AuthConfig**: 锚点: src/A.java::A.b\n")
         r = self._run("--format", "opencode", "--check")
         self.assertEqual(r.returncode, 2)
         summ = json.loads(r.stdout)
@@ -137,9 +182,9 @@ class TestAssembleOpencode(unittest.TestCase):
                             for v in summ["lint"]["violations"]))
 
     def test_check_fails_loud_on_discovery_prose(self):
-        # N2: scanner/regex internals + anchor mispointed at scanner internals.
-        _write(self.parts / "authentication.md",
-               "### 认证\n- C-AUTHN-001(扫描器模式定义) 检测模式。"
+        # 6.2: scanner/regex internals + anchor mispointed at scanner internals.
+        _write(self.rules_dir / "authentication.md",
+               "# 认证 安全控制\n\n- C-AUTHN-001(扫描器模式定义) 检测模式。"
                "锚点：扫描器内部正则定义\n")
         r = self._run("--format", "opencode", "--check")
         self.assertEqual(r.returncode, 2)
@@ -150,20 +195,32 @@ class TestAssembleOpencode(unittest.TestCase):
         self.assertIn("扫描器内部正则", toks)
         self.assertIn("锚点：扫描器", toks)  # full-width-colon variant
 
-    def test_no_empty_heading_when_category_fragment_absent(self):
-        # N3 / D5: a category with no implementation -> T3 writes NO fragment
-        # file; assemble MUST NOT emit an empty `### <Category>` heading for it.
-        _write(self.parts / "audit-logging.md",
-               "### 审计日志\n- **AuditFilter**: 锚点: src/A.java::A.b\n")
-        _write(self.parts / "authorization.md",
-               "### 鉴权\n- **方法级安全**: 锚点: src/C.java::C.d\n")
+    def test_index_no_orphan_for_absent_category(self):
+        # 6.3: only seed authentication; index has authentication, NOT authorization (no orphan).
+        _write(self.rules_dir / "authentication.md",
+               "# 认证 安全控制\n\n- **AuthConfig**: 锚点: src/A.java::A.b\n")
         r = self._run("--format", "opencode")
         self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
         body = self.agents.read_text(encoding="utf-8")
-        self.assertIn("### 审计日志", body)
-        self.assertIn("### 鉴权", body)
-        self.assertNotIn("access-control", body)   # absent category not present
-        self.assertNotIn("访问控制", body)            # no empty heading either
+        self.assertIn("@docs/security-controls/authentication.md", body)
+        self.assertNotIn("authorization", body)
+        self.assertNotIn("@docs/security-controls/authorization.md", body)
+
+    def test_display_name_falls_back_to_stem(self):
+        # 6.3: detail file with NO `#` heading -> index display name = filename stem.
+        _write(self.rules_dir / "authentication.md",
+               "- **AuthConfig**: Bearer Token。锚点: src/A.java::A.b\n")
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertIn("- authentication → @docs/security-controls/authentication.md", body)
+
+    def test_empty_rules_dir_leaves_agents_unchanged(self):
+        # no detail files -> AGENTS.md left untouched (nothing to index).
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        self.assertFalse(self.agents.exists())
+        self.assertEqual(json.loads(r.stdout)["categories"], [])
 
     def test_runs_from_unrelated_cwd(self):
         # R5.3a: self-locating; runs from a cwd unrelated to script dir AND target.

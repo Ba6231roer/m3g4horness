@@ -51,6 +51,11 @@ A `Candidate` (one control-shaped hit):
   适用相同纯净性规则;该值的出现 MUST NOT 使人读字段引入 codegraph 工具名或「经索引解析」之类过程描述。
 - `unresolved[]` = framework-routed/Feign/AOP/DI files with no textual edge (call-graph blind spot).
 - `out_of_scope[]` = cross-module controls whose def-site is outside `--scope` (disclosed, not dropped).
+- **文件枚举剪枝(单 chokepoint)**:遍历跳过任一以 `.` 开头的路径分量(tooling/VCS/IDE/build/config/
+  索引,如 `.opencode`/`.claude`/`.codegraph`/`.github`/`.env`),统一作用于 regex 候选、`skeleton.json`、
+  调用图、scout 目标集。`discover_controls.py --include-dotfiles` 覆盖(回退到扫描点前缀路径)。
+  `EXCLUDE_DIR`(精确名匹配,含 `node_modules`/`target`/`build`/`vendor` 等非点构建/缓存目录)**保持不变**。
+  故候选 `file`、`unresolved[]`、`out_of_scope[]` 均不含点前缀路径。
 
 ### Producer stdout summary (downstream reads these, never re-derives)
 
@@ -59,10 +64,11 @@ A `Candidate` (one control-shaped hit):
 
 ```json
 {"candidates": N, "clusters": M, "unresolved": U, "unresolved_count": U,
- "big_files": K, "out_of_scope": O, "truncated": false, "scanned": S}
+ "big_files": K, "dotfiles_skipped": D, "out_of_scope": O, "truncated": false, "scanned": S}
 ```
 
 | field | note |
 |---|---|
 | `big_files` | 超 `--big-file-bytes` 的源文件数(T1/scout 切片决策的下游常查量) |
 | `unresolved_count` | `len(unresolved[])`(`unresolved` 的别名,便于直接消费) |
+| `dotfiles_skipped` | 默认剪枝跳过的点前缀**源**文件计数(披露/排查用);`--include-dotfiles` 时为 `0` |

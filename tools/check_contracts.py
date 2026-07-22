@@ -45,7 +45,7 @@ SAST_SHELL_REQUIRED_FLAGS = ["--controls"]
 PY = sys.executable
 
 # A CLI flag is `--long` or `-s` preceded by a non-word boundary (whitespace/start),
-# NOT a hyphenated word/path segment like `mgh-core`, `.mgh-init`, `rules-parts`.
+# NOT a hyphenated word/path segment like `mgh-core`, `.mgh-init`, `security-controls`.
 _FLAG = r"(?<![\w-])(--?[a-zA-Z][\w-]*)"
 
 

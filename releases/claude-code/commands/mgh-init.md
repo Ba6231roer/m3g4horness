@@ -1,5 +1,5 @@
 ---
-description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules. Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format claude|opencode required (structures differ, never mix). Supports --scope/--resume/--merge and large-file sharding. Findings are LLM-induced candidates needing human review.
+description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/security-controls/; claude: path-scoped .claude/rules/*.md). Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format claude|opencode required (structures differ, never mix). Supports --scope/--resume/--merge and large-file sharding. Findings are LLM-induced candidates needing human review.
 allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 ---
 
@@ -28,6 +28,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - `--out <path>` (claude default `<target>/.claude/rules`; opencode default `<target>/AGENTS.md`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
 - `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)
+- `--include-dotfiles` (默认关;扫描点前缀路径 `.opencode`/`.claude`/`.codegraph`/`.github`/`.env`。默认跳过——tooling/VCS/IDE/build/config/索引 非一方业务代码;控制定义点落在 `.xxx` 内时传此 flag 纳入)
 - `--resume` (skip units whose `.done` exists) · `--rebuild-cache` (rebuild call graph)
 - `--merge <partials-dir>` (merge multiple scoped runs; then STOP)
 - `--skip-consistency` (skip T4) · `--config <profile>` (default `init`)
@@ -127,17 +128,17 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
      → stdout `{total,done,pending[],format}`;`pending[]` 每项 `{category,format,rule_path,done_marker}`(均绝对)
    per category in `pending[]`(WITHOUT `.done`;`--resume` 跳过):
      - spawn init-rulewriter (one isolated context per category) with --format + rule_path + done_marker
-     → 恰好写 `rule_path`(绝对;claude: `.claude/rules/security-<cat>.md`;opencode: 暂存 fragment `.mgh-init/rules-parts/<cat>.md`)+ touch `done_marker`
+     → 恰好写 `rule_path`(绝对;claude: `.claude/rules/security-<cat>.md`;opencode: 详述文件 `docs/security-controls/<cat>.md`)+ touch `done_marker`
 6b. ASSEMBLE / LINT (Bash, deterministic; uses the run's --format, after T3 / before T4):
      py .claude/mgh-core/scripts/assemble_rules.py --target <target> --format <format>
-   · opencode: 合并全部暂存 fragment 进 `<target>/AGENTS.md` 单个中性受管块(幂等、迁移旧 `mgh-init:` 块、内置 lint)
-   · claude: 无装配(T3 已直写文件),仅对 `.claude/rules/security-*.md` 做纯净性 lint
+   · opencode: 扫 `<rules-dir>/*.md` 详述文件建 `<target>/AGENTS.md` 简洁**惰性索引块**(幂等、迁移旧 `mgh-init:` 块、内置 lint);正文留详述文件按需加载
+   · claude: 无索引(T3 已直写文件),仅对 `.claude/rules/security-*.md` 做纯净性 lint
    · lint(fail-loud 退出码 2)= 规则正文泄漏:T3 禁 front matter / inventory schema 字段
      (`found_controls`/`evidence_count`)/ 过程散文(`扫描器模式定义` 等)/ 无源码锚点的控制;lint 覆盖
      工具内部 token + schema 字段 + 特征过程散文(opencode 另查 `---` YAML 围栏;claude `paths:` frontmatter 豁免)。
      回 T3 修正后重跑
 7. T4 (unless --skip-consistency): spawn init-rules-consistency
-     → in-place edits to rule files (claude) / staged fragments (opencode) + checkpoints/t4/.done
+     → in-place edits to rule files (claude) / detail files (opencode) + checkpoints/t4/.done
 8. i4: write init_manifest.json + report.md; print artifact paths + disclaimers
    · manifest 含 `codegraph:{available,used,resolved_count,unresolved_residual}`:`available`=检测到 `.codegraph/`+CLI;`used`=`codegraph=on` 且 `init-resolve` 实跑;`resolved_count`/`unresolved_residual` 取自 `resolved.json`(经
      `py .claude/mgh-core/scripts/describe_artifact.py --in <target>/.mgh-init/resolved.json --field resolved --count` 计数,NEVER `py -c`);`codegraph=off` 时 `used=false`/`resolved_count=0`,不出现解析计数。report.md 同步披露 codegraph 用量 + 残留盲区。
@@ -157,7 +158,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 | T1 induct | subagent `init-induct` (fan out per cluster) | `core/prompts/stages/init-induct.md` |
 | T2 synthesis | subagent `init-synthesis` | `core/prompts/stages/init-synthesis.md` |
 | T3 rulewriter | subagent `init-rulewriter` (fan out per category) | `core/prompts/stages/init-rulewriter.md` + `fragments/rules-format-{claude,opencode}.md` |
-| T3 assemble/lint | **script** | `core/scripts/assemble_rules.py` (opencode: single neutral block + legacy migration; both formats: `--check` purity lint: tool tokens + schema fields + YAML fences[opencode] + discovery prose) |
+| T3 assemble/lint | **script** | `core/scripts/assemble_rules.py` (opencode: build concise lazy index in AGENTS.md from `<rules-dir>/*.md` + legacy migration; both formats: `--check` purity lint over detail/rule files: tool tokens + schema fields + YAML fences[opencode] + discovery prose) |
 | T4 consistency | subagent `init-rules-consistency` (opt) | `core/prompts/stages/init-rules-consistency.md` |
 | scout plan | **script** | `core/scripts/plan_scout.py` (byte-budget + pkg-co-located batches) |
 | scout enumerate | **script** | `core/scripts/list_scout_batches.py` (pending 批清单;闭合与 T1 的不对称) |
@@ -172,6 +173,8 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 
 ```bash
 py .claude/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init
+# escape hatch: 控制定义点在 .opencode/.claude/.codegraph/.github 等 .xxx 内时才纳入(默认跳过点前缀路径)
+py .claude/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init --include-dotfiles
 py .claude/mgh-core/scripts/discover_controls.py --check ./.mgh-init
 py .claude/mgh-core/scripts/describe_artifact.py --in ./.mgh-init/controls_candidates.json --keys
 py .claude/mgh-core/scripts/list_clusters.py --clusters ./.mgh-init/clusters.json --checkpoints ./.mgh-init/checkpoints/t1
@@ -182,7 +185,7 @@ py .claude/mgh-core/scripts/list_scout_batches.py --scout-plan ./.mgh-init/scout
 py .claude/mgh-core/scripts/merge_scout.py --candidates ./.mgh-init/controls_candidates.json --scout ./.mgh-init/scout_candidates.json --audit ./.mgh-init/checkpoints/scout/audit.json --clusters ./.mgh-init/clusters.json
 py .claude/mgh-core/scripts/merge_scout.py --check ./.mgh-init/scout_candidates.json
 py .claude/mgh-core/scripts/validate_inventory.py --inventory ./.mgh-init/controls_inventory.json
-py .claude/mgh-core/scripts/list_rule_jobs.py --inventory ./.mgh-init/controls_inventory.json --format claude --checkpoints ./.mgh-init/checkpoints/t3 --target .
+py .claude/mgh-core/scripts/list_rule_jobs.py --inventory ./.mgh-init/controls_inventory.json --format claude --checkpoints ./.mgh-init/checkpoints/t3 --target . --rules-dir docs/security-controls
 py .claude/mgh-core/scripts/assemble_rules.py --target . --format claude --check
 ```
 
@@ -202,7 +205,7 @@ py .claude/mgh-core/scripts/assemble_rules.py --target . --format claude --check
 - `checkpoints/**` — per-unit artifacts (resume)
 - `init_manifest.json` — version/format/counts/provenance/unresolved[]/out_of_scope[]/boundaries[]
 - `report.md` — human-readable summary (+「competing controls」section)
-- rules → claude:`<target>/.claude/rules/security-*.md`;opencode:`<target>/AGENTS.md` 单个中性受管块 `<!-- security-controls:begin --> … :end -->`(均经 `assemble_rules.py` 纯净性 lint)
+- rules → claude:`<target>/.claude/rules/security-*.md`;opencode:`<target>/AGENTS.md` 简洁**惰性索引块** `<!-- security-controls:begin --> … :end -->` + 每实现 category 一个详述文件 `<target>/docs/security-controls/<cat>.md`(均经 `assemble_rules.py` 纯净性 lint)
 
 ## Always disclose
 - 面向人读的非代码内容(`report.md`、`init_manifest.json` 的 `boundaries[]`/文案、rules 正文)
@@ -211,6 +214,7 @@ py .claude/mgh-core/scripts/assemble_rules.py --target . --format claude --check
 - LLM-induced candidates — human review required.
 - **Existence ≠ effectiveness** (CVE-2025-41248: `@PreAuthorize` bypass on parameterized types).
 - Call-graph is textual/AST-level — misses AOP/reflection/DI/framework-routing; surface `unresolved[]`.
+- **点前缀路径默认不扫描**(tooling/VCS/IDE/build/config/索引,如 `.opencode`/`.claude`/`.codegraph`/`.github`):控制定义点落在 `.xxx` 内时默认不会被发现,须传 `--include-dotfiles` 才纳入;discover stdout `dotfiles_skipped` 计本次跳过的点前缀源文件数;`report.md` / `init_manifest.json::boundaries[]` 披露该边界。
 - For ≥1.5M-line repos: prefer `--scope` per module + `--merge` over a single full-repo run.
 - **Scout coverage is partial, not whole-repo**:`init_manifest.json` 记 `scout.{skeleton_total, scout_targets, batches, deep_read_files, audit_sampled, audit_found}`;只声称「审视/深读/自检」的真实数字,**不声称全仓覆盖**。
 - Scout 非确定:簇数 run-to-run 可能变化(regex 来源簇仍确定)。残留盲区:泛型包 + 泛型类名 + 无安全导入 + 低扇因的控制可能漏(`--no-scout` 回退纯 regex)。

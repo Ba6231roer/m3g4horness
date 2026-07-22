@@ -21,10 +21,11 @@ absolute paths given VERBATIM by the orchestrator:
   EXACTLY: one `.claude/rules/security-<category>.md` file, YAML frontmatter
   `paths:` derived from the controls' `protects` globs, then rule body.
 - `--format opencode` → follow `core/prompts/fragments/rules-format-opencode.md`
-  EXACTLY: write ONE staged fragment `<target>/.mgh-init/rules-parts/<category>.md`
-  (neutral, NO outer sentinel — never write `AGENTS.md` directly). The deterministic
-  `assemble_rules.py` later merges all fragments into a single managed block in root
-  `AGENTS.md` (idempotent, preserves user content, migrates legacy blocks).
+  EXACTLY: write ONE shipped detail file `<target>/<rules-dir>/<category>.md` (default
+  `<target>/docs/security-controls/<cat>.md`) — an **independent H1 document**, neutral,
+  NO outer sentinel — never write `AGENTS.md` directly. The deterministic
+  `assemble_rules.py` later globs the detail dir and builds a concise **lazy-load index**
+  block in root `AGENTS.md` (idempotent, preserves user content, migrates legacy blocks).
 
 ## Rule body (both formats)
 
@@ -53,10 +54,10 @@ Each rule SHALL:
   implementation → emit **no rule** for it. Such gaps stay in the human-facing
   `report.md` / `init_manifest.json` (full disclosure); the rule body MUST NOT carry
   "design gap / not-found" prose.
-- If **every** control in your category has no source anchor → write **no fragment
+- If **every** control in your category has no source anchor → write **no detail
   file at all** (opencode) / **no rule file** (claude), and STILL touch `done_marker`
   (so `--resume` treats the category as handled). NEVER produce an empty file or a
-  bare `### <Category>` heading with no body — that is noise in the root context.
+  bare `# <Category>` heading with no body — that is noise loaded on demand.
 
 ### Anchor = source, not discovery (hard boundary)
 
@@ -71,9 +72,9 @@ Favor canonical (`role: canonical`) controls as the primary rule; list
 when they carry a source anchor.
 
 ## Non-destructive + 输出纯净性(硬边界)
-- **opencode**: write ONLY the staged fragment `.mgh-init/rules-parts/<category>.md`
-  (no outer sentinel, no direct `AGENTS.md` write). `assemble_rules.py` owns the
-  single managed block + idempotent replace + legacy-block migration. You MUST NOT
+- **opencode**: write ONLY the detail file `<rules-dir>/<category>.md` (independent H1
+  document, no outer sentinel, no direct `AGENTS.md` write). `assemble_rules.py` owns the
+  single index block + idempotent replace + legacy-block migration. You MUST NOT
   emit any `<!-- mgh-init:… -->` sentinel.
 - **claude**: write `.claude/rules/security-<category>.md` directly (idempotent =
   overwrite the file).
@@ -88,7 +89,7 @@ when they carry a source anchor.
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(仅本 category 的 inventory 条目)/ `Glob` / `Grep` 自由。
 - 脚本侧:无(本层产规则文本);确定性脚本(`assemble_rules.py`)由**编排器**调用。
-- `Write`/`Edit`:仅限本 stage 产物(claude:`.claude/rules/security-<cat>.md`;opencode:`.mgh-init/rules-parts/<cat>.md`)。
+- `Write`/`Edit`:仅限本 stage 产物(claude:`.claude/rules/security-<cat>.md`;opencode:`<rules-dir>/<cat>.md` 详述文件)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**禁**直写 `AGENTS.md`/受管块哨兵。**输入产物为终态**——NEVER 用代码变换/重派生。
 
 ## 输出语言
@@ -98,7 +99,7 @@ when they carry a source anchor.
 
 ## Output
 Write EXACTLY the absolute path given by the input field `rule_path` — the rule file
-(claude) or the staged fragment (opencode) — then touch the absolute path given by the
+(claude) or the detail file (opencode) — then touch the absolute path given by the
 input field `done_marker`.
 
 **Hard boundary (`NEVER`)**: NEVER assemble or interpolate a path yourself (no

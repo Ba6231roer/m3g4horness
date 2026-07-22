@@ -5,8 +5,9 @@ Producer: `core/scripts/discover_controls.py` (i1, deterministic, stdlib; emitte
 planner) + audit trail.
 
 > **纯机械抽取,不含语义判定。** skeleton 只回答「这个文件结构长什么样」,**不**回答
-> 「它是不是安全控制」——后者由 LLM scout 层在廉价元数据上判断。覆盖**全部**源文件
-> (含被 regex 预过滤跳过的文件),是 scout 选择「读谁」的全仓地图。
+> 「它是不是安全控制」——后者由 LLM scout 层在廉价元数据上判断。覆盖**全部非点前缀**源文件
+> (含被 regex 预过滤跳过的文件),是 scout 选择「读谁」的全仓地图。点前缀路径默认与候选/
+> 调用图同一 chokepoint 跳过(见 `candidates.md`「文件枚举剪枝」;`--include-dotfiles` 覆盖)。
 
 Top-level shape:
 

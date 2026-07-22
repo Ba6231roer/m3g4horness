@@ -21,7 +21,7 @@ Usage:
   py discover_controls.py --repo <root> --out <dir> [--scope path:<d>|package:<p>|file:<g>]
         [--scope-mode defined|applicable] [--language <l>] [--max-files <N>]
         [--big-file-bytes <N>] [--sample <N>] [--progress-every <N>]
-        [--large-repo-threshold <N>]
+        [--large-repo-threshold <N>] [--include-dotfiles]
 """
 from __future__ import annotations
 import argparse
@@ -248,16 +248,21 @@ def _enclosing_from_index(cls_lines, cls_names, fn_lines, fn_names, line: int):
     return {"class": cls, "method": fn, "kind": kind}
 
 
-def collect_sources(repo: Path, max_files: int):
+def collect_sources(repo: Path, max_files: int, include_dotfiles: bool = False,
+                    dot_skipped: list | None = None):
     """Walk the repo ONCE (FD3); materialize the source list shared by graph + scan.
 
     Returns (files, truncated, scanned). Counting mirrors the old build_call_graph_bounded
-    so `truncated` / `scanned` in the output JSON stay equivalent.
+    so `truncated` / `scanned` in the output JSON stay equivalent. `dot_skipped`, when
+    given, is a 1-element `[0]` list accumulating dot-prefixed source files pruned by the
+    default skip (surfaced as stdout `dotfiles_skipped` for disclosure).
     """
     files: list[tuple[str, str, str]] = []  # (path, lang, rel)
     scanned = 0
     truncated = False
-    for path, lang in walk_sources(repo, limit_files=max_files + 1):
+    for path, lang in walk_sources(repo, limit_files=max_files + 1,
+                                   include_dotfiles=include_dotfiles,
+                                   dot_skipped=dot_skipped):
         scanned += 1
         if scanned > max_files:
             truncated = True
@@ -401,11 +406,16 @@ def scan_candidates(files_data, reverse, seed_files, language: str | None,
 
 
 def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None,
-         progress_every: int = 0, large_repo_threshold: int = 0, outdir=None):
+         progress_every: int = 0, large_repo_threshold: int = 0, outdir=None,
+         include_dotfiles: bool = False, dot_skipped: list | None = None):
     """Single-pass discover (FD3). Public API preserved: returns
     (candidates, forward, reverse, framework_files, truncated, scanned). When `outdir`
-    is given, also writes skeleton.json (D2; lossless metadata for the scout layer)."""
-    files, truncated, scanned = collect_sources(repo, max_files)
+    is given, also writes skeleton.json (D2; lossless metadata for the scout layer).
+    `include_dotfiles` / `dot_skipped` thread the dot-prefix prune (+ its count) into the
+    single walk, so skeleton + candidates + call graph all consistently skip dot paths."""
+    files, truncated, scanned = collect_sources(repo, max_files,
+                                                include_dotfiles=include_dotfiles,
+                                                dot_skipped=dot_skipped)
     if large_repo_threshold and scanned > large_repo_threshold:
         print(f"[discover] large repo: ~{scanned} source files exceed "
               f"--large-repo-threshold ({large_repo_threshold}); for speed consider "
@@ -424,23 +434,23 @@ def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str |
     return candidates, forward, reverse, framework_files, truncated, scanned
 
 
-def resolve_seed(repo: Path, scope: str | None):
+def resolve_seed(repo: Path, scope: str | None, include_dotfiles: bool = False):
     """Return (seed_files:set[rel], scope_note:str). None/empty => whole repo marker []."""
     if not scope:
         return None, "full-repo"
     if scope.startswith("path:"):
         d = repo / scope[5:]
-        return set(collect_dir(repo, d)) if d.is_dir() else set(), scope
+        return set(collect_dir(repo, d, include_dotfiles)) if d.is_dir() else set(), scope
     if scope.startswith("package:"):
         files = set()
         for d in package_to_dirs(repo, scope[8:]):
-            files |= set(collect_dir(repo, d))
+            files |= set(collect_dir(repo, d, include_dotfiles))
         return files, scope
     if scope.startswith("file:"):
         pat = scope[5:]
         import fnmatch
         out = set()
-        for p, _ in walk_sources(repo, limit_files=10**9):
+        for p, _ in walk_sources(repo, limit_files=10**9, include_dotfiles=include_dotfiles):
             rel = p.relative_to(repo).as_posix()
             if fnmatch.fnmatch(rel, pat):
                 out.add(rel)
@@ -587,6 +597,10 @@ def main():
                     help="emit stderr progress every N files (FD4)")
     ap.add_argument("--large-repo-threshold", type=int, default=15000,
                     help="advise --scope + --merge when source-file count exceeds this (FD4)")
+    ap.add_argument("--include-dotfiles", action="store_true",
+                    help="scan dot-prefixed paths (.opencode/.claude/.codegraph/.github/.env); "
+                         "default skips any path component starting with '.' "
+                         "(tooling/VCS/IDE/build/config are non-first-party code)")
     args = ap.parse_args()
     if args.check:
         return _run_check(Path(args.check).resolve())
@@ -598,14 +612,17 @@ def main():
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    seed_files, scope_note = resolve_seed(repo, args.scope)
+    seed_files, scope_note = resolve_seed(repo, args.scope, args.include_dotfiles)
     seed_set = seed_files if seed_files is not None else None
 
+    dot_skipped = [0]
     candidates, forward, reverse, framework_files, truncated, scanned = scan(
         repo, seed_set, args.max_files, args.big_file_bytes, args.language,
         progress_every=args.progress_every,
         large_repo_threshold=args.large_repo_threshold,
-        outdir=args.out)
+        outdir=args.out,
+        include_dotfiles=args.include_dotfiles,
+        dot_skipped=dot_skipped)
 
     # applicable mode: keep only candidates called from a seed file
     out_of_scope = []
@@ -668,6 +685,7 @@ def main():
     print(json.dumps({"candidates": len(candidates), "clusters": len(clusters),
                       "unresolved": len(unresolved), "unresolved_count": len(unresolved),
                       "big_files": big_files,
+                      "dotfiles_skipped": dot_skipped[0],
                       "out_of_scope": len(set(out_of_scope)),
                       "truncated": truncated, "scanned": scanned}))
     return 0

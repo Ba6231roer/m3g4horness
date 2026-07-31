@@ -28,6 +28,12 @@ per-capability drafts (a3 ran in isolated contexts and could not). You reconcile
 每个 `<cap>.md` 覆写为定稿 JSON(同 a3 shape),内容为一致性处理后的版本。**MUST NOT** 改 draft
 的 capability 归属或新增 capability;**MUST NOT** 触碰 `specs/`/`tasks.md`(合并是 a5 的事)。
 
+## 聚合上下文预算(P0 软边界)
+你是**见全部 drafts**的聚合节点(跨 capability 去重 / 消冲突需全局视图)。若编排器信号全部 drafts
+聚合输入超 `--max-aggregate-bytes`(默认 256KB),SHALL **不**强行 bound、**不**阻断——照常做一致性,
+但在编排器 manifest `boundaries[]` 留痕「全部 drafts 聚合超软阈值,建议 `--focus` 收窄维度或分变更评审;
+未硬界」(编排器据 `describe_artifact` 合法出口报聚合量)。分层归约留后续 change,本步为 P0「披露 + 回退」软边界。
+
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(仅 `<drafts_dir>` 下 draft)/ `Glob` / `Grep` 自由。
 - `Write`/`Edit`:仅限 `<drafts_dir>` 下**既有** draft 文件(原地覆写)。

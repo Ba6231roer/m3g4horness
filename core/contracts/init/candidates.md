@@ -64,7 +64,9 @@ A `Candidate` (one control-shaped hit):
 
 ```json
 {"candidates": N, "clusters": M, "unresolved": U, "unresolved_count": U,
- "big_files": K, "dotfiles_skipped": D, "out_of_scope": O, "truncated": false, "scanned": S}
+ "big_files": K, "dotfiles_skipped": D, "out_of_scope": O,
+ "truncated": false, "scanned": S,
+ "partial": false, "resume_hint": "", "cache_hit": false}
 ```
 
 | field | note |
@@ -72,3 +74,4 @@ A `Candidate` (one control-shaped hit):
 | `big_files` | 超 `--big-file-bytes` 的源文件数(T1/scout 切片决策的下游常查量) |
 | `unresolved_count` | `len(unresolved[])`(`unresolved` 的别名,便于直接消费) |
 | `dotfiles_skipped` | 默认剪枝跳过的点前缀**源**文件计数(披露/排查用);`--include-dotfiles` 时为 `0` |
+| `cache_hit` / `partial` / `resume_hint` | 韧性字段(additive):`cache_hit`=本次复用调用图缓存;`partial=true`=在 `--time-budget-ms` 安全边界干净早退(退出码 0,仅落 `cache/`+续点,**不**写最终产物),`resume_hint` 指编排器 Bash 重派 `--resume`。详见 [`discover-cache.md`](discover-cache.md)。 |

@@ -19,10 +19,12 @@ The deterministic regex pass only finds controls whose names collide with a fixe
 Your job: read the code the regex skipped and find the security controls it missed.
 
 ## Input (given by the orchestrator)
-- A `batch` record: `batch_id`, `targets[]` (each a skeleton row: `file`, `pkg`,
-  `classes[]`, `imports[]`, `method_sigs[]`, `fan_in`, `bytes`), and `needs_slice[]`
-  (files > batch budget — for these, call `chunk_sources.py` first and read the slice,
-  NEVER the whole file).
+- `input_path` (absolute, given VERBATIM by the orchestrator) — the per-batch materialized
+  input file (≤ `--max-unit-bytes`). **Read this one file**: it carries the batch's
+  `batch_id` + complete `targets[]` (each a skeleton row: `file`, `pkg`, `classes[]`,
+  `imports[]`, `method_sigs[]`, `fan_in`, `bytes`) + `needs_slice[]`.
+- `needs_slice[]`: files > batch/unit budget — for these, call `chunk_sources.py` first
+  and read the slice, **NEVER the whole file** (semantics unchanged).
 - The repo root (so you can Read / Glob / Grep).
 - `regex_known[]`: controls the regex already found (names/files). Do not re-report these.
 - `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
@@ -65,6 +67,10 @@ codegraph 沦为纯开销)。codegraph 是定位/上下文化工具,不替你判
 codegraph 调用)。
 
 ## Hard rules
+- **Read your `input_path`, not the aggregate.** Your batch's complete `targets[]` +
+  `needs_slice[]` are in the one bounded `input_path` file. **NEVER** `Read`/`cat`/`py -c`
+  the whole `scout_plan.json` (the orchestrator already sank your batch into `input_path`);
+  **NEVER** `py -c`/`python -c` introspection.
 - **Every proposal MUST be grounded**: `evidence_snippet` + `file:line` MUST come from a
   file you actually Read (or sliced via `chunk_sources.py`). No evidence → do not emit.
 - **Every candidate MUST carry a non-empty `category`** (one of the 8 enums in the schema
@@ -85,7 +91,7 @@ codegraph 调用)。
 - No prose outside the JSON. No pasted code > 3 lines.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅本 batch 的 target 文件/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
+- 读侧:`Read`(先读 `input_path`;再读本 batch 的 target 文件/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - 脚本侧:仅 `chunk_sources.py`(且仅当 `needs_slice` 切片大文件);其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件(`checkpoints/scout/<batch_id>.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入 batch 为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。
@@ -113,3 +119,10 @@ Then touch the absolute path given by the input field `done_marker`.
 NEVER write a relative path; NEVER write anywhere outside the project tree (including a
 drive root). Your cwd is NOT assumed — `checkpoint_path` is already absolute precisely so
 it is safe under any working directory. Use the field value verbatim.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**(存活/成功信号,**非数据载体**),取值之一:
+- `ok <绝对 checkpoint_path> <candidate_count>` —— 本批 reader 成功落盘(0 候选也 `ok … 0`);
+- `failed <简短原因>` —— 本批失败。**失败时 touch nothing**(不 touch `done_marker`、不写检查点记录)、**仅回** `failed` ack;编排器据此 `Write` 该单元 `.failed` marker(`<checkpoint_path>.failed`,body `{unit,reason,tier}`)——终态、resume 不重试、不阻断当前波次。crash 无 ack → 编排器无 marker → 该批仍 pending → resume 重派(crash ≠ 确认失败)。
+**NEVER** 回显候选记录体/`unresolved` 全集/源码(那会随 fan-out 单调膨胀编排器上下文)。编排器仅据 ack
+判本批成败 + 探 `.done`/`.failed`,**NEVER** 为继续而把检查点内容内联回上下文。

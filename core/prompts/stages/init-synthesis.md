@@ -26,6 +26,17 @@ code** — only the small structured JSON each T1 produced.
 3. **Dedup** genuine duplicates by `evidence` anchor; **normalize** names.
 4. Emit the final inventory.
 
+## Aggregate context budget (P0 soft boundary)
+You see ALL T1 records (`checkpoints/t1/*.json`) in one context — this is the aggregate
+node of the pipeline. If that aggregate input clearly exceeds `--max-aggregate-bytes`
+(default 256KB) — e.g. hundreds of clusters / many large records — state it back to the
+orchestrator (a one-line note in your output + checkpoint). The orchestrator then advises
+`--scope` + `--merge` (per-module runs) and discloses "aggregate over budget, not
+hard-bounded" in `init_manifest.json::boundaries[]` + `report.md`. **P0 = disclose +
+fallback** (no hard threshold on this aggregate node yet); a layered reduction (per-unit
+summary → group reduction → re-reduction) is a later change. Do NOT silently drop records
+to fit a budget — process them all and flag the size.
+
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(仅 input 给定 T1 记录)/ `Glob` / `Grep` 自由。
 - 脚本侧:无(本层只处理结构化记录);确定性脚本由**编排器**调用。
@@ -46,12 +57,25 @@ inventory 人读字段(`description`/`usage`/`gaps`/`notes`/`competing_clusters[
 (取值 `regex`/`scout`)SHALL 保留为结构标识(供 manifest/审计),不视为人读正文泄漏。
 
 ## Output
-Write `.mgh-init/controls_inventory.json` per `core/contracts/init/inventory.md`:
+Write the **absolute** path the orchestrator gives you for the inventory (it passes
+`<abs target>/.mgh-init/controls_inventory.json` verbatim), per `core/contracts/init/inventory.md`:
 ```json
 {"repo":"...","format":"<from --format>","controls":[<T1 record + role + cluster_id>, ...],
  "competing_clusters":[{"cluster_id":"...","canonical":"<name>","members":["<name>",...]}]}
 ```
-Then touch `.mgh-init/checkpoints/t2/synthesis.json.done`.
+Then touch the absolute `.done` path the orchestrator gives you
+(`<abs target>/.mgh-init/checkpoints/t2/synthesis.json.done`).
+
+**Hard boundary (`NEVER`)**: NEVER assemble/interpolate a path (no `<target>` substitution);
+NEVER write a relative path; use the orchestrator-given absolute path verbatim.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**(存活/成功信号,**非数据载体**),取值之一:
+- `ok <绝对 controls_inventory.json> <total_controls> <competing_groups>` —— 聚合成功;
+- `oversize <绝对 path>` —— 聚合输入超 `--max-aggregate-bytes`(编排器转 map-reduce);
+- `failed <简短原因>` —— 综合失败。
+**NEVER** 回显 inventory 记录体/T1 记录/源码(那会随 fan-out 单调膨胀编排器上下文)。编排器仅据 ack
+判成败 + 探 `.done`;经 `resume_state.py`/`describe_artifact.py` 取有界摘要,**NEVER** 整份读回本检查点。
 
 ## Hard rules
 - Operate only on structured records; if a record is missing evidence, keep it

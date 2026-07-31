@@ -14,10 +14,12 @@ Signal extraction + candidate-control derivation are reused from prepare_augment
 
 CLI contract (`--help` is the contract surface, R5.1):
   py ingest_requirements.py --doc <path|dir|-> [--text <str>] [--rules <path>]
-                            [--focus <inline-json|path>] [--split] [--out <dir>]
+                            [--focus <inline-json|path>] [--sensitive-catalog <inline-json|@path|->]
+                            [--split] [--out <dir>] [--materialize <inputs-dir>]
+                            [--offset N] [--limit N] [--max-unit-bytes B] [--orch-budget-bytes B]
                             [--dry-run] [--no-interactive]
   py ingest_requirements.py --text <str> [--rules <path>] [--focus <inline-json|path>]
-                            [--out <dir>] [--dry-run]
+                            [--out <dir>] [--materialize <inputs-dir>] [--dry-run]
   py ingest_requirements.py --check <change_context.json>
 
   --doc <path|dir|->   input: a .txt/.md/.csv/.json/.docx/.xlsx FILE, a DIR (scans
@@ -48,6 +50,19 @@ CLI contract (`--help` is the contract surface, R5.1):
   --split              split by markdown `#`/`##` headings into multiple pending[] units
                        (fan-out = script enumeration; default = one unit = whole doc)
   --out <dir>          output dir (default: <project>/.mgh-srr)
+  --materialize <dir>  write each unit's COMPLETE input to <dir>/<unit>.input.json and emit
+                       a SLIM paged stdout (pending[] carries input_path/bytes/oversize, no
+                       requirement bodies); the orchestrator passes input_path to the reused
+                       sra engine stage, which reads its own bounded file. The full sra-shape
+                       change_context.json is still written under <out>/ (stage consumers).
+                       Omit = backward-compat full change_context on stdout (legacy/debug).
+  --offset N           page offset into the not-done pending[] (default 0)
+  --limit N            max pending items per page (default: all not-done)
+  --max-unit-bytes B   per-unit input byte cap (default 192KB). A unit over the cap is flagged
+                       oversize:true + a recipe (--split finer headings / narrow the doc); the
+                       unit is the review atom and is NEVER sharded.
+  --orch-budget-bytes B  orchestrator single-request page byte cap (default 64KB). A page over
+                       the cap is auto-tightened; stdout reports effective_limit + shrunk:true.
   --dry-run            produce change_context.json + stdout summary only (orchestrator
                        skips the render/memory steps; flag echoed for the orchestrator)
   --no-interactive     clarification uses default guesses (flag echoed for orchestrator)
@@ -58,9 +73,16 @@ CLI contract (`--help` is the contract surface, R5.1):
                        present + sensitive_catalog field shape if present); exit 2 on
                        violation.
 
-stdout (structured JSON; stderr = diagnostics/progress only, R5.3b): the full
-`change_context.json` object (the orchestrator reads `pending[]` / `clarify_path` /
-`candidate_controls` / `memory` from it; see core/contracts/srr/intake-report.md).
+stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
+  - default (no --materialize): the full `change_context.json` object (legacy/debug; the
+    orchestrator reads `pending[]` / `clarify_path` / `candidate_controls` / `memory` from it).
+  - with --materialize: a SLIM paged envelope — {change, change_root, project_root,
+    clarify_path, memory_source, rules_source, degraded, focus, sensitive_catalog, dry_run,
+    total, done, pending[<slim: capability/draft_path/done_marker/input_path/bytes/oversize>],
+    offset, limit, effective_limit, shrunk, requirements_count, candidate_controls_count,
+    has_memory}. The orchestrator NEVER loads the whole change_context.json; it pages pending[]
+    and passes each input_path to the reused sra engine stage.
+The full sra-shape change_context.json is always written to <out>/change_context.json on disk.
 In --check mode stdout = {"check":"srr-intake","ok":bool,"violations":[...]}.
 
 Exit codes (R5.3b): 0 ok · 1 file missing / unreadable / JSON malformed ·
@@ -91,6 +113,44 @@ _S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _HEADING_RX = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 _SPLIT_RX = re.compile(r"^(#{1,2})\s+(.+?)\s*$", re.MULTILINE)
 _SAFE_NAME_RX = re.compile(r"[^A-Za-z0-9_-]+")
+
+# Per-request context budgets (request-context-budget; bytes = conservative token upper bound).
+DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — per-unit materialized input cap
+DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
+
+
+def _parse_bytes(label: str, raw) -> int:
+    """Non-negative integer byte budget; returns -1 sentinel on misuse (caller exit 2)."""
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        print(f"error: {label} must be a non-negative integer (got {raw!r})", file=sys.stderr)
+        return -1
+    if v < 0:
+        print(f"error: {label} must be >= 0 (got {v})", file=sys.stderr)
+        return -1
+    return v
+
+
+def _byte_len(obj) -> int:
+    return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+
+def _safe_unit_name(name: str) -> str:
+    """Filesystem-safe input filename for a unit. Unit/cap names are already `_SAFE_NAME_RX`-
+    safe, but `::` (NTFS ADS separator) is belt-and-suspenders guarded here too."""
+    return name.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
+def _shrink_page(page: list, orch_budget: int):
+    """Tighten a page so its serialized bytes <= orch_budget (keep >=1 item). Returns
+    (page, effective_limit, shrunk)."""
+    if orch_budget <= 0 or not page:
+        return page, len(page), False
+    eff = len(page)
+    while eff > 1 and _byte_len(page[:eff]) > orch_budget:
+        eff -= 1
+    return page[:eff], eff, eff < len(page)
 
 
 def _find_project_root(start: Path):
@@ -367,25 +427,52 @@ def _candidate_controls(args, files):
     return _sra._candidate_controls(inv, files), str(inv_path)
 
 
+def _unit_input(cap_name, reqs, candidate_controls, memory):
+    """A unit's COMPLETE input record for the reused sra engine stage (per-capability
+    augment). Body = the unit's requirements (heading+body) + per-unit-extracted business
+    surface + the doc-wide candidate_controls + shared memory. Bounded by --max-unit-bytes
+    (oversize → flag + recipe, never sharded: the unit is the review atom)."""
+    body = "\n\n".join(b for _, b in reqs)
+    sens, roles, files, endpoints = _sra._extract_signals(body)
+    return {
+        "capability": cap_name,
+        "requirements": [{"heading": h, "body": b} for h, b in reqs],
+        "endpoints": endpoints,
+        "data_fields": sens,
+        "role_hints": roles,
+        "mentioned_files": files,
+        "candidate_controls": candidate_controls,
+        "memory": memory,
+    }
+
+
+def _write_unit_input(inputs_dir: Path, cap_name: str, inp: dict):
+    """Write `<inputs_dir>/<unit>.input.json` (idempotent overwrite); return (abs path, bytes)."""
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    path = (inputs_dir / f"{_safe_unit_name(cap_name)}.input.json").resolve()
+    path.write_text(json.dumps(inp, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path), path.stat().st_size
+
+
 def _emit_change_context(args, text, doc_name, degraded):
     project_root = _find_project_root(Path.cwd())
     out_dir = Path(args.out).resolve() if args.out else (project_root / ".mgh-srr")
     drafts_dir = out_dir / "drafts"
+    materialize = bool(args.materialize)
+    inputs_dir = Path(args.materialize).resolve() if materialize else None
+    max_unit_bytes = args.max_unit_bytes
+    if materialize:
+        # inputs MUST land inside the run-domain subtree (hook判树); fail-loud otherwise.
+        try:
+            if not inputs_dir.resolve().is_relative_to(project_root.resolve()):
+                print(f"error: --materialize dir outside project subtree: {inputs_dir}",
+                      file=sys.stderr)
+                sys.exit(2)
+        except (OSError, ValueError) as e:
+            print(f"error: --materialize dir unresolvable: {inputs_dir}: {e}", file=sys.stderr)
+            sys.exit(2)
 
-    units = _units_from_text(text, doc_name, args.split)
-    capabilities, requirements, pending = [], [], []
-    for cap_name, reqs in units:
-        capabilities.append({"name": cap_name, "requirements": [h for h, _ in reqs]})
-        for h, body in reqs:
-            requirements.append({"capability": cap_name, "heading": h, "body": body})
-        draft_path = (drafts_dir / f"{_SAFE_NAME_RX.sub('-', cap_name).strip('-') or 'unit'}.md").resolve()
-        pending.append({
-            "capability": cap_name,
-            "draft_path": str(draft_path),
-            "done_marker": str(draft_path.with_name(draft_path.name + ".done")),
-        })
-
-    # non-load-bearing hints (reused sra mechanical extractor)
+    # non-load-bearing hints (reused sra mechanical extractor) — computed once, doc-wide.
     sens, roles, files, endpoints = _sra._extract_signals(text)
     candidate_controls, rules_source = _candidate_controls(args, files)
 
@@ -403,6 +490,33 @@ def _emit_change_context(args, text, doc_name, degraded):
             memory = m if isinstance(m, dict) else None
         except (OSError, ValueError):
             memory = None
+
+    units = _units_from_text(text, doc_name, args.split)
+    capabilities, requirements, pending = [], [], []
+    oversize_count = 0
+    for cap_name, reqs in units:
+        capabilities.append({"name": cap_name, "requirements": [h for h, _ in reqs]})
+        for h, body in reqs:
+            requirements.append({"capability": cap_name, "heading": h, "body": body})
+        draft_path = (drafts_dir / f"{_SAFE_NAME_RX.sub('-', cap_name).strip('-') or 'unit'}.md").resolve()
+        item = {
+            "capability": cap_name,
+            "draft_path": str(draft_path),
+            "done_marker": str(draft_path.with_name(draft_path.name + ".done")),
+        }
+        if materialize:
+            inp = _unit_input(cap_name, reqs, candidate_controls, memory)
+            input_path, nbytes = _write_unit_input(inputs_dir, cap_name, inp)
+            oversize = nbytes > max_unit_bytes
+            if oversize:
+                oversize_count += 1
+                print(f"warn: unit {cap_name} input ({nbytes}B > {max_unit_bytes}B) -> oversize; "
+                      f"recipe: --split finer headings / narrow the doc (unit not sharded)",
+                      file=sys.stderr)
+            item["input_path"] = input_path
+            item["bytes"] = nbytes
+            item["oversize"] = oversize
+        pending.append(item)
 
     change_context = {
         "change": doc_name,
@@ -428,11 +542,13 @@ def _emit_change_context(args, text, doc_name, degraded):
         "sensitive_catalog": catalog,
     }
 
-    # structural invariant: pending draft paths under the project subtree (hook判树)
+    # structural invariant: pending draft + input paths under the project subtree (hook判树)
     bad = [p["draft_path"] for p in pending
            if not Path(p["draft_path"]).resolve().is_relative_to(project_root.resolve())]
+    bad += [p["input_path"] for p in pending if p.get("input_path")
+            and not Path(p["input_path"]).resolve().is_relative_to(project_root.resolve())]
     if bad:
-        print(f"error: draft path drifted outside the project subtree: {bad}", file=sys.stderr)
+        print(f"error: path drifted outside the project subtree: {bad}", file=sys.stderr)
         sys.exit(2)
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -445,12 +561,51 @@ def _emit_change_context(args, text, doc_name, degraded):
                           if focus['facets'] else ")"))
     catalog_desc = ("none" if catalog is None
                     else f"{catalog['counts']['items']}items({catalog['counts']['categories']}cat)")
+
+    if not materialize:
+        # backward-compat: full change_context on stdout (legacy/debug path, behavior unchanged)
+        print(f"[ingest_requirements] doc={doc_name} units={len(units)} reqs={len(requirements)} "
+              f"endpoints={len(endpoints)} sens_fields={len(sens)} candidate_controls="
+              f"{len(candidate_controls)} memory={'yes' if memory else 'no'} "
+              f"focus={focus_desc} catalog={catalog_desc} degraded={degraded or 'no'} "
+              f"-> {out_dir / 'change_context.json'}", file=sys.stderr)
+        return change_context
+
+    # SLIM paged envelope: orchestrator NEVER loads the whole change_context.json.
+    done = sum(1 for p in pending if Path(p["done_marker"]).is_file())
+    live = [p for p in pending if not Path(p["done_marker"]).is_file()]
+    req_limit = args.limit if args.limit is not None else len(live)
+    page = live[args.offset: args.offset + max(0, req_limit)]
+    page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)
+    slim = {
+        "change": doc_name,
+        "change_root": str(out_dir),
+        "project_root": str(project_root),
+        "clarify_path": change_context["clarify_path"],
+        "memory_source": change_context["memory_source"],
+        "rules_source": rules_source,
+        "degraded": degraded,
+        "focus": focus,
+        "sensitive_catalog": catalog,
+        "dry_run": bool(args.dry_run),
+        "total": len(pending),
+        "done": done,
+        "pending": page,
+        "offset": args.offset,
+        "limit": req_limit,
+        "effective_limit": eff,
+        "shrunk": shrunk,
+        "requirements_count": len(requirements),
+        "candidate_controls_count": len(candidate_controls),
+        "has_memory": memory is not None,
+    }
     print(f"[ingest_requirements] doc={doc_name} units={len(units)} reqs={len(requirements)} "
-          f"endpoints={len(endpoints)} sens_fields={len(sens)} candidate_controls="
-          f"{len(candidate_controls)} memory={'yes' if memory else 'no'} "
+          f"candidate_controls={len(candidate_controls)} memory={'yes' if memory else 'no'} "
           f"focus={focus_desc} catalog={catalog_desc} degraded={degraded or 'no'} "
+          f"oversize={oversize_count} pending={len(live)} done={done} "
+          f"page offset={args.offset} eff={eff} shrunk={shrunk} "
           f"-> {out_dir / 'change_context.json'}", file=sys.stderr)
-    return change_context
+    return slim
 
 
 def _run_check(path_arg: str):
@@ -492,6 +647,21 @@ def _run_check(path_arg: str):
                         violations.append(f"draft_path outside project subtree: {dp}")
                 except (OSError, ValueError):
                     violations.append(f"draft_path unresolvable: {dp}")
+                # materialized fields (additive — only when the intake ran with --materialize)
+                ip = item.get("input_path")
+                if ip is not None:
+                    try:
+                        rip = Path(ip).resolve()
+                        if not rip.is_absolute():
+                            violations.append(f"input_path not absolute: {ip}")
+                        elif pr and not rip.is_relative_to(Path(pr).resolve()):
+                            violations.append(f"input_path outside project subtree: {ip}")
+                    except (OSError, ValueError):
+                        violations.append(f"input_path unresolvable: {ip}")
+                    if not isinstance(item.get("bytes"), int):
+                        violations.append("pending item has input_path but bytes missing/not int")
+                    if not isinstance(item.get("oversize"), bool):
+                        violations.append("pending item has input_path but oversize missing/not bool")
         deg = ctx.get("degraded", [])
         if not isinstance(deg, list) or not all(isinstance(x, str) for x in deg):
             violations.append("degraded must be a list of strings")
@@ -533,6 +703,19 @@ def main():
     ap.add_argument("--split", action="store_true",
                     help="split by markdown # / ## headings into multiple pending[] units")
     ap.add_argument("--out", help="output dir (default: <project>/.mgh-srr)")
+    ap.add_argument("--materialize", metavar="<inputs-dir>",
+                    help="write each unit's complete input to <dir>/<unit>.input.json and emit a "
+                         "slim paged stdout (input_path/bytes/oversize; backward-compat full "
+                         "stdout if omitted)")
+    ap.add_argument("--offset", type=int, default=0, help="page offset (default 0)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="max pending items per page (default: all not-done)")
+    ap.add_argument("--max-unit-bytes", type=int, default=DEFAULT_MAX_UNIT_BYTES,
+                    help=f"per-unit input byte cap (default {DEFAULT_MAX_UNIT_BYTES}; "
+                         f"oversize unit flagged + recipe, not sharded)")
+    ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES,
+                    help=f"orchestrator single-request page byte cap (default "
+                         f"{DEFAULT_ORCH_BUDGET_BYTES}; page auto-tightened + shrunk:true)")
     ap.add_argument("--dry-run", action="store_true",
                     help="produce change_context.json + summary only (orchestrator skips render/memory)")
     ap.add_argument("--no-interactive", action="store_true",
@@ -540,6 +723,14 @@ def main():
     ap.add_argument("--check", metavar="PATH", default=None,
                     help="intake validation only: validate change_context.json at PATH")
     args = ap.parse_args()
+
+    if args.offset < 0:
+        print("error: --offset must be >= 0", file=sys.stderr)
+        return 2
+    for label, raw in (("--max-unit-bytes", args.max_unit_bytes),
+                       ("--orch-budget-bytes", args.orch_budget_bytes)):
+        if _parse_bytes(label, raw) < 0:
+            return 2
 
     if args.check is not None:
         if not args.check.strip():

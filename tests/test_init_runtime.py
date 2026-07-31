@@ -199,6 +199,47 @@ class TestNewScriptsStandalone(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["total"], 1)
 
+    # --- re-entrant resume + aggregate-sharding leaves (context-resilience) ---
+
+    def test_resume_state_help_is_contract(self):
+        r = self._run(SCRIPTS / "resume_state.py", "--help")
+        self.assertEqual(r.returncode, 0)
+        for f in ("--target", "--init-dir", "--check"):
+            self.assertIn(f, r.stdout)
+
+    def test_resume_state_runs_from_non_script_cwd(self):
+        # build a run_config via write_runconfig, then derive step purely from disk
+        target = self.cwd / "proj"
+        (target / ".mgh-init").mkdir(parents=True)
+        r = self._run(SCRIPTS / "write_runconfig.py", "--target", str(target),
+                      "--format", "opencode", "--no-scout")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self._run(SCRIPTS / "resume_state.py", "--target", str(target))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["step"], "discover")
+
+    def test_plan_aggregate_help_is_contract(self):
+        r = self._run(SCRIPTS / "plan_aggregate.py", "--help")
+        self.assertEqual(r.returncode, 0)
+        for f in ("--node", "--init-dir", "--budget", "--materialize"):
+            self.assertIn(f, r.stdout)
+
+    def test_plan_aggregate_under_budget_from_non_script_cwd(self):
+        init = self.cwd / ".mgh-init"
+        (init / "checkpoints" / "t1").mkdir(parents=True)
+        (init / "checkpoints" / "t1" / "u.json").write_text(
+            '{"category":"crypto","name":"a"}', encoding="utf-8")
+        r = self._run(SCRIPTS / "plan_aggregate.py", "--node", "t2",
+                      "--init-dir", str(init), "--budget", "100000")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(json.loads(r.stdout)["needs_reduce"])
+
+    def test_write_runconfig_help_is_contract(self):
+        r = self._run(SCRIPTS / "write_runconfig.py", "--help")
+        self.assertEqual(r.returncode, 0)
+        for f in ("--target", "--format", "--no-scout", "--merge"):
+            self.assertIn(f, r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

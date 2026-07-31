@@ -15,21 +15,35 @@ Produces:
 Pipeline: walk sources ONCE (materialized) -> read each file ONCE (cached) ->
 regex scan per category -> enclosing anchor (precomputed nodes + bisect) ->
 reverse-graph wiring (entry_points) -> cluster formation. Single-pass I/O keeps
-multi-tens-of-thousands-of-files repos within the host timeout (FD3).
+multi-tens-of-thousands-of-files repos within the host timeout.
+
+Resilience (host-shell timeout safety): discover no longer assumes a single host
+call finishes. A built call graph is cached under <out>/cache/ and reused across
+runs (mtime/size freshness); scanning checkpoints <out>/cache/scan_progress.json
+every --progress-every files so --resume continues without rescanning; with
+--time-budget-ms set, discover stops at a safe boundary, writes cache + checkpoint,
+and exits 0 with stdout `partial:true` + `resume_hint` (the orchestrator re-dispatches
+--resume). All product JSON is written atomically (.tmp + os.replace) so a SIGKILL
+mid-write leaves no truncated artifact. Cache/resume/budget are additive; default
+behavior (budget 0 = off, no cache yet = rebuild) is byte-equivalent to before.
 
 Usage:
   py discover_controls.py --repo <root> --out <dir> [--scope path:<d>|package:<p>|file:<g>]
         [--scope-mode defined|applicable] [--language <l>] [--max-files <N>]
         [--big-file-bytes <N>] [--sample <N>] [--progress-every <N>]
         [--large-repo-threshold <N>] [--include-dotfiles]
+        [--time-budget-ms <N>] [--rebuild-cache] [--resume]
+  py discover_controls.py --check <out-dir>
 """
 from __future__ import annotations
 import argparse
 import bisect
 import hashlib
 import json
+import os
 import re
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -256,6 +270,11 @@ def collect_sources(repo: Path, max_files: int, include_dotfiles: bool = False,
     so `truncated` / `scanned` in the output JSON stay equivalent. `dot_skipped`, when
     given, is a 1-element `[0]` list accumulating dot-prefixed source files pruned by the
     default skip (surfaced as stdout `dotfiles_skipped` for disclosure).
+
+    The materialized list is sorted by `rel` (repo-relative posix path) so the scan order
+    — and therefore `cache/scan_progress.json::scanned_index` — is reproducible across
+    runs regardless of the host filesystem's `rglob` ordering. The candidate SET is
+    order-independent (per-file scan); only the resume index benefits from determinism.
     """
     files: list[tuple[str, str, str]] = []  # (path, lang, rel)
     scanned = 0
@@ -268,12 +287,14 @@ def collect_sources(repo: Path, max_files: int, include_dotfiles: bool = False,
             truncated = True
             break
         files.append((path, lang, path.relative_to(repo).as_posix()))
+    files.sort(key=lambda t: t[2])  # stable rel order -> reproducible scanned_index
     return files, truncated, scanned
 
 
 def index_files(files, big_bytes: int):
-    """Read each file ONCE (FD3); cache text + splitlines + big flag + skeleton meta
-    (D2: pkg/classes/method_sigs/imports/bytes). Unreadable files are dropped."""
+    """Read each file ONCE; cache text + splitlines + big flag + skeleton meta
+    (D2: pkg/classes/method_sigs/imports/bytes) + mtime (cache freshness). Unreadable
+    files are dropped."""
     out = []
     for path, lang, rel in files:
         try:
@@ -281,13 +302,16 @@ def index_files(files, big_bytes: int):
         except OSError:
             continue
         try:
-            size = path.stat().st_size
+            st = path.stat()
+            size = st.st_size
+            mtime = int(st.st_mtime)
         except OSError:
             size = len(text.encode("utf-8", errors="replace"))
+            mtime = 0
         pkg, classes, method_sigs, imports = _extract_meta(text, lang, rel)
         out.append({"rel": rel, "lang": lang, "text": text,
                     "lines": text.splitlines(), "big": size > big_bytes,
-                    "bytes": size, "pkg": pkg, "classes": classes,
+                    "bytes": size, "mtime": mtime, "pkg": pkg, "classes": classes,
                     "method_sigs": method_sigs, "imports": imports})
     return out
 
@@ -358,23 +382,36 @@ def build_call_graph(files_data, progress_every: int = 0):
 
 
 def scan_candidates(files_data, reverse, seed_files, language: str | None,
-                    progress_every: int = 0):
-    """Yield candidate dicts from CACHED texts (FD3): one splitlines per file,
-    one node index per file, O(log n) enclosing per candidate."""
-    candidates = []
-    cid = 0
+                    progress_every: int = 0, start_i: int = 0,
+                    prior_candidates=None, start_cid: int = 0,
+                    deadline=None, outdir=None, manifest=None):
+    """Scan CACHED texts: one splitlines + one node index per file, O(log n) enclosing.
+
+    Resilience: resumes from `start_i` appending to `prior_candidates` (candidate ids
+    continue from `start_cid`); at each `--progress-every` boundary writes a scan
+    checkpoint `<out>/cache/scan_progress.json`, and if `deadline` has passed stops
+    early (partial=True) at that safe boundary. Returns (candidates, partial)."""
+    candidates = list(prior_candidates) if prior_candidates else []
+    cid = start_cid
     n = len(files_data)
-    for i, fd in enumerate(files_data):
+    partial = False
+    for i in range(start_i, n):
         if progress_every and i and i % progress_every == 0:
             print(f"[discover] scanned {i}/{n} files, {len(candidates)} candidates",
                   file=sys.stderr)
+            if outdir is not None and manifest is not None:
+                _write_scan_progress(outdir, i, candidates, manifest)
+            if deadline is not None and time.monotonic() >= deadline:
+                partial = True
+                break
+        fd = files_data[i]
         rel, lang, text, lines = fd["rel"], fd["lang"], fd["text"], fd["lines"]
         if language and lang != language:
             continue
         if seed_files is not None and rel not in seed_files:
             continue
         if not _QUICK_RX.search(text):
-            continue  # FD3 pre-filter: no security marker → cannot yield a candidate
+            continue  # pre-filter: no security marker → cannot yield a candidate
         cls_lines, cls_names, fn_lines, fn_names = _node_index(text, lang)
         n_lines = len(lines)
         for cat, rxs in COMPILED.items():
@@ -402,17 +439,119 @@ def scan_candidates(files_data, reverse, seed_files, language: str | None,
                         "big_file": fd["big"],
                         "source": "regex",
                     })
-    return candidates
+    if outdir is not None and manifest is not None and not partial:
+        # final checkpoint at completion -> a later --resume is an idempotent no-op
+        _write_scan_progress(outdir, n, candidates, manifest)
+    return candidates, partial
 
 
-def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None,
-         progress_every: int = 0, large_repo_threshold: int = 0, outdir=None,
-         include_dotfiles: bool = False, dot_skipped: list | None = None):
-    """Single-pass discover (FD3). Public API preserved: returns
-    (candidates, forward, reverse, framework_files, truncated, scanned). When `outdir`
-    is given, also writes skeleton.json (D2; lossless metadata for the scout layer).
-    `include_dotfiles` / `dot_skipped` thread the dot-prefix prune (+ its count) into the
-    single walk, so skeleton + candidates + call graph all consistently skip dot paths."""
+CACHE_DIRNAME = "cache"
+
+
+def _atomic_write_json(path, obj):
+    """Write `<path>.tmp` then `os.replace` (atomic on POSIX & same-volume Windows).
+
+    A SIGKILL mid-write leaves at most a stale `.tmp` (overwritten next run), never a
+    truncated/half-written JSON — so `--check` and downstream `json.loads` never read a
+    broken artifact. Python stdlib only (`os.replace` / `pathlib`)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _build_manifest(files_data):
+    """Cache-freshness snapshot: per-source (rel, mtime, size), sorted by rel.
+
+    Two runs over an unchanged repo produce an identical list, so byte-equality is the
+    cache hit/miss signal. mtime granularity is filesystem-dependent (coarser on some
+    Windows FS) but acceptable; `--rebuild-cache` is the force-override escape hatch."""
+    out = [{"rel": fd["rel"], "mtime": fd.get("mtime", 0),
+            "size": fd.get("bytes", 0)} for fd in files_data]
+    out.sort(key=lambda e: e["rel"])
+    return out
+
+
+def _try_load_callgraph_cache(outdir, manifest):
+    """Return (forward, reverse, framework_files) if a fresh cache exists, else None.
+
+    Fresh = the cached `manifest.json` is byte-equal to the current source snapshot. A
+    changed/missing cache (or unreadable JSON) yields None, so the caller rebuilds."""
+    if outdir is None or manifest is None:
+        return None
+    cdir = Path(outdir) / CACHE_DIRNAME
+    cg_path = cdir / "callgraph.json"
+    mf_path = cdir / "manifest.json"
+    if not (cg_path.is_file() and mf_path.is_file()):
+        return None
+    try:
+        graph = json.loads(cg_path.read_text(encoding="utf-8"))
+        cached_manifest = json.loads(mf_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if cached_manifest != manifest:
+        return None  # stale: a source changed (mtime/size) -> rebuild
+    reverse = {k: set(v) for k, v in graph.get("reverse", {}).items()}
+    framework_files = set(graph.get("framework_files", []))
+    forward = graph.get("forward", {})
+    return forward, reverse, framework_files
+
+
+def _write_callgraph_cache(outdir, forward, reverse, framework_files, manifest):
+    """Atomically persist the call graph + manifest so a re-run can skip the two passes."""
+    if outdir is None:
+        return
+    graph = {"forward": {k: dict(v) for k, v in forward.items()},
+             "reverse": {k: sorted(v) for k, v in reverse.items()},
+             "framework_files": sorted(framework_files)}
+    _atomic_write_json(Path(outdir) / CACHE_DIRNAME / "callgraph.json", graph)
+    _atomic_write_json(Path(outdir) / CACHE_DIRNAME / "manifest.json", manifest)
+
+
+def _try_load_scan_progress(outdir, manifest):
+    """Return {scanned_index, candidates} if a fresh scan checkpoint exists, else None.
+
+    Fresh = the checkpoint's stored manifest is byte-equal to the current source
+    snapshot (so a checkpoint from a changed repo is ignored, not blindly trusted)."""
+    if outdir is None or manifest is None:
+        return None
+    sp_path = Path(outdir) / CACHE_DIRNAME / "scan_progress.json"
+    if not sp_path.is_file():
+        return None
+    try:
+        sp = json.loads(sp_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if sp.get("manifest") != manifest:
+        return None  # checkpoint belongs to a different source set -> ignore
+    return sp
+
+
+def _write_scan_progress(outdir, scanned_index, candidates, manifest):
+    if outdir is None or manifest is None:
+        return
+    _atomic_write_json(Path(outdir) / CACHE_DIRNAME / "scan_progress.json",
+                       {"scanned_index": scanned_index, "candidates": candidates,
+                        "manifest": manifest})
+
+
+def run_discover(repo: Path, seed_files, max_files: int, big_bytes: int,
+                 language: str | None, progress_every: int = 0,
+                 large_repo_threshold: int = 0, outdir=None,
+                 include_dotfiles: bool = False, dot_skipped: list | None = None,
+                 time_budget_ms: int = 0, rebuild_cache: bool = False,
+                 resume: bool = False, write_cache: bool = True):
+    """Resilient discover pipeline. Returns a dict:
+      candidates, forward, reverse, framework_files, truncated, scanned,
+      partial, resume_hint, cache_hit.
+
+    Cache / resume / soft-budget are inert unless `write_cache` is True and the
+    corresponding knob is set. `scan()` calls this with `write_cache=False` for
+    byte-equivalent legacy behavior (always rebuild, full single run, partial=False).
+    On a partial exit only `cache/` + `scan_progress.json` land on disk; the final
+    products (controls_candidates/clusters/skeleton) are written by `main()` only on a
+    complete run, so a partial never leaves a truncated artifact."""
     files, truncated, scanned = collect_sources(repo, max_files,
                                                 include_dotfiles=include_dotfiles,
                                                 dot_skipped=dot_skipped)
@@ -421,17 +560,84 @@ def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str |
               f"--large-repo-threshold ({large_repo_threshold}); for speed consider "
               f"--scope path:<module> + --merge", file=sys.stderr)
     files_data = index_files(files, big_bytes)
-    forward, reverse, framework_files = build_call_graph(files_data, progress_every)
-    candidates = scan_candidates(files_data, reverse, seed_files, language, progress_every)
-    if outdir is not None:
+    manifest = _build_manifest(files_data) if write_cache else None
+
+    deadline = (time.monotonic() + time_budget_ms / 1000.0) if time_budget_ms else None
+
+    # call graph: cache load or rebuild (cache hit skips the two regex passes)
+    cache_hit = False
+    loaded = None
+    if write_cache and not rebuild_cache:
+        loaded = _try_load_callgraph_cache(outdir, manifest)
+    if loaded is not None:
+        forward, reverse, framework_files = loaded
+        cache_hit = True
+        print("[discover] callgraph cache hit; skipping two-pass rebuild", file=sys.stderr)
+    else:
+        forward, reverse, framework_files = build_call_graph(files_data, progress_every)
+        if write_cache:
+            _write_callgraph_cache(outdir, forward, reverse, framework_files, manifest)
+
+    partial = False
+    resume_hint = ""
+    candidates = []  # set by scan_candidates unless the budget trips at the callgraph boundary
+
+    # safe boundary 1: call graph built (+ cached). Budget exceeded here → no scan yet.
+    if deadline is not None and time.monotonic() >= deadline:
+        # Preserve any existing fresh checkpoint — do NOT clobber prior scan progress.
+        # (On a huge repo, loading the callgraph cache can itself eat the budget on a
+        # --resume call; wiping the checkpoint to (0, []) would lose all prior progress.)
+        if write_cache and _try_load_scan_progress(outdir, manifest) is None:
+            _write_scan_progress(outdir, 0, [], manifest)
+        partial = True
+        resume_hint = ("callgraph built + cached; re-dispatch with --resume "
+                       "(or raise --time-budget-ms) to scan candidates")
+    else:
+        start_i, prior, start_cid = 0, None, 0
+        if resume and write_cache and cache_hit:
+            sp = _try_load_scan_progress(outdir, manifest)
+            if sp is not None:
+                start_i = sp["scanned_index"]
+                prior = sp["candidates"]
+                start_cid = len(prior)
+                print(f"[discover] resuming scan from file {start_i}/{len(files_data)} "
+                      f"({start_cid} prior candidates)", file=sys.stderr)
+        candidates, partial = scan_candidates(
+            files_data, reverse, seed_files, language, progress_every,
+            start_i=start_i, prior_candidates=prior, start_cid=start_cid,
+            deadline=deadline, outdir=outdir if write_cache else None, manifest=manifest)
+        if partial:
+            resume_hint = ("scan incomplete within --time-budget-ms; re-dispatch with "
+                           "--resume to continue from the checkpoint")
+
+    # skeleton on complete runs only (partial leaves only cache/ + checkpoint)
+    if outdir is not None and not partial:
         cand_files = {c["file"] for c in candidates}
         skeleton = build_skeleton(files_data, reverse, cand_files)
-        (Path(outdir) / "skeleton.json").write_text(
-            json.dumps({"repo": str(repo), "generated_by": "discover_controls.py",
-                        "files": skeleton}, indent=2, ensure_ascii=False),
-            encoding="utf-8")
+        _atomic_write_json(Path(outdir) / "skeleton.json",
+                           {"repo": str(repo), "generated_by": "discover_controls.py",
+                            "files": skeleton})
         print(f"[discover] skeleton.json: {len(skeleton)} files", file=sys.stderr)
-    return candidates, forward, reverse, framework_files, truncated, scanned
+
+    return {"candidates": candidates, "forward": forward, "reverse": reverse,
+            "framework_files": framework_files, "truncated": truncated,
+            "scanned": scanned, "partial": partial, "resume_hint": resume_hint,
+            "cache_hit": cache_hit}
+
+
+def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None,
+         progress_every: int = 0, large_repo_threshold: int = 0, outdir=None,
+         include_dotfiles: bool = False, dot_skipped: list | None = None):
+    """Legacy single-pass discover API: returns the 6-tuple
+    (candidates, forward, reverse, framework_files, truncated, scanned).
+
+    Delegates to run_discover(write_cache=False) — no cache/resume/budget, always a full
+    rebuild in one call (byte-equivalent behavior). Kept for direct callers / tests."""
+    r = run_discover(repo, seed_files, max_files, big_bytes, language, progress_every,
+                     large_repo_threshold, outdir, include_dotfiles, dot_skipped,
+                     write_cache=False)
+    return (r["candidates"], r["forward"], r["reverse"], r["framework_files"],
+            r["truncated"], r["scanned"])
 
 
 def resolve_seed(repo: Path, scope: str | None, include_dotfiles: bool = False):
@@ -585,22 +791,33 @@ def main():
     ap = argparse.ArgumentParser(description="discover existing security controls")
     ap.add_argument("--repo", required=False)
     ap.add_argument("--out", required=False, help="output dir (candidates + clusters)")
-    ap.add_argument("--check", help="validate an existing out-dir's products (R5.9 boundary check)")
+    ap.add_argument("--check", help="validate an existing out-dir's products (boundary check)")
     ap.add_argument("--scope", help="path:<dir>|package:<pkg>|file:<glob>")
     ap.add_argument("--scope-mode", choices=["defined", "applicable"], default="defined")
     ap.add_argument("--language")
     ap.add_argument("--max-files", type=int, default=200000,
-                    help="warn-and-continue beyond this (D11; no silent truncation)")
+                    help="warn-and-continue beyond this (no silent truncation)")
     ap.add_argument("--big-file-bytes", type=int, default=204800)
     ap.add_argument("--sample", type=int, default=8)
     ap.add_argument("--progress-every", type=int, default=1000,
-                    help="emit stderr progress every N files (FD4)")
+                    help="emit stderr progress every N files; also the scan-checkpoint "
+                         "and soft-budget check cadence")
     ap.add_argument("--large-repo-threshold", type=int, default=15000,
-                    help="advise --scope + --merge when source-file count exceeds this (FD4)")
+                    help="advise --scope + --merge when source-file count exceeds this")
     ap.add_argument("--include-dotfiles", action="store_true",
                     help="scan dot-prefixed paths (.opencode/.claude/.codegraph/.github/.env); "
                          "default skips any path component starting with '.' "
                          "(tooling/VCS/IDE/build/config are non-first-party code)")
+    ap.add_argument("--time-budget-ms", type=int, default=0,
+                    help="soft time budget in ms (0=off); on exceeding, at a safe boundary "
+                         "(callgraph built / every --progress-every files) write cache + scan "
+                         "checkpoint and exit 0 with stdout partial:true + resume_hint")
+    ap.add_argument("--rebuild-cache", action="store_true",
+                    help="force call-graph rebuild + cache refresh (ignore the mtime/size "
+                         "freshness check); default rebuilds only when the cache is absent/stale")
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse the callgraph cache + scan checkpoint; continue a partial run "
+                         "without rescanning already-checkpointed files")
     args = ap.parse_args()
     if args.check:
         return _run_check(Path(args.check).resolve())
@@ -616,13 +833,30 @@ def main():
     seed_set = seed_files if seed_files is not None else None
 
     dot_skipped = [0]
-    candidates, forward, reverse, framework_files, truncated, scanned = scan(
+    r = run_discover(
         repo, seed_set, args.max_files, args.big_file_bytes, args.language,
         progress_every=args.progress_every,
         large_repo_threshold=args.large_repo_threshold,
-        outdir=args.out,
-        include_dotfiles=args.include_dotfiles,
-        dot_skipped=dot_skipped)
+        outdir=args.out, include_dotfiles=args.include_dotfiles,
+        dot_skipped=dot_skipped,
+        time_budget_ms=args.time_budget_ms,
+        rebuild_cache=args.rebuild_cache, resume=args.resume, write_cache=True)
+    candidates = r["candidates"]
+    reverse = r["reverse"]
+    framework_files = r["framework_files"]
+    truncated = r["truncated"]
+    scanned = r["scanned"]
+
+    # partial clean exit (soft time-budget): only cache/ + scan_progress.json landed.
+    # Do NOT write truncated final products; the orchestrator re-dispatches --resume.
+    if r["partial"]:
+        print(json.dumps({"candidates": len(candidates), "clusters": 0,
+                          "unresolved": 0, "unresolved_count": 0, "big_files": 0,
+                          "dotfiles_skipped": dot_skipped[0], "out_of_scope": 0,
+                          "truncated": truncated, "scanned": scanned,
+                          "partial": True, "resume_hint": r["resume_hint"],
+                          "cache_hit": r["cache_hit"]}))
+        return 0
 
     # applicable mode: keep only candidates called from a seed file
     out_of_scope = []
@@ -662,15 +896,13 @@ def main():
         "unresolved": unresolved,
         "out_of_scope": sorted(set(out_of_scope)),
     }
-    (outdir / "controls_candidates.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    (outdir / "clusters.json").write_text(
-        json.dumps({"repo": str(repo), "clusters": clusters,
-                    "truncated": truncated}, indent=2, ensure_ascii=False),
-        encoding="utf-8")
-    # big_files (FD6): #source files over --big-file-bytes (downstream commonly queries
-    # this for slicing decisions). Read the just-written skeleton for the true count;
-    # fall back to distinct big candidate files if skeleton is unavailable.
+    _atomic_write_json(outdir / "controls_candidates.json", payload)
+    _atomic_write_json(outdir / "clusters.json",
+                       {"repo": str(repo), "clusters": clusters,
+                        "truncated": truncated})
+    # big_files: #source files over --big-file-bytes (downstream commonly queries this
+    # for slicing decisions). Read the just-written skeleton for the true count; fall back
+    # to distinct big candidate files if skeleton is unavailable.
     big_files = 0
     sk_path = outdir / "skeleton.json"
     if sk_path.is_file():
@@ -687,7 +919,8 @@ def main():
                       "big_files": big_files,
                       "dotfiles_skipped": dot_skipped[0],
                       "out_of_scope": len(set(out_of_scope)),
-                      "truncated": truncated, "scanned": scanned}))
+                      "truncated": truncated, "scanned": scanned,
+                      "partial": False, "resume_hint": "", "cache_hit": r["cache_hit"]}))
     return 0
 
 

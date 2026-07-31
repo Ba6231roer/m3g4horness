@@ -106,6 +106,15 @@ class TestZeroRuntimeDeps(unittest.TestCase):
         self.assertTrue((SCRIPTS / "sensitive_catalog.py").is_file(),
                         "sensitive_catalog.py missing — not covered by the zero-dep scan")
 
+    def test_new_resume_scripts_are_scanned(self):
+        # harden-mgh-init-context-resilience: three new stdlib-only leaf scripts
+        # (resume_state / plan_aggregate / write_runconfig). Assert they exist and are
+        # therefore covered by the zero-dep glob scan above (the general test proves they
+        # import stdlib only — no sibling import needed).
+        for s in ("resume_state", "plan_aggregate", "write_runconfig"):
+            self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
+                            f"{s}.py missing — not covered by the zero-dep scan")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

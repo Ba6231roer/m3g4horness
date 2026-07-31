@@ -27,14 +27,16 @@ from discover_controls import form_clusters  # reuse grouping logic, no drift
 
 def _normalize(c, i):
     """Bring a scout Candidate-subset up to the full Candidate shape form_clusters expects.
-    Returns None when `category` is missing/empty so the caller skips + warns (a category is
-    required downstream — never fabricate one)."""
-    if not c.get("category"):
+    Returns None when ANY required field (`category` or `file`) is missing/empty so the
+    caller skips + warns (both are required downstream — never fabricate either). All field
+    access uses `.get`; no required field is direct-indexed (defense-in-depth for when
+    `--check` is bypassed: a single malformed candidate is skipped, not a KeyError abort)."""
+    if not c.get("category") or not c.get("file"):
         return None
     a = c.get("anchor") or {}
     return {
         "id": c.get("id") or f"S-{i:04d}",
-        "file": c["file"],
+        "file": c.get("file"),
         "line": c.get("line"),
         "category": c.get("category"),
         "kind": c.get("kind"),
@@ -188,15 +190,17 @@ def main():
             continue
         seen.add(k)
         fresh_raw.append(c)
-    # normalize; skip + warn on any candidate missing category (belt-and-suspenders for the
-    # audit path, which does not pass through --check)
+    # normalize; skip + warn on any candidate missing a required field (category/file)
+    # (belt-and-suspenders for the audit path, which does not pass through --check)
     fresh = []
     skipped = 0
     for i, c in enumerate(fresh_raw):
         n = _normalize(c, i)
         if n is None:
+            missing = [f for f in ("category", "file") if not c.get(f)]
             print(f"[merge_scout] warn: scout candidate #{i} "
-                  f"({c.get('file', '?')}:{c.get('line', '?')}) missing category - skipped",
+                  f"({c.get('file', '?')}:{c.get('line', '?')}) "
+                  f"missing required field(s): {', '.join(missing)} - skipped",
                   file=sys.stderr)
             skipped += 1
             continue
@@ -221,7 +225,7 @@ def main():
         json.dumps(cl, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"[merge_scout] +{len(fresh)} scout candidates, +{len(scout_clusters)} scout clusters"
-          + (f", {skipped} skipped (missing category)" if skipped else ""),
+          + (f", {skipped} skipped (missing required field)" if skipped else ""),
           file=sys.stderr)
     print(json.dumps({"scout_candidates_added": len(fresh),
                       "scout_clusters_added": len(scout_clusters),

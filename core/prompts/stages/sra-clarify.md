@@ -65,6 +65,13 @@ codegraph `⚠️ pending` 点名的文件)回退 `Read`/`Glob`/`Grep`。**主�
   不阻断(以默认 advisory 继续)。
 - `dimension` 用目录维度键;`fact_key` 用 `<scope>.<facet>` 稳定键。
 
+## 聚合上下文预算(P0 软边界)
+你是**单上下文扫全变更**的聚合节点(全 cap requirements + candidate_controls + memory 汇于一处)。
+若编排器信号该聚合输入超 `--max-aggregate-bytes`(默认 256KB),SHALL **不**强行 bound、**不**阻断产出——
+照常发澄清,但在末尾附一条非阻断 `clarification`(`dimension:"meta"`、`fact_key:"aggregate.over-budget"`、
+`question` 写「本次变更较大,聚合输入超软阈值,建议 `--focus` 收窄维度或分变更评审」),供 manifest
+`boundaries[]` + 报告披露「聚合未硬界」。分层归约(逐组归约)留后续 change,本步为 P0「披露 + 回退」软边界。
+
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(仅 input 给定 `change_context` / 维度目录)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,
   外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;

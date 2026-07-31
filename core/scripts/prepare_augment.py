@@ -12,7 +12,10 @@ inventory with a self-contained json.load + minimal shape check (decoupled).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py prepare_augment.py --change <name> [--rules <path>] [--focus <inline-json|path>]
-                        [--out <dir>] [--dry-run] [--no-interactive]
+                        [--sensitive-catalog <inline-json|@path|->] [--out <dir>]
+                        [--materialize <inputs-dir>] [--offset N] [--limit N]
+                        [--max-unit-bytes B] [--orch-budget-bytes B]
+                        [--dry-run] [--no-interactive]
   py prepare_augment.py --check <rules-path-or-dir|change_context.json>
 
   --change <name>   target change (default: newest dir under openspec/changes/)
@@ -35,18 +38,39 @@ CLI contract (`--help` is the contract surface, R5.1):
                     change_context.json (object or null). Omit = legacy 6 facets only
                     (behavior unchanged). Invalid → exit 2, no context emitted.
   --out <dir>       output dir (default: <change-root>/.mgh-sra)
+  --materialize <dir>  write each capability's COMPLETE input to <dir>/<cap>.input.json and
+                    emit a SLIM paged stdout (pending[] carries input_path/bytes/oversize, no
+                    requirement bodies); the orchestrator passes input_path to sra-augment,
+                    which reads its own bounded file. The full change_context.json is still
+                    written under <out>/ (a2 stage consumer). Omit = backward-compat full
+                    change_context on stdout (legacy/debug).
+  --offset N        page offset into the not-done pending[] (default 0)
+  --limit N         max pending items per page (default: all not-done)
+  --max-unit-bytes B   per-capability input byte cap (default 192KB). A capability over the cap
+                    is flagged oversize:true + a recipe (split the change / --focus narrow); the
+                    capability is the a3 atom and is NEVER sharded.
+  --orch-budget-bytes B  orchestrator single-request page byte cap (default 64KB). A page over
+                    the cap is auto-tightened; stdout reports effective_limit + shrunk:true.
   --dry-run         produce change_context.json + stdout summary only (orchestrator
                     skips the merge steps; flag echoed for the orchestrator)
   --no-interactive  clarification uses default guesses (flag echoed for orchestrator)
   --check <path>    intake validation only. <path> polymorphic: an inventory file/dir
                     (controls[] + each has name/evidence) OR a produced change_context.json
-                    (top-level fields + pending[] absolute & in subtree + focus field
-                    shape + sensitive_catalog field shape); exit 2 on violation.
+                    (top-level fields + pending[] absolute & in subtree + pending input_path
+                    absolute & in subtree + focus field shape + sensitive_catalog field shape);
+                    exit 2 on violation.
 
-stdout (structured JSON; stderr = diagnostics/progress only, R5.3b): the full
-`change_context.json` object (the orchestrator reads `pending[]` from it; see
-core/contracts/sra/augmentation.md). In --check mode stdout =
-{"check":"augment-intake","ok":bool,"controls":N,"violations":[...]}.
+stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
+  - default (no --materialize): the full `change_context.json` object (legacy/debug; the
+    orchestrator reads `pending[]` / `clarify_path` / `candidate_controls` / `memory` from it).
+  - with --materialize: a SLIM paged envelope — {change, change_root, project_root,
+    clarify_path, memory_source, rules_source, dry_run, focus, sensitive_catalog, total, done,
+    pending[<slim: capability/draft_path/done_marker/input_path/bytes/oversize>], offset, limit,
+    effective_limit, shrunk, requirements_count, candidate_controls_count, has_memory}. The
+    orchestrator NEVER loads the whole change_context.json; it pages pending[] and passes each
+    input_path to sra-augment.
+The full change_context.json is always written to <out>/change_context.json on disk (a2 consumer).
+In --check mode stdout = {"check":"augment-intake","ok":bool,"controls":N,"violations":[...]}.
 
 Exit codes (R5.3b): 0 ok · 1 file missing / JSON malformed / change not found ·
 2 misuse (argparse) or intake-shape violation (--check).
@@ -95,6 +119,44 @@ _ROLE_ALLOWLIST = {"customer", "user", "admin", "merchant", "operator", "tenant"
 
 _SECTION_RX = re.compile(r"^##\s+(ADDED|MODIFIED)\s+Requirements\s*$", re.MULTILINE)
 _REQ_HEAD_RX = re.compile(r"^###\s+Requirement:\s*(.+?)\s*$", re.MULTILINE)
+
+# Per-request context budgets (request-context-budget; bytes = conservative token upper bound).
+DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — per-capability materialized input cap
+DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
+
+
+def _parse_bytes(label: str, raw) -> int:
+    """Non-negative integer byte budget; returns -1 sentinel on misuse (caller exit 2)."""
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        print(f"error: {label} must be a non-negative integer (got {raw!r})", file=sys.stderr)
+        return -1
+    if v < 0:
+        print(f"error: {label} must be >= 0 (got {v})", file=sys.stderr)
+        return -1
+    return v
+
+
+def _byte_len(obj) -> int:
+    return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+
+def _safe_unit_name(name: str) -> str:
+    """Filesystem-safe input filename for a capability. Capability names come from specs/<cap>/
+    dir names (already path-safe), but `::` (NTFS ADS separator) is belt-and-suspenders guarded."""
+    return name.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
+def _shrink_page(page: list, orch_budget: int):
+    """Tighten a page so its serialized bytes <= orch_budget (keep >=1 item). Returns
+    (page, effective_limit, shrunk)."""
+    if orch_budget <= 0 or not page:
+        return page, len(page), False
+    eff = len(page)
+    while eff > 1 and _byte_len(page[:eff]) > orch_budget:
+        eff -= 1
+    return page[:eff], eff, eff < len(page)
 
 
 def _find_project_root(start: Path):
@@ -251,6 +313,42 @@ def _candidate_controls(inv, mentioned_files):
     return out
 
 
+def _unit_input(cap_name, reqs, inv, memory, doc_signals, doc_candidate_controls):
+    """A capability's COMPLETE input record for the sra-augment stage (per-capability augment).
+    Body = this cap's requirements (heading+body) + per-cap-extracted business surface + the
+    candidate_controls SLICE (controls whose entry_points overlap this cap's mentioned_files —
+    reuses the `_candidate_controls` file_overlap judgment, D1) + shared memory. The fallback
+    capability (no specs) gets the doc-wide signals + full candidate set (whole-change view).
+    Bounded by --max-unit-bytes (oversize -> flag + recipe, NEVER sharded: capability = a3 atom)."""
+    if reqs:
+        body = "\n\n".join(b for _, b in reqs)
+        sens, roles, files, endpoints = _extract_signals(body)
+        cc = ([c for c in _candidate_controls(inv, files) if c.get("file_overlap")]
+              if inv is not None else [])
+    else:
+        # fallback capability (no specs): whole-change view (doc-wide signals + full candidate set)
+        sens, roles, files, endpoints = doc_signals
+        cc = doc_candidate_controls
+    return {
+        "capability": cap_name,
+        "requirements": [{"heading": h, "body": b} for h, b in reqs],
+        "endpoints": endpoints,
+        "data_fields": sens,
+        "role_hints": roles,
+        "mentioned_files": files,
+        "candidate_controls": cc,
+        "memory": memory,
+    }
+
+
+def _write_unit_input(inputs_dir: Path, cap_name: str, inp: dict):
+    """Write `<inputs_dir>/<cap>.input.json` (idempotent overwrite); return (abs path, bytes)."""
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    path = (inputs_dir / f"{_safe_unit_name(cap_name)}.input.json").resolve()
+    path.write_text(json.dumps(inp, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path), path.stat().st_size
+
+
 def _emit_change_context(args, project_root: Path, change_root: Path, change: str):
     # --- gather change text ---
     blobs = {}
@@ -261,10 +359,11 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
     full_text = "\n".join(blobs.values())
 
     # --- capabilities / requirements from specs ---
-    capabilities, requirements = [], []
+    capabilities, requirements, reqs_by_cap = [], [], {}
     for cap, reqs in _parse_specs(change_root / "specs"):
         headings = [h for h, _ in reqs]
         capabilities.append({"name": cap, "requirements": headings})
+        reqs_by_cap.setdefault(cap, []).extend(reqs)
         for h, body in reqs:
             requirements.append({"capability": cap, "heading": h, "body": body})
 
@@ -275,7 +374,7 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
     sens, roles, files, endpoints = _extract_signals(scan_text)
 
     # --- candidate controls (signal-1) ---
-    candidate_controls, rules_source = [], "none"
+    candidate_controls, rules_source, inv = [], "none", None
     if args.rules:
         rules_path = Path(args.rules)
         try:
@@ -309,15 +408,44 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
     # --- pending work-list (absolute draft paths under the project subtree) ---
     out_dir = Path(args.out).resolve() if args.out else (change_root / ".mgh-sra")
     drafts_dir = out_dir / "drafts"
-    cap_names = [c["name"] for c in capabilities] or ["security-augmentation"]
+    materialize = bool(args.materialize)
+    inputs_dir = Path(args.materialize).resolve() if materialize else None
+    max_unit_bytes = args.max_unit_bytes
+    if materialize:
+        # inputs MUST land inside the run-domain subtree (hook判树); fail-loud otherwise.
+        try:
+            if not inputs_dir.resolve().is_relative_to(project_root.resolve()):
+                print(f"error: --materialize dir outside project subtree: {inputs_dir}",
+                      file=sys.stderr)
+                sys.exit(2)
+        except (OSError, ValueError) as e:
+            print(f"error: --materialize dir unresolvable: {inputs_dir}: {e}", file=sys.stderr)
+            sys.exit(2)
+    doc_signals = (sens, roles, files, endpoints)
+    cap_names = list(reqs_by_cap.keys()) or ["security-augmentation"]
     pending = []
+    oversize_count = 0
     for cap in cap_names:
         draft_path = (drafts_dir / f"{cap}.md").resolve()
-        pending.append({
+        item = {
             "capability": cap,
             "draft_path": str(draft_path),
             "done_marker": str(draft_path.with_name(draft_path.name + ".done")),
-        })
+        }
+        if materialize:
+            inp = _unit_input(cap, reqs_by_cap.get(cap, []), inv, memory,
+                              doc_signals, candidate_controls)
+            input_path, nbytes = _write_unit_input(inputs_dir, cap, inp)
+            oversize = nbytes > max_unit_bytes
+            if oversize:
+                oversize_count += 1
+                print(f"warn: capability {cap} input ({nbytes}B > {max_unit_bytes}B) -> oversize; "
+                      f"recipe: split the change / --focus narrow (capability not sharded)",
+                      file=sys.stderr)
+            item["input_path"] = input_path
+            item["bytes"] = nbytes
+            item["oversize"] = oversize
+        pending.append(item)
 
     # --- focus (dimension narrowing; closed-set-validated here, before any LLM) ---
     focus = _resolve_focus(args)
@@ -347,11 +475,13 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
         "sensitive_catalog": catalog,
     }
 
-    # --- structural invariant: pending paths under the project subtree (D8) ---
+    # --- structural invariant: pending draft + input paths under the project subtree (hook判树) ---
     bad = [p["draft_path"] for p in pending
            if not Path(p["draft_path"]).resolve().is_relative_to(project_root.resolve())]
+    bad += [p["input_path"] for p in pending if p.get("input_path")
+            and not Path(p["input_path"]).resolve().is_relative_to(project_root.resolve())]
     if bad:
-        print(f"error: draft path drifted outside the project subtree: {bad}", file=sys.stderr)
+        print(f"error: path drifted outside the project subtree: {bad}", file=sys.stderr)
         sys.exit(2)
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -363,13 +493,51 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
                        + (f",{sum(len(v) for v in focus['facets'].values())}f)" if focus['facets'] else ")"))
     catalog_desc = ("none" if catalog is None
                     else f"{catalog['counts']['items']}items({catalog['counts']['categories']}cat)")
+
+    if not materialize:
+        # backward-compat: full change_context on stdout (legacy/debug path, behavior unchanged)
+        print(f"[prepare_augment] change={change} caps={len(capabilities)} reqs={len(requirements)} "
+              f"tasks={len(tasks)} endpoints={len(endpoints)} sens_fields={len(sens)} "
+              f"candidate_controls={len(candidate_controls)} memory={'yes' if memory else 'no'} "
+              f"focus={focus_desc} catalog={catalog_desc} pending={len(pending)} "
+              f"-> {out_dir / 'change_context.json'}",
+              file=sys.stderr)
+        return change_context
+
+    # SLIM paged envelope: orchestrator NEVER loads the whole change_context.json.
+    done = sum(1 for p in pending if Path(p["done_marker"]).is_file())
+    live = [p for p in pending if not Path(p["done_marker"]).is_file()]
+    req_limit = args.limit if args.limit is not None else len(live)
+    page = live[args.offset: args.offset + max(0, req_limit)]
+    page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)
+    slim = {
+        "change": change,
+        "change_root": str(change_root),
+        "project_root": str(project_root),
+        "clarify_path": change_context["clarify_path"],
+        "memory_source": change_context["memory_source"],
+        "rules_source": rules_source,
+        "dry_run": bool(args.dry_run),
+        "focus": focus,
+        "sensitive_catalog": catalog,
+        "total": len(pending),
+        "done": done,
+        "pending": page,
+        "offset": args.offset,
+        "limit": req_limit,
+        "effective_limit": eff,
+        "shrunk": shrunk,
+        "requirements_count": len(requirements),
+        "candidate_controls_count": len(candidate_controls),
+        "has_memory": memory is not None,
+    }
     print(f"[prepare_augment] change={change} caps={len(capabilities)} reqs={len(requirements)} "
-          f"tasks={len(tasks)} endpoints={len(endpoints)} sens_fields={len(sens)} "
           f"candidate_controls={len(candidate_controls)} memory={'yes' if memory else 'no'} "
-          f"focus={focus_desc} catalog={catalog_desc} pending={len(pending)} "
+          f"focus={focus_desc} catalog={catalog_desc} oversize={oversize_count} "
+          f"pending={len(live)} done={done} page offset={args.offset} eff={eff} shrunk={shrunk} "
           f"-> {out_dir / 'change_context.json'}",
           file=sys.stderr)
-    return change_context
+    return slim
 
 
 def _resolve_focus(args):
@@ -439,6 +607,21 @@ def _check_change_context(ctx):
                     violations.append(f"draft_path outside project subtree: {dp}")
             except (OSError, ValueError):
                 violations.append(f"draft_path unresolvable: {dp}")
+            # materialized fields (additive — only when prepare ran with --materialize)
+            ip = item.get("input_path")
+            if ip is not None:
+                try:
+                    rip = Path(ip).resolve()
+                    if not rip.is_absolute():
+                        violations.append(f"input_path not absolute: {ip}")
+                    elif pr and not rip.is_relative_to(Path(pr).resolve()):
+                        violations.append(f"input_path outside project subtree: {ip}")
+                except (OSError, ValueError):
+                    violations.append(f"input_path unresolvable: {ip}")
+                if not isinstance(item.get("bytes"), int):
+                    violations.append("pending item has input_path but bytes missing/not int")
+                if not isinstance(item.get("oversize"), bool):
+                    violations.append("pending item has input_path but oversize missing/not bool")
     if "focus" in ctx:
         violations.extend(focus_scope.validate_resolved(ctx.get("focus")))
     if "sensitive_catalog" in ctx:
@@ -502,6 +685,19 @@ def main():
                          "`-` for stdin, or a JSON file path; leading `@` tolerated) — declares the "
                          "field types that MUST be masked. Omit = legacy 6 facets only")
     ap.add_argument("--out", help="output dir (default: <change-root>/.mgh-sra)")
+    ap.add_argument("--materialize", metavar="<inputs-dir>",
+                    help="write each capability's complete input to <dir>/<cap>.input.json and emit "
+                         "a slim paged stdout (input_path/bytes/oversize; backward-compat full "
+                         "stdout if omitted)")
+    ap.add_argument("--offset", type=int, default=0, help="page offset (default 0)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="max pending items per page (default: all not-done)")
+    ap.add_argument("--max-unit-bytes", type=int, default=DEFAULT_MAX_UNIT_BYTES,
+                    help=f"per-capability input byte cap (default {DEFAULT_MAX_UNIT_BYTES}; "
+                         f"oversize capability flagged + recipe, not sharded)")
+    ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES,
+                    help=f"orchestrator single-request page byte cap (default "
+                         f"{DEFAULT_ORCH_BUDGET_BYTES}; page auto-tightened + shrunk:true)")
     ap.add_argument("--dry-run", action="store_true",
                     help="produce change_context.json + summary only (orchestrator skips merges)")
     ap.add_argument("--no-interactive", action="store_true",
@@ -509,6 +705,14 @@ def main():
     ap.add_argument("--check", nargs="?", const="", default=None, metavar="PATH",
                     help="intake validation only: validate inventory at PATH (file or dir)")
     args = ap.parse_args()
+
+    if args.offset < 0:
+        print("error: --offset must be >= 0", file=sys.stderr)
+        return 2
+    for label, raw in (("--max-unit-bytes", args.max_unit_bytes),
+                       ("--orch-budget-bytes", args.orch_budget_bytes)):
+        if _parse_bytes(label, raw) < 0:
+            return 2
 
     if args.check is not None:
         target = args.check.strip() or (args.rules or "").strip()

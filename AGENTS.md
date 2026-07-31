@@ -92,6 +92,20 @@ flowchart LR
 
 > 管辖**新增/修改任何对外分发的 `mgh-*.md` 命令壳 + 其随 install 落地的 `core/scripts/*.py`**。
 > mgh-* 性质 ≈ openspec `opsx:*`(装进别的项目当命令用),稳定性是产品特性,非可选优化。
+> 各子规则的 `理由〔…〕` 括号是承重教训,**MUST 随规保留、NEVER 软化**。
+
+**强制面索引**(哪条规则由什么兜底):
+
+| 规则 | 强制机制 | 入口 |
+| --- | --- | --- |
+| R5.1 契约 lint | 机械化 flag 存在断言 | `tools/check_contracts.py` |
+| R5.2 黑盒纪律 | runtime hook 阻断越权 Write/微脚本 | `block_adhoc_scripts.py` + `MGH_*_ACTIVE` |
+| R5.3 脚本稳定性 | 自包含 + I/O 契约(脚本自验) | 回归测 `tests/` |
+| R5.4 长跑可观测 | per-call `timeout` + `--resume` 重派 | 编排器 Bash 纪律 |
+| R5.7 hook 闭环 | 双端 runtime hook(env-or-哨兵激活)+ CI | `block_adhoc_scripts.py` + `<run-root>/.active` 哨兵 + CI |
+| R5.8 自检 + 回归 | install 自检 + 回归测 | `install.sh` + `tests/` |
+| R5.9 边界校验 | `--check` fail-loud(退出码 2) | 各产出者 `--check` |
+| R5.10 分发纯净 | purity lint | `tools/check_distributed_purity.py` |
 
 - **R5.1 契约单一真相源 + 机械化 lint**:脚本 `argparse`/`Usage:` docstring 是 CLI **唯一契约**,
   命令壳调用示例**逐字镜像**,不得出现脚本未声明的 flag(agent 经 `--help` 学接口,故 `--help`
@@ -101,21 +115,24 @@ flowchart LR
   (按命令 `.md` 用自身工具跑流水线,非写代码)——命令壳顶部须显式声明,并禁 agent 把它物化成脚本。
   三条硬边界(`NEVER`,命中**真实失败形状**,承 `harden-mgh-init-orchestration-discipline` FD1——
   真机首跑的失败全是一次性微脚本内省,非大编排器):
-  - (a) **大编排器**:`Write` 任何 `.py` 编排器/包装器(实测反例:`mgh_init.py`);
-  - (b) **一次性微脚本内省**:`Write` `py -c` 产物 / `_prep_*.py` / `_aggregate_*.py` / `<run>_helper.py`,
+  - (a) **大编排器**:`Write` 任何脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)编排器/包装器(实测反例:`mgh_init.py`);
+  - (b) **一次性微脚本内省**:`Write` `py -c` 产物 / `_prep_*.py` / `_aggregate_*.py` / `<run>_helper.py` /
+    `process_*.ps1` / `_*.sh`(脚本扩展名集,不只 `.py`),
     以及经 `Bash: py -c|python -c` 内省/重派生产物(`import json`/`open(`/`load(` 读 `.mgh-init/**`);
   - (c) **读源码**:`Read` 叶子脚本 `.py` 源码进编排器上下文(报错看 stderr,不读源码)。
+  运行域内 (a)+(b) 由 `block-adhoc-scripts` 守卫**确定性兜底**(激活 = env 或磁盘哨兵;叶脚本 read-only、
+  **无** `core/scripts` 白名单豁免;契约 `core/contracts/hooks/runtime-enforcement.md`)。
   合法出口(implementation-intention,正引导优先见 R5.5①):工作清单 → `list_clusters`/
   `list_scout_batches`/`list_rule_jobs`;瞄结构 → `describe_artifact.py`;派生量 → 产出者 stdout 字段。
   确定性脚本经 Bash 执行;细节规则下沉 `core/prompts/`,仅 subagent 按需读。理由〔省上下文 + 防 agent
-  误改 + 平台无关〕须随规保留,勿软化。(`implement` 类 trigger 词易诱导 codegen,用「执行/跑」)。
+  误改 + 平台无关〕。(`implement` 类 trigger 词易诱导 codegen,用「执行/跑」。)fan-out 清单的产出契约见 R5.3(b)「扇出与路径」。
 - **R5.3 确定性脚本稳定性契约**:
   - (a) **runtime 自包含**——零运行时依赖(承 R2)、`sys.path.insert(0, dir-of-__file__)` 自定位
     兄弟导入、读源/文本一律 `encoding="utf-8"`、任意 cwd 可直接 `py`、禁需 `python -c exec` 绕行。
   - (b) **CLI I/O 契约**——`stdout`=结构化 JSON、`stderr`=诊断/进度**严格分流**;退出码 `0/1/2`
     (成功/通用错/误用);幂等(create-if-not-exists);禁交互式 TTY(只吃 flag/env/stdin);
     闭集参数拒歧义输入 + 可操作报错;破坏性操作带 `--dry-run`;大输出默认摘要 + `--offset` 分页。
-    **扇出即脚本枚举**:所有 fan-out(tier)MUST 经 `list_*`/`describe_*` 脚本产 pending 清单
+    - **扇出与路径**(fan-out 即脚本枚举):所有 fan-out(tier)MUST 经 `list_*`/`describe_*` 脚本产 pending 清单
     (T1→`list_clusters`、scout→`list_scout_batches`、T3→`list_rule_jobs`),编排器对清单迭代,
     NEVER 直接挖 JSON / `py -c` 内省。**枚举脚本亦产每个待跑单元的确切绝对输出路径**——`pending[]`
     每项 MUST 含 `checkpoint_path`(scout/T1)/ `rule_path`(T3)+ `done_marker`,均 `Path.resolve()` 绝对
@@ -123,27 +140,47 @@ flowchart LR
     NEVER 拼路径 / NEVER 占位符(`<target>`/`<id>`)/ NEVER 相对路径。`MGH_TARGET`(= discover `repo`
     绝对根)供 PreToolUse hook 判树:运行域内 `Write`/`Edit` resolved 目标不在其子树 → fail-loud
     (退出码 2)。承 `harden-mgh-init-fanout-output-paths`(治「输出路径漂到盘符根」)。
-- **R5.4 大仓可观测 + 无静默截断**:单遍 I/O、每候选 O(1);进度走 `stderr`、产物 JSON 走 `stdout`
-  (契约不变);扫描前廉价计数 + 命中阈值前置建议 `--scope`+`--merge`(取代「跑满再超时」);
-  截断须显式告警并继续。
+  - (c) **可恢复性** → 见 R5.4(长跑可恢复机制**权威处**;脚本侧 cache / 续点 / `--time-budget-ms` / `partial:true`
+    契约统一在那里)。
+- **R5.4 大仓可观测 + 长跑可恢复**(长跑可恢复机制**权威处**):单遍 I/O、每候选 O(1);进度走 `stderr`、
+  产物 JSON 走 `stdout`(契约不变);扫描前廉价计数 + 命中阈值前置建议 `--scope`+`--merge`(取代「跑满再超时」);
+  截断须显式告警并继续。**长跑确定性 Bash SHALL 传 per-call `timeout`**(claude Bash / opencode
+  shell 工具均接受毫秒级 `timeout`,会话内即时生效;opencode `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`
+  默认 120000 但须启动前就绪——env 继承边界见 R5.7 段 B)。确定性长跑脚本(`discover_controls.py`)SHALL
+  支持 callgraph 缓存(`<out>/cache/`,按源 mtime/size 失效)+ scan 续点 + 软时限 `--time-budget-ms`
+  干净早退(**退出码 0** + stdout `partial:true`),跨多次编排器调用零全损推进;discover 不假设单次调用跑完,
+  编排器 **Bash 重派 `--resume`** 推进直至 `partial:false`(**NEVER** 写 wrapper `.py` 循环)。理由〔跨宿主 +
+  零全损 + 不依赖单次调用跑完〕。**编排器级 re-entrant resume state**(治「上下文过大停止 + 难恢复」,跨
+  compact / crash / 新 session 三态):`resume_state.py` 把「我在哪 / 下一步」下沉为**磁盘查询**——读
+  `<target>/.mgh-init/` 全产物 + 跨 tier `.done` + `run_config.json` 重派生 `step`/`next_action`/`tiers`,
+  三态坍缩为同一 resume 路径(读磁盘 → 继续);对话记忆**只是缓存、不是进度真相源**,故 compaction 是否丢
+  编排纪律提示词**无关紧要**(新 session 重灌命令壳 = 完整提示词,进度由磁盘重派生)。`run_config.json`(step 0
+  原子写,`write_runconfig.py`)作**起始态意图**(使 `--resume` 免重输 flag)、`init_manifest.json` 作**终态**,
+  二者边界清晰、磁盘 schema 不变;`run_config` 缺失 → `resume_state.py` fail-loud(退出码 2)+ recipe,**NEVER**
+  静默猜步骤图。配 `--check` 校验磁盘状态自洽(承 R5.9)。理由〔状态磁盘化 = 结构性免疫对话记忆丢失〕。
 - **R5.5 指令性 MD 措辞**(给 subagent 的 SYSTEM 提示词 / 命令壳纪律段):
   - ① **shaping 失败用 recipe,不用 prohibition**——`Don't X` 类禁令改写为「该做什么」;**硬边界**
     (跨 format 产物不混、零依赖)才用 `NEVER`。**fan-out 路径 recipe**:「需某单元输出路径 → 读 `list_*`
     stdout `pending[].checkpoint_path`/`rule_path`(绝对,逐字透传给 subagent);NEVER 自拼 `<target>/<id>`、
     NEVER `py -c` 算路径、NEVER 写相对路径」——硬边界(`NEVER`)因路径拼装命中真实失败(盘符根漂移)。理由
-    〔省拼装 + 对任意 cwd 安全 + 防 D 盘根漂移〕随规保留。
+    〔省拼装 + 对任意 cwd 安全 + 防 D 盘根漂移〕。**步骤查询 recipe**:「需知当前步骤 / 下一步 → 读
+    `resume_state.py` stdout `step`/`next_action`/`tiers`(进度纯从磁盘 `<target>/.mgh-init/` 重派生);
+    NEVER 靠对话记忆判步骤、NEVER `py -c` 重算、NEVER `Read` 整份聚合 JSON 倒推进度」——`--resume` 或任何
+    压缩事件后**第一步**调之。理由〔省上下文 + 防路径偏离 + 跨宿主〕。
   - ② **禁 nuance/exemption 子句**(`Don't X unless…`、「此限制不适用代码块」)。
   - ③ 显式废对冲词 + RFC-2119 normative 动词(`MUST/SHALL` 取代 `should/may`,机器可检)。
   - ④ 验收用可证伪清单 + schema 示例(非散文);命令行示例逐字可执行;无长代码块(承 R3)。
-- ⑤ **禁令清楚则不举例**:抽象规则醒目且无歧义时,枚举反例是冗余(承 R3);只在 agent 可能猜不到边界时才给最小反例。
+  - ⑤ **禁令清楚则不举例**:抽象规则醒目且无歧义时,枚举反例是冗余(承 R3);只在 agent 可能猜不到边界时才给最小反例。
 - **R5.6 命令壳薄壳 + token 硬预算**:壳只放 编排流 + stage→组件表 + 确切确定性调用 + 边界披露;
   正文 ≤500 行 / ≤5000 tokens(Codex 硬上限 8KB;`description:` ≤1536 chars);详情移
   `core/prompts/`,只深一级;按域分文件;禁 `@` 强制内联(改用 `REQUIRED SUB-SKILL: Use X` 标记);
   `--help`/无参 → 打印 flag 表并 STOP(花 token 前先校验)。
-- **R5.7 评估驱动 + TDD-for-docs**:改 `core/prompts/**` 前先建 baseline(无该提示词跑 ≥5 次 capture
+- **R5.7 评估驱动 + hook 强制闭环**(同号两段;**段 A 评估方法论** + **段 B hook 强制闭环**):
+  **段 A 评估方法论(TDD-for-docs)**:改 `core/prompts/**` 前先建 baseline(无该提示词跑 ≥5 次 capture
   失败模式,variance 是指标)→ blind A/B 对比 pass rate/tokens → 新命令由 A 实例写、全新 B 实例
-  大仓首跑、观察漂移 → 新失败模式回灌本节。**交付物(非倡议)**:能用 hook 做确定性闭环的,不写进 MD
-  靠 agent 自觉——每个 `mgh-*` 命令的 #1 违例 MUST 配运行时 hook(install 时注入目标仓,**双端对等**):
+  大仓首跑、观察漂移 → 新失败模式回灌本节。
+  **段 B hook 强制闭环**:**交付物(非倡议)**——能用 hook 做确定性闭环的,不写进 MD 靠 agent 自觉:
+  每个 `mgh-*` 命令的 #1 违例 MUST 配运行时 hook(install 时注入目标仓,**双端对等**)——
   claude = `.claude/settings.json` 的 PreToolUse 命令;**opencode = `.opencode/plugins/` 的 `tool.execute.before`
   `.ts` 插件**(opencode 的 hook 面即 JS/TS 插件,等价事件 `tool.execute.before`/`tool.execute.after`;
   **移植缺口非能力缺口**)。hook 缺席 = CI fail(对齐 R5.8)。**R2 定性**:`.ts` 插件是 opencode 宿主原生胶水
@@ -151,9 +188,15 @@ flowchart LR
   + 据退出码阻断;**判定逻辑单一来源在 Python 标准库守卫 `block_adhoc_scripts.py`**(双端字节级 parity 守卫,
   `tests/test_opencode_hook_parity.py`;零依赖 AST 扫描只扫 `*.py`,`.ts` 不在扫描集)。当前兑现:`block-adhoc-scripts`
   (双端:claude PreToolUse + opencode `.ts` 插件;同一守卫不改;`/mgh-init`+`/mgh-sast`+`/mgh-sra`+`/mgh-srr` #1 违例=微脚本内省
-  + 越权 `*.py` + 子树外写;四运行域 `MGH_{INIT,SAST,SRA,SRR}_ACTIVE`)。**可靠性边界(opencode)**:opencode 插件进程**不继承**
-  mid-session bash 导出的 env(`shell.ts::shellEnv` 只读 `process.env` 不回写),故 `MGH_*_ACTIVE` 仅在 opencode 启动时
-  已就绪才激活守卫;未激活时 fail-soft,纪律由命令壳明线 + R5.9 边界校验兜底。
+  + 越权 `*.py`/`.ps1`/`.ts`/… + 越树写 / init 树内根污染;四运行域 `MGH_{INIT,SAST,SRA,SRR}_ACTIVE`)。**激活 = env 或磁盘哨兵**
+  ——守卫激活当且仅当 `MGH_*_ACTIVE=1` env **或** `<cwd>/<run-root>/.active` 哨兵存在;哨兵 JSON
+  `{domain,target,out_roots[],v}` 由编排器 step 0 经 `Bash` 写、run 完成/干净停止移除(契约 `core/contracts/hooks/runtime-enforcement.md`)。
+  **可靠性边界(opencode)由哨兵关闭**:opencode 插件进程**不继承** mid-session bash 导出的 env(`shell.ts::shellEnv` 只读
+  `process.env` 不回写)——env-only 激活在 opencode 上整 run 休眠;**磁盘哨兵绕开该边界**,经磁盘对 opencode 插件进程可见,
+  使脚本只读 / 受信子树守卫双端可靠激活。哨兵携 `target`(取自 Python leaf stdout,Windows 原生;**NEVER** bash `pwd` 的 MSYS
+  `/c/…`),`MGH_TARGET` 取值优先级 = env > 哨兵.`target` > 降级(均缺则子树检查降级放行、不误伤)。运行域脚本只读:取消既有
+  `core/scripts`/`tests`/`tools`/`hooks` 白名单,扩为脚本扩展名集 `{.py,.ps1,.sh,.bash,.zsh,.bat,.cmd,.ts,.js,.mjs,.cjs}`;
+  init 域 `Write`/`Edit` 须落入受信子树(`<target>/.mgh-init`/`.claude/rules`/`docs/security-controls`/`AGENTS.md` ∪ 哨兵 `out_roots[]`)。
 - **R5.8 安装自检 + 回归单测**:`install.sh` 镜像后校验脚本族同目录共存 + fail-soft(自检失败只
   warn 不阻断 install,CI 必 fail);任何 `.md`/脚本改动 bump 版本号;回归测覆盖 契约等价 / 导入
   鲁棒(非脚本目录 cwd 子进程)/ 性能不退化 / 零依赖 AST 扫描 / R5.1 CLI lint。
@@ -174,8 +217,8 @@ flowchart LR
   (`--check`/退出码 2/`<target>/AGENTS.md`/runtime 脚本调用 `.claude/mgh-core/scripts/*.py`/阶段标签
   `T1`/`s1`..`s9`)。**受保护归因**(`core/prompts/**` 头的 `Source: vvaharness/...`、skills Apache 归因、
   `core/docs/prompt-provenance.md`、操作性 `design_controls`、`CVE-*`)不在禁列,NEVER 当 dev-only 溯源剥除。
-  理由〔省 token + 防目标项目误读 + 平台无关〕须随规保留。前 7 类 + dev-meta(`承/兑现`/`范式锚点`)由
-  `tools/check_distributed_purity.py` 确定性强制(承 R5.7);第 8 类与「本仓」与受保护归因同形、机器难辨,
+  理由〔省 token + 防目标项目误读 + 平台无关〕。前 7 类 + dev-meta(`承/兑现`/`范式锚点`)由
+  `tools/check_distributed_purity.py` 确定性强制;第 8 类与「本仓」与受保护归因同形、机器难辨,
   由提示词护栏 + 人工清理覆盖(install 自检 fail-soft、CI 测 `tests/test_distributed_md_purity.py` 必 fail,承 R5.8)。
 
 ## 目录布局

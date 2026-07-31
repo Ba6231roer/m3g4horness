@@ -46,9 +46,16 @@ codegraph 已返回源码的同一文件再 `Read`。codegraph 的 blast radius 
 (`.mgh-init/`/`checkpoints/`)、「如何被扫描/发现」的过程描述。结构字段与目标项目锚点原样保留。
 
 ## Output
-Write `.mgh-init/i1_enriched.json` — the candidates/clusters with your
-corrections. Keep it structured; cite `file:line` for any change. No prose,
-no long code.
+Write the **absolute** path the orchestrator gives you for the enriched output (it passes
+`<abs target>/.mgh-init/i1_enriched.json` verbatim) — the candidates/clusters with your
+corrections. Keep it structured; cite `file:line` for any change. No prose, no long code.
+
+**Hard boundary (`NEVER`)**: NEVER assemble/interpolate a path (no `<target>` substitution);
+NEVER write a relative path; use the orchestrator-given absolute path verbatim.
 
 > You do NOT decide canonical/competing (that is T2's job — you cannot see
 > other clusters' context). You do NOT emit rules (T3).
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**:`ok <绝对 i1_enriched.json> <cluster_count>`
+或 `failed <简短原因>`(**NEVER** 回显候选/簇记录体——ack 是存活信号,非数据载体)。

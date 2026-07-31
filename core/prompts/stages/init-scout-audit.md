@@ -54,10 +54,19 @@ S3). If after a genuine attempt you agree it is not a control, emit nothing for 
 结构字段(`source: "scout"`/`category`/`kind`/`anchor`/`file`/`line`)与目标项目锚点原样保留。
 
 ## Output
-Write `<target>/.mgh-init/checkpoints/scout/audit.json`:
+Write the **absolute** path the orchestrator gives you for the audit result (it passes
+`<abs target>/.mgh-init/checkpoints/scout/audit.json` verbatim):
 ```json
 {"audited": N, "audit_found": [<Candidate-subset, source:"scout">, ...]}
 ```
-Then touch `<target>/.mgh-init/checkpoints/scout/audit.json.done`.
+Then touch the absolute `.done` path the orchestrator gives you
+(`<abs target>/.mgh-init/checkpoints/scout/audit.json.done`).
 The orchestrator merges `audit_found[]` into `scout_candidates.json` and records
 `audit_found` count in `init_manifest.json`.
+
+**Hard boundary (`NEVER`)**: NEVER assemble/interpolate a path (no `<target>` substitution);
+NEVER write a relative path; use the orchestrator-given absolute path verbatim.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**:`ok <绝对 audit.json> <audit_found_count>`
+或 `failed <简短原因>`(**NEVER** 回显候选记录体/源码——ack 是存活信号,非数据载体)。

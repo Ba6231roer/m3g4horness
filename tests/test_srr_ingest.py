@@ -378,5 +378,128 @@ class TestSensitiveCatalog(unittest.TestCase):
         self.assertFalse(json.loads(out)["ok"])
 
 
+class TestMaterialize(unittest.TestCase):
+    """--materialize: slim paged stdout + per-unit input files + paging + oversize flag
+    (request-context-budget adoption; mirror of the init list_clusters materialize tests)."""
+
+    DOC = ("# 转账\nPOST /api/transfer bankCardNo\n## 退款\nPOST /api/refund\n"
+           "# 查询\nPOST /api/q\n")
+
+    def _run(self, project, *extra):
+        (project / "req.md").write_text(self.DOC, encoding="utf-8")
+        args = ["--doc", "req.md", "--split", "--out", ".mgh-srr",
+                "--materialize", ".mgh-srr/inputs/augment"] + list(extra)
+        return run(args, cwd=project)
+
+    def test_slim_envelope_and_input_files(self):
+        p = make_project()
+        rc, out, err = self._run(p)
+        self.assertEqual(rc, 0, err)
+        d = json.loads(out)
+        for k in ("total", "done", "pending", "offset", "limit", "effective_limit", "shrunk",
+                  "requirements_count", "candidate_controls_count", "has_memory"):
+            self.assertIn(k, d)
+        self.assertNotIn("requirements", d)          # bodies sink into input files, not stdout
+        self.assertNotIn("candidate_controls", d)
+        self.assertNotIn("memory", d)
+        item = d["pending"][0]
+        for k in ("capability", "draft_path", "done_marker", "input_path", "bytes", "oversize"):
+            self.assertIn(k, item)
+        self.assertFalse(item["oversize"])
+        inputs = list((p / ".mgh-srr" / "inputs" / "augment").glob("*.input.json"))
+        self.assertEqual(len(inputs), 3)
+
+    def test_input_file_carries_unit_record(self):
+        p = make_project()
+        rc, out, _ = self._run(p)
+        d = json.loads(out)
+        inp = json.loads(Path(d["pending"][0]["input_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(inp["capability"], d["pending"][0]["capability"])
+        self.assertTrue(inp["requirements"])
+        blob = inp["requirements"][0]["heading"] + inp["requirements"][0]["body"]
+        self.assertIn("transfer", blob.lower())
+        for k in ("endpoints", "data_fields", "role_hints", "mentioned_files",
+                  "candidate_controls", "memory"):
+            self.assertIn(k, inp)
+
+    def test_disk_change_context_keeps_sra_shape(self):
+        p = make_project()
+        self._run(p)
+        d = ctx_of(p)
+        self.assertGreater(len(d.get("requirements", [])), 0)
+        self.assertTrue(all("input_path" in it for it in d["pending"]))
+
+    def test_paging_offset_limit(self):
+        p = make_project()
+        _, out, _ = self._run(p, "--offset", "1", "--limit", "1")
+        d = json.loads(out)
+        self.assertEqual(len(d["pending"]), 1)
+        self.assertEqual(d["effective_limit"], 1)
+        self.assertEqual(d["offset"], 1)
+
+    def test_page_shrinks_to_orch_budget(self):
+        p = make_project()
+        _, out, _ = self._run(p, "--orch-budget-bytes", "200")
+        d = json.loads(out)
+        self.assertTrue(d["shrunk"])
+        self.assertLessEqual(d["effective_limit"], 3)
+
+    def test_oversize_flagged_not_sharded(self):
+        p = make_project()
+        rc, out, err = self._run(p, "--max-unit-bytes", "50")
+        self.assertEqual(rc, 0, err)
+        d = json.loads(out)
+        self.assertTrue(all(it["oversize"] for it in d["pending"]))
+        self.assertEqual(d["total"], 3)              # units NOT sharded (review atom)
+        self.assertIn("oversize", err)               # stderr warns + recipe
+
+    def test_resume_skips_done_unit(self):
+        p = make_project()
+        _, out, _ = self._run(p)
+        d = json.loads(out)
+        dm = Path(d["pending"][0]["done_marker"])
+        dm.parent.mkdir(parents=True, exist_ok=True)
+        dm.touch()
+        _, out2, _ = self._run(p)
+        d2 = json.loads(out2)
+        self.assertEqual(d2["done"], 1)
+        self.assertNotIn(d["pending"][0]["capability"], [it["capability"] for it in d2["pending"]])
+
+    def test_no_materialize_backward_compat(self):
+        p = make_project()
+        (p / "req.md").write_text("# A\nPOST /api/a bankCardNo\n", encoding="utf-8")
+        rc, out, _ = run(["--doc", "req.md", "--out", ".mgh-srr"], cwd=p)   # NO --materialize
+        self.assertEqual(rc, 0)
+        d = json.loads(out)
+        self.assertIn("requirements", d)             # full change_context on stdout (legacy)
+        self.assertNotIn("input_path", d["pending"][0])
+        self.assertNotIn("shrunk", d)                # no paging fields on the legacy path
+
+    def test_bad_budget_exit2(self):
+        p = make_project()
+        rc, _, _ = self._run(p, "--max-unit-bytes", "-1")
+        self.assertEqual(rc, 2)
+
+    def test_materialize_out_of_subtree_exit2(self):
+        p = make_project()
+        (p / "req.md").write_text("# A\nx\n", encoding="utf-8")
+        rc, _, _ = run(["--doc", "req.md", "--out", ".mgh-srr",
+                        "--materialize", "D:/outside/inputs"], cwd=p)
+        self.assertEqual(rc, 2)
+
+    def test_check_validates_materialized_fields(self):
+        p = make_project()
+        self._run(p)
+        rc, out, _ = run(["--check", ".mgh-srr/change_context.json"], cwd=p)
+        self.assertEqual(rc, 0)
+        self.assertTrue(json.loads(out)["ok"])
+        d = ctx_of(p)
+        d["pending"][0]["input_path"] = "D:/outside.input.json"   # absolute but outside subtree
+        (p / ".mgh-srr" / "change_context.json").write_text(
+            json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        rc, out, _ = run(["--check", ".mgh-srr/change_context.json"], cwd=p)
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

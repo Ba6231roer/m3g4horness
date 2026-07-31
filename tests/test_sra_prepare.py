@@ -319,5 +319,197 @@ class TestSensitiveCatalog(unittest.TestCase):
             self.assertTrue(json.loads(r.stdout)["ok"])
 
 
+# ── materialize fixtures (request-context-budget adoption) ─────────────────────
+SLICE_PROPOSAL = "# slice-change\nTouches src/api/TransferController.java. bankCardNo.\n"
+SLICE_SPEC = """\
+## ADDED Requirements
+
+### Requirement: Initiate transfer
+POST /api/transfer touches src/api/TransferController.java. Field bankCardNo.
+"""
+# one control whose entry_points overlap the cap's file (-> kept in per-cap slice) + one that
+# does not (-> sliced out); both stay in the doc-wide change_context candidate_controls (a2).
+SLICE_INVENTORY = {"repo": "PROJECT", "format": "claude", "controls": [
+    {"name": "authz-transfer", "kind": "auth", "category": "authorization",
+     "description": "方法级鉴权", "usage": "@PreAuthorize",
+     "evidence": ["src/api/OrderController.java:42"],
+     "entry_points": ["src/api/TransferController.java"], "protects": [], "gaps": []},
+    {"name": "mask-unrelated", "kind": "other", "category": "data-masking",
+     "description": "脱敏", "usage": "MaskUtil.mask",
+     "evidence": ["src/util/MaskUtil.java:8"],
+     "entry_points": ["src/util/MaskUtil.java"], "protects": [], "gaps": []},
+]}
+
+
+def build_slice_project(td: Path):
+    """One capability whose requirement body mentions src/api/TransferController.java + an
+    inventory with one overlapping + one non-overlapping control (per-cap slice fixture)."""
+    ch = td / "openspec" / "changes" / "slice-change"
+    (ch / "specs" / "payment-api").mkdir(parents=True)
+    (ch / "proposal.md").write_text(SLICE_PROPOSAL, encoding="utf-8")
+    (ch / "tasks.md").write_text("- [ ] do\n", encoding="utf-8")
+    (ch / "specs" / "payment-api" / "spec.md").write_text(SLICE_SPEC, encoding="utf-8")
+    (td / ".mgh-init").mkdir(parents=True, exist_ok=True)
+    (td / ".mgh-init" / "controls_inventory.json").write_text(
+        json.dumps(SLICE_INVENTORY), encoding="utf-8")
+    return ch
+
+
+def build_multi_cap_project(td: Path):
+    """A change with 3 capability specs (for paging/materialize tests)."""
+    ch = td / "openspec" / "changes" / "multi-change"
+    for cap, body in (("pay-api", "POST /api/pay touches src/api/Pay.java."),
+                      ("refund-api", "POST /api/refund touches src/api/Refund.java."),
+                      ("report-api", "GET /api/report touches src/api/Report.java.")):
+        (ch / "specs" / cap).mkdir(parents=True)
+        (ch / "specs" / cap / "spec.md").write_text(
+            f"## ADDED Requirements\n\n### Requirement: {cap}\n{body}\n", encoding="utf-8")
+    (ch / "proposal.md").write_text("multi-cap change\n", encoding="utf-8")
+    (ch / "tasks.md").write_text("- [ ] do\n", encoding="utf-8")
+    return ch
+
+
+class TestMaterialize(unittest.TestCase):
+    """--materialize: slim paged stdout + per-capability input files + paging + oversize flag
+    (request-context-budget adoption; mirror of srr ingest + init list_clusters tests)."""
+
+    def _run(self, td, change, *extra):
+        return run("prepare_augment", "--change", change, "--out", ".mgh-sra",
+                   "--materialize", ".mgh-sra/inputs/augment", *extra, cwd=td)
+
+    def test_slim_envelope_and_input_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            r = self._run(td, "multi-change")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            d = json.loads(r.stdout)
+            for k in ("total", "done", "pending", "offset", "limit", "effective_limit", "shrunk",
+                      "requirements_count", "candidate_controls_count", "has_memory"):
+                self.assertIn(k, d)
+            self.assertNotIn("requirements", d)          # bodies sink into input files, not stdout
+            self.assertNotIn("candidate_controls", d)
+            self.assertNotIn("memory", d)
+            self.assertEqual(d["total"], 3)
+            item = d["pending"][0]
+            for k in ("capability", "draft_path", "done_marker", "input_path", "bytes", "oversize"):
+                self.assertIn(k, item)
+            self.assertFalse(item["oversize"])
+            inputs = list((td / ".mgh-sra" / "inputs" / "augment").glob("*.input.json"))
+            self.assertEqual(len(inputs), 3)
+
+    def test_per_cap_candidate_controls_slice_file_overlap(self):
+        # sra-specific slice (D1): per-cap input keeps ONLY controls whose entry_points overlap
+        # this cap's mentioned_files (reuses _candidate_controls file_overlap). The doc-wide
+        # change_context.json keeps the FULL candidate set (all tagged) for a2.
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_slice_project(td)
+            r = self._run(td, "slice-change", "--rules", ".mgh-init")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            d = json.loads(r.stdout)
+            inp = json.loads(Path(d["pending"][0]["input_path"]).read_text(encoding="utf-8"))
+            names = [c["name"] for c in inp["candidate_controls"]]
+            self.assertIn("authz-transfer", names)       # overlaps src/api/TransferController.java
+            self.assertNotIn("mask-unrelated", names)    # no overlap -> sliced out
+            disk = json.loads((td / ".mgh-sra" / "change_context.json").read_text(encoding="utf-8"))
+            disk_names = [c["name"] for c in disk["candidate_controls"]]
+            self.assertIn("authz-transfer", disk_names)  # full set retained on disk for a2
+            self.assertIn("mask-unrelated", disk_names)
+
+    def test_input_file_carries_cap_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_slice_project(td)
+            d = json.loads(self._run(td, "slice-change").stdout)
+            inp = json.loads(Path(d["pending"][0]["input_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(inp["capability"], "payment-api")
+            self.assertTrue(inp["requirements"])
+            self.assertIn("POST /api/transfer", inp["endpoints"])
+            self.assertIn("bankCardNo", inp["data_fields"])
+            for k in ("endpoints", "data_fields", "role_hints", "mentioned_files",
+                      "candidate_controls", "memory"):
+                self.assertIn(k, inp)
+
+    def test_disk_change_context_keeps_sra_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            self._run(td, "multi-change")
+            d = json.loads((td / ".mgh-sra" / "change_context.json").read_text(encoding="utf-8"))
+            self.assertGreater(len(d.get("requirements", [])), 0)
+            self.assertTrue(all("input_path" in it for it in d["pending"]))
+
+    def test_paging_offset_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            d = json.loads(self._run(td, "multi-change", "--offset", "1", "--limit", "1").stdout)
+            self.assertEqual(len(d["pending"]), 1)
+            self.assertEqual(d["effective_limit"], 1)
+            self.assertEqual(d["offset"], 1)
+
+    def test_page_shrinks_to_orch_budget(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            d = json.loads(self._run(td, "multi-change", "--orch-budget-bytes", "200").stdout)
+            self.assertTrue(d["shrunk"])
+            self.assertLessEqual(d["effective_limit"], 3)
+
+    def test_oversize_flagged_not_sharded(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            r = self._run(td, "multi-change", "--max-unit-bytes", "50")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            d = json.loads(r.stdout)
+            self.assertTrue(all(it["oversize"] for it in d["pending"]))
+            self.assertEqual(d["total"], 3)              # capabilities NOT sharded (a3 atom)
+            self.assertIn("oversize", r.stderr)          # stderr warns + recipe
+
+    def test_resume_skips_done_unit(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            d = json.loads(self._run(td, "multi-change").stdout)
+            dm = Path(d["pending"][0]["done_marker"])
+            dm.parent.mkdir(parents=True, exist_ok=True)
+            dm.touch()
+            d2 = json.loads(self._run(td, "multi-change").stdout)
+            self.assertEqual(d2["done"], 1)
+            self.assertNotIn(d["pending"][0]["capability"],
+                             [it["capability"] for it in d2["pending"]])
+
+    def test_no_materialize_backward_compat(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            r = run("prepare_augment", "--change", "multi-change", "--out", ".mgh-sra", cwd=td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            d = json.loads(r.stdout)
+            self.assertIn("requirements", d)             # full change_context on stdout (legacy)
+            self.assertNotIn("input_path", d["pending"][0])
+            self.assertNotIn("shrunk", d)                # no paging fields on the legacy path
+
+    def test_bad_budget_exit2(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            r = self._run(td, "multi-change", "--max-unit-bytes", "-1")
+            self.assertEqual(r.returncode, 2)
+
+    def test_materialize_out_of_subtree_exit2(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            r = run("prepare_augment", "--change", "multi-change", "--out", ".mgh-sra",
+                    "--materialize", "D:/outside/inputs", cwd=td)
+            self.assertEqual(r.returncode, 2)
+
+    def test_check_validates_materialized_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); build_multi_cap_project(td)
+            self._run(td, "multi-change")
+            cc = td / ".mgh-sra" / "change_context.json"
+            r = run("prepare_augment", "--check", str(cc), cwd=td)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(json.loads(r.stdout)["ok"])
+            d = json.loads(cc.read_text(encoding="utf-8"))
+            d["pending"][0]["input_path"] = "D:/outside.input.json"  # absolute but outside subtree
+            cc.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            r = run("prepare_augment", "--check", str(cc), cwd=td)
+            self.assertEqual(r.returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

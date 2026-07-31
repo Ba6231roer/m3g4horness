@@ -13,6 +13,7 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/re/sys/pathlib).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py render_report.py --drafts-dir <abs> [--out <dir>] [--memory <path>]
+                       [--max-aggregate-bytes B]
   py render_report.py --check <out-dir>
 
   --drafts-dir <abs>   drafts directory (absolute) holding <cap>.md JSON drafts from the
@@ -21,12 +22,16 @@ CLI contract (`--help` is the contract surface, R5.1):
                        drafts/ (default: <project>/.mgh-srr). The report + manifest land here.
   --memory <path>      optional business_context.json (counts answered clarifications;
                        default: change_context.memory_source, else none)
+  --max-aggregate-bytes B  render aggregate-input (all finalized drafts) byte cap (default
+                       256KB). Over it → disclosed in srr_manifest.json boundaries[] + the
+                       report (P0 soft boundary, non-blocking); layered reduction is later.
   --check <out-dir>    post-render validation: security_review_report.md + srr_manifest.json
                        exist with complete shape (counts fields + >=6 boundaries incl. the
                        SRR-specific one) + no openspec/ path touched; exit 2 on violation.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
-  {"report":"<abs>","manifest":"<abs>","counts":{...},"boundaries":N,"checked":false}
+  {"report":"<abs>","manifest":"<abs>","counts":{...},"boundaries":N,
+   "aggregate_bytes":B,"checked":false}
 In --check mode: {"check":"srr-report","ok":bool,"out":"<abs>","violations":[...]}.
 
 Exit codes (R5.3b): 0 ok · 1 file missing / JSON malformed ·
@@ -64,6 +69,15 @@ _BOUNDARIES = [
     "业务记忆为用户断言,非代码真相(显式代码/proposal 声明 > 用户记忆 > 默认猜测;冲突时代码为准)。",
     "codegraph 结构确认是可选 advisory(仅目标已建 .codegraph/ 时);call_path 确认 N / 残留 M,不声称全确认;未建索引时确认/残留均为 0。",
 ]
+
+# P0 aggregate-context-budget soft boundary: render reads ALL finalized drafts (its aggregate
+# input). Over --max-aggregate-bytes it discloses + advises (non-blocking); layered reduction
+# is a later change. (request-context-budget; bytes = conservative token upper bound.)
+DEFAULT_MAX_AGGREGATE_BYTES = 256 * 1024  # 256KB — render aggregate-input cap (P0 soft)
+_AGGREGATE_OVER_BUDGET = (
+    "本次 render 的聚合输入(全部定稿 drafts)超过 --max-aggregate-bytes 阈值;P0 为软边界,"
+    "render 仍整份读入、未硬界。建议对超大需求文档用 --split 切分单元或 --focus 收窄维度,减小聚合输入。"
+)
 
 
 def _find_project_root(start: Path):
@@ -140,7 +154,8 @@ def _anchor_str(anchor):
     return " / ".join(parts) if parts else "(无具体锚点·泛化缺口)"
 
 
-def _render_report(doc, agg, degraded, rules_source, memory_source, clarifications, focus, catalog):
+def _render_report(doc, agg, degraded, rules_source, memory_source, clarifications, focus, catalog,
+                   aggregate_disclosure=None):
     """Render security_review_report.md (简体中文, brief, human-readable)."""
     L = []
     L.append(f"# 安全需求评审报告:{doc}")
@@ -233,7 +248,10 @@ def _render_report(doc, agg, degraded, rules_source, memory_source, clarificatio
 
     L.append("## 诚实边界")
     L.append("")
-    for i, b in enumerate(_BOUNDARIES, 1):
+    report_bounds = list(_BOUNDARIES)
+    if aggregate_disclosure:
+        report_bounds.append(aggregate_disclosure)
+    for i, b in enumerate(report_bounds, 1):
         L.append(f"{i}. {b}")
     L.append("")
     return "\n".join(L)
@@ -301,12 +319,23 @@ def _run_render(args):
         print(f"warn: no drafts in {drafts_dir}; rendering an empty review", file=sys.stderr)
     agg = _aggregate(drafts)
 
+    # aggregate-context-budget (P0): render's aggregate input = all finalized drafts. Report
+    # its bytes; over --max-aggregate-bytes → disclose in manifest boundaries[] + report.
+    aggregate_bytes = sum(dp.stat().st_size for dp in sorted(drafts_dir.glob("*.md")))
+    over_aggregate = aggregate_bytes > args.max_aggregate_bytes
+    aggregate_disclosure = _AGGREGATE_OVER_BUDGET if over_aggregate else None
+    if over_aggregate:
+        print(f"warn: render aggregate input {aggregate_bytes}B > --max-aggregate-bytes "
+              f"{args.max_aggregate_bytes}B (P0 soft boundary; advise --split / --focus)",
+              file=sys.stderr)
+
     clarifications = _read_clarifications(clarify_path)
     unconfirmed = _count_unconfirmed(clarifications, memory)
 
     focus = ctx.get("focus") if isinstance(ctx, dict) else None
     catalog = ctx.get("sensitive_catalog") if isinstance(ctx, dict) else None
-    report_md = _render_report(doc, agg, degraded, rules_source, memory_source, clarifications, focus, catalog)
+    report_md = _render_report(doc, agg, degraded, rules_source, memory_source, clarifications,
+                               focus, catalog, aggregate_disclosure)
 
     counts = {
         "gaps": len(agg["gaps"]),
@@ -327,6 +356,8 @@ def _run_render(args):
     if catalog_counts:
         boundaries.append(
             "据公司敏感数据目录逐项查脱敏:目录内字段类型据 mask 规则逐项查脱敏缺口,目录外字段类型仅按现行 6 facet 识别(目录非穷尽所有敏感字段)。")
+    if over_aggregate:
+        boundaries.append(_AGGREGATE_OVER_BUDGET)
     manifest = {
         "doc": doc,
         "rules_source": rules_source,
@@ -334,6 +365,8 @@ def _run_render(args):
         "focus": focus_dims,
         "sensitive_catalog": ({"counts": catalog_counts, "source": catalog_source}
                               if catalog_counts else None),
+        "aggregate_bytes": aggregate_bytes,
+        "aggregate_over_budget": over_aggregate,
         "counts": counts,
         "boundaries": boundaries,
     }
@@ -345,11 +378,13 @@ def _run_render(args):
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = {"report": str(report_path), "manifest": str(manifest_path),
-               "counts": counts, "boundaries": len(boundaries), "checked": False}
+               "counts": counts, "boundaries": len(boundaries),
+               "aggregate_bytes": aggregate_bytes, "checked": False}
     print(f"[render_report] doc={doc} gaps={counts['gaps']} reqs={counts['augmented_requirements']} "
           f"ref_controls={counts['referenced_controls']} clarifications={counts['clarifications_asked']} "
           f"focus={'narrowed' if focus_dims else 'all9'} "
           f"catalog={(catalog_counts.get('items') if catalog_counts else 'none')} "
+          f"aggregate_bytes={aggregate_bytes} "
           f"call_path={counts['call_path_confirmed']}/{counts['call_path_residual']} -> {report_path}",
           file=sys.stderr)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -396,6 +431,10 @@ def _run_check(out_arg):
             if isinstance(msc, dict) and msc.get("counts"):
                 if not any(("目录" in x and "6 facet" in x) for x in b if isinstance(x, str)):
                     violations.append("manifest sensitive_catalog non-null but boundaries[] missing the catalog-coverage disclosure")
+            if m.get("aggregate_over_budget") is True:
+                if not any(("聚合输入" in x or "max-aggregate-bytes" in x)
+                           for x in b if isinstance(x, str)):
+                    violations.append("manifest aggregate_over_budget true but boundaries[] missing the aggregate-budget disclosure")
     if report.is_file():
         rt = report.read_text(encoding="utf-8")
         if "openspec/" in rt:
@@ -420,6 +459,10 @@ def main():
                     help="drafts dir holding <cap>.md JSON drafts (default: <out>/drafts)")
     ap.add_argument("--out", help="output / intake working dir (default: <project>/.mgh-srr)")
     ap.add_argument("--memory", help="optional business_context.json path")
+    ap.add_argument("--max-aggregate-bytes", type=int, default=DEFAULT_MAX_AGGREGATE_BYTES,
+                    help=f"render aggregate-input (all drafts) byte cap (default "
+                         f"{DEFAULT_MAX_AGGREGATE_BYTES}; P0 soft boundary — over it is disclosed "
+                         f"in manifest boundaries[] + report, non-blocking)")
     ap.add_argument("--check", metavar="OUT-DIR", default=None,
                     help="post-render validation: report + manifest shape + no openspec/ touched")
     args = ap.parse_args()

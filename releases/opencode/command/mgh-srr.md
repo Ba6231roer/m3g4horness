@@ -15,9 +15,11 @@ description: Run /mgh-srr on a freeform requirement document (word/txt/md/excel 
 
 > **运行域**:`install.sh` 向本仓 `.opencode/plugins/` 注入 `tool.execute.before` 插件(`block-adhoc-scripts`),
 > 归一化后管道喂**同一** Python 守卫(`.opencode/hooks/block_adhoc_scripts.py`,与 claude 端零差异),在
-> `/mgh-srr` 运行域内拦 `py -c`/`python -c` 内省、越权 `Write *.py`、子树外 `Write`/`Edit`。纪律仍由下方铁律
-> + 各 producer `--check` 边界校验兜底。`MGH_TARGET`(项目根)供守卫判树。**可靠性边界**:opencode 插件进程不继承
-> mid-session bash 导出的 env,故 `MGH_SRR_ACTIVE` 仅在 opencode 启动时已就绪才激活守卫。
+> `/mgh-srr` 运行域内拦 `py -c`/`python -c` 内省、**一切脚本扩展名写入**(`.py`/`.ps1`/`.sh`/`.ts`/…;叶脚本 read-only)、
+> 子树外 `Write`/`Edit`。纪律仍由下方铁律 + 各 producer `--check` 边界校验兜底。`MGH_TARGET`(项目根)供守卫判树。
+> 编排器**起步先** `bash: export MGH_SRR_ACTIVE=1` + 写磁盘哨兵 `<project>/.mgh-srr/.active`,r1 后 `export MGH_TARGET=<绝对项目根>`
+> 并重写哨兵 `target`。守卫激活 = env **或** 磁盘哨兵——**哨兵关闭了 opencode「插件进程不继承 mid-session bash 导出的 env」
+> 的可靠性边界**(见 `core/contracts/hooks/runtime-enforcement.md`)。
 
 You are the **orchestrator** of the mgh-srr flow. Carry it out by running the deterministic
 leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets live at
@@ -47,6 +49,10 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets l
 - `--no-codegraph`(跳过可选 codegraph 富化;行为等价引入 codegraph 前)。codegraph 检测默认 `auto`:
   仅当 `<MGH_TARGET>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用;`--no-codegraph` 或检测不可用
   → 富化 off(零 codegraph 调用、a2/a3 行为与引入 codegraph 前逐字一致)
+- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):
+  `--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize 单元标 `oversize` + recipe,**不**切分——单元是评审原子)·
+  `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)·
+  `--max-aggregate-bytes <N>`(render 聚合输入上限,默认 256KB;P0 软边界,超则建议 `--split`/`--focus` + `srr_manifest.json::boundaries[]`/报告披露)
 
 **无 actionable 参数 / `--help`** → 打印参数表后 **STOP**(零 token、零解析)。
 
@@ -57,11 +63,11 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets l
 **硬边界(`NEVER`)**:(a) `Write` 任何 `.py`——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读 `.mgh-srr/**` 或 `change_context.json`);(c) `Read` 叶子 `.py` 源码。
 
 **implementation-intention(需 X → 合法出口 Y,NEVER `py -c`)**:
-- **工作清单 + fan-out 路径** → `ingest_requirements.py` stdout 即结构化 `change_context`(含 `pending[]` 每项**绝对** `draft_path`/`done_marker` + `clarify_path` + `candidate_controls` + `memory` + `degraded`);编排器**逐字读该 stdout**、**逐字透传**路径给 subagent;**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相对路径;
+- **工作清单 + fan-out 路径** → `ingest_requirements.py --materialize <out-dir>/inputs/augment` stdout 即 **slim 分页**摘要(`pending[]` 每项**绝对** `draft_path`/`done_marker`/`input_path`/`bytes`/`oversize` + `clarify_path` + `offset`/`limit`/`effective_limit`/`shrunk`);编排器**逐字读该 slim stdout**、**逐字透传** `input_path` 给复用的 sra 引擎 stage(subagent **自读** `input_path`,≤ `--max-unit-bytes`);**NEVER** 整份读 sra-shape `change_context.json`、**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相对路径、**NEVER** 把单元记录内联塞进 subagent task(只透传 `input_path`);
 - **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON);
 - **派生量** → 该量产出者的 stdout 字段;**NEVER** 自写脚本算。
 
-**fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;输出路径 = `ingest_requirements` stdout 的 `pending[].draft_path`/`clarify_path`(绝对),编排器**逐字透传**、subagent **恰好写该绝对路径**(零拼装、零占位符)。
+**fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;路径 = `ingest_requirements` stdout 的 `pending[].input_path`(subagent 读)/`draft_path`/`clarify_path`(绝对),编排器**逐字透传**、subagent **自读 `input_path`** + **恰好写 `draft_path`**(零拼装、零占位符)。
 
 **边界校验**:每个确定性 stage 产物跑完执行 `<producer> --check`;失败(退出码 2)→ 回退重跑该步,**不带着破损产物继续**。报告/manifest **NEVER** 写进 `openspec/`。
 
@@ -70,13 +76,22 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets l
 ```
 0. parse + self-check(宿主 agent/model 可用;否则 STOP 给修复提示)
    · **起步**:`Bash: export MGH_SRR_ACTIVE=1`(声明运行域;激活 block-adhoc-scripts 守卫,供 hook 判树/可观测)
+   · **哨兵(磁盘激活信号,opencode 可靠激活兜底)**:`mkdir -p .mgh-srr && printf '%s' '{"domain":"mgh-srr","target":"","out_roots":[],"v":1}' > .mgh-srr/.active`
+     (cwd = 项目根;step 0 仅激活,target 待 r1 后填)。守卫激活 = env **或** 该哨兵(opencode 插件进程不继承
+     mid-session env → 哨兵兜底)。完成态(step 7)/ 干净停止 `rm .mgh-srr/.active`。
 1. r1 ingest(Bash,确定性):
-     py .opencode/mgh-core/scripts/ingest_requirements.py --doc <path|dir|-> [--text <str>] [--rules <path>] [--focus <inline-json|path>] [--sensitive-catalog <inline-json|@path|->] [--split] [--out <dir>] [--dry-run] [--no-interactive]
-   → stdout = 结构化 change_context.json;产物落 <out-dir>/change_context.json
-   · 读该 stdout 取:`pending[]`、`clarify_path`、`candidate_controls`、`memory`、`project_root`、`requirements[]`、`degraded`、`focus`、`sensitive_catalog`(**NEVER** `py -c` 重挖)。
+     py .opencode/mgh-core/scripts/ingest_requirements.py --doc <path|dir|-> [--text <str>] [--rules <path>] [--focus <inline-json|path>] [--sensitive-catalog <inline-json|@path|->] [--split] [--out <dir>] --materialize <out-dir>/inputs/augment [--offset N] [--limit N] [--max-unit-bytes B] [--orch-budget-bytes B] [--dry-run] [--no-interactive]
+   → stdout = **slim 分页**摘要(`--materialize`);全量 sra-shape `change_context.json` 仍落 <out-dir>/change_context.json 供 a2/a4/render 读
+   · 读该 **slim stdout** 取:`pending[]`(每项绝对 draft_path/done_marker/input_path/bytes/oversize)、`clarify_path`、`project_root`、
+     `rules_source`、`memory_source`、`has_memory`、`requirements_count`、`candidate_controls_count`、`degraded`、`focus`、`sensitive_catalog`、
+     `offset`/`limit`/`effective_limit`/`shrunk`(**NEVER** 整份读 `change_context.json`、**NEVER** `py -c` 重挖)。
      `focus.directive`(简体中文句子;`focus: null` 时缺省)**逐字透传**进 a2/a3 subagent task(NEVER 重解析 / NEVER 自拼);
      `sensitive_catalog`(含 `directive`+`items[]`;`null` 时缺省)**逐字透传**进 a2/a3 subagent task(NEVER 重算 / NEVER 自拼)
-   · **MGH_TARGET**:取该 stdout `project_root`(绝对项目根)→ `export MGH_TARGET=<project_root>`
+   · **翻页**(单页 > `--orch-budget-bytes` 时 stdout `shrunk:true`):按 `offset` += `effective_limit` 重派 ingest 取下一页
+     (翻页循环由编排器,**NEVER** wrapper `.py`);`--resume` 跳过已 `.done` 单元
+   · **MGH_TARGET**:取该 stdout `project_root`(绝对项目根)→ `export MGH_TARGET=<project_root>`;
+     **重写哨兵 target**(opencode 子树守卫就绪):`printf '%s' '{"domain":"mgh-srr","target":"<project_root>","out_roots":[],"v":1}' > .mgh-srr/.active`
+     (project_root 来自 ingest_requirements stdout,Windows 原生;**NEVER** bash `pwd`)。
    · **codegraph 检测**(发起任何 LLM subagent 之前;零 LLM token):
      `Bash: if test -d "$MGH_TARGET/.codegraph" && command -v codegraph >/dev/null 2>&1; then echo on; else echo off; fi`
      → `codegraph=on|off`。默认 `auto`(可用即启用);传 `--no-codegraph` 或检测不可用 → `codegraph=off`。该信号
@@ -96,10 +111,12 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets l
    · 用户回填后(或用默认)→ 写 answers.json → `py merge_memory.py --memory <MGH_TARGET>/.mgh-sra/business_context.json --answers <answers.json>`
    · 无澄清 → 跳过本步
 4. a3 augment(复用 subagent;per-unit 扇出):
-   for each item in change_context.pending[](逐字透传 draft_path/done_marker):
-     spawn sra-augment(隔离上下文;给:该单元的 requirements[] + 业务面 + candidate_controls + 增补后 memory
-       + 维度目录路径 + focus.directive(逐字,若非 null) + sensitive_catalog(逐字,若非 null) + draft_path(绝对) + done_marker(绝对) + codegraph 信号(逐字))
+   for each item in pending[] 当前页(读 r1 slim stdout;逐字透传 input_path/draft_path/done_marker):
+     spawn sra-augment(隔离上下文;给:该单元的 **input_path**(subagent **自读**,含 requirements[] + 业务面 + candidate_controls
+       + memory,≤ `--max-unit-bytes`) + 维度目录路径 + focus.directive(逐字,若非 null) + sensitive_catalog(逐字,若非 null)
+       + draft_path(绝对) + done_marker(绝对) + codegraph 信号(逐字))
      → 恰好写 draft_path + touch done_marker
+     · oversize 单元(`oversize:true`):recipe `--split` 切更细标题 / 收窄文档(单元**不**切分——评审原子)
      · `codegraph=on`(可选 / codegraph-gated / non-fatal / bounded):sra-augment 对已三信号命中、已推荐控制的缺口做
        call-path advisory 确认(写 `recommended_control.call_path`);`codegraph=off` / 无 `--rules` → 不产 `call_path`
 5. a4 consistency(复用 subagent,除非 --skip-consistency):
@@ -116,6 +133,7 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets l
    · 校验:`py merge_memory.py --check <MGH_TARGET>/.mgh-sra/business_context.json`
 7. 打印产物路径 + 边界声明
    · counts.call_path_confirmed/call_path_residual 取自各 draft(经 describe_artifact 合法瞄结构;NEVER `py -c`);codegraph=off 时二者均 0
+   · **收尾移除哨兵**:`rm .mgh-srr/.active`(run 完成;避免残留哨兵锁死日常开发)
 ```
 
 ### Stage → component map
@@ -134,10 +152,13 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents. Shared assets l
 
 ### Deterministic invocation (Bash)
 
+**长跑 Bash 超时纪律**:给 `ingest_requirements`/`render_report` 等长跑确定性 Bash 调用传一个慷慨的 per-call `timeout`(opencode shell 工具接受毫秒级 `timeout`),勿依赖默认超时(opencode 实测 60s/官方 120s)中途强杀。
+
 ```bash
 py .opencode/mgh-core/scripts/ingest_requirements.py --doc <path|-> --rules .mgh-init --out .mgh-srr
 py .opencode/mgh-core/scripts/ingest_requirements.py --doc <path|-> --focus '{"dimensions":["sensitive-data"],"facets":{"sensitive-data":["id-card","bank-card"]}}' --out .mgh-srr
 py .opencode/mgh-core/scripts/ingest_requirements.py --doc <path|-> --sensitive-catalog @.mgh-sra/sensitive_catalog.json --out .mgh-srr
+py .opencode/mgh-core/scripts/ingest_requirements.py --doc <path|-> --split --out .mgh-srr --materialize .mgh-srr/inputs/augment --offset 0 --limit 50 --max-unit-bytes 196608 --orch-budget-bytes 65536
 py .opencode/mgh-core/scripts/focus_scope.py --list
 py .opencode/mgh-core/scripts/focus_scope.py --parse '{"dimensions":["horizontal-authz"]}'
 py .opencode/mgh-core/scripts/sensitive_catalog.py --list
@@ -146,17 +167,20 @@ py .opencode/mgh-core/scripts/ingest_requirements.py --check .mgh-srr/change_con
 py .opencode/mgh-core/scripts/describe_artifact.py --in .mgh-srr/change_context.json --keys
 py .opencode/mgh-core/scripts/merge_memory.py --memory <MGH_TARGET>/.mgh-sra/business_context.json --answers <answers.json>
 py .opencode/mgh-core/scripts/merge_memory.py --check <MGH_TARGET>/.mgh-sra/business_context.json
-py .opencode/mgh-core/scripts/render_report.py --drafts-dir .mgh-srr/drafts --out .mgh-srr
+py .opencode/mgh-core/scripts/render_report.py --drafts-dir .mgh-srr/drafts --out .mgh-srr --max-aggregate-bytes 262144
 py .opencode/mgh-core/scripts/render_report.py --check .mgh-srr
 ```
 
 ## Output(per `<project>/.mgh-srr/` + `<project>/.mgh-sra/`)
 
 - `change_context.json` / `clarifications.json`(结构化)+ `clarifications.md`(人读回填,opencode)
-- `drafts/<unit>.md`(a3/a4,复用 sra shape)、`security_review_report.md`(人读报告)、`srr_manifest.json`(counts + boundaries)
+- `inputs/augment/<unit>.input.json`(per-unit 物化输入,a3 subagent 自读,≤ `--max-unit-bytes`)、`drafts/<unit>.md`(a3/a4,复用 sra shape)、`security_review_report.md`(人读报告)、`srr_manifest.json`(counts + boundaries)
 - 项目级(跨 sra/srr):`<project>/.mgh-sra/business_context.json`(与 `/mgh-sra` 同文件同 shape,累积复用)
 
 ## Always disclose
+
+- **请求上下文预算(确定性边界)**:每次大模型请求 ≤ 配置阈值(`--max-unit-bytes`/`--orch-budget-bytes`/`--max-aggregate-bytes`);`oversize`/`shrunk`/聚合超限在 `srr_manifest.json::boundaries[]` + 报告披露(无静默溢出)。**P0 软边界**:render 聚合节点目前为「披露 + `--split`/`--focus` 回退」,分层归约留后续;**不声称** P0 已对聚合节点提供硬阈值。扇出 per-unit 输入 + 编排器请求确定性有界。
+- **宿主 shell 超时**:opencode 可经环境变量 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局 shell 超时,但**须在 opencode 启动前就绪**(会话中途 `export` 不被 opencode 插件进程继承);per-call `timeout`(见上方长跑 Bash 超时纪律)是跨宿主公共杠杆、会话内即时生效。claude Bash per-call `timeout` 上限 600000ms。
 
 - 面向人读的非代码内容用**简体中文**;锚点/路径/frontmatter 原样。
 - 产物为 **LLM 候选,需人工复核**;覆盖**取决于需求文档声明 + 已记业务事实**。

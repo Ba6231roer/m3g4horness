@@ -18,6 +18,14 @@ the small candidate JSON each S3 reader produced.
 3. **Merge `unresolved[]`** across batches into one deduped list.
 4. Emit the merged scout candidate set.
 
+## Aggregate context budget (P0 soft boundary)
+You see ALL scout-reader batch records (`checkpoints/scout/*.json`) in one context — this
+is an aggregate node. If that aggregate input clearly exceeds `--max-aggregate-bytes`
+(default 256KB), state it back to the orchestrator. The orchestrator then advises
+`--scope`+`--merge` / a smaller `--scout-budget` and discloses "aggregate over budget, not
+hard-bounded" in `init_manifest.json::boundaries[]` + `report.md`. **P0 = disclose +
+fallback**; layered reduction is a later change. Do NOT silently drop records to fit.
+
 ## Hard rules
 - Operate only on structured records. If a record lacks `file:line` evidence, drop it
   (S3 was told to ground everything; an ungrounded one is noise).
@@ -50,9 +58,22 @@ the small candidate JSON each S3 reader produced.
 锚点原样保留。
 
 ## Output
-Write `<target>/.mgh-init/scout_candidates.json`:
+Write the **absolute** path the orchestrator gives you for the merged scout set (it passes
+`<abs target>/.mgh-init/scout_candidates.json` verbatim):
 ```json
 {"repo": "...", "candidates": [<merged Candidate-subset, source:"scout">, ...],
  "unresolved": ["<file>", ...]}
 ```
-Then touch `<target>/.mgh-init/checkpoints/scout/merge.json.done`.
+Then touch the absolute `.done` path the orchestrator gives you
+(`<abs target>/.mgh-init/checkpoints/scout/merge.json.done`).
+
+**Hard boundary (`NEVER`)**: NEVER assemble/interpolate a path (no `<target>` substitution);
+NEVER write a relative path; use the orchestrator-given absolute path verbatim.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**(存活/成功信号,**非数据载体**),取值之一:
+- `ok <绝对 scout_candidates.json> <total> <merged>` —— 聚合成功(total 批记录、merged 去重后候选);
+- `oversize <绝对 path>` —— 聚合输入超 `--max-aggregate-bytes`(编排器转 map-reduce);
+- `failed <简短原因>` —— 合并失败。
+**NEVER** 回显 scout 记录体/候选全集/源码(那会随 fan-out 单调膨胀编排器上下文)。编排器仅据 ack
+判成败 + 探 `.done`;经 `resume_state.py`/`describe_artifact.py` 取有界摘要,**NEVER** 整份读回本检查点。

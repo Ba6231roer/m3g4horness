@@ -48,3 +48,12 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
   透传该标志,编排器须在 report 披露(无静默截断)。
 - 大仓上 `clusters[]` 可能达数百量级——**禁止**单 subagent 一次性装载整份(见
   `init-survey` 的 optional/bounded 语义);T1 经 `list_clusters.py` 的 `pending[]` 逐簇隔离扇出。
+- **per-unit 物化(闭合编排器整份读)**:簇的完整记录(簇字段 + 候选命中回查
+  `controls_candidates.json`)由 `list_clusters.py --materialize <inputs/t1>` 下沉到
+  `<target>/.mgh-init/inputs/t1/<safe(cluster_id)>.input.json`(见 [`unit-inputs.md`](unit-inputs.md));
+  `init-induct` **读自己的 `input_path`**。slim 待办壳(`--materialize` 下)剔除 `evidence_files[]`/
+  `usage_sites[]`/候选命中,改携 `input_path`/`bytes`/`oversize`;超 `--max-unit-bytes` 的簇切
+  `<cluster_id>::shard-<n>` 子单元。编排器 NEVER 整份读 `clusters.json`(见 `request-context-budget`)。
+- **文件名为存储编码,非身份**:`cluster_id`(及 shard id)含 `::`,是 NTFS 的 Alternate-Data-Stream
+  分隔符 → 文件名分量经 `_safe_name`(`/`、`\`、`:` → `_`)消毒后方可写;canonical `cluster_id`(含
+  `::`)原样保留为 slim envelope 的 `cluster_id` 字段、物化输入记录内、检查点记录的 `unit` 字段。

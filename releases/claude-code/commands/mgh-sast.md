@@ -8,10 +8,12 @@ allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `prefilter.py` / `dedup.py` / `emit_sarif.py` / `list_chunks.py` / `list_verify_jobs.py` / `describe_artifact.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。
 
 > **运行域 + hook**:`install.sh` 向本仓 `.claude/settings.json` 注入 PreToolUse
-> hook(`block-adhoc-scripts`),在 `/mgh-sast` 运行域内拦 `py -c`/`python -c` 内省与越权
-> `Write *.py`(命中退出码 2 + stderr recipe 指向合法出口)。编排器**起步先**
-> `Bash: export MGH_SAST_ACTIVE=1` 标记运行域;opt-out = `install.sh --no-enforce-hook`
-> (纪律仍由下方铁律 + 边界校验兜底)。
+> hook(`block-adhoc-scripts`),在 `/mgh-sast` 运行域内拦 `py -c`/`python -c` 内省与**一切脚本扩展名写入**
+> (`.py`/`.ps1`/`.sh`/`.ts`/…;叶脚本 read-only)、以及 resolved 目标不在 `MGH_TARGET` 子树内的
+> `Write`/`Edit`(命中退出码 2 + stderr recipe 指向合法出口)。编排器**起步先**
+> `Bash: export MGH_SAST_ACTIVE=1` 标记运行域 + 写磁盘哨兵 `<repo>/security-scan/.active`;opt-out =
+> `install.sh --no-enforce-hook`(纪律仍由下方铁律 + 边界校验兜底)。守卫激活 = env **或** 磁盘哨兵
+> (哨兵绕开 opencode「插件不继承 mid-session env」的可靠性边界,见 `core/contracts/hooks/runtime-enforcement.md`)。
 
 You are the **orchestrator** of a 9-stage SAST pipeline. Carry it out by running the
 deterministic leaf scripts (Bash) and spawning stage subagents (Agent). Shared assets
@@ -31,6 +33,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - `--scope-depth <N>` (default 2), `--scope-direction callers|callees|both` (default both)
 - `--models role=id` (override one role's model)
 - `--controls <path>` — optional/advisory: `controls_inventory.json` (from `/mgh-init`); intake + scope-project, inject into s2/s3/s4/s6/s8. Omit = legacy behavior (zero control injection)
+- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize chunk 标 `oversize`+`needs_slice` 切片、verify finding 标 `oversize` 不切)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(s1 scope / s2-s3 hypothesis 聚合输入上限,默认 256KB;P0 软边界,超则建议 `--scope`/`--diff` 收窄 + `boundaries[]`/`report.md` 披露)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
 
@@ -44,6 +47,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - **工作清单** → `list_chunks.py`(s4 fan-out)/ `list_verify_jobs.py`(s6 fan-out);
 - **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON);
 - **派生量** → 该量产出者的 stdout 字段(`prefilter`/`dedup`/`emit_sarif` stdout 的 stats;**NEVER** 自写脚本算)。
+- **某 fan-out 单元的完整记录**(chunk 的 `files[]`/`threat_id`/`hypothesis` 或 finding 的 source/sink 锚点)→ `list_chunks.py`/`list_verify_jobs.py` `--materialize <inputs/<tier>>` stdout `pending[]` 每项的 `input_path`(绝对,subagent **自读**;≤ `--max-unit-bytes`);**NEVER** 整份读 `s3_chunks.json`/`s5_filtered.json`(编排器只装 slim 分页待办壳)、**NEVER** `py -c`、**NEVER** 把记录体内联塞进 subagent task(只透传 `input_path`);
 
 **fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;doubt 时刻 inline 1 行 shape(如「`s3_chunks.json::chunks[]` 即你的 s4 工作清单,经 `list_chunks.py` 取」)。
 
@@ -56,6 +60,10 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 ```
 0. parse + self-check (host agent/model available; else STOP with fix hint)
    · **起步**:`Bash: export MGH_SAST_ACTIVE=1`(声明运行域,激活 PreToolUse hook)
+   · **哨兵(磁盘激活信号,opencode 可靠激活兜底)**:`mkdir -p <repo>/security-scan && printf '%s' '{"domain":"mgh-sast","target":"","out_roots":[],"v":1}' > <repo>/security-scan/.active`
+     (sast 无 step-0 Python abs-repo 源 → `target` 空、子树守卫降级;脚本只读 / 内省守卫经哨兵可靠激活)。
+     守卫激活 = `MGH_SAST_ACTIVE=1` env **或** 该哨兵(opencode 插件进程不继承 mid-session env → 哨兵兜底)。
+     完成态(step 6)/ 干净停止 `rm <repo>/security-scan/.active`。
 1. resolve profile/roles  (.claude/mgh-core/profiles/<profile>.yaml)
 2. IF --estimate: run scope + count only, print, STOP (no LLM)
 3. IF scope (--diff/--path/--package):
@@ -76,21 +84,22 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
    s1 survey (subagent, constrained to in_scope) → checkpoints/s1_context.json
    s2 threat-model (subagent) → checkpoints/s2_threats.json
    s3 decompose (subagent) → checkpoints/s3_chunks.json   (wrapper {rationale,chunks[]}; unit key = chunks[].id)
-   s4 FAN-OUT (per chunk) — 经确定性脚本枚举(**禁手挖** checkpoints/** / `py -c`):
-     [s3_chunks.json::chunks[]] → list_chunks.py → [stdout pending[]]
-       pending[] 每项 {chunk_id,files[],threat_id,hypothesis}
-     for each chunk in pending[] (--resume 跳过已 .done):
-       - if any file big: run chunk_sources.py to slice (绝不整文件喂 LLM)
-       - spawn sast-deepdive (one isolated context per chunk) → checkpoints/s4/<chunk_id>.json + .done
+   s4 FAN-OUT (per chunk) — 经确定性脚本枚举 + 物化(**禁手挖** checkpoints/** / `py -c` / 整份读 `s3_chunks.json`):
+     [s3_chunks.json::chunks[]] → list_chunks.py --materialize <repo>/security-scan/inputs/s4 [--repo <repo>] → [stdout slim pending[]]
+       pending[] 每项 {chunk_id,files_count,threat_id,needs_slice,input_path,checkpoint_path,done_marker,bytes,oversize}
+     按 `offset`/`effective_limit` 翻页(单页 > `--orch-budget-bytes` 时 `shrunk:true`;NEVER wrapper `.py`);
+     for each chunk in page `pending[]` (--resume 跳过已 .done):
+       - spawn sast-deepdive(透传 `input_path`;subagent 读 `input_path`,needs_slice 文件自行 `chunk_sources` 切片,**绝不**整文件喂 LLM)→ 收 JSON 写 checkpoints/s4/<chunk_id>.json + .done
      aggregate all chunk findings → checkpoints/s4_candidates.json  ({"findings":[...]})
    s5 prefilter (Bash, deterministic) → s5_filtered.json ({kept[],dropped[],stats})
      · 校验:`prefilter.py --check`(每条 kept finding 有 file/line_start/vuln_class/source_ref/sink_ref;退出码 2 → 回退)
      · **终态**:s5_filtered.json 为终态
-   s6 FAN-OUT (per finding, vote) — 经确定性脚本枚举:
-     [s5_filtered.json::kept[]] → list_verify_jobs.py → [stdout pending[]]
-       pending[] 每项 {finding_id,file,line,vuln_class,source_ref,sink_ref}
-     for each finding in pending[] (--resume 跳过已 .done):
-       - spawn sast-verify (≥1 pass; 多 pass 做 majority-vote FP 抑制) → checkpoints/s6/<finding_id>.json + .done
+   s6 FAN-OUT (per finding, vote) — 经确定性脚本枚举 + 物化(**禁手挖** `s5_filtered.json` / `py -c` / 整份读):
+     [s5_filtered.json::kept[]] → list_verify_jobs.py --materialize <repo>/security-scan/inputs/s6 → [stdout slim pending[]]
+       pending[] 每项 {finding_id,file,line,vuln_class,input_path,checkpoint_path,done_marker,bytes,oversize}(source/sink 锚点下沉进 input 文件)
+     按 `offset`/`effective_limit` 翻页(单页 > `--orch-budget-bytes` 时 `shrunk:true`;NEVER wrapper `.py`);
+     for each finding in page `pending[]` (--resume 跳过已 .done):
+       - spawn sast-verify(透传 `input_path`;subagent 读 `input_path`;≥1 pass,多 pass 做 majority-vote FP 抑制)→ 收 JSON 写 checkpoints/s6/<finding_id>.json + .done
      aggregate verdicts → checkpoints/s6_verdicts.json  ({...finding, verdict, cvss_vector})
    s7 dedup (Bash, deterministic) → s7_findings.json ({findings:[canonical...]})
      · 校验:`dedup.py --check`(无明显近重复簇;退出码 2 → 回退)
@@ -100,7 +109,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
      · 校验:`emit_sarif.py --check`(SARIF 2.1.0 + 每条 run.invocation;退出码 2 → 回退)
    (--stop-after truncates; --resume skips completed)
 5. spawn sast-triage → report.md; write run_manifest.json
-6. report artifact paths + triage-candidate disclaimer
+6. report artifact paths + triage-candidate disclaimer · **收尾移除哨兵** `rm <repo>/security-scan/.active`
 ```
 
 ### Stage → component map
@@ -111,10 +120,10 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 | s2 threat-model | subagent `sast-threat-model` | `core/prompts/stages/s2-*.md` |
 | s3 decompose | subagent `sast-decompose` | `core/prompts/stages/s3-decompose.md` |
 | s4 deep-dive | subagent `sast-deepdive` (per chunk) | `core/prompts/stages/s4-system.md` + `lenses/specialist-hints.md` |
-| s4 enumerate | **script** | `core/scripts/list_chunks.py` (pending work-list;读 s3_chunks.json chunks[]) |
+| s4 enumerate | **script** | `core/scripts/list_chunks.py` (--materialize slim pending[]+input_path/needs_slice;读 s3_chunks.json chunks[]) |
 | s5 prefilter | **script** | `core/scripts/prefilter.py` |
 | s6 verify | subagent `sast-verify` (vote) | `core/prompts/stages/s6-verify.md` |
-| s6 enumerate | **script** | `core/scripts/list_verify_jobs.py` (pending 按-finding 清单;读 s5_filtered.json kept[]) |
+| s6 enumerate | **script** | `core/scripts/list_verify_jobs.py` (--materialize slim pending[]+input_path;读 s5_filtered.json kept[]) |
 | s7 dedup | **script** | `core/scripts/dedup.py` |
 | s8 chain | subagent `sast-chain` | `core/prompts/stages/s8-chain.md` |
 | s9 SARIF | **script** | `core/scripts/emit_sarif.py` |
@@ -127,9 +136,11 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 
 ### Deterministic invocation (Bash)
 
+**长跑 Bash 超时纪律**:给 `prefilter`/`dedup`/`emit_sarif` 等长跑确定性 Bash 调用传一个慷慨的 per-call `timeout`(claude Bash 工具与 opencode shell 工具均接受毫秒级 `timeout`;claude 上限 600000ms),勿依赖默认超时中途强杀(opencode 实测 60s/官方 120s;claude 120s)。
+
 ```bash
-py .claude/mgh-core/scripts/list_chunks.py --chunks security-scan/checkpoints/s3_chunks.json --checkpoints security-scan/checkpoints/s4
-py .claude/mgh-core/scripts/list_verify_jobs.py --findings security-scan/checkpoints/s5_filtered.json --checkpoints security-scan/checkpoints/s6
+py .claude/mgh-core/scripts/list_chunks.py --chunks security-scan/checkpoints/s3_chunks.json --checkpoints security-scan/checkpoints/s4 --repo <repo> --materialize security-scan/inputs/s4 --max-unit-bytes 196608 --orch-budget-bytes 65536
+py .claude/mgh-core/scripts/list_verify_jobs.py --findings security-scan/checkpoints/s5_filtered.json --checkpoints security-scan/checkpoints/s6 --materialize security-scan/inputs/s6 --max-unit-bytes 196608 --orch-budget-bytes 65536
 py .claude/mgh-core/scripts/prefilter.py --in security-scan/checkpoints/s4_candidates.json --out security-scan/checkpoints/s5_filtered.json
 py .claude/mgh-core/scripts/prefilter.py --check security-scan/checkpoints/s5_filtered.json
 py .claude/mgh-core/scripts/dedup.py --in security-scan/checkpoints/s6_verdicts.json --out security-scan/checkpoints/s7_findings.json
@@ -159,9 +170,13 @@ Per target, under `<repo>/security-scan/`:
 - `report.md` — findings + exploit chains + dropped-findings appendix
 - `report.sarif` — SARIF 2.1.0
 - `checkpoints/*.json` — stage artifacts (for `--resume`); per-unit `checkpoints/s4|s6/<id>.json.done`
+- `inputs/s4/<chunk>.input.json` · `inputs/s6/<finding>.input.json` — per-unit materialized fan-out inputs (subagent 自读;≤ `--max-unit-bytes`;随 `security-scan/` gitignore;见 `core/contracts/sast/fanout-enumeration.md`)
 - `run_manifest.json` — version, role→model, config hash, git SHA, timing, scope, `controls` (source/inventory_path/in_scope_count/out_of_scope_count/total; `source="none"` when no `--controls`)
 
 ## Always disclose
+
+- **宿主 shell 超时**:opencode 可经环境变量 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局 shell 超时,但**须在 opencode 启动前就绪**(会话中途 `export` 不被 opencode 插件进程继承);per-call `timeout`(见上方长跑 Bash 超时纪律)是跨宿主公共杠杆、会话内即时生效。claude Bash per-call `timeout` 上限 600000ms。
+- **请求上下文预算(确定性边界)**:每次大模型请求 ≤ 配置阈值(`--max-unit-bytes`/`--orch-budget-bytes`/`--max-aggregate-bytes`);`oversize`/`shrunk` 在 `run_manifest.json::boundaries[]` + `report.md` 披露(无静默溢出)。**P0 软边界**:s1 scope / s2-s3 hypothesis 聚合节点目前为「披露 + `--scope`/`--diff` 回退」,分层归约留后续 change;**不声称** P0 已对聚合节点提供硬阈值。s4/s6 扇出 per-unit 输入 + 编排器请求确定性有界。
 
 - Triage-candidate disclaimer (report header + SARIF).
 - Call-graph blind spot: Spring `@RequestMapping`/Feign/AOP/`@Autowired` etc. may

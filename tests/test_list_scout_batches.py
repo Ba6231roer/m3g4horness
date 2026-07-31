@@ -61,6 +61,13 @@ class TestListScoutBatches(unittest.TestCase):
         rec.write_text(json.dumps({"batch_id": bid}), encoding="utf-8")
         rec.with_name(rec.name + ".done").write_text("", encoding="utf-8")
 
+    def _mark_failed(self, bid, reason="reader crash"):
+        # orchestrator-written .failed marker: body `unit` carries the batch_id
+        cp = self.d / "checkpoints" / "scout"
+        cp.mkdir(parents=True, exist_ok=True)
+        (cp / f"{bid}.json.failed").write_text(
+            json.dumps({"unit": bid, "reason": reason, "tier": "scout"}), encoding="utf-8")
+
     def test_total_is_batch_count_not_wrapper_keys(self):
         code, out, _ = self._run(self._write(_BATCHES))
         self.assertEqual(code, 0)
@@ -136,6 +143,37 @@ class TestListScoutBatches(unittest.TestCase):
         code, _, _ = self._run(self.d / "nope.json")
         self.assertEqual(code, 1)
 
+    # ---- .failed terminal marker (partial fan-out tolerance) ----
+
+    def test_failed_excluded_from_pending_and_counted(self):
+        p = self._write(_BATCHES)
+        cp = self.d / "checkpoints" / "scout"
+        self._mark_failed("scout-002")
+        code, out, _ = self._run(p, cp)
+        data = json.loads(out)
+        ids = [b["batch_id"] for b in data["pending"]]
+        self.assertNotIn("scout-002", ids)            # terminal → excluded
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["total"], data["done"] + data["failed"] + len(data["pending"]))
+
+    def test_failed_excludes_merge_audit_markers(self):
+        # stray merge.json.failed / audit.json.failed are tier-level, not reader batches
+        p = self._write(_BATCHES)
+        cp = self.d / "checkpoints" / "scout"
+        cp.mkdir(parents=True, exist_ok=True)
+        (cp / "merge.json.failed").write_text("{}", encoding="utf-8")
+        (cp / "audit.json.failed").write_text("{}", encoding="utf-8")
+        code, out, _ = self._run(p, cp)
+        data = json.loads(out)
+        self.assertEqual(data["failed"], 0)
+        self.assertEqual(len(data["pending"]), 3)
+
+    def test_pending_item_carries_failed_marker(self):
+        code, out, _ = self._run(self._write(_BATCHES))
+        for item in json.loads(out)["pending"]:
+            self.assertIn("failed_marker", item)
+            self.assertEqual(item["failed_marker"], item["checkpoint_path"] + ".failed")
+
 
 class TestListRuleJobs(unittest.TestCase):
     def setUp(self):
@@ -167,6 +205,13 @@ class TestListRuleJobs(unittest.TestCase):
         cp = self.d / "checkpoints" / "t3"
         cp.mkdir(parents=True, exist_ok=True)
         (cp / f"{cat}.{fmt}.json.done").write_text("", encoding="utf-8")
+
+    def _mark_failed(self, cat, fmt, reason="render error"):
+        # orchestrator-written .failed marker: body `unit` carries the category
+        cp = self.d / "checkpoints" / "t3"
+        cp.mkdir(parents=True, exist_ok=True)
+        (cp / f"{cat}.{fmt}.json.failed").write_text(
+            json.dumps({"unit": cat, "reason": reason, "tier": "t3"}), encoding="utf-8")
 
     def test_distinct_categories(self):
         p = self._write([{"name": "a", "category": "authorization"},
@@ -238,6 +283,161 @@ class TestListRuleJobs(unittest.TestCase):
         self.assertEqual(code, 0)
         rp = json.loads(out)["pending"][0]["rule_path"].replace("\\", "/")
         self.assertTrue(rp.endswith("/custom/security-rules/crypto.md"), rp)
+
+    # ---- .failed terminal marker (partial fan-out tolerance) ----
+
+    def test_failed_excluded_from_pending_and_counted(self):
+        p = self._write([{"name": "a", "category": "authorization"},
+                         {"name": "b", "category": "crypto"}])
+        cp = self.d / "checkpoints" / "t3"
+        self._mark_failed("crypto", "opencode")
+        code, out, _ = self._run(p, checkpoints=cp)
+        data = json.loads(out)
+        self.assertEqual([j["category"] for j in data["pending"]], ["authorization"])
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["total"], data["done"] + data["failed"] + len(data["pending"]))
+
+    def test_pending_item_carries_failed_marker(self):
+        p = self._write([{"name": "a", "category": "crypto"}])
+        cp = self.d / "checkpoints" / "t3"
+        code, out, _ = self._run(p, checkpoints=cp)
+        item = json.loads(out)["pending"][0]
+        self.assertIn("failed_marker", item)
+        self.assertTrue(item["failed_marker"].endswith("crypto.opencode.json.failed"))
+        self.assertEqual(item["failed_marker"], item["done_marker"].replace(".done", ".failed"))
+
+
+# ---- list_scout_batches.py: per-unit materialization + paging (request-context-budget) ----
+
+class TestListScoutBatchesMaterialize(unittest.TestCase):
+    """--materialize: slim envelope + per-batch input files + paging + oversize flag."""
+
+    def setUp(self):
+        self.m = _load("list_scout_batches")
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_lsbm_"))
+        self.inputs = self.d / "inputs" / "scout"
+        self.cp = self.d / "checkpoints" / "scout"
+
+    def _write(self, batches):
+        p = self.d / "scout_plan.json"
+        p.write_text(json.dumps({"repo": str(self.d), "targets_total": len(batches),
+                                 "regex_known_count": 0, "truncated": False,
+                                 "batches": batches}, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def _run(self, plan, *extra):
+        argv = ["list_scout_batches.py", "--scout-plan", str(plan),
+                "--checkpoints", str(self.cp), "--materialize", str(self.inputs)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def test_slim_envelope_with_input_path(self):
+        p = self._write(_BATCHES)
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        for k in ("offset", "limit", "effective_limit", "shrunk"):
+            self.assertIn(k, data)
+        item = data["pending"][0]
+        for k in ("input_path", "oversize", "bytes", "needs_slice", "checkpoint_path"):
+            self.assertIn(k, item)
+        ip = Path(item["input_path"])
+        self.assertTrue(ip.is_file())
+        inp = json.loads(ip.read_text(encoding="utf-8"))
+        self.assertIn("targets", inp)            # full targets[] sunk into input file
+        self.assertEqual(item["bytes"], _BATCHES[0]["bytes"])
+
+    def test_oversize_batch_flagged_not_sharded(self):
+        # scout batches are the plan unit: oversize -> flag, never shard
+        batches = [{"batch_id": "scout-big", "targets": [{"file": "x"}],
+                    "bytes": 999000, "needs_slice": ["x"]}]
+        p = self._write(batches)
+        code, out, _ = self._run(p, "--max-unit-bytes", "100000")
+        self.assertEqual(code, 0)
+        item = json.loads(out)["pending"][0]
+        self.assertTrue(item["oversize"])
+        self.assertEqual(item["batch_id"], "scout-big")  # not sharded into ::shard-<n>
+        self.assertEqual(item["needs_slice"], ["x"])
+
+    def test_paging_and_shrink(self):
+        p = self._write(_BATCHES)
+        _, out, _ = self._run(p, "--offset", "1", "--limit", "1")
+        data = json.loads(out)
+        self.assertEqual(len(data["pending"]), 1)
+        _, out2, _ = self._run(p, "--orch-budget-bytes", "80")
+        self.assertTrue(json.loads(out2)["shrunk"])
+
+
+# ---- list_rule_jobs.py: per-category materialization + paging (request-context-budget) ----
+
+class TestListRuleJobsMaterialize(unittest.TestCase):
+    """--materialize: slim envelope + per-category input files + paging + oversize flag."""
+
+    def setUp(self):
+        self.m = _load("list_rule_jobs")
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_lrjm_"))
+        self.inputs = self.d / "inputs" / "t3"
+        self.cp = self.d / "checkpoints" / "t3"
+
+    def _write(self, controls):
+        p = self.d / "controls_inventory.json"
+        p.write_text(json.dumps({"repo": str(self.d), "format": "opencode",
+                                 "controls": controls}, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def _run(self, inv, *extra):
+        argv = ["list_rule_jobs.py", "--inventory", str(inv), "--format", "opencode",
+                "--checkpoints", str(self.cp), "--target", str(self.d),
+                "--materialize", str(self.inputs)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def test_slim_envelope_with_input_path(self):
+        p = self._write([{"name": "a", "category": "crypto"},
+                         {"name": "b", "category": "crypto"},
+                         {"name": "c", "category": "authorization"}])
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        for k in ("offset", "limit", "effective_limit", "shrunk"):
+            self.assertIn(k, data)
+        crypto = [it for it in data["pending"] if it["category"] == "crypto"][0]
+        for k in ("input_path", "bytes", "oversize", "rule_path", "done_marker"):
+            self.assertIn(k, crypto)
+        ip = Path(crypto["input_path"])
+        self.assertTrue(ip.is_file())
+        inp = json.loads(ip.read_text(encoding="utf-8"))
+        self.assertEqual(len(inp["controls"]), 2)  # both crypto controls sunk into input
+
+    def test_oversize_category_flagged_not_sharded(self):
+        # a category is NEVER sharded (rulewriter needs whole-category view)
+        controls = [{"name": f"c{i}", "category": "crypto", "description": "d" * 4000}
+                    for i in range(20)]
+        p = self._write(controls)
+        code, out, _ = self._run(p, "--max-unit-bytes", "5000")
+        self.assertEqual(code, 0)
+        item = json.loads(out)["pending"][0]
+        self.assertTrue(item["oversize"])
+        self.assertEqual(len([i for i in json.loads(out)["pending"]]), 1)  # one category, not split
+
+    def test_paging(self):
+        p = self._write([{"name": "a", "category": "crypto"},
+                         {"name": "b", "category": "authorization"}])
+        _, out, _ = self._run(p, "--offset", "0", "--limit", "1")
+        data = json.loads(out)
+        self.assertEqual(len(data["pending"]), 1)
 
 
 if __name__ == "__main__":

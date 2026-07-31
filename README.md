@@ -110,7 +110,7 @@ i1 discover(确定性·regex 扫源)
   `opencode`（产单个 `<target>/AGENTS.md` 受管块），结构不混。
 - 产 `controls_inventory.json`（与 vvah `design_controls` schema 兼容）——是 `/mgh-sra`
   （三信号匹配）与 `/mgh-sast --controls`（注入降 FP）的**共享输入**。
-- 大仓友好：`--scope` 按模块切片 + `--merge` 合并；`--resume` 续跑；`--rebuild-cache` 重建调用图。
+- 大仓友好：`--scope` 按模块切片 + `--merge` 合并；`--resume` 续跑（上下文吃紧/中断后无损恢复，见下方「中断恢复」）；`--rebuild-cache` 重建调用图。
 - **(可选) codegraph 富化**：目标项目已建 `.codegraph/` 索引时，自动启用一个 `init-resolve` 阶段——用
   codegraph 的框架路由图解析文本/AST 调用图漏掉的 DI/AOP/反射/`@PreAuthorize` 类控制（落在 `unresolved[]`
   里的），作为 `source:"codegraph"` 候选**增量**并入下游归纳。零新增运行时依赖（codegraph 是宿主 MCP/CLI，
@@ -143,7 +143,7 @@ i1 discover(确定性·regex 扫源)
 | `--scope path:<dir>\|package:<pkg>\|file:<glob>` | 仅扫指定范围（大仓分块）；配 `--scope-mode defined\|applicable`（默认 `defined`）。 |
 | `--language <lang>` | 限定语言（默认自动探测）。 |
 | `--merge <partials-dir>` | 合并多次 `--scope` 分块跑的部分 inventory 后 STOP。 |
-| `--resume` | 跳过已 `.done` 的工作单元（scout 批 / T1 簇 / T3 类别）。 |
+| `--resume` | 跳过已 `.done` 的工作单元（scout 批 / T1 簇 / T3 类别）；纯从磁盘重派生进度、**无需重输 flag**（详见「中断恢复」）。 |
 | `--rebuild-cache` | 强制重建调用图（默认按 mtime 跳过）。 |
 | `--skip-consistency` | 跳过 T4 一致性校验。 |
 | `--no-scout` | 跳过 LLM scout 发现（纯 regex，旧行为）。 |
@@ -156,6 +156,31 @@ i1 discover(确定性·regex 扫源)
 `controls_candidates.json` + `scout_candidates.json`（审计轨迹，每条带 `source`）、
 `clusters.json`、`init_manifest.json`、`report.md`；rules 落 `.claude/rules/security-*.md`
 （claude）或 `AGENTS.md`（opencode），均经 `assemble_rules.py` 纯净性 lint。
+
+### 中断恢复（`--resume`）——上下文吃紧也能续
+
+`/mgh-init` 是长跑流水线，大仓上可能跑到一半**上下文被占满自动停止**、session 崩溃、或你主动关掉。
+**进度不会丢**——所有可恢复状态都落盘在 `<target>/.mgh-init/`（checkpoints + `.done` 标记 + 产物 +
+`run_config.json`），对话记忆只是缓存、不是真相源。
+
+- **怎么续**：重跑同一命令加 `--resume`，**无需重输任何 flag**（首次跑时 step 0 已把决定步骤图的 flag
+  原子写进 `run_config.json`，resume 自动读取）：
+  ```
+  /mgh-init --target . --resume
+  ```
+- **续跑首步**先调 `resume_state.py`，从磁盘重新判定「停在哪一步、下一步确切做什么、还剩哪些单元」，
+  再据此继续；**已 `.done` 的单元（scout 批 / T1 簇 / T3 类别）直接跳过、不重跑**。
+- **优于手动 `/compact`**：上下文吃紧时，让它**跑完当前一批、干净停下**（落 `.done`、不留半截单元），
+  再开个**新 session** `--resume` 续——比人工 `/compact` 后手输「继续」更稳。原因：`/compact` 是模型摘要，
+  可能丢掉命令壳灌入的编排纪律；而新 session 重灌命令壳 = 完整纪律，进度由磁盘重派生，故 compact 是否
+  丢提示词**无关紧要**。
+- **只想查停在哪**（不续跑）：跑 `resume_state.py`（随 install 落在 `.claude/mgh-core/scripts/` 或
+  `.opencode/mgh-core/scripts/`）—— `py …/resume_state.py --target <dir>` 打印当前 `step` + 下一步；
+  `--check` 另校验磁盘状态是否自洽（退出码 2 = 不自洽，按提示重跑该步）。
+
+> discover 阶段另有独立韧性：`--time-budget-ms` 软时限 + callgraph 缓存，超预算时干净早退
+> （`partial:true`），编排器见之即重派 `--resume` 推进——即便「单次调用必然超时」的超大仓也能跨多次
+> 重派收敛、零全损。
 
 ## `/mgh-sra` — openspec 安全设计补充（security requirements augmentation）
 
@@ -381,6 +406,20 @@ m3g4horness/
   `export MGH_*_ACTIVE=1` 不保证到达守卫——运行域门控仅在 opencode **启动时**该 env 已就绪
   才激活（如 `MGH_INIT_ACTIVE=1 opencode run`）。未激活时纪律由命令壳铁律 + 各 producer `--check`
   边界校验兜底（fail-soft）。已据 opencode v1.17.15 源码核验。
+
+**宿主 shell 超时（opencode / claude）**
+- 长跑确定性脚本（init 的 `discover_controls.py`/`plan_scout.py`/`merge_scout.py`、sast 的
+  `prefilter`/`dedup`/`emit_sarif`、sra/srr 的 `prepare_augment`/`merge_augment`/`ingest_requirements`/
+  `render_report`）在大仓上可能超过宿主 shell 默认超时（opencode 实测 60s / 官方 120s；claude 120s）。
+- **per-call `timeout`（主杠杆）**：编排器给这些 Bash 调用传一个慷慨的毫秒级 `timeout`——claude Bash
+  工具与 opencode shell 工具都接受，且**会话内即时生效**（claude Bash per-call 上限 600000ms）。
+- **opencode 全局默认**：可设环境变量 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`（默认 120000）。
+  与 `MGH_*_ACTIVE` 同可靠性边界——**须在 opencode 启动前就绪**，会话中途 `export` 不被插件进程继承
+  （如 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=600000 opencode run`）。
+- **`/mgh-init` 的 discover 韧性**：`discover_controls.py` 内置 callgraph 缓存（`<out>/cache/`，按源文件
+  mtime/size 失效）+ scan 续点 + 软时限 `--time-budget-ms`——超预算时在安全边界干净早退（退出码 0、
+  stdout `partial:true`），编排器见 `partial:true` 即 Bash 重派 `--resume` 直至完成（**从不**写 wrapper
+  `.py` 循环）。这样即便「单次调用必然超时」的超大仓，也能跨多次重派收敛、零全损。
 
 耗 token。善用成本控制 flag：sast 的 `--estimate` / `--stop-after` / `--budget`；sra/srr 的
 `--dry-run` / `--no-interactive`；init 的 `--scope` / `--no-scout`。详见 `core/docs/`。

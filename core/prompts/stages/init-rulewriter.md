@@ -10,11 +10,18 @@ entries whose `category` matches yours (assigned by orchestrator), and emit the
 rule(s) for the target agent **in exactly one format** (`--format`).
 
 ## Input (given by the orchestrator)
-The `controls_inventory.json` entries for ONE category + the `--format` flag + two
-absolute paths given VERBATIM by the orchestrator:
-- `rule_path` — the exact file you MUST write your rule (claude) / staged fragment
-  (opencode) to.
-- `done_marker` — the exact `.done` path you MUST touch after.
+- `input_path` (absolute, given VERBATIM by the orchestrator) — the per-category
+  materialized input file (≤ `--max-unit-bytes`). **Read this one file**: it carries the
+  `controls_inventory.json` entries whose `category` matches yours (your category's full
+  controls). For an oversize category the file is flagged `oversize` (not sharded — you
+  need the whole-category view); if it is unworkably large, say so back to the orchestrator
+  (which will advise `--scope`+`--merge`).
+- The `--format` flag + two absolute paths given VERBATIM by the orchestrator:
+  - `rule_path` — the exact file you MUST write your rule (claude) / staged fragment
+    (opencode) to.
+  - `done_marker` — the exact `.done` path you MUST touch after.
+- **NEVER** `Read`/`cat`/`py -c` the whole `controls_inventory.json` (the orchestrator
+  already sank your category into `input_path`); **NEVER** `py -c`/`python -c` introspection.
 
 ## Format selection (mutually exclusive — pick the fragment that matches --format)
 - `--format claude` → follow `core/prompts/fragments/rules-format-claude.md`
@@ -87,7 +94,7 @@ when they carry a source anchor.
   (`src/.../X.java::Class.method`) are fine.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅本 category 的 inventory 条目)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(先读 `input_path`;仅本 category 的 inventory 条目)/ `Glob` / `Grep` 自由。
 - 脚本侧:无(本层产规则文本);确定性脚本(`assemble_rules.py`)由**编排器**调用。
 - `Write`/`Edit`:仅限本 stage 产物(claude:`.claude/rules/security-<cat>.md`;opencode:`<rules-dir>/<cat>.md` 详述文件)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**禁**直写 `AGENTS.md`/受管块哨兵。**输入产物为终态**——NEVER 用代码变换/重派生。
@@ -108,3 +115,11 @@ outside the project tree (including a drive root); NEVER write `AGENTS.md` or a 
 block sentinel directly (existing constraint — `assemble_rules.py` owns the block). Your
 cwd is NOT assumed — `rule_path` is already absolute precisely so it is safe under any
 working directory. Use the field value verbatim.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**(存活/成功信号,**非数据载体**),取值之一:
+- `ok <绝对 rule_path> <category>` —— 本 category 规则成功落盘;
+- `oversize <绝对 rule_path> <category>` —— category 输入超 `--max-unit-bytes`(编排器建议 `--scope`+`--merge`);
+- `failed <简短原因>` —— 本 category 失败(含「无源码锚点、不产规则」时仍 `ok … <category>` 并 touch `done_marker`,**非** `failed`)。`failed` 时 **touch nothing**(不 touch `done_marker`、不写规则/详述文件)、**仅回** `failed` ack;编排器据此 `Write` 该单元 `.failed` marker(`<checkpoints>/<cat>.<fmt>.json.failed`,body `{unit,reason,tier}`)——终态、resume 不重试、不阻断当前波次。
+**NEVER** 回显规则正文/inventory 记录体/源码(那会随 category 数单调膨胀编排器上下文)。编排器仅据 ack
+判本 category 成败 + 探 `.done`/`.failed`,**NEVER** 为继续 fan-out 而内联 `Read` 规则/详述文件回上下文。

@@ -4,8 +4,8 @@
 
 Covers the `--check` boundary gate (missing `category` / malformed JSON -> exit 2 with
 line:col diagnostics; well-formed -> exit 0) and `main()` fold-in defense (malformed JSON
--> structured stdout error + exit 1, NO traceback; missing-category audit candidate ->
-skip + warn + `skipped` count; well-formed scout+regex+audit fold-in preserves counts and
+-> structured stdout error + exit 1, NO traceback; missing-required-field (category/file)
+candidate -> skip + warn naming the field + `skipped` count; well-formed scout+regex+audit fold-in preserves counts and
 appends scout clusters without touching the regex cluster / usage_sites).
 
 Subprocess-driven so exit codes / stdout JSON / stderr diagnostics / "no Traceback" are
@@ -150,6 +150,72 @@ class TestMainFoldIn(unittest.TestCase):
         self.assertEqual(cc["candidates"][0]["source"], "regex")
         self.assertEqual(cc["candidates"][1]["source"], "scout")
         self.assertEqual(cc["provenance"]["scout_merged"], 1)
+
+    def test_scout_missing_file_skipped_warned_no_traceback(self):  # 2.1 missing file
+        # Before the fix, _normalize direct-indexed c["file"] -> KeyError abort. Now the
+        # candidate is skipped + warned and the merge completes (exit 0, NO traceback).
+        self._base()
+        _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "crypto", "evidence_snippet": "ok"},   # well-formed (folded)
+            {"line": 9, "source": "scout",
+             "category": "authn", "evidence_snippet": "x"}]})   # index 1: no file -> skip
+        code, out, err = _run(["--candidates", str(self.d / "cc.json"),
+                               "--scout", str(self.d / "sc.json"),
+                               "--clusters", str(self.d / "cl.json")])
+        self.assertEqual(code, 0)                                # NOT a KeyError abort
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("KeyError", err)
+        self.assertIn("missing required field(s): file", err)    # warn names the field
+        data = json.loads(out)
+        self.assertGreaterEqual(data["skipped"], 1)
+        self.assertEqual(data["scout_candidates_added"], 1)      # only the well-formed one
+
+    def test_scout_missing_category_warns_category(self):  # 2.2 missing category (unchanged)
+        self._base()
+        _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"file": "b.java", "line": 9, "source": "scout",
+             "evidence_snippet": "x"}]})  # no category
+        code, out, err = _run(["--candidates", str(self.d / "cc.json"),
+                               "--scout", str(self.d / "sc.json"),
+                               "--clusters", str(self.d / "cl.json")])
+        self.assertEqual(code, 0)
+        self.assertIn("missing required field(s): category", err)
+        data = json.loads(out)
+        self.assertGreaterEqual(data["skipped"], 1)
+        self.assertEqual(data["scout_candidates_added"], 0)
+
+    def test_scout_missing_both_fields_warns_once_lists_both(self):  # 2.2 missing both
+        self._base()
+        _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"line": 9, "source": "scout", "evidence_snippet": "x"}]})  # no file, no category
+        code, out, err = _run(["--candidates", str(self.d / "cc.json"),
+                               "--scout", str(self.d / "sc.json"),
+                               "--clusters", str(self.d / "cl.json")])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("missing required field(s)", err)
+        self.assertIn("category", err)   # both fields named
+        self.assertIn("file", err)
+        self.assertEqual(err.count("scout candidate #"), 1)  # single skip, no double warn
+        data = json.loads(out)
+        self.assertEqual(data["skipped"], 1)
+        self.assertEqual(data["scout_candidates_added"], 0)
+
+    def test_well_formed_scout_no_warn(self):  # 2.2 well-formed unaffected
+        self._base()
+        _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "crypto", "evidence_snippet": "ok"}]})
+        code, out, err = _run(["--candidates", str(self.d / "cc.json"),
+                               "--scout", str(self.d / "sc.json"),
+                               "--clusters", str(self.d / "cl.json")])
+        self.assertEqual(code, 0)
+        self.assertNotIn("warn", err)
+        self.assertNotIn("missing required field", err)
+        data = json.loads(out)
+        self.assertEqual(data["scout_candidates_added"], 1)
+        self.assertEqual(data["skipped"], 0)
 
 
 if __name__ == "__main__":

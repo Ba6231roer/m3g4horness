@@ -107,18 +107,39 @@ MUST NOT 硬切丢弃控制(只标维度 + 保留)。未传 `--rules` 时 `candi
 
 ### Requirement: Enumerate per-capability augmentation jobs with absolute draft paths
 
-`prepare_augment.py` SHALL 输出 `pending[]`(每 capability 一个增补工作单元),每项 MUST 含
-`capability`、`draft_path`(绝对路径,`<change-root>/.mgh-sra/drafts/<cap>.md`,`Path.resolve()`)
-与 `done_marker`。变更无 capability specs 时 `pending[]` 含单个整体增补单元。所有 draft 路径
-MUST 落在 `MGH_TARGET`(项目根)子树内。
+`prepare_augment.py` SHALL 输出 `pending[]`(每 capability 一个增补工作单元),每项 MUST 含 `capability`、
+`draft_path`(绝对路径,`<change-root>/.mgh-sra/drafts/<cap>.md`,`Path.resolve()`)、`done_marker`、
+`input_path`(绝对,per-capability 完整输入)、`bytes`、`oversize`。变更无 capability specs 时 `pending[]` 含
+单个整体增补单元。所有 draft / input 路径 MUST 落在 `MGH_TARGET`(项目根)子树内。`prepare_augment.py` SHALL
+支持 `--materialize <dir>`(把每 capability 的 `requirements[]` + 相关 `endpoints`/`data_fields`/`role_hints` +
+`candidate_controls` 切片 + **增补后** `memory` 写到 `<dir>/<cap>.input.json`,从 `change_context.json` 切出,
+脚本内部读聚合不进编排器上下文)、`--offset`/`--limit`(分页 `pending[]`)。单 cap input `bytes` >
+`--max-unit-bytes` 时 SHALL 标 `oversize:true` + recipe(分变更 / `--focus` 收窄;**不**切分 capability,
+sra-augment 需整 cap 视图)。当某页字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报
+`effective_limit`+`shrunk:true`。`sra-augment` SHALL 读自己的 `input_path`(该 cap 的完整输入)而非编排器内联
+传 `change_context` 切片。编排器 MUST NOT 整份读 `change_context.json` 进其请求上下文。
 
-#### Scenario: Pending lists one job per capability with absolute draft path
+#### Scenario: Pending lists one job per capability with absolute draft + input paths
 - **WHEN** 变更触及 3 个 capability
-- **THEN** `pending[]` 含 3 项,各自 `draft_path` 为绝对路径且位于 `<change-root>/.mgh-sra/drafts/`
+- **THEN** `pending[]` 含 3 项,各自 `draft_path`/`input_path` 为绝对路径且位于 `<change-root>/.mgh-sra/` 子树
 
-#### Scenario: Draft path stays under the project subtree
-- **WHEN** 编排器把 `draft_path` 透传给 subagent 写入
-- **THEN** 该路径解析后位于 `MGH_TARGET`(项目根)子树内;漂出子树触发 hook 拦截(退出码 2)
+#### Scenario: Draft/input paths stay under the project subtree
+- **WHEN** 编排器把 `draft_path`/`input_path` 透传给 subagent
+- **THEN** 二者解析后位于 `MGH_TARGET`(项目根)子树内;漂出子树触发 hook 拦截(退出码 2)
+
+#### Scenario: sra-augment reads its own per-capability input file
+- **WHEN** a3 扇出一个 capability,编排器 spawn `sra-augment`
+- **THEN** `sra-augment` 输入含绝对 `input_path` → `<change-root>/.mgh-sra/inputs/<cap>.input.json`(该 cap 的
+  requirements + endpoints/fields/role_hints + candidate_controls + memory),其 `bytes` ≤ `--max-unit-bytes`;
+  编排器不内联传 `change_context` 切片,不整份读 `change_context.json`
+
+#### Scenario: Oversize capability is flagged not sharded
+- **WHEN** 某 capability input `bytes` > `--max-unit-bytes`
+- **THEN** `prepare_augment.py` 标 `oversize:true` + recipe(分变更 / `--focus` 收窄);**不**切分 capability
+
+#### Scenario: Work-list page shrinks to the orchestrator budget
+- **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
+- **THEN** `prepare_augment.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`,编排器翻页
 
 ### Requirement: Dimension-driven security gap analysis
 
@@ -363,4 +384,25 @@ facet 2–4 的产物以**改善既有 `evidence`/`risk`/`reason` 质量的 advi
 #### Scenario: Residual blind spot is disclosed
 - **WHEN** 审阅 `sra_manifest.json` 的 `boundaries[]`
 - **THEN** 其中明示「codegraph 静态分析上限致 call_path 未确认残差不归零,残留需人工复核」,且既有四条诚实边界仍在
+
+### Requirement: Long-running deterministic Bash calls carry a per-call timeout
+
+`/mgh-sra` 命令壳的编排器 SHALL 给**长跑确定性 Bash 调用**——尤其 `prepare_augment`/`merge_augment`/
+`merge_memory`(及 `--check` 边界校验)——传一个慷慨的 per-call `timeout`(claude Bash 工具与 opencode
+shell 工具均接受毫秒级 `timeout` 参数),使其在大仓上不被宿主默认超时(opencode 实测 60s / 官方 120s;
+claude 120s)强杀。命令壳 SHALL 在边界/披露段说明:opencode 用户**可**经环境变量
+`OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局默认,但该变量**须在 opencode
+启动前就绪**(mid-session `export` 不被 opencode 插件进程继承,与 R5.7 `MGH_*_ACTIVE` 可靠性边界同根因);
+per-call `timeout` 是跨宿主公共杠杆,可在会话中即时生效。本要求与 `control-discovery` 的同名横切 recipe
+同形(承 `harden-mgh-init-shell-timeout`)。
+
+#### Scenario: Shell recipe tells the orchestrator to pass a per-call timeout
+- **WHEN** 审阅 claude-code 与 opencode 两份 `mgh-sra.md`
+- **THEN** 两壳均显式要求 `prepare_augment`/`merge_augment`/`merge_memory` 等长跑确定性 Bash 调用携带
+  per-call `timeout`
+
+#### Scenario: opencode env-var boundary disclosed
+- **WHEN** 审阅 `mgh-sra.md` 边界段
+- **THEN** 其中明示 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` 须 opencode 启动前设置、mid-session
+  `export` 不生效,并指 per-call `timeout` 为会话内即时生效的替代
 

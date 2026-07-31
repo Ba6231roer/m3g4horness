@@ -207,20 +207,28 @@ opencode 规则 SHALL 经确定性叶脚本 `core/scripts/assemble_rules.py` 装
 
 `/mgh-init` 的编排器进入 T3 fan-out(按 category 出 rules)时,MUST 经确定性叶脚本
 `core/scripts/list_rule_jobs.py` 取得按-category 的 pending 工作清单(对标 T1 `list_clusters.py` 与 scout
-`list_scout_batches.py`)。`list_rule_jobs.py` SHALL 读 `<target>/.mgh-init/controls_inventory.json` 的
+`list_scout_batches.py`),MUST NOT 手挖 inventory 取 category、MUST NOT `py -c` 内省、MUST NOT **整份读**
+`controls_inventory.json` 进编排器上下文(完整记录经 `--materialize` 下沉到 per-unit input 文件,见
+`request-context-budget`)。`list_rule_jobs.py` SHALL 读 `<target>/.mgh-init/controls_inventory.json` 的
 categories(+ 对应 `--format`)+ `--rules-dir`(默认 `<target>/docs/security-controls`)并扫
-`<target>/.mgh-init/checkpoints/t3/*.done`,stdout 输出结构化 JSON `{total,done,pending[],format}`;
-`pending[]` 每项含 `{category,format,rule_path,done_marker}`;stderr 仅诊断/进度;退出码 `0/1/2`;`--help`
-即其 CLI 契约(承 R5.1)。opencode `rule_path` SHALL 为 `<abs target>/<rules-dir>/<cat>.md`。编排器 MUST NOT
-手挖 inventory 取 category、MUST NOT `py -c` 内省。脚本 MUST 自定位 `sys.path`、utf-8 读入、零第三方依赖、
-任意 cwd 可 `py`(承 R5.3a)。T3 产出的详述文件 SHALL 经既有 `assemble_rules.py --check` 做边界校验,失败
-fail-loud(退出码 2)回退重跑(承 R5.9)。
+`<target>/.mgh-init/checkpoints/t3/*.done`,stdout 输出结构化 JSON
+`{total,done,pending[],format,offset,limit,effective_limit,shrunk}`,`pending[]` 每项(slim 壳)含
+`{category,format,rule_path,done_marker,input_path,bytes,oversize}`(`rule_path`/`done_marker`/`input_path`
+绝对);stderr 仅诊断/进度;退出码 `0/1/2`;`--help` 即其 CLI 契约(承 R5.1)。opencode `rule_path` SHALL 为
+`<abs target>/<rules-dir>/<cat>.md`。脚本 SHALL 支持 `--materialize <dir>`(把每 category 完整 controls 写到
+`<dir>/<category>.input.json` + 报 `input_path`/`bytes`/`oversize`)、`--offset`/`--limit`(分页)。单 category
+input `bytes` > `--max-unit-bytes` 时 SHALL 标 `oversize:true` + recipe 建议 `--scope`+`--merge`(**不**切分
+category,rulewriter 需整 category 视图)。当某页字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报
+`effective_limit`+`shrunk:true`。`init-rulewriter` SHALL 读自己的 `input_path`(一个 category 的 controls)而非
+编排器内联传记录。脚本 MUST 自定位 `sys.path`、utf-8 读入、零第三方依赖、任意 cwd 可 `py`(承 R5.3a)。T3 产出
+的详述文件 SHALL 经既有 `assemble_rules.py --check` 做边界校验,失败 fail-loud(退出码 2)回退重跑(承 R5.9)。
 
 #### Scenario: Orchestrator enumerates rule jobs via the leaf script
 
 - **WHEN** 编排器进入 T3 fan-out(步骤 6)
-- **THEN** 它先调用 `list_rule_jobs.py --rules-dir <dir>` 取 `pending[]` 再逐 category 扇出 `init-rulewriter`;
-  不出现手挖 inventory 或 `py -c`
+- **THEN** 它先调用 `list_rule_jobs.py --format <format> --materialize <inputs/t3> --rules-dir <dir>` 取
+  `pending[]` 再逐 category 扇出 `init-rulewriter`,向 subagent **透传 `input_path`**;不出现手挖 inventory、
+  `py -c` 或整份读 inventory
 
 #### Scenario: list_rule_jobs reports total vs done for resume
 
@@ -229,13 +237,23 @@ fail-loud(退出码 2)回退重跑(承 R5.9)。
 
 #### Scenario: list_rule_jobs is self-contained and offline
 
-- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_rule_jobs.py --inventory <dir>/controls_inventory.json --checkpoints <dir>/checkpoints/t3 --format opencode --rules-dir <dir>/docs/security-controls` 执行
-- **THEN** 脚本成功(自定位 `sys.path`、utf-8 读入、零第三方依赖),stdout 为合法 JSON
+- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_rule_jobs.py --inventory <dir>/controls_inventory.json --checkpoints <dir>/checkpoints/t3 --format opencode --rules-dir <dir>/docs/security-controls --materialize <dir>/inputs/t3` 执行
+- **THEN** 脚本成功(自定位 `sys.path`、utf-8 读入、零第三方依赖),stdout 为合法 JSON,per-category input 文件落 `<dir>/inputs/t3/`
 
 #### Scenario: Empty inventory handled without silent truncation
 
 - **WHEN** `controls_inventory.json` 含 0 个 category
 - **THEN** `list_rule_jobs.py` 输出 `total:0`,退出码仍 `0`,不静默丢信息
+
+#### Scenario: Oversize category is flagged not sharded
+
+- **WHEN** 某 category input `bytes` > `--max-unit-bytes`
+- **THEN** `list_rule_jobs.py` 标 `oversize:true` + stderr recipe 建议 `--scope`+`--merge`;**不**切分 category
+
+#### Scenario: Work-list page shrinks to the orchestrator budget
+
+- **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
+- **THEN** `list_rule_jobs.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`,编排器翻页
 
 ### Requirement: T3 rule-output paths are deterministic absolute values
 
@@ -396,3 +414,28 @@ CLI 唯一契约、`stdout`=JSON 摘要 / `stderr`=诊断、退出码 `0/1/2`、
 - **WHEN** 受管块正文含裸词 `category` 或 `缺失`(目标项目合法措辞),执行 `--check`
 - **THEN** lint 不误报(裸通用词不在禁用集,其泄漏由提示词护栏覆盖)
 
+### Requirement: init-rulewriter returns a bounded ack to the orchestrator
+
+`init-rulewriter`(T3 per-category rulewriter)subagent 的**最终回传消息** SHALL 是**单条有界 ack**——取值之一
+`ok <绝对 rule_path> <category>`、`oversize <绝对 rule_path> <category>`、`failed <简短原因>`——且 **MUST NOT** 回显规则
+正文、inventory 记录体、或源码(承 control-discovery「Subagent return-to-orchestrator is a bounded ack」的横切纪律,
+专治 T3 fan-out 完成时编排器上下文随 category 数单调膨胀)。该 ack 仅为存活/成功信号;编排器 SHALL 据 ack + `.done`
+标记判断该 category 成败,MUST NOT 为继续 fan-out 而内联 `Read` 规则/详述文件回编排器上下文。该契约 SHALL 同时写入
+`core/prompts/stages/init-rulewriter.md` 与双壳 `agents/init-rulewriter.md` 的 Hard-constraints 段(双重防线)。
+`assemble_rules.py --check` 纯净性 lint、T3 fan-out 绝对 `rule_path` 契约(承 rules-emission 既有要求)**保持不变**。
+
+#### Scenario: rulewriter prompt declares the bounded ack
+
+- **WHEN** 审阅 `core/prompts/stages/init-rulewriter.md`
+- **THEN** 该提示词含一个 Return-to-orchestrator 段,声明最终消息为单条有界 ack(`ok <abs rule_path> <category>` 等)、
+  NEVER 回显规则正文/inventory 记录体
+
+#### Scenario: Orchestrator does not inline-read rules to continue fan-out
+
+- **WHEN** 一个 init-rulewriter subagent 完成并回传 `ok <abs rule_path> <category>`,编排器进入下一 category
+- **THEN** 编排器仅记 ack 为成功信号 + 探 `.done`;它 **不** `Read` 该规则/详述文件内联回上下文
+
+#### Scenario: Shell agent definition mirrors the ack contract
+
+- **WHEN** 审阅 claude-code 与 opencode 两份 `agents/init-rulewriter.md` 的 Hard-constraints 段
+- **THEN** 两壳均显式声明 subagent 回传为有界 ack、NEVER 回显正文(双壳与 prompt 双重防线)

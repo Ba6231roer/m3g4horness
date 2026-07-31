@@ -14,6 +14,285 @@ end-to-end verification is still pending (see *Pending* below).
 
 ---
 
+## [Unreleased]
+
+### Changed — `/mgh-init` tolerates partial fan-out unit failure (`.failed` terminal marker)
+- A confirmed fan-out unit failure (scout reader batch / T1 cluster / T3 category subagent
+  returning the existing `failed <reason>` ack) is now **terminal and non-blocking**: the
+  orchestrator writes a `.failed` marker sibling to `.done` (`<checkpoint_path>.failed`, body
+  `{unit,reason,tier}`), the unit is excluded from resume `pending` (NOT retried), and the tier
+  completes when `done + failed >= total` (not `done >= total`). `list_clusters.py` /
+  `list_scout_batches.py` / `list_rule_jobs.py` emit a `failed` count + a per-item absolute
+  `failed_marker` (parallel to `done_marker`, verbatim-transmitted — never self-assembled);
+  `resume_state.py` derives `tiers{<tier>}.failed`, surfaces non-zero failures in `notes[]`
+  (a rate > half the tier is a loud `WARNING` advisory, never a gate), and `--check` flags a
+  unit carrying both `.done` and `.failed` as an ambiguous-terminal violation (exit 2).
+  Failures are disclosed in `init_manifest.json::failures` (per-tier `{done,failed,total}`) +
+  `boundaries[]` + `report.md`, counts read from disk (`resume_state`/`list_*` stdout), never
+  conversation memory. A crash without an ack leaves no marker → unit stays pending → retried
+  (crash ≠ confirmed failure); escape hatch = delete the `.failed` marker then `--resume`.
+  No new CLI flag (R5.1 surface frozen; `.failed` read by glob, written via `Write` to the
+  verbatim `failed_marker` path). Stage prompts + dual-shell agent defs updated to "touch
+  nothing on failure, emit only the `failed` ack". Original (no `.done` ⇒ tier never completes
+  ⇒ pipeline blocks, or indiscriminate retry) is the failure-shape being fixed.
+
+### Changed — `/mgh-init` fan-out waves run to completion (no scale-driven mid-run interruption)
+- Both `mgh-init.md` shells (claude + opencode, mirrored verbatim) gain a run-to-completion
+  directive in the Re-entrancy & compaction section: during a fan-out wave (scout reader /
+  T1 induct / T3 rulewriter) the orchestrator **MUST NOT** pause to ask the user whether to
+  split / skip / abort on account of scale, and **SHALL** iterate the `list_*` pending
+  work-list at `max_concurrent` until `pending` is empty. Scale and boundary facts (large
+  fan-out count, partial coverage, `.failed`/skipped units, residual blind spots) **SHALL**
+  flow into the existing disclosure channel — `init_manifest.json::boundaries[]` + `report.md`
+  + `resume_state.py` `notes[]` — never as a mid-run blocking question; counts are read from
+  disk (`resume_state.py`/`list_*` stdout), never conversation memory. The legitimate
+  **pre-run** i0 advisory (`--large-repo-threshold` → suggest `--scope`+`--merge`, before
+  tokens are spent) is explicitly preserved and distinguished from the mid-wave directive.
+  Prompt-wording only: no new CLI flag, script, contract, hook, or stage-prompt change.
+
+### Changed — runtime hook enforcement hardened (env-or-sentinel activation + runtime scripts read-only + init write confinement)
+- **Disk-sentinel activation closes the opencode reliability boundary.** The shared guard
+  `block_adhoc_scripts.py` now activates inside an mgh run-domain when **EITHER** env
+  `MGH_{INIT,SAST,SRA,SRR}_ACTIVE=1` **OR** a disk sentinel `<cwd>/<run-root>/.active` exists
+  (init→`.mgh-init`, sast→`security-scan`, sra→`.mgh-sra`, srr→`.mgh-srr`). The opencode `.ts`
+  plugin process does not inherit mid-session bash-exported env, so env-only activation left the
+  opencode guard dormant for a whole run; the sentinel (visible to the plugin via disk) closes
+  that hole. Sentinel JSON `{domain,target,out_roots[],v}`, written by the orchestrator at step 0
+  via Bash, removed on completion/clean-stop. New contract `core/contracts/hooks/runtime-enforcement.md`;
+  new shared spec `runtime-hook-enforcement` (single source replacing scattered per-command hook wording).
+- **Runtime scripts read-only (whitelist removed + script-extension set).** When active the guard
+  blocks `Write`/`Edit` of any extension in `{.py,.ps1,.sh,.bash,.zsh,.bat,.cmd,.ts,.js,.mjs,.cjs}`
+  with **no** path whitelist — the prior `core/scripts`/`mgh-core/scripts` + `tests`/`tools`/`hooks`
+  exemptions only mattered while inactive (install/dev), at which point `main()` already exits 0.
+  Leaf scripts are read-only for the orchestrator at runtime. Closes the "agent edits
+  `list_clusters.py`" and "`process_*.ps1` leaks past `.py`-only" failure shapes.
+- **`/mgh-init` write confinement to sanctioned subtrees.** The init domain upgrades
+  out-of-tree interception to a positive allowlist: `Write`/`Edit` MUST land in
+  `<target>/.mgh-init/**` / `.claude/rules/**` / `docs/security-controls/**` / `AGENTS.md` /
+  sentinel `out_roots[]` — so in-tree root pollution (`temp_clusters*.json`, `process_*.ps1`) also
+  fails loud. sast/sra/srr retain the out-of-tree check. `MGH_TARGET` precedence: env > sentinel.target
+  > degrade. Sentinel `target` is sourced from Python leaf-script stdout (Windows-native; never bash
+  `pwd`, whose MSYS `/c/…` mis-resolves in pathlib).
+- **Tests:** `test_block_adhoc_scripts.py` flips the whitelist PASS tests to BLOCK, adds sentinel
+  activation (env unset), sentinel-carried-target subtree block, script-ext set, init root-pollution
+  block + sanctioned-subtree/out_roots pass, stale/degrade; `test_opencode_hook_parity.py` adds
+  byte-identity-of-new-logic + opencode sentinel-activation checks. The `.ts` shim stays glue-only.
+
+### Added — `/mgh-init` context resilience (re-entrant resume + bounded ack + aggregate hard-budget)
+- **Re-entrant orchestrator resume state.** New `core/scripts/resume_state.py` derives the
+  pipeline's current step + exact next action **purely from on-disk artifacts** (`<target>/.mgh-init/`
+  products + per-tier `.done` + `run_config.json`), independent of conversation memory. compact /
+  crash / new-session collapse into one recovery path: `/mgh-init --resume` whose **first action is
+  `resume_state.py`**. `--check` validates on-disk self-consistency (exit 2 on violation). New
+  `core/scripts/write_runconfig.py` atomically writes the start-state intent `run_config.json` at
+  step 0 so resume is stateless of re-typed flags. See `core/contracts/init/resume-state.md`.
+- **Bounded subagent return-to-orchestrator ack.** All 9 `init-*.md` stage prompts + dual-shell
+  `agents/init-*.md` declare the final message as a single bounded ack (`ok <abs path> <count>` /
+  `oversize` / `failed`) — NEVER echo the record body (which monotonically bloated orchestrator
+  context across fan-out). The 5 whole-tier stages (survey/scout-merge/scout-audit/synthesis/
+  rules-consistency) also moved to orchestrator-given absolute-path-verbatim output.
+- **Aggregate hard-budget via map-reduce.** New `core/scripts/plan_aggregate.py` makes
+  `--max-aggregate-bytes` a HARD gate at T2 (`init-synthesis`) and scout-merge (`init-scout-merge`):
+  ≤ budget → single-context (byte-identical, zero regression); > budget → two-pass map-reduce
+  (per-shard ≤ budget → single rollup over summaries). Replaces the prior "disclose + fallback"
+  soft boundary for those two nodes (T4 rules-consistency remains soft-bounded). See
+  `core/contracts/init/aggregate-sharding.md`.
+- **Re-entrancy & compaction section** in both `mgh-init.md` shells: disk is the progress source of
+  truth, conversation memory is only a cache; resume/compact first action is `resume_state.py`;
+  context-tight clean-stop + new-session resume is preferred over manual `/compact`.
+- `AGENTS.md` R5.4 / R5.5① sharpened (orchestrator-level re-entrant resume state + step-query
+  recipe). `init_manifest.json` version bumped 6 → 7; `boundaries[]` reflects the hard-threshold.
+
+### Changed
+- **Restructured `AGENTS.md` R5(Agent 工具命令稳定性)for readability — 零规范内容删除。**
+  跨处复述的机制去重到单一归宿(长跑可恢复 → R5.4;opencode env 不继承 → R5.7 段 B;退出码 `0/1/2`
+  定义 → R5.3(b) 单次);R5.7 拆「段 A 评估方法论 + 段 B hook 强制闭环」;R5.3(b) fan-out 提升为子项;
+  修 R5.5 ⑤ 孤儿 indent;合并重复的「理由须随规保留」样板为前言一行;修剪纯回声 `承 R5.x`。加 R5 头部
+  「强制面索引表」。编号 R5.1–R5.10 不变。详见 change `simplify-agents-r5`。
+
+### Added
+- **Bounded per-request context for `/mgh-sra` fan-out (`request-context-budget` adoption).**
+  `prepare_augment.py` now materializes each capability's complete input to its own bounded file
+  and the orchestrator carries only a slim, paged work-list (it no longer whole-reads
+  `change_context.json` into its context). New on `prepare_augment.py`: `--materialize <dir>`
+  (writes `<change-root>/.mgh-sra/inputs/augment/<cap>.input.json` = that cap's requirements +
+  per-cap business surface + the `candidate_controls` file_overlap slice + memory; `pending[]`
+  becomes a slim envelope carrying `input_path`/`bytes`/`oversize`), `--offset`/`--limit` paging
+  reporting `effective_limit`/`shrunk`, and `--max-unit-bytes` (192 KB; an oversize capability is
+  flagged + recipe'd to split the change / `--focus` narrow — never sharded, the capability is the
+  a3 atom) / `--orch-budget-bytes` (64 KB; a page over it is auto-tightened). `sra-augment` reads
+  its own `input_path` (NEVER the whole `change_context.json`); the full `change_context.json`
+  stays on disk for the a2 single-context whole-change scan. `sra-clarify`/`sra-consistency` gain a
+  P0 soft-boundary disclosure guardrail for their aggregate inputs (`--max-aggregate-bytes`,
+  256 KB — over it they advise `--focus`/split-change and surface it in
+  `sra_manifest.json::boundaries[]`, non-blocking). `tools/check_contracts.py` asserts the new
+  flags (R5.1); tests cover per-cap materialize (file_overlap slice)/paging/oversize + the
+  whole-read discipline regression. (This lands the engine-stage `input_path` consumption the srr
+  adoption deferred; the cross-cutting `request-context-budget` spec is the contract.)
+- **Bounded per-request context for `/mgh-srr` fan-out (`request-context-budget` adoption).**
+  The srr intake adapter now materializes each review unit's complete input to its own bounded
+  file and the orchestrator carries only a slim, paged work-list (it no longer whole-reads the
+  sra-shape `change_context.json` into its context). New on `ingest_requirements.py`:
+  `--materialize <dir>` (writes `<out>/inputs/augment/<unit>.input.json`; `pending[]` becomes a
+  slim envelope carrying `input_path`/`bytes`/`oversize`), `--offset`/`--limit` paging reporting
+  `effective_limit`/`shrunk`, and `--max-unit-bytes` (192 KB; an oversize unit is flagged +
+  recipe'd to `--split`/narrow the doc — never sharded, the unit is the review atom) /
+  `--orch-budget-bytes` (64 KB; a page over it is auto-tightened). The reused sra engine stage
+  reads its own `input_path`; the full sra-shape `change_context.json` stays on disk for stage
+  consumers. `render_report.py` gains `--max-aggregate-bytes` (256 KB; P0 soft boundary — over
+  it the aggregate draft input is disclosed in `srr_manifest.json::boundaries[]` + the report,
+  non-blocking). `tools/check_contracts.py` asserts the new flags (R5.1); tests cover
+  materialize/page/`--split`/oversize + the whole-read discipline regression. (Engine-stage
+  consumption of `input_path` lands with the `/mgh-sra` adoption; intake-side lands independently.)
+- **Bounded per-request context for `/mgh-sast` fan-out (`request-context-budget` adoption).**
+  The s4/s6 enumeration scripts now materialize each fan-out unit's complete input to its own
+  bounded file and the orchestrator carries only a slim, paged work-list (it no longer
+  whole-reads `s3_chunks.json`/`s5_filtered.json` into its context). New on `list_chunks.py`:
+  `--materialize <dir>` (writes `<repo>/security-scan/inputs/s4/<chunk>.input.json` = that chunk's
+  `files[]` + `threat_id` + `hypothesis` + `needs_slice`; `pending[]` becomes a slim envelope
+  carrying `input_path`/`bytes`/`oversize`/`needs_slice`), `--offset`/`--limit` paging reporting
+  `effective_limit`/`shrunk`, `--max-unit-bytes` (192 KB; an oversize chunk — input over budget OR
+  a source file over `--big-file-bytes` — is flagged + its big files listed in `needs_slice[]` for
+  `chunk_sources` slicing, never the whole file fed to the LLM) / `--orch-budget-bytes` (64 KB; a
+  page over it is auto-tightened), plus `--repo`/`--big-file-bytes` (200 KB) for computing
+  `needs_slice`. `list_verify_jobs.py` mirrors this for s6 (`inputs/s6/<finding_id>.input.json` =
+  the full finding record; an oversize finding is flagged + recipe'd to `--scope` narrow — never
+  sliced, the finding is the s6 verify atom). `sast-deepdive`/`sast-verify` read their own
+  `input_path` (NEVER the whole `s3_chunks.json`/`s5_filtered.json`). `mgh-sast.md` (claude +
+  opencode) gains the orchestrator-discipline recipe, the s4/s6 materialize→page→pass-`input_path`
+  flow, the `--max-unit-bytes`/`--orch-budget-bytes`/`--max-aggregate-bytes` flag table (s1 scope /
+  s2-s3 hypothesis aggregate = P0 soft boundary — over it advise `--scope`/`--diff` and surface in
+  `run_manifest.json::boundaries[]` + `report.md`, non-blocking), and the `inputs/` output.
+  `tools/check_contracts.py` asserts the new flags (R5.1); tests cover per-chunk/per-finding
+  materialize (needs_slice/oversize)/paging + the s3/s5 whole-read discipline regression. (The
+  cross-cutting `request-context-budget` spec is the contract; the `block_adhoc_scripts` hook
+  already covered `MGH_SAST_ACTIVE` from the foundation — no hook change.)
+- **`docs/r5-plain-language.md`**(dev-only,不分发)—— R5.1–R5.10 大白话逐条(说什么 / 为什么 /
+  违反后果 / 兜底),作 AGENTS.md(AI 面向)的人类桥梁 + 去重后防单点灭失的第二副本。
+
+### Fixed
+- **`/mgh-init` scout→merge fold-in aborted with `KeyError: "file"` when a scout candidate
+  lacked its `file` field** (raw traceback, the whole merge halted) — unlike `category`, which
+  `merge_scout._normalize` already tolerated (skip + warn). `file` is now treated the same as
+  `category`: a missing/empty `category` OR `file` makes `_normalize` return `None`, the caller
+  skips that one candidate and warns (naming which required field is missing — `category` /
+  `file` / both, plus the candidate `index` and any available `file:line`), and the merge
+  continues. All `_normalize` field access is now `.get` (no direct-indexed required field
+  remains). Defense-in-depth for when `merge_scout.py --check` is bypassed (orchestrator
+  context pressure / a hand-crafted malformed `scout_candidates.json`); the `--check` gate,
+  stdout/stderr/exit-code CLI contract are unchanged. Covered by `tests/test_merge_scout.py`.
+- **`/mgh-init` T1 subagent `write_text` of `checkpoint_path` failed with `OSError [Errno 22]
+  Invalid argument` on Windows NTFS** when `cluster_id` (or `<cid>::shard-<n>`) contained `::`
+  — NTFS's Alternate-Data-Stream separator. `list_clusters.py::_paths` built the checkpoint
+  filename from the **raw** `unit_id`, unlike the input filename which was already
+  `_safe_name`-sanitized (`/ \ :` → `_`) — a same-source latent bug (the test helper `_mark_done`
+  already sanitized, diverging from production). `_paths` now encodes the filename component via
+  `_safe_name` (same function, same paradigm as `_write_unit`/`_shard_hit_count`); the canonical
+  `unit_id` (with `::`) is preserved verbatim as the slim-envelope `cluster_id` field and the
+  checkpoint record's `unit` field, so done detection / resume matching (which reads `unit`, not
+  the filename) are unaffected. See `core/contracts/init/cluster-enumeration.md`,
+  `openspec/changes/fix-mgh-init-ntfs-unit-filename/`. Covered by `tests/test_init_clusters.py`.
+
+### Dev-meta
+- **Q1 决策:**AGENTS.md 改动**不**触发分发版本 bump —— AGENTS.md 是研发手册,在 install 分发集之外
+  (`SCAN_DIRS` 排除;无 VERSION 字段,版本追踪仅 CHANGELOG)。记于此,不作为 release 切出。
+- **行数实际:**R5 段 97 → ~114 行(未达 design 估的 70–75)。强制面索引表(~13 行)抵消了去重收益;
+  真实收益是可读性(去重 + 拆段 + 索引 + 修孤儿),非行数。
+
+## [0.1.12] — 2026-07-27
+
+### Added
+- **Bounded per-request context for `/mgh-init` fan-out (`request-context-budget`).** The
+  orchestrator no longer whole-reads a multi-unit aggregate into its context (observed: an
+  opencode host reading the 426 KB `t1_pending`-style work-list whole, bloating every
+  subsequent model request). Every fan-out tier now materializes each unit's complete input
+  to its own bounded file and the orchestrator carries only a slim, paged work-list. New
+  three-tier byte budgets (defaults; unit = bytes, a conservative upper bound for tokens):
+  - **Per-unit materialization** — `list_clusters` / `list_scout_batches` / `list_rule_jobs`
+    gain `--materialize <dir>`: each T1 cluster / scout batch / T3 category's complete input
+    record is written to `<target>/.mgh-init/inputs/<tier>/<unit>.input.json` (idempotent,
+    `--resume`-reused). `pending[]` becomes a slim envelope carrying `input_path` / `bytes` /
+    `oversize` (no variable-length payload). The stage subagent (`init-induct` / `init-scout`
+    / `init-rulewriter`) reads its own `input_path`; the orchestrator only passes the path.
+  - **Configurable byte budgets** — `--max-unit-bytes` (192 KB; oversize clusters sharded
+    into `<cluster_id>::shard-<n>`, scout batches / T3 categories flagged `oversize`),
+    `--orch-budget-bytes` (64 KB; a work-list page exceeding it is auto-tightened with
+    `shrunk:true`), `--max-aggregate-bytes` (256 KB; T2/merge/T4 aggregate stages — P0 soft
+    boundary: disclose + advise `--scope`/`--merge`; layered reduction is a later change).
+  - **Paging** — all three enumeration scripts gain `--offset` / `--limit` and report
+    `effective_limit` / `shrunk`; the orchestrator pages rather than loading the whole list.
+  - **Defense-in-depth hook** — `block-adhoc-scripts` (both platform twins, byte-identical;
+    the opencode `.ts` shim stays pure glue) now also blocks a shell whole-read
+    (`cat`/`head`/`tail`) of a multi-unit aggregate in any of the four run-domains, with a
+    recipe pointing at `list_* --materialize` `input_path`. The structural fix is the primary
+    lever; the hook is residual defense. (`/mgh-sast` / `/mgh-sra` / `/mgh-srr` adoption is
+    deferred to follow-up changes — this release lays the cross-cutting capability and the
+  `init` reference implementation.)
+- **New contract** `core/contracts/init/unit-inputs.md` documenting the per-unit
+  materialization schema and the four-command path conventions.
+- **`init_manifest.json` version 5 → 6** (additive): `boundaries[]` gains the request-context-
+  budget disclosure.
+
+### Changed
+- `init-induct` / `init-scout` / `init-rulewriter` prompts: input is now the bounded
+  `input_path` file (with a NEVER-whole-read-aggregate hard rule). `init-synthesis` /
+  `init-scout-merge` / `init-rules-consistency` gain a P0 aggregate-context-budget guard.
+- `tools/check_contracts.py` asserts the three `list_*` scripts declare the new flags and
+  the `/mgh-init` shells advertise `--max-aggregate-bytes`.
+
+## [0.1.11] — 2026-07-23
+
+### Added
+- **Discover resilience against host shell timeouts (`/mgh-init`).** `discover_controls.py`
+  no longer assumes a single host call finishes — it checkpoints a built call graph under
+  `<out>/cache/` and resumes across runs, so a large repo (or an opencode/claude shell
+  timeout mid-scan) is no longer total loss. New flags (all additive; defaults preserve
+  prior behavior):
+  - **Call-graph cache** — `<out>/cache/callgraph.json` + `manifest.json` (per-source
+    `mtime`/`size` freshness). A re-run with an unchanged repo hits the cache and skips
+    the two regex passes (stdout `cache_hit: true`). `--rebuild-cache` forces a rebuild
+    (this flag was already advertised in the shells but was previously a dangling
+    contract — it is now real and `--help`-exposed).
+  - **Scan resume** — `<out>/cache/scan_progress.json` checkpoints every
+    `--progress-every` files. `--resume` reuses the cache and continues scanning from the
+    checkpoint without rescanning; deterministic + idempotent (resume == one-shot candidate set).
+  - **Soft time budget** — `--time-budget-ms <N>` (default `0` = off). When set, discover
+    stops at a safe boundary (after the call graph is built; every `--progress-every`
+    files — never mid-write), persists the cache + checkpoint, and exits **0** with stdout
+    `partial: true` + `resume_hint`. The orchestrator re-dispatches `--resume` until
+    `partial: false`.
+  - **Atomic writes** — all product JSON (`controls_candidates`/`clusters`/`skeleton`/
+    `cache/*`) is written `.tmp` + `os.replace`, so a SIGKILL mid-write leaves no truncated
+    artifact (`--check` never sees a broken file).
+- **Per-call `timeout` recipe across all four command shells.** The `mgh-init`/`mgh-sast`/
+  `mgh-sra`/`mgh-srr` orchestrators (claude + opencode) now instruct the host to pass a
+  generous per-call `timeout` to long-running deterministic Bash calls, and disclose the
+  opencode global `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` (default 120000; must be
+  ready before opencode launches — mid-session `export` is not inherited). `mgh-init` also
+  adds the `partial: true` → Bash re-dispatch `--resume` loop (never a wrapper `.py`).
+
+### Changed
+- `discover_controls.py`: the materialized source list is sorted by repo-relative path so
+  the scan checkpoint index is reproducible across runs; `scan()` keeps its 6-tuple API (a
+  new `run_discover()` carries the cache/resume/budget knobs). `main()` skips writing final
+  products on a partial exit (only `cache/` + `scan_progress.json` land). All additive — no
+  final-product schema change; `--time-budget-ms 0` and a missing cache are byte-equivalent
+  to before.
+- `AGENTS.md` R5.3(c) (deterministic-script recoverability) + R5.4 (per-call timeout +
+  discover soft-budget re-dispatch) sharpened; `README.md` gained a host-shell-timeout
+  section; new contract `core/contracts/init/discover-cache.md`; `core/contracts/init/
+  candidates.md` stdout summary extended with `partial`/`resume_hint`/`cache_hit`.
+
+### Verified
+- `tests/test_discover_resilience.py` (14 tests): cache hit + equivalence, mtime/size
+  invalidation, `--rebuild-cache`, midpoint-resume equivalence + idempotency, checkpoint
+  preservation when the budget trips at the callgraph boundary (regression), clean partial
+  exit (exit 0, no truncated product), atomic writes, `--check` after a run. Plus a
+  synthetic 150-file repo converging via repeated `--resume` to the one-shot candidate set.
+- Full suite green (426 tests); `tools/check_contracts.py` (now asserts the discover flags
+  in `--help`) and `tools/check_distributed_purity.py` both clean; zero-runtime-dep AST scan
+  clean (`os`/`time` are stdlib).
+
 ## [0.1.10] — 2026-07-20
 
 ### Added

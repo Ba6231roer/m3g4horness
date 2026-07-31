@@ -4,6 +4,12 @@ Producer: `init-synthesis` (T2). Consumers: `init-rulewriter` (T3), `/mgh-sra`,
 `/mgh-blst`, future mgh-sast control intake. **Backward-compatible with
 `design_controls`** (`kind`/`protects`/`notes`).
 
+> **per-category 物化(闭合编排器整份读)**:`init-rulewriter` 需的「该 category 的全部 controls」由
+> `list_rule_jobs.py --materialize <inputs/t3>` 下沉到 `<target>/.mgh-init/inputs/t3/<category>.input.json`
+> (见 [`unit-inputs.md`](unit-inputs.md));subagent **读自己的 `input_path`**。slim 待办壳携
+> `input_path`/`bytes`/`oversize`;超 `--max-unit-bytes` 的 category 标 `oversize:true` + recipe(建议
+> `--scope`+`--merge`,**不**切分)。编排器 NEVER 整份读 `controls_inventory.json`(见 `request-context-budget`)。
+
 Top-level:
 
 ```json

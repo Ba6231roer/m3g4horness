@@ -286,12 +286,20 @@ SHALL 区分:`defined`(默认,控制定义点在 scope 内)与 `applicable`(控�
 **stderr** 周期输出进度(每 N 个文件),stdout 仅在末尾输出既有 JSON 摘要(契约不变)。在 i0 阶段
 SHALL 以低成本统计源文件数,命中大仓阈值时**在开始全量扫描前**主动建议 `--scope` 分模块 + `--merge`。
 
-#### Scenario: Large repo finishes within the host timeout
-- **WHEN** 对一个约两万个源文件的目标仓运行 `/mgh-init`(默认 `--max-files`)
-- **THEN** `discover_controls.py` 在 5 分钟内完成,不被宿主 300s 超时强杀
+本要求**不再假设 discover 在单次宿主调用内必然完成**:当目标仓大到单次调用超过宿主 shell 超时
+(claude Bash / opencode shell 工具默认 120s,可被强杀于更早),discover SHALL 经 callgraph 缓存 +
+scan 续点 + 软时限干净早退(见「Discover call-graph cache survives re-runs」「Discover scan resumes
+from a checkpoint」「Discover soft time-budget clean exit」「Discover writes are atomic」)**跨多次
+编排器调用推进且零全损**,而非依赖「5 分钟内一发跑完」。
+
+#### Scenario: Large repo completes across re-invocations without total loss
+- **WHEN** 对一个单次调用即超过宿主 shell 超时的大目标仓运行 `/mgh-init`,且某次 discover 调用被宿主
+  在超时处强杀
+- **THEN** 已建成的 callgraph 缓存与 scan 续点**留存可用**,编排器 Bash 重派 `discover ... --resume`
+  复用缓存、从续点继续,**不**从零重跑;经有限次重派后产物完整,期间**无**「`(no output)` 全损」形态
 
 #### Scenario: Each source file read at most once
-- **WHEN** 对任意目标仓运行发现脚本
+- **WHEN** 对任意目标仓运行发现脚本(单次调用内)
 - **THEN** 每个源文件的磁盘读取次数为 1(调用图两遍与候选扫描共用同一缓存文本)
 
 #### Scenario: Progress emitted to stderr only
@@ -368,28 +376,50 @@ MUST NOT 携带 `entry_points`(`entry_points` 在 candidate 上,仅 distributed 
 
 `/mgh-init` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_clusters.py` 取得 T1 工作清单,
 MUST NOT 手搓 `py -c "import json…"` 式内省、MUST NOT 对 `clusters.json` 顶层做 `len()`
-(那是包装字典的 key 数,非簇数)。`list_clusters.py` SHALL 读 `<target>/.mgh-init/clusters.json`
-并扫 `<target>/.mgh-init/checkpoints/t1/*.done`,stdout 输出结构化 JSON
-`{repo,total,done,pending[],truncated}`,`pending[]` 每项含
-`{cluster_id,category,kind,shape,evidence_files[],candidate_count}`;stderr 仅走诊断/进度;
-退出码 `0/1/2`。脚本的 `--help` 即其 CLI 契约(承 R5.1)。簇数权威真相源 =
+(那是包装字典的 key 数,非簇数)、MUST NOT **整份读** `clusters.json` 进编排器上下文(完整记录经
+`--materialize` 下沉到 per-unit input 文件,见 `request-context-budget`)。`list_clusters.py` SHALL 读
+`<target>/.mgh-init/clusters.json` 并扫 `<target>/.mgh-init/checkpoints/t1/*.done`,stdout 输出结构化
+JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`,`pending[]` 每项为
+**slim 壳**`{cluster_id,category,kind,shape,candidate_count,input_path,checkpoint_path,done_marker,bytes,oversize}`
+(**不含** `evidence_files[]`/`usage_sites[]`/候选命中——已下沉进 `input_path` 文件);stderr 仅走诊断/进度;
+退出码 `0/1/2`。脚本 SHALL 支持 `--materialize <dir>`(把每簇完整输入写到
+`<dir>/<cluster_id>.input.json` + 报 `input_path`/`bytes`/`oversize`,无该 flag 时回退 read-only lite 壳
+向后兼容)、`--offset`/`--limit`(分页)、`--max-unit-bytes`(超阈值簇切分为 `<cluster_id>::shard-<n>`
+子单元或标 `oversize`)。当某页序列化字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报
+`effective_limit`+`shrunk:true`。脚本的 `--help` 即其 CLI 契约(承 R5.1)。簇数权威真相源 =
 `discover_controls.py` stdout `clusters` 字段 或 `list_clusters.py` stdout `total`。
 
 #### Scenario: Orchestrator enumerates clusters via the leaf script
 - **WHEN** 编排器进入 T1 fan-out(步骤 4)
-- **THEN** 它调用 `list_clusters.py` 取 `pending[]`,据此逐簇扇出 `init-induct`;不出现手搓 JSON 内省
+- **THEN** 它调用 `list_clusters.py --materialize <inputs/t1>` 取 `pending[]`,据此逐簇扇出 `init-induct`,
+  向 subagent **透传 `input_path`**;不出现手搓 JSON 内省,不整份读 `clusters.json`
 
 #### Scenario: list_clusters reports total vs done for resume
 - **WHEN** 部分簇已 done(`checkpoints/t1/<cluster_id>.json.done` 存在)后再次运行
 - **THEN** `list_clusters.py` stdout 的 `done` 反映已完成数,`pending[]` 仅含未完成簇,`total = done + len(pending)`
 
 #### Scenario: list_clusters is self-contained and offline
-- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_clusters.py --clusters <dir>/clusters.json --checkpoints <dir>/checkpoints/t1` 执行
-- **THEN** 脚本成功(自定位 `sys.path`、utf-8 读入、零第三方依赖),stdout 为合法 JSON
+- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_clusters.py --clusters <dir>/clusters.json --checkpoints <dir>/checkpoints/t1 --materialize <dir>/inputs/t1` 执行
+- **THEN** 脚本成功(自定位 `sys.path`、utf-8 读入、零第三方依赖),stdout 为合法 JSON,per-unit input 文件落 `<dir>/inputs/t1/`
 
 #### Scenario: Empty or truncated clusters handled without silent truncation
 - **WHEN** `clusters.json` 的 `clusters[]` 为空,或 `truncated: true`
 - **THEN** `list_clusters.py` 输出 `total:0`(空)或保留 `truncated: true`(截断显式告警),退出码仍 `0`,不静默丢信息
+
+#### Scenario: Slim envelope excludes variable-length payload
+- **WHEN** 审阅 `list_clusters.py` stdout 的 `pending[]` 元素
+- **THEN** 壳含 `{cluster_id,category,kind,shape,candidate_count,input_path,checkpoint_path,done_marker,bytes,oversize}`,
+  **不含** `evidence_files[]`/`usage_sites[]`(已下沉进 `input_path` 文件)
+
+#### Scenario: Oversize cluster is sharded within the unit budget
+- **WHEN** 某 cluster 物化输入 `bytes` > `--max-unit-bytes`
+- **THEN** `list_clusters.py` 按 `evidence_files`/`usage_sites` 组切分为 `<cluster_id>::shard-<n>` 子单元,
+  每子单元 `bytes` ≤ `--max-unit-bytes` 且有独立 `input_path`/`checkpoint_path`;`pending[]` 不出现超阈值整簇
+
+#### Scenario: Work-list page shrinks to the orchestrator budget
+- **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
+- **THEN** `list_clusters.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`(stderr 告警),
+  编排器据 `offset`/`effective_limit` 翻页
 
 ### Requirement: init-survey is optional, advisory, and non-fatal
 
@@ -590,28 +620,43 @@ SHALL 将该目标回灌(重跑其所属批次或直接补候选),并在 `init_m
 ### Requirement: Deterministic scout-batch enumeration for fan-out
 
 `/mgh-init` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_scout_batches.py` 取得 scout 工作清单
-(对标 T1 的 `list_clusters.py`,闭合 FD3 的扇出不对称)。`list_scout_batches.py` SHALL 读
-`<target>/.mgh-init/scout_plan.json::batches[]` 并扫 `<target>/.mgh-init/checkpoints/scout/*.json.done`,
-stdout 输出结构化 JSON `{repo,total,done,pending[],truncated}`,`pending[]` 每项含
-`{batch_id,targets_count,bytes,needs_slice[]}`;stderr 仅诊断/进度;退出码 `0/1/2`;`--help` 即其 CLI
-契约(承 R5.1)。`total = len(batches[])`,`done = #已 .done`,`pending = total − done`。脚本 MUST
-自定位 `sys.path`、utf-8 读入、零第三方依赖、任意 cwd 可 `py`(承 R5.3a)。
+(对标 T1 的 `list_clusters.py`,闭合 FD3 的扇出不对称),MUST NOT **整份读** `scout_plan.json` 进编排器
+上下文。`list_scout_batches.py` SHALL 读 `<target>/.mgh-init/scout_plan.json::batches[]` 并扫
+`<target>/.mgh-init/checkpoints/scout/*.json.done`,stdout 输出结构化 JSON
+`{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`,`pending[]` 每项含
+`{batch_id,targets_count,bytes,needs_slice[],input_path,checkpoint_path,done_marker,oversize}`;stderr 仅
+诊断/进度;退出码 `0/1/2`;`--help` 即其 CLI 契约(承 R5.1)。`total = len(batches[])`,
+`done = #已 .done`,`pending = total − done`。脚本 SHALL 支持 `--materialize <dir>`(把每批完整 `targets[]`
+输入写到 `<dir>/<batch_id>.input.json` + 报 `input_path`)、`--offset`/`--limit`(分页)、
+`--max-unit-bytes`(与 `plan_scout --batch-bytes` 取 `min` 作硬上限;超 `--big-file-bytes` 文件强制
+`needs_slice` 走 `chunk_sources`)。当某页字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报
+`effective_limit`+`shrunk:true`。脚本 MUST 自定位 `sys.path`、utf-8 读入、零第三方依赖、任意 cwd 可 `py`
+(承 R5.3a)。
 
 #### Scenario: Orchestrator enumerates scout batches via the leaf script
 - **WHEN** 编排器进入 scout fan-out(步骤 3b)
-- **THEN** 它调用 `list_scout_batches.py` 取 `pending[]`,据此逐批扇出 `init-scout`;不出现手搓 JSON 内省
+- **THEN** 它调用 `list_scout_batches.py --materialize <inputs/scout>` 取 `pending[]`,据此逐批扇出
+  `init-scout`,向 subagent **透传 `input_path`**;不出现手搓 JSON 内省,不整份读 `scout_plan.json`
 
 #### Scenario: list_scout_batches reports total vs done for resume
 - **WHEN** 部分批已 done(`checkpoints/scout/<batch_id>.json.done` 存在)后再次运行
 - **THEN** stdout 的 `done` 反映已完成批数,`pending[]` 仅含未完成批,`total = done + len(pending)`
 
 #### Scenario: list_scout_batches is self-contained and offline
-- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_scout_batches.py --scout-plan <dir>/scout_plan.json --checkpoints <dir>/checkpoints/scout` 执行
-- **THEN** 脚本成功(自定位 `sys.path`、utf-8 读入、零第三方依赖),stdout 为合法 JSON
+- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_scout_batches.py --scout-plan <dir>/scout_plan.json --checkpoints <dir>/checkpoints/scout --materialize <dir>/inputs/scout` 执行
+- **THEN** 脚本成功(自定位 `sys.path`、utf-8 读入、零第三方依赖),stdout 为合法 JSON,per-unit input 文件落 `<dir>/inputs/scout/`
 
 #### Scenario: Empty or truncated scout plan handled without silent truncation
 - **WHEN** `scout_plan.json::batches[]` 为空,或 `truncated: true`
 - **THEN** `list_scout_batches.py` 输出 `total:0`(空)或保留 `truncated: true`(显式告警),退出码仍 `0`,不静默丢信息
+
+#### Scenario: Oversize batch respects the unit budget via slicing
+- **WHEN** 某批 input `bytes` > `--max-unit-bytes`(或含 > `--big-file-bytes` 文件)
+- **THEN** 该文件入 `needs_slice[]`,`init-scout` 经 `chunk_sources.py` 切片后读 slice,NEVER 整文件喂 LLM
+
+#### Scenario: Work-list page shrinks to the orchestrator budget
+- **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
+- **THEN** `list_scout_batches.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`,编排器翻页
 
 ### Requirement: Sanctioned artifact-inspection primitive (no ad-hoc introspection)
 
@@ -665,15 +710,18 @@ Python 标准库脚本、零运行时依赖,承 R2),使 Claude Code 与 opencode
   工具事件**归一化**为 Claude PreToolUse 的 stdin 形态(`{tool_name, tool_input}`),管道喂给**同一**
   `block_adhoc_scripts.py`,据其退出码 2 阻断该工具调用、否则放行。
 
-守卫在 `/mgh-init` 运行域(由编排器起步 `export MGH_INIT_ACTIVE=1` 标记)内:拦截 `Bash` 中
-`py -c`/`python -c` 且含 `import json`/`open(`/`load(`/`\.json` 的内省模式,以及 `Write` 中 `*.py`
-且不在白名单(`core/scripts`/`tests`/`tools`/`releases/*/hooks`)的写入,以及(init/sra 域)resolved
-目标落在 `MGH_TARGET` 子树外的 `Write`/`Edit`。命中 SHALL fail-loud(退出码 2)+ stderr recipe,指向
-合法出口(`list_*`/`describe_artifact.py`/脚本 stdout 字段)。非运行域会话 SHALL 直接放行(零日常
-噪声)。`install.sh` SHALL 提供 `--no-enforce-hook` opt-out;仅当某端的 hook 注入或核验失败时(claude:
-settings.json 写入失败;opencode:`tool.execute.before` 在目标 opencode 版本不可用/不触发)SHALL
-stderr warn 并跳过**该端**注入(fail-soft,承 R5.8),此时纪律由命令壳明线 + R5.9 边界校验兜底。本条
-兑现 R5.7「能 hook 就别靠自觉」——双端均有等价 hook 路径,opencode 不再被当作「无 hook 能力」而跳过。
+守卫的**激活模型 + 运行域写入纪律**由共享契约 [`runtime-hook-enforcement`](../runtime-hook-enforcement/spec.md)
+单一规定(取代此前散在本要求内的 env-only 激活 + `core/scripts` 白名单措辞):激活 = `MGH_INIT_ACTIVE=1`
+env **或** `<cwd>/.mgh-init/.active` 哨兵(编排器 step 0 经 `Bash` 写、run 完成/干净停止移除);运行域内
+一切脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)写入均 fail-loud——**取消**既有 `core/scripts`/`tests`/
+`tools`/`hooks` 白名单豁免(叶脚本对 agent 为 read-only);init 域 `Write`/`Edit` 须落入受信子树(见
+「Init write confinement to sanctioned subtrees」)。既有 `py -c`/`python -c` 内省拦截 + 多单元聚合整读
+拦截 + recipe(指向 `list_clusters`/`list_scout_batches`/`list_rule_jobs`/`describe_artifact`/脚本 stdout
+字段)**不变**。非运行域会话 SHALL 直接放行(零日常噪声)。`install.sh` SHALL 提供 `--no-enforce-hook`
+opt-out;仅当某端的 hook 注入或核验失败时(claude:settings.json 写入失败;opencode:`tool.execute.before`
+在目标 opencode 版本不可用/不触发)SHALL stderr warn 并跳过**该端**注入(fail-soft,承 R5.8),此时纪律
+由命令壳明线 + R5.9 边界校验兜底。本条兑现 R5.7「能 hook 就别靠自觉」——双端均有等价 hook 路径,且哨兵
+关闭了 opencode「mid-session env 不继承 → 守卫休眠」的既有可靠性边界。
 
 #### Scenario: Hook blocks introspection py -c during a run (claude)
 - **WHEN** `MGH_INIT_ACTIVE=1` 下编排器运行 `py -c "import json; json.load(open('.mgh-init/scout_plan.json'))"`
@@ -682,6 +730,14 @@ stderr warn 并跳过**该端**注入(fail-soft,承 R5.8),此时纪律由命令�
 #### Scenario: Hook passes legitimate leaf-script invocation (claude)
 - **WHEN** `MGH_INIT_ACTIVE=1` 下运行 `py .claude/mgh-core/scripts/discover_controls.py --repo . --out .mgh-init`
 - **THEN** hook 放行,不误伤合法叶子调用
+
+#### Scenario: Hook blocks editing a leaf script during a run
+- **WHEN** `mgh-init` 运行域内编排器 `Edit`/`Write` `.claude/mgh-core/scripts/list_clusters.py`(或 `merge_scout.py`)
+- **THEN** hook 以退出码 2 拦截(叶脚本 read-only;此前 `core/scripts` 白名单放行——即「agent 改叶脚本」失守形状)
+
+#### Scenario: opencode activates the guard via the disk sentinel
+- **WHEN** opencode 下 `MGH_INIT_ACTIVE` env 未设(opencode 插件进程不继承 mid-session export),但 step 0 已写 `<cwd>/.mgh-init/.active` 哨兵
+- **THEN** 守卫经哨兵激活,等效 env 已设;`py -c` 内省/越权脚本写/越树写均 fail-loud(opencode 不再整 run 休眠)
 
 #### Scenario: Hook is idempotent across reinstalls (claude)
 - **WHEN** 对同一目标项目连续两次 `install.sh --claude`
@@ -698,6 +754,36 @@ stderr warn 并跳过**该端**注入(fail-soft,承 R5.8),此时纪律由命令�
 #### Scenario: Opt-out and per-platform fail-soft
 - **WHEN** `install.sh --no-enforce-hook`,或某端 hook 注入/核验失败(含 opencode `tool.execute.before` 在目标版本不可用)
 - **THEN** 该端 hook 不注入(warn 跳过),install 仍成功(fail-soft);命令壳明线 + R5.9 校验仍生效
+
+### Requirement: Init write confinement to sanctioned subtrees
+
+In the `mgh-init` run-domain, every `Write`/`Edit` SHALL resolve to a target inside one of the sanctioned
+subtrees (positive allowlist); writes inside `MGH_TARGET` but outside these subtrees (e.g. project-root
+`temp_clusters*.json`, `process_*.ps1`) SHALL be blocked fail-loud by the guard (exit 2) per
+`runtime-hook-enforcement`. The sanctioned subtrees are:
+
+| Subtree | Purpose |
+|---|---|
+| `<target>/.mgh-init/**` | artifacts / checkpoints / inputs / manifest / report / sentinel |
+| `<target>/.claude/rules/**` | claude rules output |
+| `<target>/docs/security-controls/**` | opencode per-category detail files |
+| `<target>/AGENTS.md` | opencode lazy index |
+| `out_roots[]` (sentinel-carried) | customized `--out` / `--rules-dir` absolute roots |
+
+The orchestrator SHALL record any non-default `--out` / `--rules-dir` resolved absolute root into the sentinel's
+`out_roots[]` at step 0 so the guard honors custom output locations without over-blocking.
+
+#### Scenario: Root-level aggregate dump is blocked
+- **WHEN** `mgh-init` 运行域内编排器 `Write` `<target>/temp_clusters1.json`(聚合 dump 到项目根)
+- **THEN** 守卫以退出码 2 拦截;recipe 指向 `list_*` stdout 的受信 `checkpoint_path`/`rule_path`
+
+#### Scenario: Sanctioned fan-out paths pass
+- **WHEN** `mgh-init` 运行域内写 `<target>/.mgh-init/inputs/t1/<unit>.input.json` 或 `<target>/docs/security-controls/authn.md`
+- **THEN** 守卫放行(落入受信子树)
+
+#### Scenario: Custom output root is honored via the sentinel
+- **WHEN** 编排器以 `--rules-dir <custom abs>` 启动、写入哨兵 `out_roots[]`,运行域内 `Write` `<custom>/x.md`
+- **THEN** 守卫放行(自定义产物根被受信,不 over-block)
 
 ### Requirement: Stage-boundary contract checks
 
@@ -761,8 +847,15 @@ FD8)。
 scout 与 T1 fan-out 的每个待跑单元的**输出路径** SHALL 是由确定性枚举脚本产出的**单一权威绝对路径值**,
 而非占位符模板或相对路径。`list_scout_batches.py` 与 `list_clusters.py` 的 stdout `pending[]` 每项
 SHALL 额外包含 `checkpoint_path`(待写产物文件的**绝对路径**)与 `done_marker`(对应 `.done` 标记的
-**绝对路径**),二者均由该脚本从其 `--checkpoints` 参数(已 `resolve()`)拼单元 id 得出。编排器 SHALL
-把 `list_*` stdout 中的 `checkpoint_path` / `done_marker` **逐字透传**进对应 subagent 的 task 输入,
+**绝对路径**),二者均由该脚本从其 `--checkpoints` 参数(已 `resolve()`)拼单元 id 得出。
+
+`checkpoint_path` / `done_marker` 的**文件名分量** SHALL 经文件系统消毒(复用 `_safe_name`:`/`、`\`、`:`
+→ `_`),使含 `::`(NTFS Alternate-Data-Stream 分隔符)或 `/` 的 `cluster_id` / shard id 派生的文件名在
+Windows NTFS 上可写(否则 `write_text` 报 `OSError [Errno 22]`)。canonical 单元 id(含 `::`)SHALL 原样
+保留为 slim envelope 的 `cluster_id` 字段与检查点记录内的 `unit` 字段——**只有文件名被编码,身份不变**;
+done 检测读记录内 `unit` 字段、不依赖文件名,故消毒不影响 resume 匹配。
+
+编排器 SHALL 把 `list_*` stdout 中的 `checkpoint_path` / `done_marker` **逐字透传**进对应 subagent 的 task 输入,
 MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径,也 MUST NOT 用 `py -c` 算路径。
 
 `init-scout` / `init-induct` subagent 的 stage 提示词 SHALL 把 `checkpoint_path`(与 `done_marker`)
@@ -780,7 +873,15 @@ MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径
 #### Scenario: Enumeration script emits absolute checkpoint path per pending unit
 - **WHEN** `list_scout_batches.py --scout-plan …/scout_plan.json --checkpoints …/checkpoints/scout` 运行
 - **THEN** stdout `pending[]` 每项含 `checkpoint_path` 与 `done_marker`,二者均为绝对路径,且分别等于
-  `<绝对 checkpoints dir>/<batch_id>.json` 与 `<绝对 checkpoints dir>/<batch_id>.json.done`
+  `<绝对 checkpoints dir>/<safe(batch_id)>.json` 与 `<绝对 checkpoints dir>/<safe(batch_id)>.json.done`
+  (`safe` = `_safe_name`,`batch_id` 通常不含 `::`,消毒为幂等 no-op)
+
+#### Scenario: Checkpoint filename is sanitized for NTFS-unsafe cluster_id
+- **WHEN** `list_clusters.py` 对一条 `cluster_id` 含 `::`(如 `authorization::SecCfg::ab12cd34`)、或 shard id
+  含 `::shard-<n>` 的待跑单元产出 `pending[]`,运行宿主为 Windows
+- **THEN** 该项 `checkpoint_path` / `done_marker` 的**文件名分量**把 `::`(及 `/` `\`)替换为 `_`
+  (可经 `write_text` 写下、不报 Errno 22);该项 envelope `cluster_id` 字段仍为**原始**含 `::` 的 canonical id;
+  subagent 写入的检查点记录内 `unit` 字段为该 canonical id;`_done_ids` 据此 `unit` 字段正确判终态
 
 #### Scenario: Orchestrator passes path verbatim, never interpolates
 - **WHEN** 编排器取得 scout / T1 的 `pending[]` 并起 subagent
@@ -797,8 +898,9 @@ MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径
 - **THEN** PreToolUse hook 以退出码 2 拒绝,并在 stderr 给出「路径须取自 `list_*` stdout 的 `checkpoint_path`」recipe
 
 #### Scenario: Existing on-disk artifact schema unchanged
-- **WHEN** 本变更生效后审阅 `checkpoints/scout/<batch_id>.json` 与 `checkpoints/t1/<cluster_id>.json`
-- **THEN** 其磁盘内容 schema 与变更前一致(新增的 `checkpoint_path`/`done_marker` 仅存在于 `list_*` stdout,不写入产物文件)
+- **WHEN** 本变更生效后审阅 `checkpoints/scout/<safe(batch_id)>.json` 与 `checkpoints/t1/<safe(cluster_id)>.json`
+- **THEN** 其磁盘**内容** schema 与变更前一致(记录内 `unit` = canonical id、`status`、`out`、`bytes` 等);
+  文件名经 `_safe_name` 消毒;`checkpoint_path`/`done_marker` 仅存在于 `list_*` stdout,不写入产物文件内容
 
 ### Requirement: Scout candidate JSON robustness at the merge boundary
 
@@ -964,3 +1066,463 @@ codegraph 自身静态分析上限(反射/DI 容器/运行时分派)产生的残
 - **WHEN** 审阅 `report.md` / `init_manifest.json` 的 `boundaries[]`
 - **THEN** 其中明示「codegraph 静态分析上限致 `unresolved[]` 缩小不归零,残留需人工复核」,且既有三条诚实边界仍在
 
+### Requirement: Discover call-graph cache survives re-runs
+
+`discover_controls.py` SHALL 在两遍调用图建成后将结果(`forward`/`reverse`/`framework_files`/
+`name_to_files` 等重建所需态)原子写到 `<out>/cache/callgraph.json`;重跑时 SHALL 按源文件 mtime
+判定缓存新鲜度——源未变更且未传 `--rebuild-cache` 时 SHALL 加载缓存、跳过两遍 callgraph 重建。该缓存
+是「跨调用零全损推进」与「重跑提速」的基础(兑现既有「Resumable, checkpointed execution」的
+callgraph-cache 条款,关闭 `--rebuild-cache` 悬空契约)。`--rebuild-cache` flag SHALL 真实存在且经
+`--help` 暴露(承 R5.1);默认行为(无缓存或缓存失效=每次重建)向后兼容。
+
+#### Scenario: Cache hit skips callgraph rebuild
+- **WHEN** discover 完成一次写入 `cache/callgraph.json` 后,源文件未变更即再次运行
+- **THEN** discover 加载缓存、跳过两遍 callgraph 重建,stdout 摘要含缓存命中标志
+
+#### Scenario: Stale cache rebuilt on source change
+- **WHEN** 缓存存在但某源文件 mtime 新于缓存,或传 `--rebuild-cache`
+- **THEN** discover 重建调用图并刷新缓存(不返回过期结果)
+
+#### Scenario: rebuild-cache is a real documented flag
+- **WHEN** 运行 `discover_controls.py --help`
+- **THEN** `--rebuild-cache` 出现在参数表(argparse 认识,不报 unrecognized)
+
+### Requirement: Discover scan resumes from a checkpoint
+
+`discover_controls.py` SHALL 在 scan 阶段周期(每 `--progress-every` 文件)原子写续点
+`<out>/cache/scan_progress.json`(至少含已扫文件索引 `scanned_index` 与累积候选)。`--resume` SHALL
+复用 callgraph 缓存并从 `scanned_index` 续扫、追加候选(不重扫已续点文件);续点合并 SHALL 确定性、
+幂等(同一续点重跑产等价候选集)。scan 完成后续点可保留(供再次 resume)或清理,均不破坏最终产物。
+
+#### Scenario: Resume continues scan past a kill
+- **WHEN** discover 在 scan 中途被强杀,留下 `scan_progress.json`(scanned_index=K),随后
+  `discover ... --resume`
+- **THEN** discover 跳过前 K 个已扫文件、从第 K+1 续扫,候选集等价于一次跑完的结果
+
+#### Scenario: Resume is idempotent
+- **WHEN** 对同一续点连续两次 `--resume`
+- **THEN** 两次产出的候选集等价(不重复、不丢失)
+
+### Requirement: Discover soft time-budget clean exit
+
+`discover_controls.py` SHALL 提供 `--time-budget-ms <N>`(默认 0=关)。当置位且在安全边界(callgraph
+建成后、scan 每 `--progress-every` 文件)已超预算时,discover SHALL 落全部-so-far 产物(callgraph
+缓存 + scan 续点)并在 stdout 增 `partial: true` + `resume_hint`(可操作的重派提示)后**退出码 0**
+(干净早退,而非被宿主 SIGKILL 全损)。未置位或未超预算时 SHALL 一次性跑完,stdout `partial: false`。
+编排器 SHALL 据 stdout `partial: true` 经 Bash 重派 `--resume`(编排器循环,**NEVER** 写 wrapper `.py`;
+承 R5.2 黑盒纪律)直至 `partial: false`。
+
+#### Scenario: Budget exceeded triggers clean partial exit
+- **WHEN** 运行 `discover_controls.py --repo . --out .mgh-init --time-budget-ms 30000`,且单次调用 30s
+  内跑不完
+- **THEN** discover 在安全边界落缓存/续点后退出码 0,stdout 含 `partial: true` + `resume_hint`,无产物截断
+
+#### Scenario: Budget off finishes in one go
+- **WHEN** 未传 `--time-budget-ms`(默认 0),且仓规模在单次超时内
+- **THEN** discover 一次性跑完,stdout `partial: false`,行为等价于引入本要求前
+
+#### Scenario: Orchestrator re-dispatches on partial, never via wrapper script
+- **WHEN** discover stdout 为 `partial: true`
+- **THEN** 编排器经 Bash 重派 `discover ... --resume`;**不** `Write` wrapper `.py` 去循环
+
+### Requirement: Discover writes are atomic
+
+`discover_controls.py` SHALL 原子写出所有产物 JSON(`controls_candidates.json`/`clusters.json`/`skeleton.json`/
+`cache/*`):先写 `<path>.tmp` 再 `os.replace` 落盘,使进程在任意时刻被 SIGKILL 都**不**留下
+截断/半写 JSON(`--check` 与下游 `json.loads` 不会读到破损文件)。原子写仅用 Python 标准库
+(`os.replace`/`pathlib`),承 R2 零运行时依赖。
+
+#### Scenario: Killed mid-write leaves no truncated artifact
+- **WHEN** discover 在写 `controls_candidates.json` 的过程中被强杀
+- **THEN** 目标仓里**不**存在截断的 `controls_candidates.json`(要么完整、要么不存在),`.tmp` 残留可被
+  下次运行覆盖
+
+#### Scenario: check passes after an interrupted run
+- **WHEN** 对一次被强杀后留下完整产物的 out-dir 运行 `discover_controls.py --check`
+- **THEN** `--check` 读到合法 JSON,退出码 0(无破损文件误判为边界失败)
+
+### Requirement: Long-running deterministic Bash calls carry a per-call timeout
+
+每份 `mgh-*.md` 命令壳的编排器 SHALL 给**长跑确定性 Bash 调用**传一个慷慨的 per-call `timeout`
+(claude Bash 工具与 opencode shell 工具均接受毫秒级 `timeout` 参数)。对 init,长跑脚本含
+`discover_controls.py`(尤其带 `--time-budget-ms`)/`plan_scout.py`/`merge_scout.py`;对带 `--time-budget-ms`
+的 discover,`timeout` SHALL 略大于该 budget,编排器见 stdout `partial: true` 即 Bash 重派 `--resume`。
+命令壳 SHALL 在边界/披露段说明:opencode 用户**可**经环境变量
+`OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局默认,但该变量**须在 opencode
+启动前就绪**(mid-session `export` 不被 opencode 插件进程继承,与 R5.7 `MGH_*_ACTIVE` 可靠性边界同根因);
+per-call `timeout` 是跨宿主公共杠杆,可在会话中即时生效。该 recipe 是横切编排纪律(镜像
+`sast-orchestration-discipline`/`security-augmentation`/`freeform-security-review`)。
+
+#### Scenario: Shell recipe tells the orchestrator to pass a per-call timeout
+- **WHEN** 审阅 claude-code 与 opencode 两份 `mgh-init.md`
+- **THEN** 两壳均显式要求长跑确定性 Bash 调用携带 per-call `timeout`,并据 discover stdout `partial`
+  决定是否 Bash 重派 `--resume`
+
+#### Scenario: opencode env-var boundary disclosed
+- **WHEN** 审阅 `mgh-init.md` 边界段与 README
+- **THEN** 其中明示 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` 须 opencode 启动前设置、mid-session
+  `export` 不生效,并指 per-call `timeout` 为会话内即时生效的替代
+
+### Requirement: Re-entrant orchestrator resume state (disk as single source of truth)
+
+`/mgh-init` SHALL provide a deterministic leaf script `core/scripts/resume_state.py` that, given a
+`<target>/.mgh-init/` directory, derives the pipeline's **current step** and **exact next action** **purely from
+on-disk artifacts + `.done` markers** — independent of any conversation / session memory. It is the single
+sanctioned outlet for the orchestrator reflex "which step am I on / what do I do next" (replaces relying on
+remembering progress across the 8-step flow). stdout = slim structured JSON
+`{target, format, step, tiers{discover, scout, t1, t2, t3, t4 each {done, total}}, next_action{kind∈bash|subagent|done,
+desc, absolute_paths}, resumable, notes[]}`; stderr = diagnostics/progress only; exit codes `0/1/2`.
+`step` SHALL be one of `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done`, resolved by
+probing product artifacts (`controls_candidates.json`/`clusters.json`/`scout_candidates.json`/`controls_inventory.json`/
+rule files/`init_manifest.json`) and per-tier `.done` markers, **conditional on the persisted run config**
+(see "Persisted run configuration for stateless resume") so optional/codepath branches
+(`--no-scout`/`--no-codegraph`/`--skip-consistency`/`--merge`/survey-skipped/resolve-skipped) are honored.
+`next_action.absolute_paths` SHALL reuse the same `Path.resolve()` absolute values the `list_*`/`describe_artifact`
+producers emit (承 "Fan-out checkpoint paths are deterministic absolute values"); the script MUST NOT invent paths or
+template `<target>`. The script MUST be zero-runtime-dependency (承 R2), self-locate `sys.path`, read utf-8, run from
+any cwd, and expose `--help` as its CLI contract (承 R5.1/R5.3). The orchestrator SHALL call `resume_state.py` as the
+**first action** on `--resume` and **after any host context compaction** (claude `/compact` / opencode auto-compact),
+and SHALL NOT determine "current step" from conversation memory.
+
+#### Scenario: Fresh session resumes mid-T1 purely from disk
+
+- **WHEN** a run halted with some `<target>/.mgh-init/checkpoints/t1/*.done` present but
+  `controls_inventory.json` absent, and a **new session** runs
+  `py <path>/resume_state.py --target <target>`
+- **THEN** stdout `step` = `t1`, `tiers.t1` = `{total, done}` reflecting real `.done` count,
+  `next_action.kind` = `subagent` with `desc` naming `init-induct` for the pending units and `absolute_paths`
+  carrying the real `input_path`/`checkpoint_path` from `list_clusters.py`, `resumable` = true — and the orchestrator
+  obtained this **without consulting any prior conversation memory**
+
+#### Scenario: Run config makes resume stateless of re-typed flags
+
+- **WHEN** the original invocation passed `--format opencode --no-scout` and then halted, and a fresh session runs
+  `/mgh-init --resume` **without** re-passing `--format`/`--no-scout`
+- **THEN** `resume_state.py` reads `<target>/.mgh-init/run_config.json`, reports `format` = `opencode` and the scout
+  tier as skipped (not pending), and `next_action` respects `--no-scout` (it does NOT direct spawning scout readers)
+
+#### Scenario: Completed run reports done
+
+- **WHEN** all terminal artifacts exist (`controls_inventory.json` + rule/detail files + `init_manifest.json`) and the
+  final tier `.done` markers are present
+- **THEN** `resume_state.py` stdout `step` = `done`, `next_action.kind` = `done`, `resumable` = false
+
+#### Scenario: --merge short-circuit reflected
+
+- **WHEN** `run_config.json` records `mode` = `merge`
+- **THEN** `resume_state.py` stdout `step` = `merge` and `next_action` directs the `--merge <partials-dir>` flow
+  rather than discover/scout/t1
+
+#### Scenario: Scout-merge sub-step is not skipped on resume
+
+- **WHEN** all scout batch `.done` markers exist but `scout_candidates.json` (and
+  `checkpoints/scout/merge.json.done`) are absent — i.e. a prior, context-pressured session fanned out the scout
+  readers but never ran `init-scout-merge`
+- **THEN** `resume_state.py` stdout `step` = `scout` (NOT `t1`/`resolve`), `next_action.kind` = `subagent` naming
+  `init-scout-merge` to produce `scout_candidates.json` first — preventing the orchestrator from skipping straight
+  to `merge_scout.py` / T1 and hand-rolling a malformed aggregate (real-machine failure shape: orchestrator lost the
+  step sequence, read `merge_scout.py` source to reverse-engineer the expected wrapper format, then fabricated it)
+
+#### Scenario: resume_state is self-contained, offline, and contract-complete
+
+- **WHEN** `py <path>/resume_state.py --target <dir>` is executed from an arbitrary cwd in an offline environment, and
+  `py <path>/resume_state.py --help` is run
+- **THEN** it succeeds (self-located `sys.path`, utf-8 read, zero third-party imports) emitting valid JSON; and `--help`
+  prints a flag table whose flags the dual `mgh-init.md` shells mirror verbatim (承 R5.1)
+
+#### Scenario: Orchestrator routes "where am I" to the sanctioned primitive
+
+- **WHEN** the orchestrator (on `--resume` or post-compaction) needs to know the current step / next action
+- **THEN** it calls `resume_state.py`, MUST NOT `py -c`/`python -c` introspect `.mgh-init/**`, MUST NOT `Read` whole
+  aggregate JSON to reconstruct progress, and MUST NOT rely on remembered step state from conversation
+
+### Requirement: Persisted run configuration for stateless resume
+
+`/mgh-init` 编排器 SHALL 在 step 0(参数解析后、花 token 前)原子写出
+`<target>/.mgh-init/run_config.json`(`.tmp`+`os.replace`,承 "Discover writes are atomic"),记录**决定步骤图的本次
+调用 flag**:`target`(绝对)、`format`、`scope`/`scope_mode`、`no_scout`、`no_codegraph`、`skip_consistency`、
+`merge`(及 `merge_partials_dir`)、`include_dotfiles`、以及 `--max-unit-bytes`/`--orch-budget-bytes`/`--max-aggregate-bytes`
+预算与 `--scout-*` 参数。该文件是**起始态**意图记录,与既有**终态** `init_manifest.json`(版本/计数/出处)边界清晰、
+互不替代。`resume_state.py` SHALL 消费 `run_config.json` 解析可选/codepath 分支。`run_config.json` 缺失或破损时,
+`resume_state.py` SHALL fail-loud(退出码 2)+ stderr recipe(指向重跑 `/mgh-init --<flags>` 重建),MUST NOT 静默猜测
+步骤图。该文件随 `.mgh-init/` gitignore(承既有 unit-inputs gitignore 约定)。
+
+#### Scenario: Run config written atomically at start
+
+- **WHEN** `/mgh-init --target <t> --format opencode --no-scout` runs and reaches step 0
+- **THEN** `<t>/.mgh-init/run_config.json` is written atomically (no truncated half-write survives a mid-write kill) and
+  records `format`/`no_scout`/absolute `target` verbatim from the invocation
+
+#### Scenario: Resume consumes run config
+
+- **WHEN** `resume_state.py` runs against a `.mgh-init/` whose `run_config.json` records `no_scout=true`
+- **THEN** it reports the scout tier as skipped and never directs scout fan-out, matching the original invocation intent
+
+#### Scenario: Missing run config fails loud, not silent
+
+- **WHEN** `resume_state.py` runs and `run_config.json` is absent or unparseable
+- **THEN** it exits code `2` with a stderr recipe telling the user to re-run `/mgh-init --<flags>` to rebuild it, rather
+  than silently guessing a step graph that could diverge from the original intent
+
+### Requirement: Subagent return-to-orchestrator is a bounded ack
+
+每份 `core/prompts/stages/init-*.md` SHALL 声明一个 **Return-to-orchestrator** 契约:subagent 的**最终回传消息**
+SHALL 是**单条有界 ack**——取值之一 `ok <绝对 checkpoint_path 或 rule_path> <count>`、`oversize <绝对 path>`、
+`failed <简短原因>`(聚合 stage 的 ack 额外带 `total`/`merged` 计数)——且 **MUST NOT** 回显记录体、原始源码、或
+检查点文件内容(治「subagent 回传随 fan-out 单调膨胀编排器上下文」,承审计发现:9 份提示词此前对回传消息集体沉默)。
+该 ack 是**存活/成功信号**,非数据载体。编排器 SHALL 仅据 ack 判断该单元成败、并以 `.done` 标记 + `resume_state.py`
+确认进度;MUST NOT 为「继续流水线」而内联 `Read` 检查点文件回编排器上下文。聚合节点(T2/scout-merge)的检查点文件
+本身即全量聚合记录,编排器 SHALL 通过 `resume_state.py`/`describe_artifact.py` 的有界摘要接触之,NEVER 整份读回。
+本要求同时写入双壳 `agents/init-*.md` 的 Hard-constraints 段(双重防线)。
+
+#### Scenario: Each stage prompt declares the bounded ack contract
+
+- **WHEN** 审阅 `core/prompts/stages/init-scout.md`/`init-induct.md`/`init-synthesis.md`/`init-scout-merge.md`/
+  `init-survey.md`/`init-scout-audit.md`/`init-resolve.md`/`init-rules-consistency.md`
+- **THEN** 每份含一个可识别的 Return-to-orchestrator 段,声明最终消息为单条有界 ack、NEVER 回显记录体/源码
+
+#### Scenario: Orchestrator does not echo checkpoint content to continue
+
+- **WHEN** 一个 init-induct subagent 完成并回传 `ok <abs path> <count>`,编排器进入下一单元
+- **THEN** 编排器仅记 ack 为成功信号 + 探 `.done`;它 **不** `Read` 该 checkpoint 内联回上下文,也 **不** 把记录体
+  透传给后续 subagent(后续 subagent 经自己的 `input_path` 自读)
+
+#### Scenario: Aggregate checkpoint accessed via bounded summary, not inline read
+
+- **WHEN** 编排器在 T2 完成后需要确认 inventory 落盘
+- **THEN** 它经 `resume_state.py`(或 `describe_artifact.py --count/--keys`)取得有界摘要,**不** 整份 `Read`
+  `controls_inventory.json` 进编排器上下文
+
+### Requirement: Aggregate nodes enforce a hard request budget via map-reduce
+
+T2(`init-synthesis`)与 scout-merge(`init-scout-merge`)SHALL 把 `--max-aggregate-bytes` 当作**硬闸门**(兑现
+shell 既有「P0 软边界:T2/merge/T4 聚合节点目前为披露 + `--scope`/`--merge` 回退」的自认 TODO,把软边界升级为硬阈值)。
+聚合输入(全部 T1 记录 / 全部 scout 批记录)≤ `--max-aggregate-bytes` 时,行为**逐字不变**(单一综合 subagent
+上下文,承 "Isolated per-cluster induction with cross-cluster synthesis" / "Fan out scout across parallel isolated
+byte-bounded batches" 的既有 single-context 综合语义)。聚合输入 **>** 预算时,SHALL 自动触发**两段 map-reduce**:
+确定性叶脚本 `core/scripts/plan_aggregate.py` 把上一层记录(T2 按 `category` 分桶;scout-merge 按 batch 簇分桶)切成
+**每桶 ≤ `--max-aggregate-bytes`** 的有界 shard 并物化 per-shard 输入;编排器为每 shard 扇出一个 **partial-synthesis
+subagent**(有界输入、回传有界 ack),产出 per-shard 摘要 checkpoint;最后由**单一 rollup subagent** 仅吞**各 shard
+摘要**(有界)产出终态产物(`controls_inventory.json` / `scout_candidates.json`)。**每个大模型请求 SHALL ≤ 预算**。
+`plan_aggregate.py` SHALL 零依赖、自定位、utf-8、任意 cwd、stdout=JSON/stderr=诊断、退出码 `0/1/2`、`--help` 即契约
+(承 R5.1/R5.3),并复用既有 `list_*` 的 `--materialize`/`--offset`/`--limit`/`--orch-budget-bytes` 翻页语义。降级触发
+与 shard 数 SHALL 在 `init_manifest.json::boundaries[]` + `report.md` 披露(无静默溢出)。本要求在「超预算」时**取代**
+既有 single-context 综合条款;≤ 预算(常见小仓)时既有条款逐字生效。
+
+#### Scenario: Small repo keeps single-context synthesis unchanged
+
+- **WHEN** 全部 T1 记录序列化字节 ≤ `--max-aggregate-bytes`
+- **THEN** T2 仍为单一综合 subagent 上下文(无 shard、无 rollup),行为等价于引入本要求前
+
+#### Scenario: Large repo triggers automatic map-reduce sharding
+
+- **WHEN** 全部 T1 记录序列化字节 > `--max-aggregate-bytes`
+- **THEN** `plan_aggregate.py` 按 `category` 切成多个每桶 ≤ 预算的 shard,编排器每 shard 一个 partial-synthesis
+  subagent(有界输入),再一个 rollup subagent 仅吞各 shard 摘要;**每个大模型请求 ≤ 预算**
+
+#### Scenario: scout-merge over budget uses batch-cluster shards
+
+- **WHEN** 全部 scout 批记录 > `--max-aggregate-bytes`
+- **THEN** `plan_aggregate.py` 按 batch 簇分桶,每桶一个 bounded partial-merge subagent,再 rollup;每请求有界
+
+#### Scenario: Rollup operates on summaries only
+
+- **WHEN** map-reduce 的 rollup subagent 运行
+- **THEN** 其输入为各 shard 的**结构化摘要**(非原始 T1/scout 记录全集),上下文规模远小于任一 shard
+
+#### Scenario: Reduction is disclosed, not silent
+
+- **WHEN** 一次运行触发了聚合 map-reduce 降级
+- **THEN** `init_manifest.json::boundaries[]` + `report.md` 记录触发节点、shard 数与每 shard 预算,不静默溢出
+
+#### Scenario: plan_aggregate is self-contained, offline, and contract-complete
+
+- **WHEN** `py <path>/plan_aggregate.py ...` 从任意 cwd、内网无网环境执行,且 `--help` 被运行
+- **THEN** 脚本成功(零依赖、自定位、utf-8),stdout 为合法 JSON;`--help` flag 表被双壳 `mgh-init.md` 逐字镜像(承 R5.1)
+
+### Requirement: Compaction-aware orchestration
+
+两份 `mgh-init.md` 命令壳(claude + opencode)SHALL 新增一个 **Re-entrancy & compaction** 段,声明:(1) 所有可恢复
+流水线状态(checkpoints / `.done` / 产物 JSON / `run_config.json`)都在磁盘 `<target>/.mgh-init/`,**对话记忆只是缓存、
+不是进度真相源**;(2) claude `/compact` 与 opencode 自动压缩(~95% 触发)是**模型生成摘要**,**可能丢掉**命令壳灌入的
+编排纪律系统提示词,故续跑 SHALL **NEVER** 依赖「记得自己在第几步」;(3) **`--resume` 与任何压缩事件后,编排器第一步
+SHALL 调 `resume_state.py`** 从磁盘重派生 step + next_action;(4) 上下文吃紧时编排器 **MAY** **干净停止**(跑完当前
+fan-out 波次、落 `.done`、不留下半截单元)→ **新 session `/mgh-init --resume` 续**,此路径**优于**人工 `/compact`(
+后者摘要可能丢编排纪律导致执行路径偏离——直击用户痛点);(5) 既有 per-call `timeout` + discover `partial:true` +
+`--resume` 纪律**保持不变**。该段 SHALL 用主谓措辞(SHALL/MAY)+ recipe 句式(承 R5.5①「该做什么」优先于禁令)。
+
+#### Scenario: Shell declares disk-as-source-of-truth
+
+- **WHEN** 审阅 claude-code 与 opencode 两份 `mgh-init.md`
+- **THEN** 两壳均含可识别的 Re-entrancy & compaction 段,声明可恢复状态在磁盘、对话记忆非真相源、压缩是模型摘要可能丢提示词
+
+#### Scenario: Resume / post-compaction first action is resume_state
+
+- **WHEN** 编排器在 `--resume` 或一次自动/手动压缩后继续
+- **THEN** 其第一步是调用 `resume_state.py` 重派生 step + next_action,而非依赖对话记忆判步骤
+
+#### Scenario: Stop-cleanly-and-resume preferred over manual compact
+
+- **WHEN** 审阅 Re-entrancy & compaction 段关于上下文吃紧的 recipe
+- **THEN** 该段声明编排器 MAY 干净停止 + 新 session `/mgh-init --resume` 续,并指明此路径优于人工 `/compact`(因其可能丢编排纪律)
+
+#### Scenario: Existing timeout / partial-resume discipline preserved
+
+- **WHEN** 审阅该段与既有「Long-running deterministic Bash calls carry a per-call timeout」段
+- **THEN** per-call `timeout` + discover `partial:true` + `--resume` 纪律保持不变,本段为 additive
+
+### Requirement: Merge path tolerates scout candidates missing required fields
+
+`merge_scout.py::_normalize`(把 scout candidate 子集归一到完整 Candidate shape 的路径,非 `--check` 路径)SHALL 对缺任一必填字段(`category` 或 `file`)的 candidate 返回 `None`,由调用方 skip 并向 stderr 打印 warn(warn SHALL 如实指出缺哪个必填字段、candidate 的 `index`、以及可得的 `file:line` 定位),而非直索引抛 `KeyError` 中止整次 merge。`_normalize` 内所有字段取值 SHALL 统一用 `.get`,不得残留对必填字段的直索引。
+
+此要求为 defense-in-depth:正常流程下 `merge_scout.py --check` 已挡缺字段候选(退出码 2 回退重跑);本要求覆盖 `--check` 被绕行(如编排器上下文压力下跳过 merge 闸门、或畸形 `scout_candidates.json`)时的脚本侧鲁棒性,使 merge 优雅丢弃个别畸形 candidate 并继续,而非整体崩溃。
+
+#### Scenario: Candidate missing file is skipped with a warning, merge continues
+- **WHEN** `merge_scout.py` 归一一条缺 `file` 字段的 scout candidate(且 `--check` 未先运行或被绕行)
+- **THEN** `_normalize` 返回 `None`,该 candidate 被 skip;stderr 打印指出**缺 `file`** 的 warn(含
+  candidate `index` 与可得 `file:line` 定位);merge 继续处理其余 candidate;进程**不**抛 `KeyError: "file"`,
+  正常产出(退出码 0)
+
+#### Scenario: Candidate missing category is still skipped (behavior unchanged)
+- **WHEN** 某 scout candidate 缺 `category` 字段
+- **THEN** 行为与现状一致:`_normalize` 返回 `None`,candidate 被 skip,stderr 打印指出缺 `category` 的 warn,
+  merge 继续
+
+#### Scenario: Candidate missing both required fields is skipped once
+- **WHEN** 某 scout candidate 同时缺 `category` 与 `file`
+- **THEN** candidate 被 skip 一次,stderr warn 如实列出所缺字段(含 `category` 与 `file`),不重复 skip、不抛异常
+
+#### Scenario: Well-formed candidate is unaffected
+- **WHEN** 某 scout candidate 含完整 `category` 与 `file`
+- **THEN** `_normalize` 正常归一产出完整 Candidate dict,不打 warn,merge 正常进行
+
+### Requirement: Fan-out waves run to completion without scale-driven user interruption
+
+`/mgh-init` 的编排器(宿主 agent)SHALL 把每个 fan-out 波次跑到完成,且 MUST NOT 因规模大而中途停下征求用户拆分 / 跳过 / 终止。具体到 scout reader batches / T1 per-cluster induction / T3 per-category rule writing 任一波次:编排器迭代 `list_*` 的 `pending` 工作清单、以 `max_concurrent` 并发起 subagent、跑完一波起下一波,直至无 pending 单元剩余;规模大(数百至 ~1000 单元)本身 NEVER 构成停下征求的理由。规模与边界事实 SHALL 流入既有披露渠道——`init_manifest.json::boundaries[]`、`report.md`、`resume_state.py` `notes[]`——NEVER 作为运行中的阻塞式提问;披露所用计数 SHALL 自磁盘读取(`resume_state.py` / `list_*` stdout),NEVER 据对话记忆编造。
+
+本要求**不改动**既有 **pre-run** 建议:i0 阶段统计源文件数命中 `--large-repo-threshold` 时、
+**在花 token 之前**主动建议 `--scope` 分模块 + `--merge` 的行为(承「Bounded single-pass scan
+performance on large repos」)保持不变。本要求的禁止范围仅限**运行已提交之后**(波次进行中)的
+打断行为。
+
+该指令 SHALL 以规范性措辞(RFC-2119 `MUST NOT`/`SHALL`)写入 claude-code 与 opencode 两份
+`mgh-init.md`(逐字镜像),落在 fan-out / Re-entrancy & compaction 区。这是编排器对话行为约束
+(非工具调用约束),runtime hook 管不到「agent 是否停下来问用户」;确定性可测部分 = 披露侧
+(规模/边界进 `init_manifest.json`/`report.md`/`resume_state.py`,计数来自磁盘)。
+
+#### Scenario: A large fan-out wave runs to completion without a blocking question
+
+- **WHEN** 编排器进入一个 fan-out 波次,且该波次 `pending` 单元数很大(如 ~1000 个 scout batch),
+  用户期望全面、稳定执行到底
+- **THEN** 编排器迭代 `list_*` stdout `pending[]`、以 `max_concurrent` 并行跑完所有单元,**不**
+  中途停下征求用户「是否拆分 / 跳过 / 终止」;波次跑到 `pending` 为空
+
+#### Scenario: Scale and boundaries are disclosed, not asked
+
+- **WHEN** 一个 fan-out 波次规模大或覆盖部分(含 `.failed`/跳过单元 / 残留盲区)
+- **THEN** 规模与边界事实出现在 `init_manifest.json::boundaries[]` 和/或 `report.md` 和/或
+  `resume_state.py` `notes[]`(计数自磁盘 `resume_state.py`/`list_*` stdout),且编排器**不**就
+  规模提出运行中的阻塞式提问
+
+#### Scenario: The pre-run scope advisory is preserved
+
+- **WHEN** i0 阶段统计的源文件数超过 `--large-repo-threshold`,且尚未花 token 进入全量扫描
+- **THEN** 系统在开始全量扫描前建议 `--scope` 分模块 + `--merge`(行为等价于本要求引入前);
+  该 pre-token 建议不受「运行中不打断」指令影响
+
+#### Scenario: Both shells declare the run-to-completion directive
+
+- **WHEN** 审阅 claude-code 与 opencode 两份 `mgh-init.md` 的 fan-out / Re-entrancy & compaction 区
+- **THEN** 两壳均含一条规范性措辞,声明编排器 MUST NOT 因规模在波次进行中停下征求拆分/跳过/终止、
+  SHALL 把规模与边界流入既有披露渠道(双壳逐字镜像)
+
+#### Scenario: Disclosed counts come from disk, not conversation memory
+
+- **WHEN** 编排器在摘要/披露中陈述 fan-out 规模、失败数、跳过数或覆盖率
+- **THEN** 这些计数取自 `resume_state.py` / `list_*` stdout 的结构化字段(磁盘真相),NEVER 据对话
+  记忆编造
+
+### Requirement: Partial fan-out unit failure tolerance
+
+A confirmed `/mgh-init` fan-out unit failure SHALL be treated as a terminal, non-blocking state distinct from completion. This covers the scout-reader batch, T1 per-cluster induction, and T3 per-category rule-writing tiers: when a unit's subagent returns the existing `failed <reason>` ack, the orchestrator SHALL record it with a `.failed` marker sibling to its `.done` marker (`<checkpoint_path>.failed`); the unit SHALL NOT be retried on `--resume` and SHALL NOT block tier completion. A tier SHALL be considered complete enough to proceed when `done + failed >= total` (not `done >= total`).
+
+The orchestrator (host agent) SHALL write the `.failed` marker on receiving a `failed` ack — the
+subagent touches nothing on failure (it only emits the ack). A unit whose subagent crashed
+without producing any ack SHALL leave neither `.done` nor `.failed` and SHALL remain pending
+(crash is not a confirmed terminal failure).
+
+The `list_clusters.py`, `list_scout_batches.py`, and `list_rule_jobs.py` work-list producers
+SHALL exclude `.failed` units from `pending[]`, SHALL emit a `failed` count in stdout, and SHALL
+emit a `failed_marker` absolute path per pending item (parallel to `done_marker`). `resume_state.py`
+SHALL derive each tier's `failed` count from `.failed` markers, gate tier completion on
+`done + failed >= total`, surface non-zero failures in `notes[]`, and flag a unit carrying both
+`.done` and `.failed` as a `--check` self-consistency violation (exit 2).
+
+#### Scenario: A failed unit is marked terminal and excluded from pending
+
+- **WHEN** a T1 cluster subagent returns `failed evidence parse error` for cluster `authZ::shard-0`
+  and the orchestrator writes its `failed_marker` (`checkpoints/t1/<safe(authZ::shard-0)>.json.failed`)
+- **THEN** the next `list_clusters.py --checkpoints <t1-dir>` run does NOT list that unit in
+  `pending[]`, and its stdout `failed` count is incremented
+
+#### Scenario: A tier proceeds when done plus failed reaches total
+
+- **WHEN** a tier has `total=1000` units, of which 997 are `.done` and 3 are `.failed`
+- **THEN** `resume_state.py` reports `step` past that tier (it does not gate on `done < total`),
+  `tiers[<tier>].failed == 3`, and the pipeline proceeds to the next stage
+
+#### Scenario: Resume does not retry a failed unit
+
+- **WHEN** the pipeline is re-entered with `mgh-init --resume` after a unit was marked `.failed`
+- **THEN** `resume_state.py` does not surface that unit in `next_action` / `pending`, and the
+  orchestrator does not re-dispatch it
+
+#### Scenario: A crash is not a confirmed failure and is retried
+
+- **WHEN** a subagent crashes mid-unit leaving neither `.done` nor `.failed`
+- **THEN** the unit remains `pending` and `resume_state.py` re-dispatches it on the next resume
+
+#### Scenario: Both done and failed for one unit is a check violation
+
+- **WHEN** a unit carries both `<checkpoint_path>.done` and `<checkpoint_path>.failed`
+- **THEN** `resume_state.py --check` reports the ambiguous terminal state and exits 2
+
+#### Scenario: A failed unit with no checkpoint record body is not a violation
+
+- **WHEN** a `.failed` marker exists but its sibling checkpoint record `<id>.json` is absent
+  (the subagent failed before writing the record)
+- **THEN** `resume_state.py --check` does not flag it (absent record is expected for failures)
+
+### Requirement: Fan-out failures are disclosed in artifacts
+
+The orchestrator SHALL disclose fan-out unit failures in `init_manifest.json` and `report.md`.
+The `failures` counts SHALL be read from disk via `resume_state.py` stdout `tiers` or `list_*`
+stdout `failed` fields — NEVER from agent conversation memory. The `list_*` producers and
+`resume_state.py` SHALL expose failure counts as structured output fields.
+
+#### Scenario: Work-list producers expose failed count and failed_marker path
+
+- **WHEN** the orchestrator runs `list_clusters.py` / `list_scout_batches.py` / `list_rule_jobs.py`
+  over a checkpoint dir containing `.failed` markers
+- **THEN** stdout carries a `failed` integer count, and each `pending[]` item carries an absolute
+  `failed_marker` path parallel to its `done_marker`
+
+#### Scenario: resume_state reports failed per tier
+
+- **WHEN** a tier has any `.failed` units
+- **THEN** `resume_state.py` stdout `tiers[<tier>]` includes a `failed` count, and `notes[]`
+  contains a disclosure entry naming the tier, the failed count, and the total
+
+#### Scenario: The manifest and report disclose the failure rate
+
+- **WHEN** the orchestrator finalizes `init_manifest.json` and `report.md` after a tier with
+  `failed > 0`
+- **THEN** `init_manifest.json` carries a `failures` object (per-tier `{done,failed,total}` or
+  equivalent) and a `boundaries[]` entry disclosing that fan-out units failed and were skipped,
+  and `report.md` surfaces the same fact in its disclosure section
+
+#### Scenario: High failure rate produces a loud advisory
+
+- **WHEN** a tier's failed count exceeds half its total
+- **THEN** `resume_state.py` `notes[]` elevates the disclosure to a prominent advisory (the run
+  still proceeds; this is not a gate)

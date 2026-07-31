@@ -30,6 +30,7 @@ re-scan, do NOT touch regex/scout candidates, do NOT pick canonical.
   NEVER 对 codegraph 已返回源码的同一文件再 `Read`。
 - **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的
   Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
+- **回传有界 ack**:最终消息 = 单条 `ok <绝对输出路径> <count>` / `oversize <绝对路径>` / `failed <原因>`(见 stage prompt 的 Return-to-orchestrator 段);**NEVER** 回显记录体/源码/检查点内容(会随 fan-out 膨胀编排器上下文)。
 - **输出路径逐字**:`checkpoint_path`/`done_marker` 是编排器逐字给定的**绝对路径**——恰好写该路径、
   touch 该 `.done`,**NEVER** 自行拼 `<target>/<id>` / NEVER 发明文件名 / NEVER 相对路径 / NEVER 写项目外
   (含盘符根)。cwd 不可假设;绝对路径对任意 cwd 安全。

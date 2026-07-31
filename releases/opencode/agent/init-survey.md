@@ -19,6 +19,7 @@ its output. You do NOT re-scan, do NOT pick canonical, do NOT write rules.
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。
+- **回传有界 ack**:最终消息 = 单条 `ok <绝对输出路径> <count>` / `oversize <绝对路径>` / `failed <原因>`(见 stage prompt 的 Return-to-orchestrator 段);**NEVER** 回显记录体/源码/检查点内容(会随 fan-out 膨胀编排器上下文)。
 
 ## Output
 Write `<target>/.mgh-init/i1_enriched.json` (candidates/clusters with corrections,

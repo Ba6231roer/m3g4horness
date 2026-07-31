@@ -133,3 +133,7 @@ Then touch the absolute path given by the input field `done_marker`.
 path; NEVER write anywhere outside the project tree (including a drive root). Your
 cwd is NOT assumed — `checkpoint_path` is already absolute precisely so it is safe
 under any working directory. Use the field value verbatim.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**:`ok <绝对 resolved.json> <resolved_count>`
+或 `failed <简短原因>`(**NEVER** 回显候选记录体/`resolved_path` 全集/源码——ack 是存活信号,非数据载体)。

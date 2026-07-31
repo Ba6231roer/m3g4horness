@@ -25,6 +25,14 @@ detail files (`<rules-dir>/<category>.md`) and claude files
 (`.claude/rules/security-<category>.md`) in place. Preserve the 输出纯净性 hard
 boundary (no tool internals in rule prose) while editing.
 
+## Aggregate context budget (P0 soft boundary)
+You see ALL drafted rule files (claude: every `.claude/rules/security-*.md`; opencode:
+every `<rules-dir>/<cat>.md`) in one context — this is an aggregate node. If that
+aggregate clearly exceeds `--max-aggregate-bytes` (default 256KB), state it back to the
+orchestrator. The orchestrator then advises `--scope`+`--merge` and discloses "aggregate
+over budget, not hard-bounded" in `init_manifest.json::boundaries[]` + `report.md`.
+**P0 = disclose + fallback**; do NOT silently skip rule files to fit a budget.
+
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(规则文件)/ `Glob` / `Grep` 自由。
 - 脚本侧:无(本层只做语义校订);确定性脚本由**编排器**调用。
@@ -37,8 +45,17 @@ boundary (no tool internals in rule prose) while editing.
 `paths:` 字段保持原样(英文/符号不变)。
 
 ## Output
-Apply edits in place to the rule files (claude) / detail files (opencode).
-Write a short `.mgh-init/checkpoints/t4/consistency.json` listing changes + any
-flags, then touch `.mgh-init/checkpoints/t4/consistency.json.done`.
+Apply edits in place to the rule files (claude) / detail files (opencode). Write a short
+checkpoint to the **absolute** path the orchestrator gives you
+(`<abs target>/.mgh-init/checkpoints/t4/consistency.json`) listing changes + any flags, then
+touch the absolute `.done` path the orchestrator gives you
+(`<abs target>/.mgh-init/checkpoints/t4/consistency.json.done`).
+
+**Hard boundary (`NEVER`)**: NEVER assemble/interpolate a path (no `<target>` substitution);
+NEVER write a relative path; use the orchestrator-given absolute path verbatim.
 
 > If `--skip-consistency` was passed, the orchestrator does not spawn this tier.
+
+## Return-to-orchestrator(回传有界 ack)
+你的**最终回传消息** SHALL 是**单条有界 ack**:`ok <绝对 consistency.json> <change_count>`
+或 `failed <简短原因>`(**NEVER** 回显规则正文全集——ack 是存活信号,非数据载体)。

@@ -23,6 +23,14 @@ Build your user-message research lens from `lenses/specialist-hints.md` for the
 chunk's specialist, plus per-language guidance. Putting the lens in the user
 prompt — exactly as the original does — keeps the SYSTEM block cacheable.
 
+## Input (from orchestrator)
+The orchestrator passes an ABSOLUTE `input_path` (materialized by
+`list_chunks.py --materialize`) to ONE chunk's complete record (`files[]` + `threat_id`
++ `hypothesis` + `needs_slice[]`). **Read that file**, then Read the chunk's source
+`files[]` yourself; slice any file in `needs_slice[]` via `chunk_sources.py` — never
+read a big file whole. Respond with ONLY your findings JSON; the orchestrator writes the
+per-chunk checkpoint + aggregates `checkpoints/s4_candidates.json`.
+
 ## Output
 Respond with ONLY the JSON object from the output schema (`{"findings":[...]}`).
 The orchestrator collects all chunks into `checkpoints/s4_candidates.json`.
@@ -34,6 +42,8 @@ after genuinely confirming each path is mitigated/unreachable.
 You are a stage subagent, not the orchestrator — emit only this stage's declared output.
 - NEVER `Write`/`Edit` a `.py` file (no orchestrator, no helper script, no `py -c` snippet).
 - NEVER run `py -c`/`python -c` to introspect or re-derive artifacts; read inputs with `Read`.
+- **NEVER whole-read `s3_chunks.json`** — receive only YOUR chunk's `input_path` from the
+  orchestrator (it never inlines or whole-reads the multi-chunk aggregate into a request).
 - Input artifacts are terminal — consume as-is; do not transform or re-aggregate them in code.
 (The tool frontmatter above already denies script authoring; this states the intent so
 it is never loosened.)

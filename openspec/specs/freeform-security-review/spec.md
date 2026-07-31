@@ -76,18 +76,40 @@ SHALL still proceed by LLM semantic reading of the full text, with gaps anchored
 
 ### Requirement: Fan-out is script-enumerated, single-unit by default
 
-The adapter SHALL emit exactly one `pending[]` item (the whole document as one review scope) by default.
-With `--split`, the adapter SHALL deterministically split by markdown heading levels into multiple `pending[]`
-items, each carrying an absolute `draft_path` + `done_marker` resolved within the project subtree. The
-orchestrator SHALL iterate only this script-produced list and MUST NOT self-assemble paths.
+The intake adapter (`ingest_requirements.py`) SHALL emit exactly one `pending[]` item (the whole document as one
+review scope) by default. With `--split`, the adapter SHALL deterministically split by markdown heading levels into
+multiple `pending[]` items, each carrying an absolute `draft_path` + `done_marker` + `input_path` + `bytes` +
+`oversize` resolved within the project subtree. The orchestrator SHALL iterate only this script-produced list and
+MUST NOT self-assemble paths. The adapter SHALL support `--materialize <dir>` (write each unit's full input to
+`<dir>/<unit>.input.json`, report `input_path`/`bytes`/`oversize`), `--offset`/`--limit` (paginate `pending[]`),
+and `--max-unit-bytes` (oversize unit → flag + recipe; not sharded). When a page's serialized bytes exceed
+`--orch-budget-bytes`, the adapter SHALL shrink `--limit`, reporting `effective_limit` + `shrunk:true`. Each
+per-unit stage subagent (reused sra engine: `sra-clarify`/`sra-augment`) SHALL read its own `input_path` rather than
+receive an inlined record; the orchestrator MUST NOT load the whole sra-shape `change_context.json` into its request
+context.
 
 #### Scenario: default single review unit
 - **WHEN** `/mgh-srr` runs without `--split`
-- **THEN** `change_context.json.pending` contains exactly one item whose `draft_path` and `done_marker` are absolute and within the project subtree
+- **THEN** `change_context.json.pending` contains exactly one item whose `draft_path`/`done_marker`/`input_path` are
+  absolute and within the project subtree
 
 #### Scenario: split produces heading-based units
 - **WHEN** `/mgh-srr` runs with `--split` on a document with multiple markdown headings
-- **THEN** `pending[]` contains one item per top-level section, each with an absolute `draft_path`
+- **THEN** `pending[]` contains one item per top-level section, each with an absolute `draft_path` + `input_path`
+
+#### Scenario: per-unit subagent reads its own bounded input
+- **WHEN** `/mgh-srr` fans out a unit into the reused sra engine
+- **THEN** the stage subagent input carries an absolute `input_path` → `<out-dir>/inputs/<unit>.input.json` with
+  `bytes` ≤ `--max-unit-bytes`; the orchestrator passes `input_path`, never the whole `change_context.json`
+
+#### Scenario: oversize unit is flagged not sharded
+- **WHEN** a unit input `bytes` > `--max-unit-bytes`
+- **THEN** `ingest_requirements.py` flags `oversize:true` + a recipe (use `--split` / narrow the doc); it does not
+  shard the unit
+
+#### Scenario: work-list page shrinks to the orchestrator budget
+- **WHEN** a `pending[]` page's serialized bytes > `--orch-budget-bytes`
+- **THEN** `ingest_requirements.py` shrinks `--limit`, reporting `effective_limit` + `shrunk:true`; the orchestrator pages
 
 ### Requirement: Middle engine reused verbatim, no duplication
 
@@ -177,11 +199,45 @@ only via the legacy 6 facets** (so the reader does not mistake the catalog for a
 ### Requirement: Runtime discipline and zero runtime dependencies
 
 `/mgh-srr` SHALL run under the `MGH_SRR_ACTIVE` run-domain (parallel to `MGH_SRA_ACTIVE`) with the
-`block-adhoc-scripts` guard active on both claude (`PreToolUse`) and opencode (`.ts` plugin) ends, blocking adhoc
-`py -c` introspection, unauthorized `Write *.py`, and out-of-subtree writes. The new scripts SHALL use only the
-Python standard library (no `pip` dependency; R2); `.docx`/`.xlsx` handling via `zipfile` + `xml.etree`.
+`block-adhoc-scripts` guard active on both claude (`PreToolUse`) and opencode (`.ts` plugin) ends. The guard's
+**activation model + runtime write discipline** SHALL follow the shared contract
+[`runtime-hook-enforcement`](../runtime-hook-enforcement/spec.md): activation = `MGH_SRR_ACTIVE=1` env **or**
+the `<cwd>/.mgh-srr/.active` disk sentinel (written by the orchestrator at step 0 via `Bash`, removed on
+completion/clean-stop — closes the prior opencode "mid-session env not inherited → guard dormant" boundary);
+runtime writes of any script extension (`.py`/`.ps1`/`.sh`/`.ts`/…) SHALL fail-loud with **no**
+`core/scripts`/`mgh-core/scripts` whitelist exemption (leaf scripts are read-only); out-of-subtree writes SHALL
+be blocked (srr retains the out-of-tree check; no positive allowlist). The new scripts SHALL use only the Python
+standard library (no `pip` dependency; R2); `.docx`/`.xlsx` handling via `zipfile` + `xml.etree`.
 
 #### Scenario: hook blocks adhoc script in SRR domain
-- **WHEN** the orchestrator (with `MGH_SRR_ACTIVE=1`) attempts a `py -c` introspection or an out-of-subtree write
-- **THEN** the `block-adhoc-scripts` guard fails the call (exit code 2) with a stderr recipe, identical behavior on both claude and opencode ends
+- **WHEN** the orchestrator attempts a `py -c` introspection, a `Write` of an adhoc `.py`/`.ps1`/`.ts` script, or an out-of-subtree write
+- **THEN** the `block-adhoc-scripts` guard fails the call (exit code 2) with a stderr recipe; identical behavior on both claude and opencode ends
+
+#### Scenario: opencode activates the srr guard via the disk sentinel
+- **WHEN** opencode 下 `MGH_SRR_ACTIVE` env 未设,但 step 0 已写 `<cwd>/.mgh-srr/.active` 哨兵
+- **THEN** 守卫经哨兵激活,等效 env 已设;内省/越权脚本写/越树写均 fail-loud
+
+#### Scenario: Shell writes and removes the srr sentinel
+- **WHEN** 审阅两份 `mgh-srr.md` 编排流起步与完成态
+- **THEN** 两壳均含 `export MGH_SRR_ACTIVE=1` + 写 `<target>/.mgh-srr/.active` 哨兵步骤;完成态移除哨兵
+
+### Requirement: Long-running deterministic Bash calls carry a per-call timeout
+
+`/mgh-srr` 命令壳的编排器 SHALL 给**长跑确定性 Bash 调用**——尤其 `ingest_requirements`(docx/xlsx
+尽力抽取,大输入耗时)/`render_report`(及 `--check` 边界校验)——传一个慷慨的 per-call `timeout`
+(claude Bash 工具与 opencode shell 工具均接受毫秒级 `timeout` 参数),使其在大输入上不被宿主默认超时
+(opencode 实测 60s / 官方 120s;claude 120s)强杀。命令壳 SHALL 在边界/披露段说明:opencode 用户**可**
+经环境变量 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局默认,但该变量**须在
+opencode 启动前就绪**(mid-session `export` 不被 opencode 插件进程继承,与 R5.7 `MGH_*_ACTIVE` 可靠性
+边界同根因);per-call `timeout` 是跨宿主公共杠杆,可在会话中即时生效。本要求与 `control-discovery` 的
+同名横切 recipe 同形(承 `harden-mgh-init-shell-timeout`)。
+
+#### Scenario: Shell recipe tells the orchestrator to pass a per-call timeout
+- **WHEN** 审阅 claude-code 与 opencode 两份 `mgh-srr.md`
+- **THEN** 两壳均显式要求 `ingest_requirements`/`render_report` 等长跑确定性 Bash 调用携带 per-call `timeout`
+
+#### Scenario: opencode env-var boundary disclosed
+- **WHEN** 审阅 `mgh-srr.md` 边界段
+- **THEN** 其中明示 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` 须 opencode 启动前设置、mid-session
+  `export` 不生效,并指 per-call `timeout` 为会话内即时生效的替代
 

@@ -5,9 +5,7 @@
 为 `/mgh-sast` 命令建立编排纪律的硬性规约:编排器即宿主 agent(非物化脚本)、扇出经确定性
 枚举脚本、阶段边界有 `--check`、运行域有 hook 拦截、subagent 工具受白名单约束、CLI 契约与回归
 测试覆盖到位。本能力 spec 由 change `harden-mgh-sast-orchestration-discipline` 同步建立。
-
 ## Requirements
-
 ### Requirement: Orchestrator is host agent with three never boundaries
 
 `/mgh-sast` 的编排器 SHALL 是宿主 agent 本身(按 `mgh-sast.md` 用自身工具跑流水线,非写代码)。
@@ -39,47 +37,74 @@
 ### Requirement: Deterministic chunk enumeration for s4 fan-out
 
 `/mgh-sast` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_chunks.py` 取得 s4 工作清单(对标
-mgh-init `list_clusters.py`,闭合 s4 扇出不对称)。`list_chunks.py` SHALL 读 s3 产物的 `chunks[]`
-并扫 `<repo>/security-scan/checkpoints/s4/*.json.done`,stdout 输出结构化 JSON
-`{repo,total,done,pending[],truncated}`,`pending[]` 每项含
-`{chunk_id,files[],threat_id,hypothesis}`;stderr 仅诊断/进度;退出码 `0/1/2`;`--help` 即其 CLI
-契约(承 R5.1)。`total = len(chunks[])`,`done = #已 .done`,`pending = total − done`。脚本 MUST
-自定位 `sys.path`、utf-8 读入、零第三方依赖、任意 cwd 可 `py`(承 R5.3a)。
+mgh-init `list_clusters.py`,闭合 s4 扇出不对称),MUST NOT **整份读** `s3_chunks.json` 进编排器上下文。
+`list_chunks.py` SHALL 读 s3 产物的 `chunks[]` 并扫 `<repo>/security-scan/checkpoints/s4/*.json.done`,stdout
+输出结构化 JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`,`pending[]` 每项
+(slim 壳)含 `{chunk_id,files_count,threat_id,input_path,checkpoint_path,done_marker,bytes,oversize}`(完整
+`files[]`/`hypothesis` 下沉进 `input_path` 文件);stderr 仅诊断/进度;退出码 `0/1/2`;`--help` 即其 CLI 契约
+(承 R5.1)。`total = len(chunks[])`,`done = #已 .done`,`pending = total − done`。脚本 SHALL 支持
+`--materialize <dir>`(把每 chunk 完整输入写到 `<dir>/<chunk_id>.input.json` + 报 `input_path`/`bytes`/
+`oversize`)、`--offset`/`--limit`(分页)、`--max-unit-bytes`(超阈值且含 > `--big-file-bytes` 文件 → 强制
+`needs_slice` 走 `chunk_sources` 切片,NEVER 整文件喂 LLM)。当某页字节 > `--orch-budget-bytes` 时 SHALL 自动
+收紧 `--limit`、报 `effective_limit`+`shrunk:true`。`sast-deepdive` SHALL 读自己的 `input_path`(一个 chunk
+的 files + threat + hypothesis)而非编排器内联传记录。脚本 MUST 自定位 `sys.path`、utf-8 读入、零第三方依赖、
+任意 cwd 可 `py`(承 R5.3a)。
 
 #### Scenario: Orchestrator enumerates chunks via the leaf script
 - **WHEN** 编排器进入 s4 fan-out
-- **THEN** 它调用 `list_chunks.py` 取 `pending[]`,据此逐 chunk 扇出 `sast-deepdive`;不出现手搓
-  JSON 内省或 `Write _prep_chunks.py`
+- **THEN** 它调用 `list_chunks.py --materialize <inputs/s4>` 取 `pending[]`,据此逐 chunk 扇出
+  `sast-deepdive`,向 subagent **透传 `input_path`**;不出现手搓 JSON 内省、`Write _prep_chunks.py` 或整份读 `s3_chunks.json`
 
 #### Scenario: list_chunks reports total vs done for resume
 - **WHEN** 部分 chunk 已 done(`checkpoints/s4/<chunk_id>.json.done` 存在)后再次运行
 - **THEN** stdout 的 `done` 反映已完成数,`pending[]` 仅含未完成,`total = done + len(pending)`
 
 #### Scenario: list_chunks is self-contained and offline
-- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_chunks.py --chunks <dir>/s3_chunks.json --checkpoints <dir>/checkpoints/s4` 执行
-- **THEN** 脚本成功(自定位 `sys.path`、utf-8、零第三方依赖),stdout 为合法 JSON
+- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_chunks.py --chunks <dir>/s3_chunks.json --checkpoints <dir>/checkpoints/s4 --materialize <dir>/inputs/s4` 执行
+- **THEN** 脚本成功(自定位 `sys.path`、utf-8、零第三方依赖),stdout 为合法 JSON,per-unit input 文件落 `<dir>/inputs/s4/`
 
 #### Scenario: Empty or truncated chunks handled without silent truncation
 - **WHEN** `chunks[]` 为空,或 `truncated: true`
-- **THEN** `list_chunks.py` 输出 `total:0`(空)或保留 `truncated: true`(显式告警),退出码仍 `0`,
-  不静默丢信息
+- **THEN** `list_chunks.py` 输出 `total:0`(空)或保留 `truncated: true`(显式告警),退出码仍 `0`,不静默丢信息
+
+#### Scenario: Oversize chunk respects the unit budget via slicing
+- **WHEN** 某 chunk input `bytes` > `--max-unit-bytes`(或含 > `--big-file-bytes` 文件)
+- **THEN** 该文件入 `needs_slice[]`,`sast-deepdive` 经 `chunk_sources.py` 切片后读 slice,NEVER 整文件喂 LLM
+
+#### Scenario: Work-list page shrinks to the orchestrator budget
+- **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
+- **THEN** `list_chunks.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`,编排器翻页
 
 ### Requirement: Deterministic verify-job enumeration for s6 fan-out
 
-`/mgh-sast` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_verify_jobs.py` 取得 s6 工作清单(闭合
-s6 扇出不对称)。`list_verify_jobs.py` SHALL 读 s5 产物 `findings[]` 并扫
-`<repo>/security-scan/checkpoints/s6/*.json.done`,stdout `{repo,total,done,pending[],truncated}`,
-`pending[]` 每项 `{finding_id,file,line,vuln_class,source_ref,sink_ref}`;stderr 仅诊断;退出码
-`0/1/2`;`--help` 即 CLI 契约。自定位、utf-8、零依赖、任意 cwd。
+`/mgh-sast` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_verify_jobs.py` 取得 s6 工作清单(闭合 s6 扇出
+不对称),MUST NOT 手挖 `s5_filtered.json`、MUST NOT **整份读**之进编排器上下文。`list_verify_jobs.py` SHALL
+读 s5 产物 `findings[]` 并扫 `<repo>/security-scan/checkpoints/s6/*.json.done`,stdout
+`{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`,`pending[]` 每项(slim 壳)含
+`{finding_id,file,line,vuln_class,input_path,checkpoint_path,done_marker,bytes,oversize}`(完整 `source_ref`/
+`sink_ref` 下沉进 `input_path` 文件);stderr 仅诊断;退出码 `0/1/2`;`--help` 即 CLI 契约。脚本 SHALL 支持
+`--materialize <dir>`(每 finding 完整输入写到 `<dir>/<finding_id>.input.json` + 报 `input_path`/`bytes`/
+`oversize`)、`--offset`/`--limit`(分页)、`--max-unit-bytes`(超阈值 → 标 `oversize` + recipe,s6 单 finding
+通常不切分)。当某页字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报 `effective_limit`+
+`shrunk:true`。`sast-verify` SHALL 读自己的 `input_path`(该 finding 的 source/sink 锚点 + 上下文)。自定位、
+utf-8、零依赖、任意 cwd(承 R5.3a)。
 
 #### Scenario: Orchestrator enumerates verify jobs via the leaf script
 - **WHEN** 编排器进入 s6 fan-out
-- **THEN** 它调用 `list_verify_jobs.py` 取 `pending[]`,据此逐 finding 扇出 `sast-verify`;不手挖
-  `s5_filtered.json` 或 `py -c`
+- **THEN** 它调用 `list_verify_jobs.py --materialize <inputs/s6>` 取 `pending[]`,据此逐 finding 扇出
+  `sast-verify`,向 subagent **透传 `input_path`**;不手挖 `s5_filtered.json`、不 `py -c`、不整份读之
 
 #### Scenario: list_verify_jobs is resume-aware
 - **WHEN** 部分 finding 已 done 后再次运行
 - **THEN** `pending[]` 仅含未完成,`total = done + len(pending)`
+
+#### Scenario: list_verify_jobs is self-contained and offline
+- **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_verify_jobs.py --findings <dir>/s5_filtered.json --checkpoints <dir>/checkpoints/s6 --materialize <dir>/inputs/s6` 执行
+- **THEN** 脚本成功(自定位、utf-8、零依赖),stdout 为合法 JSON,per-finding input 文件落 `<dir>/inputs/s6/`
+
+#### Scenario: Work-list page shrinks to the orchestrator budget
+- **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
+- **THEN** `list_verify_jobs.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`,编排器翻页
 
 ### Requirement: Sanctioned structure-inspection primitive reused
 
@@ -110,14 +135,17 @@ finding 有 `file`/`line`/`vuln_class`/`source_ref`/`sink_ref`)、`dedup.py --ch
 
 ### Requirement: Runtime enforcement hook for the sast run-domain
 
-`/mgh-sast` SHALL 复用既有 `releases/claude-code/hooks/block_adhoc_scripts.py`,其激活条件 SHALL
-扩展为 `MGH_INIT_ACTIVE=1` **或** `MGH_SAST_ACTIVE=1`(同一 hook、同一正则、同一白名单;本条兑现
-R5.7 对 /mgh-sast #1 违例的交付物)。在 `/mgh-sast` 运行域(编排器起步 `export MGH_SAST_ACTIVE=1`)
-内:拦截 `Bash` 中 `py -c`/`python -c` 且含 `import json`/`open(`/`load(`/`\.json` 的内省,以及
-`Write` 中 `*.py` 且不在白名单(`core/scripts`/`tests`/`tools`/`releases/*/hooks`)的写入。命中 SHALL
-fail-loud(退出码 2)+ stderr recipe,recipe SHALL 列 sast 合法出口(`list_chunks`/`list_verify_jobs`/
-`describe_artifact`/脚本 stdout 字段)。非两运行域 SHALL 直接放行(零日常噪声)。`install.sh` 的
-hook 注入与 `--no-enforce-hook` opt-out 行为不变(hook 已由 mgh-init 注入、幂等)。
+`/mgh-sast` SHALL 复用既有 `releases/claude-code/hooks/block_adhoc_scripts.py`。守卫的**激活模型 + 运行域
+写入纪律**由共享契约 [`runtime-hook-enforcement`](../runtime-hook-enforcement/spec.md) 单一规定:激活 =
+`MGH_SAST_ACTIVE=1`(或 init 域 `MGH_INIT_ACTIVE=1`)env **或** `<cwd>/security-scan/.active` 哨兵(编排器
+step 0 经 `Bash` 写、run 完成/干净停止移除;哨兵绕开 opencode 插件不继承 mid-session env 的可靠性边界)。
+运行域内一切脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)写入均 fail-loud——**取消**既有
+`core/scripts`/`tests`/`tools`/`releases/*/hooks` 白名单豁免(叶脚本 read-only)。既有 `py -c`/`python -c`
+内省拦截 + recipe(指向 `list_chunks`/`list_verify_jobs`/`describe_artifact`/脚本 stdout 字段)+ 多单元聚合
+(`s3_chunks.json`/`s5_filtered.json`/`scope_manifest.json`)整读拦截 **不变**。sast 域保留**树外**写入拦截
+(`MGH_TARGET` 取值优先级 env > 哨兵.`target` > cwd),不加正向受信子表。命中 SHALL fail-loud(退出码 2)+
+stderr recipe。非运行域 SHALL 直接放行(零日常噪声)。`install.sh` 的 hook 注入与 `--no-enforce-hook`
+opt-out 行为不变(hook 已由 mgh-init 注入、幂等)。
 
 #### Scenario: Hook blocks introspection py -c during a sast run
 - **WHEN** `MGH_SAST_ACTIVE=1` 下编排器运行 `py -c "import json; json.load(open('security-scan/checkpoints/s5_filtered.json'))"`
@@ -127,13 +155,21 @@ hook 注入与 `--no-enforce-hook` opt-out 行为不变(hook 已由 mgh-init 注
 - **WHEN** `MGH_SAST_ACTIVE=1` 下运行 `py .claude/mgh-core/scripts/prefilter.py --in … --out …`
 - **THEN** hook 放行,不误伤合法叶子调用
 
+#### Scenario: Hook blocks editing a leaf script during a sast run
+- **WHEN** `MGH_SAST_ACTIVE=1` 下编排器 `Edit`/`Write` `.claude/mgh-core/scripts/prefilter.py`
+- **THEN** hook 以退出码 2 拦截(叶脚本 read-only,取消 `core/scripts` 白名单豁免)
+
+#### Scenario: opencode activates the sast guard via the disk sentinel
+- **WHEN** opencode 下 `MGH_SAST_ACTIVE` env 未设,但 step 0 已写 `<cwd>/security-scan/.active` 哨兵
+- **THEN** 守卫经哨兵激活,等效 env 已设;内省/越权脚本写/越树写均 fail-loud
+
 #### Scenario: Non-run-domain is silent
-- **WHEN** 既无 `MGH_INIT_ACTIVE` 也无 `MGH_SAST_ACTIVE` 时运行任意 Bash
+- **WHEN** 既无 `MGH_INIT_ACTIVE` 也无 `MGH_SAST_ACTIVE`、且哨兵不存在时运行任意 Bash
 - **THEN** hook 退出码 0 放行,零噪声
 
-#### Scenario: Shell sets the run-domain flag
-- **WHEN** 审阅两份 `mgh-sast.md` 编排流起步
-- **THEN** 两壳均含 `export MGH_SAST_ACTIVE=1` 步骤 + hook 存在/opt-out 声明
+#### Scenario: Shell sets the run-domain flag and writes the sentinel
+- **WHEN** 审阅两份 `mgh-sast.md` 编排流起步与完成态
+- **THEN** 两壳均含 `export MGH_SAST_ACTIVE=1` + 写 `<target>/security-scan/.active` 哨兵步骤 + hook 存在/opt-out 声明;完成态移除哨兵
 
 ### Requirement: Subagent sanctioned-tools allowlist
 
@@ -211,3 +247,24 @@ vvaharness`、MUST NOT 要求 `pip install`(承 R2)。
 #### Scenario: AST scan finds no third-party imports
 - **WHEN** 对新增脚本做 AST 扫描
 - **THEN** 不存在非标准库 import,且无 `import vvaharness` / `from vvaharness import`
+
+### Requirement: Long-running deterministic Bash calls carry a per-call timeout
+
+`/mgh-sast` 命令壳的编排器 SHALL 给**长跑确定性 Bash 调用**——尤其 `prefilter`/`dedup`/`emit_sarif`
+(s5/s7/s9 确定性阶段)——传一个慷慨的 per-call `timeout`(claude Bash 工具与 opencode shell 工具均接受
+毫秒级 `timeout` 参数),使其在大仓上不被宿主默认超时(opencode 实测 60s / 官方 120s;claude 120s)强杀。
+命令壳 SHALL 在边界/披露段说明:opencode 用户**可**经环境变量
+`OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局默认,但该变量**须在 opencode
+启动前就绪**(mid-session `export` 不被 opencode 插件进程继承,与 R5.7 `MGH_*_ACTIVE` 可靠性边界同根因);
+per-call `timeout` 是跨宿主公共杠杆,可在会话中即时生效。本要求与 `control-discovery` 的同名横切 recipe
+同形(承 `harden-mgh-init-shell-timeout`)。
+
+#### Scenario: Shell recipe tells the orchestrator to pass a per-call timeout
+- **WHEN** 审阅 claude-code 与 opencode 两份 `mgh-sast.md`
+- **THEN** 两壳均显式要求 `prefilter`/`dedup`/`emit_sarif` 等长跑确定性 Bash 调用携带 per-call `timeout`
+
+#### Scenario: opencode env-var boundary disclosed
+- **WHEN** 审阅 `mgh-sast.md` 边界段
+- **THEN** 其中明示 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` 须 opencode 启动前设置、mid-session
+  `export` 不生效,并指 per-call `timeout` 为会话内即时生效的替代
+

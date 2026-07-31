@@ -220,5 +220,38 @@ class TestFocus(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestAggregateBudget(unittest.TestCase):
+    """render_report reports aggregate bytes + discloses over --max-aggregate-bytes
+    (request-context-budget adoption; P0 soft boundary, non-blocking)."""
+
+    def test_aggregate_bytes_reported(self):
+        p = make_project()
+        out = write_run(p, [{"capability": "cap1", "gaps": [], "security_requirements": []}])
+        rc, sout, _ = run(["--drafts-dir", str(out / "drafts"), "--out", str(out)], cwd=p)
+        self.assertEqual(rc, 0)
+        s = json.loads(sout)
+        self.assertIn("aggregate_bytes", s)
+        self.assertGreater(s["aggregate_bytes"], 0)
+        m = json.loads((out / "srr_manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("aggregate_bytes", m)
+        self.assertFalse(m["aggregate_over_budget"])
+
+    def test_aggregate_over_budget_disclosed(self):
+        p = make_project()
+        out = write_run(p, [{"capability": "cap1", "gaps": [
+            {"dimension": "authentication", "anchor": {"requirement": "r"}, "risk": "x"}],
+            "security_requirements": []}])
+        rc, sout, _ = run(["--drafts-dir", str(out / "drafts"), "--out", str(out),
+                           "--max-aggregate-bytes", "50"], cwd=p)
+        self.assertEqual(rc, 0)
+        m = json.loads((out / "srr_manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(m["aggregate_over_budget"])
+        self.assertTrue(any("聚合输入" in b for b in m["boundaries"]))
+        rep = (out / "security_review_report.md").read_text(encoding="utf-8")
+        self.assertIn("聚合输入", rep)
+        rc2, _, _ = run(["--check", str(out)], cwd=p)   # P0 soft, non-blocking
+        self.assertEqual(rc2, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

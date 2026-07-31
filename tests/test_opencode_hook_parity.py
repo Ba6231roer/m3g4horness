@@ -25,6 +25,45 @@ OC_GUARD = ROOT / "releases" / "opencode" / "hooks" / "block_adhoc_scripts.py"
 SHIM = ROOT / "releases" / "opencode" / "plugins" / "block_adhoc_scripts.ts"
 
 
+_RUN_ROOTS = {"init": ".mgh-init", "sast": "security-scan", "sra": ".mgh-sra", "srr": ".mgh-srr"}
+_DOMAIN_KEYS = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE")
+
+
+def _run_guard_sentinel(mod, payload, domain, sentinel_dict):
+    """Run the guard under a fresh temp cwd with a disk sentinel <cwd>/<run-root>/.active and
+    NO MGH_*_ACTIVE env (the opencode mid-session condition). Proves the opencode guard twin
+    activates via the sentinel just like the claude canonical."""
+    old_active = {k: os.environ.pop(k, None) for k in _DOMAIN_KEYS}
+    for k in _DOMAIN_KEYS:
+        os.environ.pop(k, None)
+    old_target = os.environ.pop("MGH_TARGET", None)
+    cwd_tmp = tempfile.mkdtemp(prefix="mgh_par_sent_")
+    spath = Path(cwd_tmp) / _RUN_ROOTS[domain] / ".active"
+    spath.parent.mkdir(parents=True, exist_ok=True)
+    spath.write_text(json.dumps(sentinel_dict), encoding="utf-8")
+    old_cwd, old_stdin = os.getcwd(), sys.stdin
+    out, err = io.StringIO(), io.StringIO()
+    code = None
+    try:
+        os.chdir(cwd_tmp)
+        sys.stdin = io.StringIO(json.dumps(payload))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = mod.main()
+    finally:
+        sys.stdin = old_stdin
+        os.chdir(old_cwd)
+        try:
+            spath.unlink()
+        except OSError:
+            pass
+        for k, v in old_active.items():
+            if v is not None:
+                os.environ[k] = v
+        if old_target is not None:
+            os.environ["MGH_TARGET"] = old_target
+    return code, err.getvalue()
+
+
 def _load_guard(path: Path):
     spec = importlib.util.spec_from_file_location("block_adhoc_scripts_oc", path)
     mod = importlib.util.module_from_spec(spec)
@@ -95,10 +134,12 @@ class TestNormalizationParity(unittest.TestCase):
         code, _ = self._oc("bash", {"command": "py .opencode/mgh-core/scripts/discover_controls.py --repo ."})
         self.assertEqual(code, 0)
 
-    # --- write/edit filePath -> file_path normalization: whitelist + adhoc + out-of-tree ---
-    def test_write_whitelisted_leaf_passes(self):
+    # --- write/edit filePath -> file_path normalization: leaf-script read-only + adhoc + out-of-tree ---
+    def test_write_leaf_script_blocked(self):
+        # whitelist removed (D2): leaf scripts are read-only at runtime; the opencode layout
+        # (.opencode/mgh-core/scripts/) is no longer exempt -> BLOCK (same decision as claude).
         code, _ = self._oc("write", {"filePath": ".opencode/mgh-core/scripts/discover_controls.py"})
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
 
     def test_write_adhoc_py_blocked(self):
         code, err = self._oc("write", {"filePath": "_prep_scout_batches.py"})
@@ -109,7 +150,8 @@ class TestNormalizationParity(unittest.TestCase):
         target = tempfile.mkdtemp(prefix="mgh_op_")
         code, err = self._oc("edit", {"filePath": "D:/xxxraw.json"}, target=target)
         self.assertEqual(code, 2)
-        self.assertIn("MGH_TARGET tree", err)
+        # init domain (default) uses the positive allowlist; D:/ is outside every sanctioned subtree.
+        self.assertIn("sanctioned init subtrees", err)
 
     def test_write_in_tree_passes(self):
         target = tempfile.mkdtemp(prefix="mgh_op_")
@@ -151,6 +193,16 @@ class TestNormalizationParity(unittest.TestCase):
                            domain_env="MGH_SRR_ACTIVE", target=target)
         self.assertEqual(code, 0)
 
+    # --- sentinel activation: opencode guard activates via disk sentinel with env unset ---
+    def test_sentinel_activates_introspection_blocked(self):
+        # the opencode plugin process does not inherit mid-session env; the disk sentinel closes
+        # that hole. No MGH_*_ACTIVE env, sentinel present -> guard activates -> block.
+        code, err = _run_guard_sentinel(self.m,
+            normalize("bash", {"command": 'py -c "import json; json.load(open(\'x.json\'))"'}),
+            "init", {"domain": "mgh-init", "target": "", "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("describe_artifact", err)
+
 
 class TestGuardByteParity(unittest.TestCase):
     """§4.4 — opencode guard twin MUST be byte-identical to the claude canonical (single logic)."""
@@ -163,9 +215,22 @@ class TestGuardByteParity(unittest.TestCase):
     def test_shim_exists_and_is_glue_only(self):
         self.assertTrue(SHIM.is_file(), "opencode .ts shim missing")
         text = SHIM.read_text(encoding="utf-8")
-        # the shim MUST NOT reimplement guard decision logic (D1/D7: glue only)
-        for forbidden in ("_INTRO_TOKENS", "_PYC_RX", "_WL_SEGMENTS", "_is_out_of_tree"):
+        # the shim MUST NOT reimplement guard decision logic (glue only — single decision source).
+        # Forbidden tokens track the current guard internals: sentinel + script-ext set +
+        # init allowlist + activation/out-of-tree/introspection.
+        for forbidden in ("_INTRO_TOKENS", "_PYC_RX", "_SCRIPT_EXTS", "_read_sentinel",
+                          "_resolve_domain", "_init_write_blocked", "_is_out_of_tree",
+                          "_INIT_SUBTREES", "out_roots"):
             self.assertNotIn(forbidden, text, f"shim reimplements guard logic ({forbidden}) — not glue-only")
+
+    def test_both_guards_embed_new_sentinel_logic(self):
+        """Byte-identity must be of the NEW guard, not a stale twin: both canonical and opencode
+        guard carry the sentinel-activation + script-ext-set + init-allowlist logic."""
+        for guard in (CC_GUARD, OC_GUARD):
+            text = guard.read_text(encoding="utf-8")
+            for marker in ("_read_sentinel", "_resolve_domain", "_SCRIPT_EXTS",
+                           "_init_write_blocked", "_INIT_SUBTREES", "out_roots", ".active"):
+                self.assertIn(marker, text, f"{guard.name} missing new-logic marker {marker}")
 
     def test_ts_not_in_zero_dep_scan_set(self):
         """The R2 zero-dep AST scan globs core/scripts/*.py; the .ts shim + releases/*/hooks/.py

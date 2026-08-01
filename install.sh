@@ -86,7 +86,7 @@ cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 #    enforce co-location (R5.8: CI 必 fail).
 _missing=()
 for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules \
-         list_clusters list_scout_batches list_rule_jobs describe_artifact validate_inventory \
+         list_clusters list_scout_batches list_rule_jobs list_steps describe_artifact validate_inventory \
          prepare_augment merge_augment merge_memory ingest_requirements render_report; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
@@ -94,7 +94,7 @@ if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init, /mgh-sra, or /mgh-srr may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sra + mgh-srr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/describe_artifact/validate_inventory + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report"
+  echo "✓ mgh-init + mgh-sra + mgh-srr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/list_steps/describe_artifact/validate_inventory + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report"
 fi
 
 # 4b) Distribution-purity self-check (R5.10; fail-soft per R5.8): shipped md MUST be

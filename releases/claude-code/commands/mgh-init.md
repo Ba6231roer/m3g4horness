@@ -48,6 +48,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 **硬边界(`NEVER`)**:(a) `Write` 任何 `.py`——大编排器(`mgh_init.py`)**或**一次性微脚本(`py -c` 产物、`_prep_scout_batches.py`、`_aggregate_scout.py`、`<run>_helper.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读 `.mgh-init/**`);(c) `Read` 叶子 `.py` 源码。
 
 **implementation-intention(需 X → 触发器 Y,NEVER `py -c`)**——每个常被手搓的需求都有合法出口:
+- **每步确切脚本路径 / 调用行 / IO shape** → `list_steps.py` stdout(或 `--step <id>` 单步);宿主前缀自动派生,**NEVER** 猜 `scripts/` vs `mgh-core/scripts/`、**NEVER** 漏宿主前缀;
 - **工作清单** → `list_clusters.py`(T1)/ `list_scout_batches.py`(scout)/ `list_rule_jobs.py`(T3);
 - **某 fan-out 单元的完整记录** → `list_* --materialize <inputs/<tier>>` stdout `pending[]` 每项的 `input_path`(绝对,subagent **自读**;≤ `--max-unit-bytes`);**NEVER** 整份读 `clusters.json`/`controls_candidates.json`/`scout_plan.json`/`controls_inventory.json`(编排器只装 slim 分页待办壳)、**NEVER** `py -c`、**NEVER** 把记录体内联塞进 subagent task(只透传 `input_path`);
 - **某 fan-out 单元的输出路径** → `list_*` stdout `pending[]` 每项的 `checkpoint_path`(scout/T1)/ `rule_path`(T3)+ `done_marker` + `failed_marker`(均**绝对**);**NEVER** 自拼 `<target>/<id>`、**NEVER** `py -c` 算路径、**NEVER** 相对路径;
@@ -69,7 +70,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 > **进度真相源 = 磁盘 `<target>/.mgh-init/`(checkpoints / `.done` / 产物 / `run_config.json`);对话记忆只是缓存,不是真相源。** 这把 compact / crash / 新 session 三种中断坍缩为**同一种恢复路径**——「读磁盘状态 → 继续」。
 
 1. claude `/compact` 与 opencode 自动压缩(~95% 触发)是**模型生成摘要**,**可能丢掉**本命令壳灌入的编排纪律系统提示词(硬边界 / fan-out 三元组 / NEVER 拼路径)。故续跑 SHALL **NEVER** 依赖「记得自己在第几步」。
-2. **`--resume` 或任何压缩事件后,编排器第一步 SHALL 调 `resume_state.py`** 从磁盘重派生 `step` + `next_action` + `tiers`,据此继续 fan-out / 下一步(见上方「当前步骤 / 下一步」recipe)。
+2. **`--resume` 或任何压缩事件后,编排器第一步 SHALL 调 `resume_state.py`** 从磁盘重派生 `step` + `next_action` + `tiers`,据此继续 fan-out / 下一步(见上方「当前步骤 / 下一步」recipe)。压缩后:`resume_state.py` 给当前 step → 据以 `list_steps.py --step <id>` 取确切调用行(配套语义,单步确切脚本路径 / 调用行 / IO shape)。
 3. 上下文吃紧时编排器 **MAY** **干净停止**(跑完当前 fan-out 波次、落 `.done`、不留半截单元)→ **新 session `/mgh-init --resume` 续**;此路径**优于**人工 `/compact`(后者摘要可能丢编排纪律导致执行路径偏离——直击用户痛点)。新 session 重灌命令壳 = 完整纪律提示词,进度由磁盘重派生,故 compact 是否丢提示词**无关紧要**。干净停止**亦** `rm <target>/.mgh-init/.active` 移除哨兵(或留待 resume step 0 重写覆盖;残留哨兵只挡脚本写、不挡 JSON/`.md`/读)。
 4. 既有 per-call `timeout` + discover `partial:true` + `--resume` 纪律**保持不变**(本段为 additive)。`run_config.json` 作起始态意图、`init_manifest.json` 作终态(磁盘 schema 不变)。
 5. **`.failed` = 终态**(确认失败,区别于 `.done` 的成功完成):`--resume` 跳过 `.failed` 单元(**不重派**);crash 无 ack → 无 marker → 单元仍 `pending` → 重派(crash ≠ 确认失败)。escape hatch = 人工 `rm <unit>.json.failed` 后 `--resume` 重派该单元。失败计数从磁盘(`resume_state.py`/`list_*` stdout `tiers`/`failed`)读,**NEVER** 对话记忆(见步骤 8)。

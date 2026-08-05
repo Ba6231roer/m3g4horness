@@ -174,6 +174,14 @@ class TestListScoutBatches(unittest.TestCase):
             self.assertIn("failed_marker", item)
             self.assertEqual(item["failed_marker"], item["checkpoint_path"] + ".failed")
 
+    def test_lite_slice_dir_present_absolute(self):
+        # lite shell (no --materialize) also carries an ABSOLUTE slice_dir per batch.
+        code, out, _ = self._run(self._write(_BATCHES))
+        self.assertEqual(code, 0)
+        for item in json.loads(out)["pending"]:
+            self.assertIn("slice_dir", item)
+            self.assertTrue(Path(item["slice_dir"]).is_absolute())
+
 
 class TestListRuleJobs(unittest.TestCase):
     def setUp(self):
@@ -372,6 +380,28 @@ class TestListScoutBatchesMaterialize(unittest.TestCase):
         self.assertEqual(len(data["pending"]), 1)
         _, out2, _ = self._run(p, "--orch-budget-bytes", "80")
         self.assertTrue(json.loads(out2)["shrunk"])
+
+    def test_slice_dir_absolute_in_tree(self):
+        # slice_dir = <init-dir>/slices/scout/<safe(batch_id)>/ ; <init-dir> = grandparent of
+        # the checkpoint dir (= self.d, where scout_plan.json lives). Absolute, resolve()-stable,
+        # inside the <init-dir>/slices/scout/ subtree. batch_id (scout-NNN) is clean → filename
+        # == batch_id verbatim.
+        p = self._write(_BATCHES)
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        init_dir = self.d.resolve()
+        for item in json.loads(out)["pending"]:
+            self.assertIn("slice_dir", item)
+            sd = Path(item["slice_dir"])
+            self.assertTrue(sd.is_absolute(), "slice_dir must be absolute")
+            self.assertEqual(sd, sd.resolve(),
+                             "slice_dir resolve()-stable (no '..' residual)")
+            self.assertEqual(sd.relative_to(init_dir),
+                             Path("slices") / "scout" / item["batch_id"])
+            # existing additive fields still present (regression: slice_dir is additive)
+            for k in ("input_path", "checkpoint_path", "done_marker", "failed_marker",
+                      "oversize"):
+                self.assertIn(k, item)
 
 
 # ---- list_rule_jobs.py: per-category materialization + paging (request-context-budget) ----

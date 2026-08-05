@@ -23,8 +23,14 @@ Your job: read the code the regex skipped and find the security controls it miss
   input file (≤ `--max-unit-bytes`). **Read this one file**: it carries the batch's
   `batch_id` + complete `targets[]` (each a skeleton row: `file`, `pkg`, `classes[]`,
   `imports[]`, `method_sigs[]`, `fan_in`, `bytes`) + `needs_slice[]`.
-- `needs_slice[]`: files > batch/unit budget — for these, call `chunk_sources.py` first
-  and read the slice, **NEVER the whole file** (semantics unchanged).
+- `needs_slice[]`: files > batch/unit budget — slice these via `chunk_sources.py` (see
+  `slice_dir` + Sanctioned tools), **NEVER the whole file**.
+- `slice_dir` (absolute, given VERBATIM by the orchestrator) — the in-tree dir for THIS
+  batch's big-file slices. For each `needs_slice[]` file, write its slice to
+  `<slice_dir>/<safe-stem>.slice.json` (`<safe-stem>` = the source file's stem) and re-read
+  THAT exact absolute path. **NEVER** a relative `--out`; **NEVER** a cwd / system-temp
+  path (e.g. opencode `…\Temp\opencode\`); **NEVER** out-of-tree — your process cwd is not
+  assumed and may be a temp dir, so only the verbatim `slice_dir` keeps slices in-tree.
 - The repo root (so you can Read / Glob / Grep).
 - `regex_known[]`: controls the regex already found (names/files). Do not re-report these.
 - `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
@@ -92,7 +98,7 @@ codegraph 调用)。
 
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(先读 `input_path`;再读本 batch 的 target 文件/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
-- 脚本侧:仅 `chunk_sources.py`(且仅当 `needs_slice` 切片大文件);其余确定性脚本由**编排器**调用,不在本层。
+- 脚本侧:仅 `chunk_sources.py`(且仅当切片 `needs_slice[]` 大文件),**用编排器透传的绝对工具路径 verbatim 调用**——recipe:`<绝对 chunk_sources> --in <big_file> --big-file-bytes .. --line <L> --out <slice_dir>/<safe-stem>.slice.json`,再回读该确切绝对路径(`<safe-stem>` 取源文件 stem)。硬边界(`NEVER`):裸名 `chunk_sources.py`、相对 `.opencode`/`.claude/mgh-core/scripts/…`(多层 install 下可解析到**别的**旧副本);相对 `--out`;cwd/Temp 派生路径;树外写。其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件(`checkpoints/scout/<batch_id>.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入 batch 为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。
 

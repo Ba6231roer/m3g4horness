@@ -283,6 +283,20 @@ class TestListClusters(unittest.TestCase):
         self.assertNotIn("crypto::Crypt::ef56", [c["cluster_id"] for c in data["pending"]])
         self.assertEqual(data["failed"], 1)
 
+    def test_lite_slice_dir_present_absolute_sanitized(self):
+        # lite shell (no --materialize) also carries an ABSOLUTE slice_dir whose filename
+        # component is `_safe_name`-sanitized (cluster_id '::' → '__'; no NTFS-ADS ':').
+        p = self._write(_LC_CLUSTERS)
+        cp = self.d / "checkpoints" / "t1"
+        code, out, _ = self._run(p, cp)
+        self.assertEqual(code, 0)
+        for item in json.loads(out)["pending"]:
+            self.assertIn("slice_dir", item)
+            sd = Path(item["slice_dir"])
+            self.assertTrue(sd.is_absolute())
+            self.assertNotIn(":", sd.name)            # '::' sanitized out of the filename
+            self.assertEqual(sd.name, _safe(item["cluster_id"]))
+
 
 # ---- list_clusters.py: per-unit materialization + paging (request-context-budget) ----
 
@@ -462,6 +476,35 @@ class TestListClustersMaterialize(unittest.TestCase):
         p = self._write(_LC_CLUSTERS, _LC_CANDS)
         code, _, _ = self._run(p, "--max-unit-bytes", "-1")
         self.assertEqual(code, 2)
+
+    def test_slice_dir_absolute_in_tree_and_sanitized(self):
+        # slice_dir = <init-dir>/slices/t1/<safe(cluster_id)>/ ; <init-dir> = grandparent of
+        # the checkpoint dir (= self.d). Absolute, resolve()-stable, in the
+        # <init-dir>/slices/t1/ subtree. cluster_id '::' (NTFS ADS separator) sanitized in the
+        # filename component; envelope cluster_id stays canonical.
+        p = self._write(_LC_CLUSTERS, _LC_CANDS)
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        init_dir = self.d.resolve()
+        for item in json.loads(out)["pending"]:
+            cid = item["cluster_id"]
+            self.assertIn("slice_dir", item)
+            sd = Path(item["slice_dir"])
+            self.assertTrue(sd.is_absolute(), "slice_dir must be absolute")
+            self.assertEqual(sd, sd.resolve(),
+                             "slice_dir resolve()-stable (no '..' residual)")
+            # in-tree + sanitized filename component (== _safe(cid))
+            self.assertEqual(sd.relative_to(init_dir),
+                             Path("slices") / "t1" / _safe(cid))
+            self.assertEqual(sd.name, _safe(cid))
+            for bad in (":", "/", "\\"):  # NTFS-ADS / path separators absent
+                self.assertNotIn(bad, sd.name)
+            # canonical identity preserved in the envelope (NOT sanitized)
+            self.assertIn("::", cid)
+            # existing additive fields still present (regression: slice_dir is additive)
+            for k in ("input_path", "checkpoint_path", "done_marker", "failed_marker",
+                      "bytes", "oversize"):
+                self.assertIn(k, item)
 
 
 if __name__ == "__main__":

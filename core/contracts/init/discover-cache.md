@@ -50,7 +50,7 @@ The one-line JSON stdout gains three fields; the existing fields are unchanged:
 
 ```json
 {"candidates": N, "clusters": M, "unresolved": U, "unresolved_count": U,
- "big_files": K, "dotfiles_skipped": D, "out_of_scope": O,
+ "big_files": K, "dotfiles_skipped": D, "tests_skipped": T, "out_of_scope": O,
  "truncated": false, "scanned": S,
  "partial": false, "resume_hint": "", "cache_hit": true}
 ```

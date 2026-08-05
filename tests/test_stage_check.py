@@ -37,8 +37,11 @@ class TestDiscoverCheck(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp(prefix="mgh_dchk_"))
 
     def _dir(self, cands, clusters):
+        # `tests_skipped` is a required additive wrapper field (discover --check validates
+        # it per R5.9); a good wrapper carries a non-negative int.
         (self.dir / "controls_candidates.json").write_text(
-            json.dumps({"repo": "r", "candidates": cands}, ensure_ascii=False), encoding="utf-8")
+            json.dumps({"repo": "r", "candidates": cands, "tests_skipped": 0},
+                       ensure_ascii=False), encoding="utf-8")
         (self.dir / "clusters.json").write_text(
             json.dumps({"repo": "r", "clusters": clusters, "truncated": False},
                        ensure_ascii=False), encoding="utf-8")

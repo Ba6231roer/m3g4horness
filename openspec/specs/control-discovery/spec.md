@@ -8,7 +8,8 @@ TBD - created by archiving change add-mgh-init. Update Purpose after archive.
 `/mgh-init` SHALL accept `--target <dir>`(默认 `.`)、`--format opencode|claude`
 (**必选**)、`--out <path>`、`--scope <dir|package>`、`--language <lang>`、
 `--config <profile>`、`--include-dotfiles`(默认关;传则回退到扫描点前缀路径,见「Skip
-dot-prefixed paths during discovery」)。当无 actionable 参数或传 `--help` 时,系统 MUST 仅打印参数表
+dot-prefixed paths during discovery」)、`--include-tests`(默认关;传则回退到扫描测试源码树,见「Skip
+test source directories during discovery」)。当无 actionable 参数或传 `--help` 时,系统 MUST 仅打印参数表
 与指向 `task.260630.md` 的说明后**停止,不消耗 token、不做任何分析**。
 
 #### Scenario: Missing required --format
@@ -23,6 +24,12 @@ dot-prefixed paths during discovery」)。当无 actionable 参数或传 `--help
 - **WHEN** 用户运行 `mgh-init --target . --format claude --include-dotfiles`
 - **THEN** `--include-dotfiles` 被 `discover_controls.py` 接受(argparse 不报 unrecognized),
   发现阶段纳入点前缀路径;该 flag 出现在 `--help` 参数表(承 R5.1,`--help` 即契约面)
+
+#### Scenario: --include-tests is a recognized flag
+
+- **WHEN** 用户运行 `mgh-init --target . --format claude --include-tests`
+- **THEN** `--include-tests` 被 `discover_controls.py` 接受(argparse 不报 unrecognized),发现阶段纳入测试
+  源码树(回退到引入测试目录排除前的行为);该 flag 出现在 `--help` 参数表(承 R5.1)
 
 ### Requirement: Discover security control candidates deterministically
 
@@ -95,6 +102,87 @@ VCS / IDE / build / config / 索引);默认扫描它们会把工具自身脚本(
 #### Scenario: Windows drive root is not mis-excluded
 - **WHEN** 在 Windows 上对 `C:\DEV\<repo>` 运行发现
 - **THEN** 盘符根分量(`C:\`)不以 `.` 开头,不触发点前缀跳过;repo 下正常源文件照常被发现
+
+### Requirement: Skip test source directories during discovery
+
+确定性文件遍历(`expand_scope.walk_sources` / `collect_dir`)SHALL 在既有 `EXCLUDE_DIR` 精确匹配
+与「Skip dot-prefixed paths during discovery」点前缀剪枝之外,**额外跳过**测试源码树下的源文件,使测试
+源码对 regex 候选、`skeleton.json`、调用图与 scout 目标集**一致不可见**(单一 chokepoint,与点前缀
+剪枝同构,非仅 regex 一路)。测试源码树按以下匹配规则判定(机械、确定性、仅用 Python 标准库
+`str.startswith` / 集合 membership):
+
+- **路径前缀**(repo 相对 posix):`src/test/`、`src/tests/`(Maven/Gradle/Kotlin 约定);
+- **目录分量集合**(仅目录段、**非**文件名):`tests`、`__tests__`、`__mocks__`、`spec`、`specs`。
+
+匹配器 SHALL **不含**裸单数 `test` 作目录段(碰撞风险最高:生产 `com/acme/test/` 工具包、Go `test` 包);
+单数 `test/` 仅由 `src/test` 前缀覆盖。该跳过 SHALL 作为文件枚举层的属性,统一作用于全部下游阶段。
+
+`discover_controls.py` SHALL 提供 `--include-tests` flag(默认关 = 排除);传该 flag 时 SHALL 回退到
+引入本要求前的行为(纳入测试源码树)。理由:测试代码**不上线**且为**派生物**;对「发现生产安全控制」
+这一目标以**反信号**为主——`mock`/`stub`/`@MockBean` 把安全组件物化成调用图里的伪控制、故意写脆弱的
+测试夹具(渗透训练 `VulnerableApp`、负路径样本、禁用 TLS / 放宽 CORS / 占位密钥 / dummy JWT issuer 的
+test 配置)被当成真实控制特征命中产出错误规则、并在大型仓白烧 scout/induct 的 LLM 预算(Java/Gradle 仓
+`src/test` 常占 30–50% 源文件)。既有 `EXCLUDE_DIR` 集合**保持不变**(测试剪枝是并行独立规则,不吸收其
+构建/缓存成员)。本要求仅用 Python 标准库(`pathlib.Parts` / `str.startswith` / 集合),承 R2 零运行时依赖。
+
+`expand_scope.walk_sources` / `collect_dir` 的新参数 `include_tests` SHALL **默认 True**(保持现状,
+使不经该参数的调用方——含 mgh-sast 的 `build_call_graph`——行为逐字不变);**仅** `discover_controls`
+(mgh-init)的 `collect_sources`/`run_discover`/`scan`/`resolve_seed` 链以默认 `include_tests=False`
+(排除)调用,并由 `main` 经 `--include-tests` store_true 绑定。该极性不对称是有意的非跨命令设计
+(mgh-sast 的测试排除是独立后续变更,见 design.md D2)。
+
+discover stdout 摘要(partial 与 full 两路 JSON)SHALL 新增 `tests_skipped`(本次跳过的测试源文件数,
+非负整数),逐字并列于既有 `dotfiles_skipped`。`--check`(R5.9)SHALL 校验该字段存在且为非负整数,否则
+fail-loud(退出码 2)。
+
+#### Scenario: Maven src/test sources are skipped by default
+
+- **WHEN** 目标项目含 `src/test/java/com/acme/SecurityTest.java`(匹配控制特征如鉴权关键字),且未传
+  `--include-tests`
+- **THEN** 该文件不出现在 `controls_candidates.json`、`skeleton.json`、调用图、scout 目标集中;
+  discover stdout `tests_skipped` ≥1
+
+#### Scenario: Ecosystem test roots are skipped (tests / __tests__ / spec)
+
+- **WHEN** 目标项目分别含 `tests/test_auth.py`、`src/__tests__/auth.test.ts`、`spec/auth_spec.rb`
+  (各匹配控制特征),且未传 `--include-tests`
+- **THEN** 这些文件均被跳过(目录段命中 `tests`/`__tests__`/`spec`),不出现在候选/skeleton/调用图/scout
+  目标集;`tests_skipped` 反映三者
+
+#### Scenario: --include-tests re-includes test source trees
+
+- **WHEN** 运行 `discover_controls.py --repo . --out .mgh-init --include-tests`,且 `src/test/` 下含一个
+  匹配控制特征的源文件
+- **THEN** 该文件被纳入候选/skeleton/调用图(行为等价于引入本要求前),不被测试目录规则跳过
+
+#### Scenario: Test-dir skip is consistent across all downstream stages
+
+- **WHEN** 默认运行 `discover_controls.py`,且 `src/test/` 与 `tests/` 下各有一个源文件
+- **THEN** `skeleton.json`、调用图(`build_call_graph` 产出)、`plan_scout.py` 的 scout 目标集三者
+  **均不含**这些测试路径(单一 chokepoint,非仅 regex 候选一路排除)
+
+#### Scenario: Bare singular test dir is NOT excluded (regression guard)
+
+- **WHEN** 目标项目含 `src/main/java/com/acme/test/Helper.java`(生产代码落在单数 `test` 目录段下),
+  且未传 `--include-tests`
+- **THEN** 该文件仍被纳入发现(单数裸 `test` 不在匹配段集合内);仅 `src/test/` 前缀与复数/生态专用段
+  (`tests`/`__tests__`/`__mocks__`/`spec`/`specs`)触发跳过
+
+#### Scenario: Non-test build/cache dirs remain excluded (regression guard)
+
+- **WHEN** 默认运行发现,且 `node_modules/`、`target/`、`build/` 下各有一个源文件
+- **THEN** 这些文件仍被既有 `EXCLUDE_DIR` 精确匹配跳过(测试目录规则不弱化既有构建目录剪枝)
+
+#### Scenario: mgh-sast call-graph behavior is unchanged
+
+- **WHEN** 审阅 `expand_scope.build_call_graph`(不经 `include_tests` 参数)对含 `src/test/` 的仓运行
+- **THEN** 测试源码仍被纳入调用图(共享函数默认 `include_tests=True`;本要求仅 `discover_controls` opt-in
+  排除,mgh-sast 行为逐字不变)
+
+#### Scenario: --include-tests is a recognized contract flag
+
+- **WHEN** 以 `discover_controls.py --repo . --out ./.mgh-init --include-tests` 执行
+- **THEN** argparse 不报「unrecognized argument」;该 flag 出现在 `--help` 参数表(承 R5.1,`--help` 即契约面)
 
 ### Requirement: Zero runtime dependencies
 
@@ -178,21 +266,29 @@ T3 每 category 一个独立上下文出草稿,T4 可选一致性 pass。**隔�
 
 ### Requirement: Disclose honesty boundaries in artifacts
 
-`report.md` 与 `init_manifest.json` MUST 明示四条边界:(1) 控制为「**存在**」非「**有效**」
+`report.md` 与 `init_manifest.json` MUST 明示五条边界:(1) 控制为「**存在**」非「**有效**」
 (引用 CVE-2025-41248:参数化类型上 `@PreAuthorize` 可绕过);(2) 调用图为文本/AST 级,
 漏 AOP/反射/DI/框架路由,未解析项见 `unresolved[]`;(3) 归纳结果为 LLM 候选,**需人工复核**;
 (4) **点前缀路径(tooling/VCS/IDE/build/config/索引,如 `.opencode`/`.claude`/`.codegraph`/
 `.github`)默认不扫描**——若目标项目的安全控制定义点落在 `.xxx` 内,默认不会被发现,须传
-`--include-dotfiles` 才纳入。
+`--include-dotfiles` 才纳入;(5) **测试源码树(`src/test`/`src/tests` 前缀与 `tests`/`__tests__`/
+`__mocks__`/`spec`/`specs` 目录段)默认不扫描**——若目标项目的安全控制定义点落在测试目录内,默认不会
+被发现,须传 `--include-tests` 才纳入;discover stdout `tests_skipped` 计本次跳过的测试源文件数。
 
-#### Scenario: Manifest carries all four disclaimers
+#### Scenario: Manifest carries all five disclaimers
 - **WHEN** 一次运行完成
-- **THEN** `init_manifest.json` 含上述四条边界声明的可识别字段
+- **THEN** `init_manifest.json` 含上述五条边界声明的可识别字段
 
 #### Scenario: Dot-prefix skip boundary is disclosed
 - **WHEN** 审阅默认运行产出的 `report.md` / `init_manifest.json::boundaries[]`
 - **THEN** 其中明示「点前缀路径默认不扫描,控制定义点在 `.xxx` 内须传 `--include-dotfiles`」,
   并指向该 flag
+
+#### Scenario: Test-dir skip boundary is disclosed
+
+- **WHEN** 审阅默认运行产出的 `report.md` / `init_manifest.json::boundaries[]`
+- **THEN** 其中明示「测试源码树(`src/test`/`tests`/`__tests__`/`spec`/`specs`)默认不扫描,控制定义点
+  在测试目录内须传 `--include-tests`」,并指向该 flag;discover stdout `tests_skipped` 计本次跳过数
 
 ### Requirement: Shard large files for stable LLM analysis
 
@@ -1601,3 +1697,35 @@ MUST NOT 把全量 `steps[]` 表内联进提示词正文(护 R5.6 token 预算,�
 - **WHEN** 从任意 cwd、内网无网环境以 `py <path>/list_steps.py` 或 `py <path>/list_steps.py --step t1` 执行
 - **THEN** 脚本成功(自定位 `sys.path`、utf-8、零第三方依赖),stdout 为合法 JSON,退出码 0;`--help`
   暴露 `--step` 且 `--help` 即其 CLI 契约(承 R5.1)
+
+### Requirement: Big-file slice outputs are confined to an absolute in-tree path
+
+`chunk_sources.py` 的切片输出(`--out`)是 fan-out 邻接路径,SHALL 与 `checkpoint_path`/`input_path` 同纪律——绝对、落受信子树、由枚举脚本产出 + 编排器逐字透传。`list_scout_batches.py` 与 `list_clusters.py` 的 stdout `pending[]` 每项 SHALL **额外**携带 `slice_dir`(绝对、`Path.resolve()`、形如 `<init-dir>/slices/<tier>/<safe(unit_id)>/`,其中 `<init-dir>` = `<target>/.mgh-init`、`<tier>` ∈ `scout`/`t1`)。scout/induct subagent 处理大文件(`needs_slice[]` 或运行时发现 > `--big-file-bytes` 的证据文件)SHALL 调 `chunk_sources.py --out <slice_dir>/<safe-stem>.slice.json` 并**回读该确切绝对路径**。subagent NEVER 写相对 `--out`、NEVER 写 cwd/Temp 派生路径、NEVER 写 `<target>/.mgh-init/` 子树之外。`chunk_sources.py` 本身保持 cwd 无关、不假设项目树(承 R5.3a);路径钉死在契约 + 提示词层,非脚本层。
+
+#### Scenario: Slice output lands inside the project tree, not the opencode temp dir
+- **WHEN** opencode 下 scout subagent 处理一个含 250KB `LegacyGuard.java`(`needs_slice[]`)的 batch,且 subagent 进程 cwd 为 `C:\Users\<u>\AppData\Local\Temp\opencode\`
+- **THEN** subagent 调 `chunk_sources.py --out <slice_dir>/LegacyGuard.slice.json`,其中 `<slice_dir>` = 编排器透传的 `pending[].slice_dir`(绝对、落 `<target>/.mgh-init/slices/scout/<batch_id>/`);切片落该树内路径,subagent 回读该确切路径,**不**向 `…\Temp\opencode\*` 发起 `Read`、**不**触发越权读取提示
+
+#### Scenario: Enumeration stdout carries an absolute slice_dir per pending unit
+- **WHEN** 编排器运行 `list_scout_batches.py --materialize <init-dir>/inputs/scout`(或 `list_clusters.py --materialize <init-dir>/inputs/t1`)
+- **THEN** stdout `pending[]` 每项含 `slice_dir` 字段,值为 `resolve()` 后的绝对路径且以 `<target>/.mgh-init/slices/<tier>/` 为前缀;编排器将其与 `input_path`/`checkpoint_path` 一同逐字透传给 subagent
+
+#### Scenario: T1 induct slices a runtime-discovered big evidence file in-tree
+- **WHEN** `init-induct` subagent 在读某 `evidence_file` 时发现其 > `--big-file-bytes`(该文件未预先列入任何 `needs_slice[]`,系运行时发现)
+- **THEN** subagent 用编排器透传的 `slice_dir` + 确定性 stem 规则(`<safe-stem>.slice.json`,`_safe_name` 消毒 `/ \ :`)写切片,回读该确切路径;NEVER 自发明 cwd 相对路径或树外路径
+
+#### Scenario: chunk_sources.py itself stays cwd-agnostic
+- **WHEN** 人类或编排器按 `list_steps.py` 示例以 `py chunk_sources.py --in <f> --out <any>` 直接执行(ad-hoc,非 fan-out 切片)
+- **THEN** 脚本仍按 `--out` 指定处写出,不强制树内、不假设项目树(cwd 无关性不破);fan-out 树内约束由枚举脚本的 `slice_dir` + subagent prompt 兜,非由 `chunk_sources.py` 兜
+
+### Requirement: Fan-out subagents use absolute tool-script paths pinned to the current install
+
+编排器 SHALL 在 step 0 经 `list_steps.py` stdout 的 `script_abs`(`__file__` 派生 = 当前运行 install 的 `<mgh-core>/scripts/` 目录)取绝对工具基,把绝对 `chunk_sources` 脚本路径逐字透传给 scout/induct subagent task 输入。subagent SHALL 用该绝对路径 verbatim 调用,**NEVER** 用裸名 `chunk_sources.py`、**NEVER** 用相对 `.opencode/mgh-core/scripts/…` / `.claude/mgh-core/scripts/…`(多层 install 下相对路径可经 `.opencode/`/`.claude/` 上溯解析到**别的** install 的副本,实测会命中父层旧版本)。此约束使整 run 只用当前项目(命令壳加载处)的工具副本,与 `<target>` 可独立(允许 install 在 A、分析 B)。
+
+#### Scenario: Subagent uses the orchestrator-broadcast absolute tool path, not a bare name
+- **WHEN** 父项目与叶项目均装过本工具(叶项目 `D:\repo\leaf\.opencode\mgh-core\scripts\chunk_sources.py` 为当前版,父项目 `D:\repo\parent\.opencode\mgh-core\scripts\chunk_sources.py` 为 7-20 前旧版),编排器从叶项目调 `/mgh-init`
+- **THEN** 编排器经 `list_steps.py`(其 `__file__` 落叶项目 install)取 `script_abs` = `D:\repo\leaf\.opencode\mgh-core\scripts\chunk_sources.py`,逐字透传给 scout subagent;subagent 调该绝对路径,**不**命中父层旧版(不出现旧版 stdout `"node"` 这类版本错位)
+
+#### Scenario: Tool base derived from list_steps script_abs, not from --target
+- **WHEN** 编排器需要给 subagent `chunk_sources` 的绝对路径
+- **THEN** 它读 `list_steps.py --step discover`(或任一 step)stdout 的 `script_abs`,取其目录作为工具基;NEVER 从 `--target` 拼 `<target>/.opencode/mgh-core/scripts`(install-dir 可与 target 不同)、NEVER 从 mid-session bash env 读工具基(opencode 插件进程不继承,承 R5.7)

@@ -81,6 +81,20 @@ class TestWriteRunconfig(unittest.TestCase):
         cfg = json.loads((target / ".mgh-init" / "run_config.json").read_text(encoding="utf-8"))
         self.assertTrue(cfg["skip_consistency"])
 
+    def test_include_tests_recorded(self):
+        # --include-tests → run_config["include_tests"] == True (mirrors include_dotfiles).
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc6_")).resolve()
+        _run("--target", str(target), "--format", "opencode", "--include-tests")
+        cfg = json.loads((target / ".mgh-init" / "run_config.json").read_text(encoding="utf-8"))
+        self.assertTrue(cfg["include_tests"])
+
+    def test_include_tests_default_false(self):
+        # Default (flag absent) → include_tests == False (mgh-init excludes test sources).
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc7_")).resolve()
+        _run("--target", str(target), "--format", "opencode")
+        cfg = json.loads((target / ".mgh-init" / "run_config.json").read_text(encoding="utf-8"))
+        self.assertFalse(cfg["include_tests"])
+
 
 if __name__ == "__main__":
     unittest.main()

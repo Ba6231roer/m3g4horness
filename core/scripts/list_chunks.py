@@ -39,18 +39,26 @@ CLI contract (`--help` is the contract surface, R5.1):
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": ..., "total": N, "done": M, "pending": [<ChunkLite>, ...],
-   "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
+   "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false,
+   "scripts_dir": "<abs <mgh-core>/scripts dir of THIS install>"}
   - total       = len(chunks[])             (the REAL count, not len(wrapper))
   - done        = #chunks whose <chunk_id>.json.done marker exists
   - pending[]   = chunks not yet done, in file order; each item (WITH --materialize):
       {chunk_id, files_count, threat_id, needs_slice, input_path, checkpoint_path,
-       done_marker, bytes, oversize}
-    (WITHOUT --materialize: backward-compat lite shell retains `files[]`/`hypothesis`)
+       done_marker, slice_dir, bytes, oversize}
+    (WITHOUT --materialize: backward-compat lite shell retains `files[]`/`hypothesis` and
+     omits slice_dir — lite never fans out)
   - input_path     = ABSOLUTE per-chunk input file (subagent reads this; ≤ --max-unit-bytes).
   - checkpoint_path = ABSOLUTE path the sast-deepdive subagent MUST write its checkpoint to
                       (<resolved --checkpoints>/<chunk_id>.json); passed verbatim by the
                       orchestrator so the subagent NEVER assembles/interpolates a path.
   - done_marker     = ABSOLUTE `.done` marker path (<checkpoint_path>.done) to touch.
+  - slice_dir       = ABSOLUTE in-tree dir for THIS chunk's big-file slices
+                      (<命令输出目录>/slices/s4/<safe(chunk_id)>/; <命令输出目录> = grandparent of
+                      --checkpoints = <target>/security-scan, same root as checkpoint_path).
+                      Orchestrator passes it verbatim; sast-deepdive writes
+                      `chunk_sources.py --out <slice_dir>/<safe-stem>.slice.json` and re-reads
+                      that exact path (NEVER relative/cwd/Temp --out). --materialize slim only.
   - needs_slice    = source files in this chunk > --big-file-bytes (sliced via chunk_sources;
                      empty when --repo omitted or no big files).
   - bytes/oversize = input file size / whether it exceeded --max-unit-bytes OR has big files.
@@ -58,6 +66,11 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - truncated   = passthrough of wrapper.truncated (false when absent)
   - offset/limit/effective_limit/shrunk = paging (R5.3b); orchestrator advances offset
     by effective_limit. shrunk=true iff a page was auto-tightened to ≤ --orch-budget-bytes.
+  - scripts_dir = ABSOLUTE dir of THIS install's <mgh-core>/scripts/ (Path(__file__).resolve()
+                  .parent; host-agnostic). Orchestrator reads it in s4 fan-out and passes
+                  `<scripts_dir>/chunk_sources.py` verbatim to sast-deepdive as the ABSOLUTE
+                  tool path (NEVER bare name / relative `.claude`|`.opencode/mgh-core/scripts/…`,
+                  which under a multi-layer install can resolve to an older copy).
 
 Exit codes (R5.3b): 0 ok (incl. empty chunks) · 1 s3_chunks.json missing/malformed ·
 2 misuse (argparse / bad budget). Idempotent, no TTY.
@@ -159,6 +172,17 @@ def _write_chunk_input(inputs_dir: Path, chunk_id, chunk: dict, needs_slice):
 def _paths(checkpoints_dir: Path, chunk_id):
     base = checkpoints_dir / f"{chunk_id}.json"
     return str(base), str(base.with_name(base.name + ".done"))
+
+
+def _slice_dir(checkpoints_dir: Path, chunk_id) -> str:
+    """ABSOLUTE in-tree slice-output dir for a chunk: <out-root>/slices/s4/<safe(chunk_id)>/.
+    <out-root> = grandparent of the checkpoint dir (<target>/security-scan, same root as
+    checkpoint_path). `_safe_name` sanitizes any `/`/`\\`/`:` (chunk_ids are clean "chunk-NN"
+    → no-op; defensive parity with init T1's NTFS-ADS guard). Pinned in-tree so an
+    sast-deepdive subagent whose cwd is a system temp dir (opencode) cannot drift big-file
+    slice outputs out-of-tree."""
+    out_root = checkpoints_dir.parent.parent  # checkpoints/s4 -> checkpoints -> security-scan
+    return str((out_root / "slices" / "s4" / _safe_name(chunk_id)).resolve())
 
 
 def _lite(chunk: dict) -> dict:
@@ -272,6 +296,7 @@ def main():
                 "input_path": ipath,
                 "checkpoint_path": cp,
                 "done_marker": dm,
+                "slice_dir": _slice_dir(checkpoints_dir, cid),
                 "bytes": nbytes,
                 "oversize": oversize,
             })
@@ -293,6 +318,7 @@ def main():
         "limit": req_limit,
         "effective_limit": eff,
         "shrunk": shrunk,
+        "scripts_dir": str(Path(__file__).resolve().parent),
     }
     print(f"s3_chunks.json: {total} total, {done_count} done, {len(all_units)} pending "
           f"chunk(s); page offset={args.offset} eff={eff} shrunk={shrunk} "

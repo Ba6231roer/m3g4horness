@@ -16,6 +16,91 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — `/mgh-sast` pins s4 big-file slice outputs in-tree + absolute tool-script paths
+- The s4 deep-dive big-file slice output (`chunk_sources.py --out`) — the sast-side fan-out
+  gap left open by `harden-mgh-init-slice-and-tool-pinning` (its Non-Goals deferred sast to
+  this adoption) — is now pinned to the project tree. `list_chunks.py` stdout `pending[]`
+  each gains an additive ABSOLUTE `slice_dir` = `<target>/security-scan/slices/s4/<safe(chunk_id)>/`
+  (`<命令输出目录>` = grandparent of `--checkpoints` = `<target>/security-scan`, same root as
+  `checkpoint_path`; `_safe_name` sanitizes `/ \ :` — a no-op on clean vvah `chunk-NN` ids,
+  defensive parity with init T1's NTFS-ADS guard). The orchestrator passes `slice_dir` verbatim;
+  the sast-deepdive subagent writes `chunk_sources.py --out <slice_dir>/<safe-stem>.slice.json`
+  and re-reads that exact path — NEVER a relative `--out`, NEVER a cwd/system-temp-derived path
+  (opencode subagent cwd can be `…\Temp\opencode\` → out-of-tree slice → unauthorized-`Read`
+  prompt), NEVER out-of-tree. `chunk_sources.py` itself stays cwd-agnostic (no tree assumption);
+  the pin lives in the contract + prompt layer.
+- s4 deep-dive subagents now use the ABSOLUTE tool-script path pinned to the current install:
+  `list_chunks.py` stdout gains a top-level `scripts_dir` = `Path(__file__).resolve().parent`
+  (the running install's `<mgh-core>/scripts/`); the orchestrator reads it in s4 fan-out and
+  passes `<scripts_dir>/chunk_sources.py` verbatim. Subagents NEVER use a bare `chunk_sources.py`
+  name or a relative `.claude`/`.opencode/mgh-core/scripts/…` path (multi-layer install → can
+  resolve to an older copy). Tool base is taken from `list_chunks.py` (s4 already calls it), not
+  init-only `list_steps.py`; install-dir stays independent of `--target`.
+- Affected: `core/scripts/list_chunks.py` (additive per-pending `slice_dir` + top-level
+  `scripts_dir`); `core/contracts/sast/fanout-enumeration.md` + `core/contracts/init/unit-inputs.md`;
+  `core/prompts/stages/s4-system.md` + mirrored `releases/{claude-code/agents,opencode/agent}/
+  sast-deepdive.md`; both `mgh-sast.md` shells (s4 fan-out `slice_dir`/`scripts_dir` transmission,
+  absolute `chunk_sources` recipe); `install.sh` self-check now also verifies the sast pipeline
+  scripts (`list_chunks`/`list_verify_jobs`/`prefilter`/`dedup`/`emit_sarif`) are co-located.
+  Additive stdout fields — no on-disk schema change (`checkpoint_path`/`input_path`/exit-code
+  semantics unchanged); lite shell omits `slice_dir` (never fans out); zero new runtime deps.
+
+### Changed — `/mgh-init` pins big-file slice outputs in-tree + absolute tool-script paths
+- The scout/T1 big-file slice output (`chunk_sources.py --out`) — the one fan-out-adjacent
+  path NOT already pinned by `harden-mgh-init-fanout-output-paths` — is now pinned to the
+  project tree. `list_scout_batches.py` / `list_clusters.py` stdout `pending[]` each gain an
+  additive ABSOLUTE `slice_dir` = `<target>/.mgh-init/slices/<tier>/<safe(unit_id)>/`
+  (`<tier>` ∈ `scout`/`t1`; `<init-dir>` = grandparent of `--checkpoints`, same root as
+  `checkpoint_path`; `cluster_id` `::` NTFS-ADS-sanitized via the existing `_safe_name`).
+  The orchestrator passes `slice_dir` verbatim; the scout/induct subagent writes
+  `chunk_sources.py --out <slice_dir>/<safe-stem>.slice.json` and re-reads that exact path —
+  NEVER a relative `--out`, NEVER a cwd/system-temp-derived path (opencode subagent cwd can
+  be `…\Temp\opencode\` → out-of-tree slice → unauthorized-`Read` prompt), NEVER out-of-tree.
+  `chunk_sources.py` itself stays cwd-agnostic (no tree assumption); the pin lives in the
+  contract + prompt layer.
+- Fan-out subagents now use the ABSOLUTE tool-script path pinned to the current install:
+  the orchestrator derives it in step 0 from `list_steps.py` stdout `script_abs` (`__file__`-
+  derived = the running install's `<mgh-core>/scripts/`) and passes it verbatim. Subagents
+  NEVER use a bare `chunk_sources.py` name or a relative `.opencode`/`.claude/mgh-core/
+  scripts/…` path — under a multi-layer install a relative tool path can resolve to a
+  DIFFERENT (older) copy. Install-dir stays independent of `--target` (install in A, analyze B).
+- Affected: `core/scripts/list_scout_batches.py` + `list_clusters.py` (additive `slice_dir`);
+  `core/contracts/init/{scout-enumeration,cluster-enumeration,unit-inputs}.md`;
+  `core/prompts/stages/init-{scout,induct}.md` + mirrored `releases/{claude-code/agents,
+  opencode/agent}/init-{scout,induct}.md`; both `mgh-init.md` shells (step-0 tool-base recipe,
+  fan-out `slice_dir` transmission, `chunk_sources` example → absolute path + `<slice_dir>`
+  `--out`). Additive stdout field — no on-disk schema change (`checkpoint_path`/`input_path`/
+  exit-code semantics unchanged); zero new runtime deps. mgh-sast's s4/deepdive same-shape gap
+  is deferred to a follow-up `harden-mgh-sast-slice-path-pinning`.
+
+### Changed — `/mgh-init` skips test source trees during discovery (`--include-tests` opt-in)
+- The discovery file-enumeration layer (`expand_scope.walk_sources` / `collect_dir`, the
+  single chokepoint consumed by regex candidates, `skeleton.json`, the call graph, and scout
+  targets) **additionally** prunes test source trees by default, mirroring the existing
+  dot-prefix prune. A test tree hits when the repo-relative posix path starts with
+  `src/test/` / `src/tests/` (Maven/Gradle/Kotlin) **or** a directory segment (not filename)
+  is in `{tests, __tests__, __mocks__, spec, specs}`. Bare singular `test` is **deliberately
+  not** matched (collision risk: production `com/acme/test/` helper packages, Go `test`
+  packages). Test code is net noise for finding existing **production** controls — mocks/stubs
+  (`@MockBean SecurityConfig`, `mock(SecurityChecker)`) materialize pseudo-controls,
+  deliberately-vulnerable fixtures (VulnerableApp, disabled-TLS / widened-CORS / placeholder-
+  key / dummy-JWT-issuer test configs) hit as real control features, and test code never ships.
+- `discover_controls.py` gains `--include-tests` (default off = exclude; passing it re-includes
+  test sources, equivalent to before this change). Polarity asymmetry (design D2): the shared
+  `walk_sources`/`collect_dir` default `include_tests=True`, so callers that don't pass it —
+  including `mgh-sast`'s `build_call_graph` — stay byte-identical; only `discover_controls`
+  (mgh-init) opts into exclusion. Excluding test code as an mgh-sast default is a separate
+  later change (not bundled here).
+- discover stdout summary (partial + full) gains `tests_skipped` (non-negative int), parallel
+  to `dotfiles_skipped`; `controls_candidates.json` wrapper gains an additive top-level
+  `tests_skipped` so `discover_controls.py --check` can validate it (R5.9: fail-loud exit 2 if
+  missing/non-int/negative). `write_runconfig.py` records `include_tests` in `run_config.json`
+  for stateless `--resume`. Both `mgh-init.md` shells (claude + opencode, mirrored verbatim)
+  gain the flag-table row, the `write_runconfig`/`discover_controls` call examples, and a test-
+  tree honesty-boundary line in `init_manifest.json::boundaries[]` / `report.md`. No disk
+  schema change to `controls_candidates`/`clusters`/`skeleton` Candidate records (only an
+  additive wrapper counter); no LLM-stage prompt change (prune is at the deterministic layer).
+
 ### Changed — `/mgh-init` tolerates partial fan-out unit failure (`.failed` terminal marker)
 - A confirmed fan-out unit failure (scout reader batch / T1 cluster / T3 category subagent
   returning the existing `failed <reason>` ack) is now **terminal and non-blocking**: the

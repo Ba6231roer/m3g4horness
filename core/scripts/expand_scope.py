@@ -39,6 +39,43 @@ EXCLUDE_DIR = {".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
                "target", ".venv", "venv", "__pycache__", ".idea", ".vscode",
                "bin", "obj", "out", ".gradle"}
 
+# Test source-tree roots — pruned from mgh-init discovery by default. Test code is net
+# noise for "find existing PRODUCTION controls": mocks/stubs (@MockBean SecurityConfig,
+# mock(SecurityChecker)) materialize security components as pseudo-controls in the call
+# graph; deliberately-vulnerable fixtures (VulnerableApp, negative-path samples,
+# disabled-TLS / widened-CORS / placeholder-key / dummy-JWT-issuer test configs) hit as
+# real control features and yield wrong rules; and test code never ships, so test-only
+# "controls" are out of the production domain mgh-init rules govern. Maven/Gradle
+# `src/test` commonly holds 30–50% of source files in large Java repos, so excluding it
+# also saves scout/induct LLM budget.
+#
+# Deliberately does NOT include bare singular `test` as a directory segment — highest
+# collision risk (production `com/acme/test/` helper packages, Go `test` packages). The
+# `src/test`/`src/tests` prefix covers Java/Kotlin/Gradle; plural `tests` + ecosystem
+# tokens cover Python/JS/TS/Ruby. Singular bare `test/` stays INCLUDED (no regression);
+# users who want it excluded pass nothing different here (see design D1).
+#
+# Parallel to / additive over EXCLUDE_DIR: the build/cache members stay owned by it.
+TEST_PREFIXES = ("src/test/", "src/tests/")           # repo-relative posix (Maven/Gradle/Kotlin)
+TEST_SEGMENTS = {"tests", "__tests__", "__mocks__", "spec", "specs"}  # dir segments only
+
+
+def _is_test_path(rel_posix: str, parent_parts) -> bool:
+    """True if a repo-relative posix path lives under a test source tree.
+
+    Hit = `rel_posix` starts with a TEST_PREFIXES entry, OR any DIRECTORY segment in
+    `parent_parts` (NOT the filename) is in TEST_SEGMENTS. Pure stdlib (str.startswith
+    over a tuple + set membership). The polarity asymmetry vs the dotfile prune is
+    intentional (design D2): the default for the SHARED walk_sources/collect_dir is
+    include_tests=True, so callers that don't pass it — including mgh-sast's
+    build_call_graph — stay byte-identical; only discover_controls (mgh-init) opts into
+    include_tests=False. Excluding test code as an mgh-sast default is a separate
+    behavior change left to a later change."""
+    if rel_posix.startswith(TEST_PREFIXES):
+        return True
+    return any(seg in TEST_SEGMENTS for seg in parent_parts)
+
+
 # ── per-language def/call patterns (textual; mirrors vvaharness's approach) ──
 # Each returns (def_pattern, call_pattern) as compiled regexes over text.
 DEF_CALL = {
@@ -74,7 +111,8 @@ ANNOTATION_LANGS = {"java", "php"}
 
 
 def walk_sources(repo: Path, limit_files: int = 20000,
-                 include_dotfiles: bool = False, dot_skipped: list | None = None):
+                 include_dotfiles: bool = False, dot_skipped: list | None = None,
+                 include_tests: bool = True, tests_skipped: list | None = None):
     for p in repo.rglob("*"):
         if not p.is_file():
             continue
@@ -88,6 +126,20 @@ def walk_sources(repo: Path, limit_files: int = 20000,
             if dot_skipped is not None and SOURCE_EXT.get(p.suffix.lower()):
                 dot_skipped[0] += 1
             continue
+        # Test source tree (src/test | src/tests prefix; tests/__tests__/__mocks__/spec/
+        # specs dir segment) = non-production noise for control discovery (see
+        # _is_test_path). Default include_tests=True keeps callers that don't pass it —
+        # incl. mgh-sast's build_call_graph — byte-identical (design D2); only
+        # discover_controls (mgh-init) opts into include_tests=False. EXCLUDE_DIR stays
+        # the owner of build/cache dirs; this rule is parallel/additive. `tests_skipped`,
+        # when given, accumulates the pruned SOURCE files (surfaced as stdout
+        # `tests_skipped` for disclosure), mirroring `dot_skipped`.
+        if not include_tests:
+            rel_posix = p.relative_to(repo).as_posix()
+            if _is_test_path(rel_posix, p.relative_to(repo).parts[:-1]):
+                if tests_skipped is not None and SOURCE_EXT.get(p.suffix.lower()):
+                    tests_skipped[0] += 1
+                continue
         lang = SOURCE_EXT.get(p.suffix.lower())
         if lang:
             yield p, lang
@@ -175,13 +227,25 @@ def package_to_dirs(repo: Path, pkg: str):
     return hits
 
 
-def collect_dir(repo: Path, dirpath: Path, include_dotfiles: bool = False):
+def collect_dir(repo: Path, dirpath: Path, include_dotfiles: bool = False,
+                include_tests: bool = True):
+    """Collect source files under `dirpath` (repo-relative posix). `--path`/`--package`
+    scope resolution shares this prune with whole-repo walk_sources (single chokepoint):
+    EXCLUDE_DIR + dot-prefixed (unless include_dotfiles) + test source tree (unless
+    include_tests, design D2 — default True = unchanged for mgh-sast)."""
     out = []
     for p in dirpath.rglob("*"):
-        if p.is_file() and SOURCE_EXT.get(p.suffix.lower()) and \
-           not any(part in EXCLUDE_DIR for part in p.parts) and \
-           (include_dotfiles or not any(part.startswith(".") for part in p.parts)):
-            out.append(p.relative_to(repo).as_posix())
+        if not (p.is_file() and SOURCE_EXT.get(p.suffix.lower())):
+            continue
+        if any(part in EXCLUDE_DIR for part in p.parts):
+            continue
+        if not include_dotfiles and any(part.startswith(".") for part in p.parts):
+            continue
+        if not include_tests:
+            rel_posix = p.relative_to(repo).as_posix()
+            if _is_test_path(rel_posix, p.relative_to(repo).parts[:-1]):
+                continue
+        out.append(p.relative_to(repo).as_posix())
     return out
 
 

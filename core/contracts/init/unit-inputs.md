@@ -30,6 +30,25 @@ no-op。各命令的 `<命令输出目录>` + `<tier>`:
 > sast/sra/srr 的路径约定供后续 `harden-mgh-{sast,sra,srr}-context-budget` adoption 引用;本 contract
 > 只在 init 端落地参考实现。
 
+### 大文件切片输出(`slices/<tier>/<unit>/`)— 邻接 fan-out 路径,与 `input_path`/`checkpoint_path` 同纪律
+
+`<命令输出目录>/slices/<tier>/<safe(unit)>/<safe-stem>.slice.json`(绝对路径,ephemeral、随运行域
+目录 gitignore、整 run 结束随之清理)。`chunk_sources.py` 的大文件切片(`--out`)是 fan-out 邻接路径,
+SHALL 与 `checkpoint_path`/`input_path` 同纪律——**绝对、落受信子树、由枚举脚本产出 + 编排器逐字透传**:
+
+- **产出者**:`list_scout_batches.py` / `list_clusters.py`(init scout/T1)/ `list_chunks.py`(sast s4)
+  stdout `pending[]` 每项**额外**携带 `slice_dir`(绝对、`Path.resolve()`、形如
+  `<命令输出目录>/slices/<tier>/<safe(unit_id)>/`;`<命令输出目录>` = `--checkpoints` 祖父目录:init =
+  `<target>/.mgh-init`(`<tier>` ∈ `scout`/`t1`)、sast = `<target>/security-scan`(`<tier>` = `s4`))。
+  绝对工具基:init 经 `list_steps.py` stdout `script_abs`、sast 经 `list_chunks.py` stdout 顶层 `scripts_dir`。
+- **编排器**:把 `slice_dir` 与 `input_path`/`checkpoint_path` 一同**逐字透传**给 scout/induct subagent。
+- **subagent**:处理大文件(scout 的 `needs_slice[]`,或 T1 运行时发现 > `--big-file-bytes` 的证据文件)
+  写 `chunk_sources.py --out <slice_dir>/<safe-stem>.slice.json`(`<safe-stem>` 取源文件 stem 经 `_safe_name`
+  消毒)并**回读该确切绝对路径**。NEVER 写相对 `--out`、NEVER 写 cwd/系统临时目录(如 opencode 的
+  `…\AppData\Local\Temp\opencode\`)派生路径、NEVER 写运行域受信子树之外(含盘符根)。
+- **`chunk_sources.py` 本身**保持 cwd 无关、不假设项目树(`--out` 默认相对 cwd 的人类 ad-hoc 用法不变);
+  树内约束由枚举脚本的 `slice_dir` + subagent prompt 兜,非由 `chunk_sources.py` 兜。
+
 ## Schema
 
 每个 `pending[]` 项携带该单元的 `input_path`(绝对)+ `bytes`(该 input 文件字节数)+ `oversize`(bool,
@@ -68,7 +87,7 @@ no-op。各命令的 `<命令输出目录>` + `<tier>`:
 `<命令输出目录>/run_config.json`(`<target>/.mgh-init/run_config.json`)由 `write_runconfig.py` 在
 step 0 **原子写出**(`.tmp`+`os.replace`),记录**决定步骤图的本次调用 flag**:`target`(绝对)/`format`/
 `scope`/`scope_mode`/`no_scout`/`no_codegraph`/`skip_consistency`/`merge`+`merge_partials_dir`/
-`include_dotfiles`/预算(`max_unit_bytes`/`orch_budget_bytes`/`max_aggregate_bytes`)/`scout.*`。
+`include_dotfiles`/`include_tests`/预算(`max_unit_bytes`/`orch_budget_bytes`/`max_aggregate_bytes`)/`scout.*`。
 
 - **起始态,非终态**:与 `init_manifest.json`(step 8 写,版本/计数/出处)边界清晰、互不替代——
   `run_config` = 本次 run 的**意图**,`init_manifest` = 本次 run 的**结果**。

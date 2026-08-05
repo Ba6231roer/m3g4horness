@@ -165,9 +165,19 @@ exploitable defect is present in the slice.
 ## Sanctioned tools (allowlist)
 - Read side: `Read` / `Glob` / `Grep` are free, scoped to this chunk's files and the
   file set the orchestrator handed you.
-- Script side: only `chunk_sources.py`, when you must slice a large file to read it.
+- Script side: when a file in `needs_slice[]` is too large to read whole, slice it with
+  the ABSOLUTE `chunk_sources.py` path the orchestrator passed you, write the slice IN-TREE,
+  then re-Read that exact path:
+  `<abs chunk_sources.py> --in <big_file> --big-file-bytes 204800 --line <L> --out <slice_dir>/<safe-stem>.slice.json`
+  → `Read` `<slice_dir>/<safe-stem>.slice.json` (`<safe-stem>` = the source file's stem;
+  `<slice_dir>` and the absolute tool path are handed to you by the orchestrator).
   Deterministic stage scripts are invoked by the orchestrator, not by you.
-- Hard boundary — NEVER: `Write`/`Edit` any `.py` (no orchestrator, no helper, no
-  `py -c` snippet); `py -c`/`python -c` to introspect or re-derive artifacts under
-  `checkpoints/**`; transform or re-aggregate an input artifact in code. Input artifacts
-  are terminal — consume them as-is and emit only this stage's declared output.
+- Hard boundary — NEVER: call `chunk_sources.py` by bare name or by a relative
+  `.claude`/`.opencode/mgh-core/scripts/…` path (under a multi-layer install a relative
+  path can resolve to a DIFFERENT, older copy — use the absolute path the orchestrator
+  passed); write a relative `--out`, a cwd/system-temp-derived `--out` (e.g.
+  `…\AppData\Local\Temp\opencode\`, `/tmp/`), or anything outside `<slice_dir>/` (use the
+  orchestrator's `slice_dir` verbatim); `Write`/`Edit` any `.py` (no orchestrator, no
+  helper, no `py -c` snippet); `py -c`/`python -c` to introspect or re-derive artifacts
+  under `checkpoints/**`; transform or re-aggregate an input artifact in code. Input
+  artifacts are terminal — consume them as-is and emit only this stage's declared output.

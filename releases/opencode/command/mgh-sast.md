@@ -46,6 +46,7 @@ subagents) and run deterministic stage scripts (bash). Shared assets live at
 - **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `read` 整份大 JSON);
 - **派生量** → 该量产出者的 stdout 字段(`prefilter`/`dedup`/`emit_sarif` stdout 的 stats;**NEVER** 自写脚本算)。
 - **某 fan-out 单元的完整记录**(chunk 的 `files[]`/`threat_id`/`hypothesis` 或 finding 的 source/sink 锚点)→ `list_chunks.py`/`list_verify_jobs.py` `--materialize <inputs/<tier>>` stdout `pending[]` 每项的 `input_path`(绝对,subagent **自读**;≤ `--max-unit-bytes`);**NEVER** 整份读 `s3_chunks.json`/`s5_filtered.json`(编排器只装 slim 分页待办壳)、**NEVER** `py -c`、**NEVER** 把记录体内联塞进 subagent task(只透传 `input_path`);
+- **subagent 用的绝对工具脚本路径**(sast-deepdive 切片用的 `chunk_sources`)→ `list_chunks.py` stdout 顶层 `scripts_dir`(`__file__` 派生 = 当前 install 的 `<mgh-core>/scripts/` 目录);s4 fan-out(已调 `list_chunks`)取该绝对基,把绝对 `chunk_sources` 路径**逐字透传**进 sast-deepdive task(subagent 用该绝对路径 verbatim;**NEVER** 裸名、**NEVER** 相对 `.claude`/`.opencode/mgh-core/scripts/…`——多层 install 下相对路径可上溯到**别的**旧副本;**NEVER** 从 `--target`/`--repo` 拼工具基(install-dir 可与 target 不同)、**NEVER** 从 mid-session env 读(opencode 插件进程不继承)、**NEVER** 调 init 专属的 `list_steps.py`);
 
 **fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;doubt 时刻 inline 1 行 shape(如「`s3_chunks.json::chunks[]` 即你的 s4 工作清单,经 `list_chunks.py` 取」)。
 
@@ -83,10 +84,10 @@ subagents) and run deterministic stage scripts (bash). Shared assets live at
    s3 decompose (subagent) → checkpoints/s3_chunks.json   (wrapper {rationale,chunks[]}; unit key = chunks[].id)
    s4 FAN-OUT (per chunk) — 经确定性脚本枚举 + 物化(**禁手挖** checkpoints/** / `py -c` / 整份读 `s3_chunks.json`):
      [s3_chunks.json::chunks[]] → list_chunks.py --materialize <repo>/security-scan/inputs/s4 [--repo <repo>] → [stdout slim pending[]]
-       pending[] 每项 {chunk_id,files_count,threat_id,needs_slice,input_path,checkpoint_path,done_marker,bytes,oversize}
+       pending[] 每项 {chunk_id,files_count,threat_id,needs_slice,input_path,checkpoint_path,done_marker,slice_dir,bytes,oversize};stdout 顶层 `scripts_dir`(绝对工具基,透传 `<scripts_dir>/chunk_sources.py` 给 sast-deepdive)
      按 `offset`/`effective_limit` 翻页(单页 > `--orch-budget-bytes` 时 `shrunk:true`;NEVER wrapper `.py`);
      per chunk in page `pending[]` (--resume 跳过已 .done):
-       - spawn sast-deepdive(透传 `input_path`;subagent 读 `input_path`,needs_slice 文件自行 `chunk_sources` 切片,**绝不**整文件喂 LLM)→ 收 JSON 写 checkpoints/s4/<chunk_id>.json + .done
+       - spawn sast-deepdive(透传 `input_path` + `slice_dir` + `<scripts_dir 派生的绝对 chunk_sources 路径>`;subagent 读 `input_path`,needs_slice 文件写 `<绝对 chunk_sources> --out <slice_dir>/<safe-stem>.slice.json` 并回读该确切路径,**绝不**整文件喂 LLM)→ 收 JSON 写 checkpoints/s4/<chunk_id>.json + .done
      aggregate all chunk findings → checkpoints/s4_candidates.json  ({"findings":[...]})
    s5 prefilter (bash, deterministic) → s5_filtered.json ({kept[],dropped[],stats})
      · 校验:`prefilter.py --check`(每条 kept finding 有 file/line_start/vuln_class/source_ref/sink_ref;退出码 2 → 回退)
@@ -144,7 +145,8 @@ py .opencode/mgh-core/scripts/dedup.py --in security-scan/checkpoints/s6_verdict
 py .opencode/mgh-core/scripts/dedup.py --check security-scan/checkpoints/s7_findings.json
 py .opencode/mgh-core/scripts/emit_sarif.py --in security-scan/checkpoints/findings.json --out security-scan/report.sarif --repo-name <name> --application-id <id>
 py .opencode/mgh-core/scripts/emit_sarif.py --check security-scan/report.sarif
-py .opencode/mgh-core/scripts/chunk_sources.py --in <big_file> --big-file-bytes 204800 --line <L> --out security-scan/_slice.json
+# 大文件切片(sast-deepdive 在 s4 fan-out 内调用;--out 钉到 list_chunks stdout 的 slice_dir 树内;脚本路径 = list_chunks stdout scripts_dir 派生的绝对基 + chunk_sources.py,NEVER 裸名/相对):
+py <list_chunks stdout scripts_dir 派生的绝对路径>/chunk_sources.py --in <big_file> --big-file-bytes 204800 --line <L> --out <slice_dir>/<safe-stem>.slice.json
 py .opencode/mgh-core/scripts/describe_artifact.py --in security-scan/checkpoints/s5_filtered.json --keys
 py .opencode/mgh-core/scripts/load_controls.py --check <controls_inventory.json>
 py .opencode/mgh-core/scripts/load_controls.py --inventory <controls_inventory.json> --repo <repo> [--in-scope security-scan/scope_manifest.json]

@@ -12,6 +12,7 @@ Top-level shape:
   "generated_by": "discover_controls.py",
   "candidates": [<Candidate>, ...],
   "truncated": false,
+  "tests_skipped": 0,
   "max_files_note": "warned-and-continued when source files > --max-files",
   "unresolved": ["<file>", ...],
   "out_of_scope": ["<file>", ...]
@@ -56,6 +57,12 @@ A `Candidate` (one control-shaped hit):
   调用图、scout 目标集。`discover_controls.py --include-dotfiles` 覆盖(回退到扫描点前缀路径)。
   `EXCLUDE_DIR`(精确名匹配,含 `node_modules`/`target`/`build`/`vendor` 等非点构建/缓存目录)**保持不变**。
   故候选 `file`、`unresolved[]`、`out_of_scope[]` 均不含点前缀路径。
+- **测试源码树剪枝(同 chokepoint,并行于点前缀剪枝)**:遍历**额外**跳过测试源码树(`src/test`/`src/tests`
+  repo 相对 posix 前缀 + `tests`/`__tests__`/`__mocks__`/`spec`/`specs` 目录段;**不含**裸单数 `test`——碰撞风险,
+  生产 `com/acme/test/` 工具包 / Go `test` 包会误删),统一作用于 regex 候选、`skeleton.json`、调用图、scout
+  目标集。`discover_controls.py --include-tests` 覆盖(回退到纳入测试源码)。测试码是「发现生产安全控制」的净
+  噪声(mock/stub 物化伪控制、脆弱夹具命中成真特征、不上线)。故候选 `file`、`unresolved[]`、`out_of_scope[]`
+  默认不含测试源码树路径;stdout `tests_skipped` 计本次跳过的测试源文件数(并列于 `dotfiles_skipped`)。
 
 ### Producer stdout summary (downstream reads these, never re-derives)
 
@@ -64,7 +71,7 @@ A `Candidate` (one control-shaped hit):
 
 ```json
 {"candidates": N, "clusters": M, "unresolved": U, "unresolved_count": U,
- "big_files": K, "dotfiles_skipped": D, "out_of_scope": O,
+ "big_files": K, "dotfiles_skipped": D, "tests_skipped": T, "out_of_scope": O,
  "truncated": false, "scanned": S,
  "partial": false, "resume_hint": "", "cache_hit": false}
 ```
@@ -74,4 +81,5 @@ A `Candidate` (one control-shaped hit):
 | `big_files` | 超 `--big-file-bytes` 的源文件数(T1/scout 切片决策的下游常查量) |
 | `unresolved_count` | `len(unresolved[])`(`unresolved` 的别名,便于直接消费) |
 | `dotfiles_skipped` | 默认剪枝跳过的点前缀**源**文件计数(披露/排查用);`--include-dotfiles` 时为 `0` |
+| `tests_skipped` | 默认剪枝跳过的测试源码树**源**文件计数(披露/排查用);`--include-tests` 时为 `0`(镜像 `dotfiles_skipped`) |
 | `cache_hit` / `partial` / `resume_hint` | 韧性字段(additive):`cache_hit`=本次复用调用图缓存;`partial=true`=在 `--time-budget-ms` 安全边界干净早退(退出码 0,仅落 `cache/`+续点,**不**写最终产物),`resume_hint` 指编排器 Bash 重派 `--resume`。详见 [`discover-cache.md`](discover-cache.md)。 |

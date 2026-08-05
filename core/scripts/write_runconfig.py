@@ -19,7 +19,7 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/pathlib/sys).
 CLI contract (`--help` is the contract surface, R5.1):
   py write_runconfig.py --target <dir> --format opencode|claude [--init-dir <dir>]
        [--scope ..] [--scope-mode defined|applicable] [--no-scout] [--no-codegraph]
-       [--skip-consistency] [--merge <partials-dir>] [--include-dotfiles]
+       [--skip-consistency] [--merge <partials-dir>] [--include-dotfiles] [--include-tests]
        [--max-unit-bytes B] [--orch-budget-bytes B] [--max-aggregate-bytes B]
        [--scout-budget N] [--scout-batch-bytes B] [--scout-batch-cap N] [--scout-audit-pct N]
        [--language <lang>] [--rules-dir <path>] [--out <path>]
@@ -91,6 +91,9 @@ def main():
                     help="merge multiple scoped runs (sets mode=merge; then STOP)")
     ap.add_argument("--include-dotfiles", action="store_true",
                     help="scan dot-prefixed paths (.opencode/.claude/.codegraph/.github/.env)")
+    ap.add_argument("--include-tests", action="store_true",
+                    help="scan test source trees (src/test | src/tests prefix; "
+                         "tests/__tests__/__mocks__/spec/specs dir segment)")
     ap.add_argument("--max-unit-bytes", type=int, default=DEFAULT_MAX_UNIT_BYTES)
     ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES)
     ap.add_argument("--max-aggregate-bytes", type=int, default=DEFAULT_MAX_AGGREGATE_BYTES)
@@ -145,6 +148,7 @@ def main():
         "no_codegraph": bool(args.no_codegraph),
         "skip_consistency": bool(args.skip_consistency),
         "include_dotfiles": bool(args.include_dotfiles),
+        "include_tests": bool(args.include_tests),
         "merge": args.merge,
         "merge_partials_dir": args.merge,
         "language": args.language,

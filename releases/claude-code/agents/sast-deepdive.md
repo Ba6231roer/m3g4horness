@@ -21,10 +21,18 @@ prompt — exactly as the original does — keeps the SYSTEM block cacheable.
 ## Input (from orchestrator)
 The orchestrator passes an ABSOLUTE `input_path` (materialized by
 `list_chunks.py --materialize`) to ONE chunk's complete record (`files[]` + `threat_id`
-+ `hypothesis` + `needs_slice[]`). **Read that file**, then Read the chunk's source
-`files[]` yourself; slice any file in `needs_slice[]` via `chunk_sources.py` — never
-read a big file whole. Respond with ONLY your findings JSON; the orchestrator writes the
-per-chunk checkpoint + aggregates `checkpoints/s4_candidates.json`.
++ `hypothesis` + `needs_slice[]`), plus an ABSOLUTE `slice_dir` and the ABSOLUTE
+`chunk_sources.py` path (both from `list_chunks.py` stdout — `slice_dir` per pending item,
+tool path = `<scripts_dir>/chunk_sources.py`). **Read `input_path`**, then Read the chunk's
+source `files[]` yourself. For any file in `needs_slice[]`, slice it IN-TREE and re-read
+that exact path: `<abs chunk_sources.py> --in <big_file> --big-file-bytes 204800 --line <L>
+--out <slice_dir>/<safe-stem>.slice.json` → `Read` that path (`<safe-stem>` = the source
+file's stem). NEVER read a big file whole; NEVER call `chunk_sources.py` by bare name or a
+relative `.claude`/`.opencode/mgh-core/scripts/…` path (a multi-layer install can resolve
+that to an older copy); NEVER a relative / cwd / system-temp (e.g. `…\Temp\opencode\`) /
+out-of-tree `--out` — use the orchestrator's `slice_dir` verbatim. Respond with ONLY your
+findings JSON; the orchestrator writes the per-chunk checkpoint + aggregates
+`checkpoints/s4_candidates.json`.
 
 ## Output
 Respond with ONLY the JSON object from the output schema (`{"findings":[...]}`).

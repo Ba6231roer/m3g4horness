@@ -26,7 +26,7 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<BatchLite>, ...],
    "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
   - pending[] item: {batch_id, targets_count, bytes, needs_slice[], input_path,
-                     checkpoint_path, done_marker, failed_marker, oversize}
+                     checkpoint_path, done_marker, failed_marker, oversize, slice_dir}
   - failed         = #confirmed-failed reader batches (`.failed` marker; terminal,
                      excluded from pending, NOT retried on --resume; done+failed+pending
                      = total). Crash with no `failed` ack → no marker → batch stays pending.
@@ -34,6 +34,11 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - checkpoint_path / done_marker / failed_marker = ABSOLUTE (verbatim, passed to
                      subagent; failed_marker body {unit,reason,tier} written by the
                      orchestrator on a `failed` ack).
+  - slice_dir      = ABSOLUTE in-tree dir for this batch's big-file slice outputs
+                     (<init-dir>/slices/scout/<safe(batch_id)>/). Orchestrator passes it
+                     verbatim; the scout subagent writes `chunk_sources.py --out
+                     <slice_dir>/<safe-stem>.slice.json` and re-reads that exact path
+                     (NEVER a cwd/Temp-derived or out-of-tree --out).
   - oversize       = batch bytes > --max-unit-bytes (flagged, not sharded).
 
 Exit codes (R5.3b): 0 ok (incl. empty batches) · 1 scout_plan.json missing/malformed ·
@@ -201,6 +206,10 @@ def main():
     batches = wrapper["batches"]
     checkpoints_dir = (Path(args.checkpoints).resolve() if args.checkpoints
                        else (plan_path.parent / "checkpoints" / "scout").resolve())
+    # <init-dir> = grandparent of the checkpoint dir (same root as checkpoint_path),
+    # i.e. <target>/.mgh-init. Anchors slice outputs in-tree so a subagent process whose
+    # cwd is a system temp dir (opencode) cannot drift slices out-of-tree.
+    init_dir = checkpoints_dir.parent.parent
     done = _done_ids(checkpoints_dir)
     failed = _failed_ids(checkpoints_dir)
     materialize = bool(args.materialize)
@@ -221,6 +230,7 @@ def main():
         cp = str(base)
         dm = str(base.with_name(base.name + ".done"))
         fm = str(base.with_name(base.name + ".failed"))
+        slice_dir = str((init_dir / "slices" / "scout" / _safe_name(bid)).resolve())
         if materialize:
             ipath, _ = _write_batch_input(inputs_dir, bid, batch)
             nbytes = int(batch.get("bytes", 0))
@@ -238,6 +248,7 @@ def main():
                 "done_marker": dm,
                 "failed_marker": fm,
                 "oversize": oversize,
+                "slice_dir": slice_dir,
             })
         else:
             all_units.append({
@@ -248,6 +259,7 @@ def main():
                 "checkpoint_path": cp,
                 "done_marker": dm,
                 "failed_marker": fm,
+                "slice_dir": slice_dir,
             })
 
     total = len(batches)

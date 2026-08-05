@@ -31,7 +31,7 @@ Usage:
   py discover_controls.py --repo <root> --out <dir> [--scope path:<d>|package:<p>|file:<g>]
         [--scope-mode defined|applicable] [--language <l>] [--max-files <N>]
         [--big-file-bytes <N>] [--sample <N>] [--progress-every <N>]
-        [--large-repo-threshold <N>] [--include-dotfiles]
+        [--large-repo-threshold <N>] [--include-dotfiles] [--include-tests]
         [--time-budget-ms <N>] [--rebuild-cache] [--resume]
   py discover_controls.py --check <out-dir>
 """
@@ -263,13 +263,19 @@ def _enclosing_from_index(cls_lines, cls_names, fn_lines, fn_names, line: int):
 
 
 def collect_sources(repo: Path, max_files: int, include_dotfiles: bool = False,
-                    dot_skipped: list | None = None):
+                    dot_skipped: list | None = None,
+                    include_tests: bool = False, tests_skipped: list | None = None):
     """Walk the repo ONCE (FD3); materialize the source list shared by graph + scan.
 
     Returns (files, truncated, scanned). Counting mirrors the old build_call_graph_bounded
     so `truncated` / `scanned` in the output JSON stay equivalent. `dot_skipped`, when
     given, is a 1-element `[0]` list accumulating dot-prefixed source files pruned by the
-    default skip (surfaced as stdout `dotfiles_skipped` for disclosure).
+    default skip (surfaced as stdout `dotfiles_skipped` for disclosure). `tests_skipped`,
+    likewise, accumulates test-source-tree files pruned by the default skip (surfaced as
+    stdout `tests_skipped`). Polarity asymmetry (design D2): the SHARED walk_sources
+    defaults include_tests=True, but THIS discover layer defaults include_tests=False
+    (= exclude test source trees) — mgh-init opts out of test code, while mgh-sast's
+    build_call_graph (which never passes include_tests) stays byte-identical.
 
     The materialized list is sorted by `rel` (repo-relative posix path) so the scan order
     — and therefore `cache/scan_progress.json::scanned_index` — is reproducible across
@@ -281,7 +287,9 @@ def collect_sources(repo: Path, max_files: int, include_dotfiles: bool = False,
     truncated = False
     for path, lang in walk_sources(repo, limit_files=max_files + 1,
                                    include_dotfiles=include_dotfiles,
-                                   dot_skipped=dot_skipped):
+                                   dot_skipped=dot_skipped,
+                                   include_tests=include_tests,
+                                   tests_skipped=tests_skipped):
         scanned += 1
         if scanned > max_files:
             truncated = True
@@ -540,6 +548,7 @@ def run_discover(repo: Path, seed_files, max_files: int, big_bytes: int,
                  language: str | None, progress_every: int = 0,
                  large_repo_threshold: int = 0, outdir=None,
                  include_dotfiles: bool = False, dot_skipped: list | None = None,
+                 include_tests: bool = False, tests_skipped: list | None = None,
                  time_budget_ms: int = 0, rebuild_cache: bool = False,
                  resume: bool = False, write_cache: bool = True):
     """Resilient discover pipeline. Returns a dict:
@@ -554,7 +563,9 @@ def run_discover(repo: Path, seed_files, max_files: int, big_bytes: int,
     complete run, so a partial never leaves a truncated artifact."""
     files, truncated, scanned = collect_sources(repo, max_files,
                                                 include_dotfiles=include_dotfiles,
-                                                dot_skipped=dot_skipped)
+                                                dot_skipped=dot_skipped,
+                                                include_tests=include_tests,
+                                                tests_skipped=tests_skipped)
     if large_repo_threshold and scanned > large_repo_threshold:
         print(f"[discover] large repo: ~{scanned} source files exceed "
               f"--large-repo-threshold ({large_repo_threshold}); for speed consider "
@@ -627,36 +638,45 @@ def run_discover(repo: Path, seed_files, max_files: int, big_bytes: int,
 
 def scan(repo: Path, seed_files, max_files: int, big_bytes: int, language: str | None,
          progress_every: int = 0, large_repo_threshold: int = 0, outdir=None,
-         include_dotfiles: bool = False, dot_skipped: list | None = None):
+         include_dotfiles: bool = False, dot_skipped: list | None = None,
+         include_tests: bool = False, tests_skipped: list | None = None):
     """Legacy single-pass discover API: returns the 6-tuple
     (candidates, forward, reverse, framework_files, truncated, scanned).
 
     Delegates to run_discover(write_cache=False) — no cache/resume/budget, always a full
-    rebuild in one call (byte-equivalent behavior). Kept for direct callers / tests."""
+    rebuild in one call (byte-equivalent behavior). Kept for direct callers / tests.
+    `include_tests` defaults False (exclude test source trees) to mirror main()'s default;
+    tests that want test sources pass include_tests=True."""
     r = run_discover(repo, seed_files, max_files, big_bytes, language, progress_every,
                      large_repo_threshold, outdir, include_dotfiles, dot_skipped,
+                     include_tests, tests_skipped,
                      write_cache=False)
     return (r["candidates"], r["forward"], r["reverse"], r["framework_files"],
             r["truncated"], r["scanned"])
 
 
-def resolve_seed(repo: Path, scope: str | None, include_dotfiles: bool = False):
-    """Return (seed_files:set[rel], scope_note:str). None/empty => whole repo marker []."""
+def resolve_seed(repo: Path, scope: str | None, include_dotfiles: bool = False,
+                 include_tests: bool = False):
+    """Return (seed_files:set[rel], scope_note:str). None/empty => whole repo marker [].
+    Threads include_dotfiles/include_tests into collect_dir/walk_sources so --path/
+    --package/--file scope resolution shares the same test-dir + dot-prefix prune as the
+    whole-repo walk (single chokepoint, design D3)."""
     if not scope:
         return None, "full-repo"
     if scope.startswith("path:"):
         d = repo / scope[5:]
-        return set(collect_dir(repo, d, include_dotfiles)) if d.is_dir() else set(), scope
+        return set(collect_dir(repo, d, include_dotfiles, include_tests)) if d.is_dir() else set(), scope
     if scope.startswith("package:"):
         files = set()
         for d in package_to_dirs(repo, scope[8:]):
-            files |= set(collect_dir(repo, d, include_dotfiles))
+            files |= set(collect_dir(repo, d, include_dotfiles, include_tests))
         return files, scope
     if scope.startswith("file:"):
         pat = scope[5:]
         import fnmatch
         out = set()
-        for p, _ in walk_sources(repo, limit_files=10**9, include_dotfiles=include_dotfiles):
+        for p, _ in walk_sources(repo, limit_files=10**9, include_dotfiles=include_dotfiles,
+                                 include_tests=include_tests):
             rel = p.relative_to(repo).as_posix()
             if fnmatch.fnmatch(rel, pat):
                 out.add(rel)
@@ -737,6 +757,17 @@ def _run_check(outdir: Path):
             if not isinstance(cands, list):
                 violations.append({"file": "controls_candidates.json",
                                    "issue": "wrapper must be {repo,candidates[],...}"})
+            elif not isinstance(cd.get("tests_skipped"), int) or \
+                    isinstance(cd.get("tests_skipped"), bool) or \
+                    cd.get("tests_skipped") < 0:
+                # R5.9: the test-source-tree prune counter MUST be a non-negative int
+                # (bool is an int subclass but not a valid counter). Short-circuits before
+                # the `< 0` compare so a missing (None) field flags without a TypeError.
+                # Additive disclosure field; does not weaken the wrapper/source/cluster_id
+                # checks above.
+                violations.append({"file": "controls_candidates.json",
+                                   "issue": "`tests_skipped` must be a non-negative int "
+                                            "(missing/non-int/negative)"})
         except (OSError, ValueError) as e:
             violations.append({"file": "controls_candidates.json", "issue": f"malformed: {e}"})
             cands = []
@@ -808,6 +839,12 @@ def main():
                     help="scan dot-prefixed paths (.opencode/.claude/.codegraph/.github/.env); "
                          "default skips any path component starting with '.' "
                          "(tooling/VCS/IDE/build/config are non-first-party code)")
+    ap.add_argument("--include-tests", action="store_true",
+                    help="scan test source trees (src/test | src/tests prefix; "
+                         "tests/__tests__/__mocks__/spec/specs dir segment); default skips "
+                         "them — test code is net noise for finding existing PRODUCTION "
+                         "controls (mocks/stubs materialize pseudo-controls; vulnerable "
+                         "fixtures hit as real features; test code never ships)")
     ap.add_argument("--time-budget-ms", type=int, default=0,
                     help="soft time budget in ms (0=off); on exceeding, at a safe boundary "
                          "(callgraph built / every --progress-every files) write cache + scan "
@@ -829,16 +866,19 @@ def main():
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    seed_files, scope_note = resolve_seed(repo, args.scope, args.include_dotfiles)
+    seed_files, scope_note = resolve_seed(repo, args.scope, args.include_dotfiles,
+                                          args.include_tests)
     seed_set = seed_files if seed_files is not None else None
 
     dot_skipped = [0]
+    tests_skipped = [0]
     r = run_discover(
         repo, seed_set, args.max_files, args.big_file_bytes, args.language,
         progress_every=args.progress_every,
         large_repo_threshold=args.large_repo_threshold,
         outdir=args.out, include_dotfiles=args.include_dotfiles,
         dot_skipped=dot_skipped,
+        include_tests=args.include_tests, tests_skipped=tests_skipped,
         time_budget_ms=args.time_budget_ms,
         rebuild_cache=args.rebuild_cache, resume=args.resume, write_cache=True)
     candidates = r["candidates"]
@@ -852,7 +892,8 @@ def main():
     if r["partial"]:
         print(json.dumps({"candidates": len(candidates), "clusters": 0,
                           "unresolved": 0, "unresolved_count": 0, "big_files": 0,
-                          "dotfiles_skipped": dot_skipped[0], "out_of_scope": 0,
+                          "dotfiles_skipped": dot_skipped[0],
+                          "tests_skipped": tests_skipped[0], "out_of_scope": 0,
                           "truncated": truncated, "scanned": scanned,
                           "partial": True, "resume_hint": r["resume_hint"],
                           "cache_hit": r["cache_hit"]}))
@@ -891,6 +932,7 @@ def main():
         "generated_by": "discover_controls.py",
         "candidates": candidates,
         "truncated": truncated,
+        "tests_skipped": tests_skipped[0],
         "max_files_note": (f"warned-and-continued: scanned {scanned} source files"
                            if truncated else "ok"),
         "unresolved": unresolved,
@@ -918,6 +960,7 @@ def main():
                       "unresolved": len(unresolved), "unresolved_count": len(unresolved),
                       "big_files": big_files,
                       "dotfiles_skipped": dot_skipped[0],
+                      "tests_skipped": tests_skipped[0],
                       "out_of_scope": len(set(out_of_scope)),
                       "truncated": truncated, "scanned": scanned,
                       "partial": False, "resume_hint": "", "cache_hit": r["cache_hit"]}))

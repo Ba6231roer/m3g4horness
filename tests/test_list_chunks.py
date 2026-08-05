@@ -226,7 +226,9 @@ class TestListChunksMaterialize(unittest.TestCase):
         self.assertEqual(data["done"], 1)
 
     def test_no_materialize_keeps_backward_compat_lite(self):
-        # WITHOUT --materialize the lite shell still carries files[] (no input_path)
+        # WITHOUT --materialize the lite shell still carries files[] (no input_path);
+        # lite never fans out / slices, so it omits per-item slice_dir (but the top-level
+        # scripts_dir is still present — it is host-agnostic, not fan-out-specific).
         p = self._write(_CHUNKS)
         argv = ["list_chunks.py", "--chunks", str(p), "--checkpoints", str(self.cp)]
         old, sys.argv = sys.argv, argv
@@ -236,9 +238,67 @@ class TestListChunksMaterialize(unittest.TestCase):
                 code = self.m.main()
         finally:
             sys.argv = old
-        it = json.loads(out.getvalue())["pending"][0]
+        data = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        it = data["pending"][0]
         self.assertIn("files", it)            # lite retains files[]
         self.assertNotIn("input_path", it)    # no materialization
+        self.assertNotIn("slice_dir", it)     # lite never slices → no per-item slice_dir
+        self.assertIn("scripts_dir", data)    # top-level scripts_dir always present
+
+    def test_slice_dir_absolute_in_tree_and_sanitized(self):
+        # slice_dir = <命令输出目录>/slices/s4/<safe(chunk_id)>/ ; <命令输出目录> = grandparent of
+        # the checkpoint dir (= self.d here). Absolute, resolve()-stable, in the
+        # <out>/slices/s4/ subtree; filename component == _safe_name(chunk_id); same root as
+        # checkpoint_path. (Mirrors test_init_clusters.test_slice_dir_absolute_in_tree_and_sanitized.)
+        p = self._write(_CHUNKS)
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        out_root = self.cp.resolve().parent.parent  # <命令输出目录> (= self.d)
+        for item in json.loads(out)["pending"]:
+            cid = item["chunk_id"]
+            self.assertIn("slice_dir", item)
+            sd = Path(item["slice_dir"])
+            self.assertTrue(sd.is_absolute(), "slice_dir must be absolute")
+            self.assertEqual(sd, sd.resolve(),
+                             "slice_dir resolve()-stable (no '..' residual)")
+            # in-tree + sanitized filename component (== _safe_name(chunk_id))
+            self.assertEqual(sd.relative_to(out_root),
+                             Path("slices") / "s4" / self.m._safe_name(cid))
+            self.assertEqual(sd.name, self.m._safe_name(cid))
+            # same root as checkpoint_path (both under <命令输出目录>)
+            self.assertTrue(Path(item["checkpoint_path"]).is_relative_to(out_root))
+            # existing additive fields still present (regression: slice_dir is additive)
+            for k in ("input_path", "checkpoint_path", "done_marker",
+                      "bytes", "oversize", "needs_slice", "files_count", "threat_id"):
+                self.assertIn(k, item)
+
+    def test_scripts_dir_absolute_file_derived(self):
+        # top-level scripts_dir is ABSOLUTE and == Path(list_chunks.py source).resolve().parent
+        # (__file__-derived = current install's <mgh-core>/scripts/; host-agnostic).
+        p = self._write(_CHUNKS)
+        _, out, _ = self._run(p)
+        data = json.loads(out)
+        self.assertIn("scripts_dir", data)
+        sd = Path(data["scripts_dir"])
+        self.assertTrue(sd.is_absolute(), "scripts_dir must be absolute")
+        self.assertEqual(sd, Path(self.m.__file__).resolve().parent,
+                         "scripts_dir must be __file__-derived (current install scripts dir)")
+
+    def test_slice_dir_sanitizes_separator_chunk_id(self):
+        # a synthetic chunk_id with `/`/`\`/`:` has its slice_dir filename component
+        # _safe_name-sanitized (real vvah chunk_ids are clean "chunk-NN" → no-op; this is
+        # defensive parity with init T1's NTFS-ADS guard). Envelope chunk_id stays canonical.
+        chunks = [{"id": "a/b\\c:d", "files": ["x.c"],
+                   "threat_id": "T9", "hypothesis": "h"}]
+        p = self._write(chunks)
+        _, out, _ = self._run(p)
+        item = json.loads(out)["pending"][0]
+        sd = Path(item["slice_dir"])
+        self.assertEqual(item["chunk_id"], "a/b\\c:d")  # envelope stays canonical
+        self.assertEqual(sd.name, "a_b_c_d")            # filename sanitized
+        for bad in (":", "/", "\\"):
+            self.assertNotIn(bad, sd.name)
 
     def test_bad_budget_exit2(self):
         p = self._write(_CHUNKS)

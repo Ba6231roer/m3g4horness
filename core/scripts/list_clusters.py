@@ -36,7 +36,7 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
                   no marker → unit stays pending (crash ≠ confirmed failure).
   - pending[]   = slim work items on the current page; each item (WITH --materialize):
       {cluster_id, category, kind, shape, candidate_count,
-       input_path, checkpoint_path, done_marker, failed_marker, bytes, oversize}
+       input_path, checkpoint_path, done_marker, failed_marker, bytes, oversize, slice_dir}
     (WITHOUT --materialize: backward-compat lite shell retains `evidence_files[]`)
   - input_path     = ABSOLUTE per-unit input file (subagent reads this; ≤ --max-unit-bytes).
   - checkpoint_path = ABSOLUTE path the T1 subagent MUST write its checkpoint to
@@ -47,6 +47,12 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - failed_marker   = ABSOLUTE `.failed` marker path (<checkpoint_path>.failed); the
                       orchestrator writes it (body {unit,reason,tier}) on a `failed` ack —
                       passed verbatim, NEVER self-assembled.
+  - slice_dir      = ABSOLUTE in-tree dir for this unit's big-file slice outputs
+                     (<init-dir>/slices/t1/<safe(unit_id)>/). Orchestrator passes it verbatim;
+                     the T1 induct subagent writes `chunk_sources.py --out
+                     <slice_dir>/<safe-stem>.slice.json` for runtime-discovered big evidence
+                     files and re-reads that exact path (NEVER a cwd/Temp-derived or
+                     out-of-tree --out). `_safe_name` sanitizes `::` in cluster_id.
   - bytes/oversize  = input file size / whether it exceeded --max-unit-bytes (sharded).
   - truncated   = passthrough of the wrapper's `truncated` flag (no silent loss)
   - offset/limit/effective_limit/shrunk = paging (R5.3b); orchestrator advances offset
@@ -239,6 +245,16 @@ def _paths(checkpoints_dir: Path, unit_id: str):
             str(base.with_name(base.name + ".failed")))
 
 
+def _slice_dir(checkpoints_dir: Path, unit_id: str) -> str:
+    """ABSOLUTE in-tree slice-output dir for a unit: <init-dir>/slices/t1/<safe(unit_id)>/.
+    <init-dir> = grandparent of the checkpoint dir (<target>/.mgh-init, same root as
+    checkpoint_path). `_safe_name` sanitizes `::` in cluster_id (NTFS ADS separator).
+    Pinned in-tree so a subagent process whose cwd is a system temp dir (opencode) cannot
+    drift big-file slice outputs out-of-tree."""
+    init_dir = checkpoints_dir.parent.parent
+    return str((init_dir / "slices" / "t1" / _safe_name(unit_id)).resolve())
+
+
 def _slim_materialized(cluster: dict, unit_id: str, hit_count: int,
                        input_path: str, nbytes: int, oversize: bool,
                        checkpoints_dir: Path) -> dict:
@@ -255,6 +271,7 @@ def _slim_materialized(cluster: dict, unit_id: str, hit_count: int,
         "failed_marker": fm,
         "bytes": nbytes,
         "oversize": oversize,
+        "slice_dir": _slice_dir(checkpoints_dir, unit_id),
     }
 
 
@@ -272,6 +289,7 @@ def _lite(cluster: dict, checkpoints_dir: Path) -> dict:
         "checkpoint_path": cp,
         "done_marker": dm,
         "failed_marker": fm,
+        "slice_dir": _slice_dir(checkpoints_dir, cid),
     }
 
 

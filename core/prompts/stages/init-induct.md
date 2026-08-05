@@ -15,8 +15,15 @@ candidates; you do NOT see other clusters (by design).
   + this cluster's candidate hits). For an oversize cluster the orchestrator fans out one
   `init-induct` per `<cluster_id>::shard-<n>` unit; each shard's `input_path` holds its
   subset of candidate hits — induce that subset, T2 reconciles all shards.
-- For big evidence files (> `--big-file-bytes`): obtain a **slice** yourself via
-  `chunk_sources.py`, NEVER read the whole file.
+- For big evidence files (> `--big-file-bytes`, discovered at runtime — NOT pre-listed in
+  any `needs_slice[]`): slice via `chunk_sources.py` (see `slice_dir` + Sanctioned tools),
+  NEVER read the whole file.
+- `slice_dir` (absolute, given VERBATIM by the orchestrator) — the in-tree dir for THIS
+  cluster's big-file slices. For a runtime-discovered big file, write its slice to
+  `<slice_dir>/<safe-stem>.slice.json` (`<safe-stem>` = the source file's stem) and re-read
+  THAT exact absolute path. **NEVER** a relative `--out`; **NEVER** a cwd / system-temp
+  path (e.g. opencode `…\Temp\opencode\`); **NEVER** out-of-tree — your process cwd is not
+  assumed and may be a temp dir, so only the verbatim `slice_dir` keeps slices in-tree.
 - `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
   MUST write your checkpoint to.
 - `done_marker` (absolute, given VERBATIM) — the exact `.done` path you MUST touch after.
@@ -70,7 +77,7 @@ codegraph 返回的 blast radius(谁依赖该控制 / 是否落在活请求路�
 
 ## Sanctioned tools(白名单)
 - 读侧:`Read`(仅 `input_path` 给定文件 + 其证据源/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
-- 脚本侧:仅 `chunk_sources.py`(且仅当需切片大文件);其余确定性脚本由**编排器**调用,不在本层。
+- 脚本侧:仅 `chunk_sources.py`(且仅当切片运行时发现的大证据文件),**用编排器透传的绝对工具路径 verbatim 调用**——recipe:`<绝对 chunk_sources> --in <big_file> --big-file-bytes .. --line <L> --out <slice_dir>/<safe-stem>.slice.json`,再回读该确切绝对路径(`<safe-stem>` 取源文件 stem)。硬边界(`NEVER`):裸名 `chunk_sources.py`、相对 `.opencode`/`.claude/mgh-core/scripts/…`(多层 install 下可解析到**别的**旧副本);相对 `--out`;cwd/Temp 派生路径;树外写。其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。
 

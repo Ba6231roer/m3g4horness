@@ -103,6 +103,44 @@ public class Gen { @PreAuthorize("x") public void g() {} }
 """
 
 
+# ── test source-tree sources (net noise for production-control discovery) ──
+# Maven/Gradle src/test | Python tests/ | JS __tests__/ | Ruby spec/ — skipped by
+# default (no candidates, counted in tests_skipped), re-included w/ --include-tests.
+TEST_MAVEN = "src/test/java/com/acme/SecurityTest.java"
+TEST_MAVEN_SRC = (
+    "package com.acme;\n"
+    "@EnableMethodSecurity\n"
+    "public class SecurityTest { public void check() {} }\n"
+)
+TEST_PY_DIR = "tests/test_auth.py"
+TEST_PY_DIR_SRC = (
+    "from crypto import Cipher\n"
+    "def test_enc(): return Cipher()\n"
+)
+TEST_JSTS_DIR = "src/__tests__/auth.ts"
+TEST_JSTS_DIR_SRC = (
+    "export class AuthTest { mask(s:string):string { return s; } }\n"
+)
+TEST_SPEC_DIR = "spec/auth_spec.rb"
+TEST_SPEC_DIR_SRC = (
+    "class AuthSpec; def mask(s); s[0,2]; end; end\n"
+)
+# Singular bare `test` dir segment under src/main = PRODUCTION code (helper pkg) —
+# MUST stay discovered (regression guard: matcher excludes bare singular `test`).
+PROD_SINGULAR_TEST = "src/main/java/com/acme/test/Helper.java"
+PROD_SINGULAR_TEST_SRC = (
+    "package com.acme.test;\n"
+    'public class Helper { @PreAuthorize("x") public void h() {} }\n'
+)
+TEST_PATHS = (TEST_MAVEN, TEST_PY_DIR, TEST_JSTS_DIR, TEST_SPEC_DIR)
+
+
+def _write_test_sources(repo):
+    for rel, src in ((TEST_MAVEN, TEST_MAVEN_SRC), (TEST_PY_DIR, TEST_PY_DIR_SRC),
+                     (TEST_JSTS_DIR, TEST_JSTS_DIR_SRC), (TEST_SPEC_DIR, TEST_SPEC_DIR_SRC)):
+        _write(repo, rel, src)
+
+
 class TestDiscover(unittest.TestCase):
     def setUp(self):
         self.d = _load("discover_controls")
@@ -251,6 +289,132 @@ class TestDiscover(unittest.TestCase):
         cands, _, _ = self._scan()
         self.assertIn("RootSvc.java", {c["file"] for c in cands},
                       "root-level normal source must be discovered (no dot-root false skip)")
+
+    # ── test source-tree skip (--include-tests) — mirrors the dotfiles tests above ──
+
+    def _scan_tests(self, include_tests, seed=None):
+        tests_skipped = [0]
+        cands, fwd, rev, fw, trunc, scanned = self.d.scan(
+            self.repo, seed, 200000, 204800, None,
+            include_tests=include_tests, tests_skipped=tests_skipped)
+        return cands, rev, fw, tests_skipped[0]
+
+    def test_tests_skipped_by_default(self):
+        # Spec: src/test | tests | __tests__ | spec are NOT discovered by default.
+        _write_test_sources(self.repo)
+        cands, _, _, n = self._scan_tests(include_tests=False)
+        cand_files = {c["file"] for c in cands}
+        for rel in TEST_PATHS:
+            self.assertNotIn(rel, cand_files,
+                             f"{rel}: test source must not yield candidates by default")
+        self.assertGreaterEqual(n, 4, "tests_skipped must count the 4 pruned test sources")
+
+    def test_singular_test_dir_kept_as_production(self):
+        # Spec regression guard: bare singular `test` dir segment under src/main is
+        # production code — NOT matched by the test-dir rule, stays discovered.
+        _write(self.repo, PROD_SINGULAR_TEST, PROD_SINGULAR_TEST_SRC)
+        cands, _, _, _ = self._scan_tests(include_tests=False)
+        self.assertIn(PROD_SINGULAR_TEST, {c["file"] for c in cands},
+                      "singular bare test/ production dir must stay discovered")
+
+    def test_include_tests_reincludes(self):
+        # Spec: --include-tests re-includes test source trees (eq. to before this rule).
+        _write_test_sources(self.repo)
+        cands, _, _, n = self._scan_tests(include_tests=True)
+        cand_files = {c["file"] for c in cands}
+        for rel in TEST_PATHS:
+            self.assertIn(rel, cand_files,
+                          f"{rel}: must be re-included under --include-tests")
+        self.assertEqual(n, 0, "tests_skipped is 0 when --include-tests re-includes all")
+
+    def test_test_skip_consistent_across_stages(self):
+        # Spec: test-dir skip is a single chokepoint — skeleton.json, call graph, AND
+        # scout targets all exclude test paths (not only the regex candidate path).
+        import json
+        _write_test_sources(self.repo)
+        outdir = Path(tempfile.mkdtemp(prefix="mgh_init_out_"))
+        cands, fwd, rev, fw, trunc, scanned = self.d.scan(
+            self.repo, None, 200000, 204800, None, outdir=outdir)  # include_tests=False default
+        (outdir / "controls_candidates.json").write_text(
+            json.dumps({"repo": str(self.repo), "candidates": cands}), encoding="utf-8")
+        sk = json.loads((outdir / "skeleton.json").read_text(encoding="utf-8"))
+        self.assertFalse(any(f["file"] in TEST_PATHS for f in sk["files"]),
+                         "skeleton.json must contain no test-source-tree path")
+        self.assertFalse(any(f in TEST_PATHS for f in rev),
+                         "call graph (reverse keys) must contain no test-source-tree path")
+        ps = _load("plan_scout")
+        plan_path = outdir / "scout_plan.json"
+        rc = self._run_main(ps, ["plan_scout.py",
+                                 "--skeleton", str(outdir / "skeleton.json"),
+                                 "--candidates", str(outdir / "controls_candidates.json"),
+                                 "--out", str(plan_path)])
+        self.assertEqual(rc, 0)
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        scout_files = [t["file"] for b in plan.get("batches", [])
+                       for t in b.get("targets", [])]
+        self.assertFalse(any(f in TEST_PATHS for f in scout_files),
+                         "scout targets must contain no test-source-tree path")
+
+    def test_walk_sources_and_collect_dir_test_prune(self):
+        # 7.2: direct unit test of the shared chokepoint (expand_scope). include_tests=True
+        # includes; False excludes prefix+segments, keeps singular test, counts correctly.
+        es = _load("expand_scope")
+        repo = Path(tempfile.mkdtemp(prefix="mgh_walk_"))
+        _write(repo, "src/test/java/Foo.java", "class Foo {}")
+        _write(repo, "tests/x.py", "def f(): pass")
+        _write(repo, "src/__tests__/y.ts", "export class Y {}")
+        _write(repo, "spec/z.rb", "class Z; end")
+        _write(repo, "src/main/java/com/acme/test/Keep.java", "class Keep {}")  # singular prod
+
+        def collected(include_tests):
+            box = [0]
+            files = sorted(p.relative_to(repo).as_posix()
+                           for p, _ in es.walk_sources(repo, include_tests=include_tests,
+                                                       tests_skipped=box))
+            return files, box[0]
+
+        inc, n_inc = collected(True)
+        for present in ("src/test/java/Foo.java", "tests/x.py", "src/__tests__/y.ts",
+                        "spec/z.rb", "src/main/java/com/acme/test/Keep.java"):
+            self.assertIn(present, inc)
+        self.assertEqual(n_inc, 0)
+
+        exc, n_exc = collected(False)
+        for absent in ("src/test/java/Foo.java", "tests/x.py", "src/__tests__/y.ts", "spec/z.rb"):
+            self.assertNotIn(absent, exc)
+        self.assertIn("src/main/java/com/acme/test/Keep.java", exc)  # singular kept
+        self.assertGreaterEqual(n_exc, 4)
+
+        # collect_dir parity (--path/--package scope resolves through the same prune)
+        d = repo / "src"
+        cd_inc = es.collect_dir(repo, d, include_tests=True)
+        cd_exc = es.collect_dir(repo, d, include_tests=False)
+        self.assertIn("src/__tests__/y.ts", cd_inc)
+        self.assertIn("src/test/java/Foo.java", cd_inc)
+        self.assertNotIn("src/__tests__/y.ts", cd_exc)
+        self.assertNotIn("src/test/java/Foo.java", cd_exc)
+        # singular prod `test` under src/main stays in both
+        self.assertIn("src/main/java/com/acme/test/Keep.java", cd_inc)
+        self.assertIn("src/main/java/com/acme/test/Keep.java", cd_exc)
+
+    def test_check_validates_tests_skipped_field(self):
+        # R5.9 / task 2.5: discover --check validates the wrapper's tests_skipped field.
+        # A normal main() run writes it (non-negative int) → --check returns 0; stripping
+        # it fails loud (exit 2).
+        import json
+        _write(self.repo, TEST_MAVEN, TEST_MAVEN_SRC)
+        outdir = Path(tempfile.mkdtemp(prefix="mgh_init_out_"))
+        rc = self._run_main(self.d, ["discover_controls.py", "--repo", str(self.repo),
+                                     "--out", str(outdir)])
+        self.assertEqual(rc, 0)
+        cd = json.loads((outdir / "controls_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(cd.get("tests_skipped"), 1)  # TEST_MAVEN is the one test source
+        # check passes on the just-written products
+        self.assertEqual(self._run_main(self.d, ["discover_controls.py", "--check", str(outdir)]), 0)
+        # check fails loud if tests_skipped is stripped from the wrapper
+        cd.pop("tests_skipped", None)
+        (outdir / "controls_candidates.json").write_text(json.dumps(cd), encoding="utf-8")
+        self.assertEqual(self._run_main(self.d, ["discover_controls.py", "--check", str(outdir)]), 2)
 
 
 if __name__ == "__main__":

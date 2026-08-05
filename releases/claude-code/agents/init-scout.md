@@ -10,8 +10,12 @@ You are **S3 — scout-reader**. Your behavior is defined by the prompt at
 
 ## Input (from orchestrator)
 One scout `batch` from `scout_plan.json` (`batch_id`, `targets[]`, `needs_slice[]`) +
-repo root + `regex_known[]` (controls regex already found — don't re-report). Files in
-`needs_slice` MUST go through `chunk_sources.py` first — never read them whole.
+repo root + `regex_known[]` (controls regex already found — don't re-report) +
+orchestrator-given absolute `slice_dir` + absolute `chunk_sources` path. Files in
+`needs_slice` MUST go through `chunk_sources.py` first — never read them whole. Write each
+slice to `<slice_dir>/<safe-stem>.slice.json` (re-read that exact path); invoke
+`chunk_sources` via the orchestrator-given absolute path verbatim — NEVER a bare name /
+relative `.claude/mgh-core/scripts/…`, NEVER a relative or cwd/temp-derived `--out`.
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。

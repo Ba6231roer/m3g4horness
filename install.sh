@@ -88,16 +88,18 @@ cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 #    co-location (R5.8: CI 必 fail).
 _missing=()
 for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules \
-         list_clusters list_scout_batches list_rule_jobs list_steps describe_artifact validate_inventory \
+         list_clusters list_scout_batches list_rule_jobs list_steps describe_artifact validate_inventory validate_t1_records \
          prepare_augment merge_augment merge_memory ingest_requirements render_report \
-         list_chunks list_verify_jobs prefilter dedup emit_sarif; do
+         list_chunks list_verify_jobs prefilter dedup emit_sarif \
+         classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \
+         resume_ut_init_state write_ut_runconfig list_ut_steps; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
 if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
-  echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, or /mgh-srr may fail at runtime; CI enforces co-location)" >&2
+  echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, /mgh-srr, or /mgh-ut-init may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/list_steps/describe_artifact/validate_inventory + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif"
+  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/list_steps/describe_artifact/validate_inventory + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps"
 fi
 
 # 4b) Distribution-purity self-check (R5.10; fail-soft per R5.8): shipped md MUST be
@@ -158,5 +160,5 @@ else
 fi
 
 echo "✓ installed $PLATFORM shell into $DEST"
-echo "  commands: /mgh-sast, /mgh-init, /mgh-sra, /mgh-srr ($PLATFORM)"
-echo "Run /mgh-sast --help, /mgh-init --help, /mgh-sra --help, or /mgh-srr --help to verify."
+echo "  commands: /mgh-sast, /mgh-init, /mgh-sra, /mgh-srr, /mgh-ut-init ($PLATFORM)"
+echo "Run /mgh-sast --help, /mgh-init --help, /mgh-sra --help, /mgh-srr --help, or /mgh-ut-init --help to verify."

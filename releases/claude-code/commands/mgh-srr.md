@@ -64,6 +64,8 @@ leaf scripts (Bash) and spawning the REUSED sra stage subagents (Agent). Shared 
 
 **硬边界(`NEVER`)**:(a) `Write` 任何 `.py`——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读 `.mgh-srr/**` 或 `change_context.json`);(c) `Read` 叶子 `.py` 源码。
 
+**`NEVER` 向系统临时目录写中间文件再回读**:确定性脚本 stdout 在 Bash tool result(最后一行是 JSON),直接消费;NEVER 重定向到 `$env:TEMP`/`%TEMP%`/`/tmp` 再回读。
+
 **implementation-intention(需 X → 合法出口 Y,NEVER `py -c`)**:
 - **工作清单 + fan-out 路径** → `ingest_requirements.py --materialize <out-dir>/inputs/augment` stdout 即 **slim 分页**摘要(`pending[]` 每项**绝对** `draft_path`/`done_marker`/`input_path`/`bytes`/`oversize` + `clarify_path` + `offset`/`limit`/`effective_limit`/`shrunk`);编排器**逐字读该 slim stdout**、**逐字透传** `input_path` 给复用的 sra 引擎 stage(subagent **自读** `input_path`,≤ `--max-unit-bytes`);**NEVER** 整份读 sra-shape `change_context.json`、**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相对路径、**NEVER** 把单元记录内联塞进 subagent task(只透传 `input_path`);
 - **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON);

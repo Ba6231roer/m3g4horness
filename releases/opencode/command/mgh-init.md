@@ -14,7 +14,7 @@ description: Discover existing reusable security controls in a project (input-va
 > 管道喂**同一** Python 守卫(`.opencode/hooks/block_adhoc_scripts.py`,与 claude 端零差异)。编排器**起步先**
 > `Bash: export MGH_INIT_ACTIVE=1` 标记运行域 + 写磁盘哨兵 `<target>/.mgh-init/.active`,并在 discover 后
 > `export MGH_TARGET=<绝对 repo>`(供 hook 判树;缺失则该条降级放行)。opt-out = `install.sh --no-enforce-hook`
-> (纪律仍由下方铁律 + 边界校验兜底)。守卫激活 = env **或** 磁盘哨兵——**哨兵关闭了 opencode「插件进程不继承
+> (纪律仍由 orchestrator-discipline fragment + 边界校验兜底)。守卫激活 = env **或** 磁盘哨兵——**哨兵关闭了 opencode「插件进程不继承
 > mid-session bash 导出的 env」的可靠性边界**:env 未继承担时哨兵兜底激活,使脚本只读 / 受信子树守卫在 opencode
 > 上整 run 可靠激活(见 `core/contracts/hooks/runtime-enforcement.md`)。
 
@@ -42,46 +42,18 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
 
-## Orchestrator discipline(铁律)
+## Orchestrator discipline
 
-编排器 = 宿主 agent,**不写代码**。确定性叶脚本经 `Bash` 执行;**NEVER `Read` 叶子 `.py` 源码进上下文**(报错看 stderr,不读源码)。
+> **REQUIRED SUB-SKILL: Use orchestrator-discipline** — 跑流水线前先加载完整编排纪律(opencode `.opencode/mgh-core/prompts/fragments/orchestrator-discipline.md`):三条 `NEVER` 硬边界(脚本扩展名 Write / `py -c` 内省 / Read 叶脚本源码)、implementation-intention recipe、fan-out 刚性三元组、`.failed` 终态、长跑 Bash per-call `timeout`、resume-from-disk、Re-entrancy & compaction。
 
-**硬边界(`NEVER`)**:(a) `Write` 任何 `.py`——大编排器(`mgh_init.py`)**或**一次性微脚本(`py -c` 产物、`_prep_scout_batches.py`、`_aggregate_scout.py`、`<run>_helper.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读 `.mgh-init/**`);(c) `Read` 叶子 `.py` 源码。
+编排器 = 宿主 agent(非物化脚本);完整纪律见上述 fragment。本壳下文 stage 流给 init 专属实例(确切 `list_steps.py`/`list_clusters.py`/`list_scout_batches.py`/`list_rule_jobs.py`/`resume_state.py`/`write_runconfig.py` 调用行、产物清单、`MGH_INIT_ACTIVE` + `.mgh-init/.active` 哨兵、init 边界披露)。
 
-**implementation-intention(需 X → 触发器 Y,NEVER `py -c`)**——每个常被手搓的需求都有合法出口:
-- **每步确切脚本路径 / 调用行 / IO shape** → `list_steps.py` stdout(或 `--step <id>` 单步);宿主前缀自动派生,**NEVER** 猜 `scripts/` vs `mgh-core/scripts/`、**NEVER** 漏宿主前缀;
-- **subagent 用的绝对工具脚本路径**(scout/induct 切片用的 `chunk_sources`)→ `list_steps.py` stdout `script_abs`(`__file__` 派生 = 当前 install 的 `<mgh-core>/scripts/` 目录);step 0 取该绝对基,把绝对 `chunk_sources` 路径**逐字透传**进 scout/induct subagent task(subagent 用该绝对路径 verbatim;**NEVER** 裸名、**NEVER** 相对 `.opencode`/`.claude/mgh-core/scripts/…`——多层 install 下相对路径可解析到**别的**旧副本;**NEVER** 从 `--target` 拼、**NEVER** 从 mid-session env 读);
-- **工作清单** → `list_clusters.py`(T1)/ `list_scout_batches.py`(scout)/ `list_rule_jobs.py`(T3);
-- **某 fan-out 单元的完整记录** → `list_* --materialize <inputs/<tier>>` stdout `pending[]` 每项的 `input_path`(绝对,subagent **自读**;≤ `--max-unit-bytes`);**NEVER** 整份读 `clusters.json`/`controls_candidates.json`/`scout_plan.json`/`controls_inventory.json`(编排器只装 slim 分页待办壳)、**NEVER** `py -c`、**NEVER** 把记录体内联塞进 subagent task(只透传 `input_path`);
-- **某 fan-out 单元的输出路径** → `list_*` stdout `pending[]` 每项的 `checkpoint_path`(scout/T1)/ `rule_path`(T3)+ `done_marker` + `failed_marker` + `slice_dir`(scout/T1 大文件切片输出目录;均**绝对**);**NEVER** 自拼 `<target>/<id>`、**NEVER** `py -c` 算路径、**NEVER** 相对路径;切片 `--out` = `<slice_dir>/<safe-stem>.slice.json`(subagent 写 + 回读该确切绝对路径;NEVER 相对 `--out`、NEVER cwd/Temp 派生、NEVER 树外);
-- **fan-out 单元 `failed` ack**(subagent 回 `failed <原因>`)→ 编排器 `Write` 该单元 `failed_marker`(= `list_*` stdout `pending[].failed_marker`,绝对、**逐字透传**、body `{unit,reason,tier}`;**NEVER** 自拼 `<checkpoint_path>.failed`、**NEVER** `py -c`、**NEVER** 让 subagent 写);**不重试**该单元、**不阻断**当前波次,继续下一单元。`.failed` = **终态**(resume 不重派,区别于 `.done` 的成功完成);crash 无 ack → 无 marker → 单元仍 `pending` → 重派(crash ≠ 确认失败,安全重试非静默丢失)。tier 完成门 = `done+failed>=total`(见 `resume_state.py` stdout `tiers`)。
-- **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON);
-- **派生量** → 该量产出者的 stdout 字段(`discover` stdout `big_files`/`unresolved_count`;`plan_scout` stdout/`scout_plan.json` `regex_known_count`);**NEVER** 自写脚本算。
-- **当前步骤 / 下一步** → `resume_state.py --target <target>` stdout `step`/`next_action`/`tiers`(进度纯从磁盘 `<target>/.mgh-init/` 重派生);**NEVER** 靠对话记忆判步骤、**NEVER** `py -c` 重算、**NEVER** `Read` 整份聚合 JSON 倒推进度。`--resume` 或任何压缩事件后**第一步**调之。
-
-**fan-out 刚性三元组**:每个 fan-out 步骤表述为 `[输入产物::字段] → script/subagent → [输出产物::字段]`;输出路径 = `list_*` stdout 的 `checkpoint_path`/`rule_path`(绝对),编排器**逐字透传**进 subagent task、subagent **恰好写该绝对路径**(零拼装、零占位符)。doubt 时刻 inline 1 行 shape(如「`scout_plan.json::batches[]` 即你的工作清单,经 `list_scout_batches.py` 取;每项 `checkpoint_path` 即该批产物绝对路径」)。
-
-**终态声明**:`merge_scout.py`/foldin 完成后,`scout_candidates.json` / `controls_candidates.json` / `clusters.json` 为**终态**——不再二次聚合 / 重切批(不出现 `_aggregate_scout.py` 之类重实现)。
-
-**边界校验**:每个 stage 产物跑完执行 `<producer> --check`(或独立 `validate_inventory.py`);失败(退出码 2)→ 回退重跑该步,**不带着破损产物继续**。
-
-**长跑 Bash 超时纪律**:给长跑确定性 Bash 调用(`discover_controls.py`/`plan_scout.py`/`merge_scout.py`)传一个慷慨的 per-call `timeout`(opencode shell 工具接受毫秒级 `timeout`),勿依赖默认超时(opencode 实测 60s/官方 120s)中途强杀。对带 `--time-budget-ms` 的 discover,`timeout` 取略大于 budget;**见 discover stdout `partial:true` → 用 Bash 重派 `discover ... --resume`** 推进(编排器循环、**NEVER** 写 wrapper `.py` 循环),带 sane 重派次数上界,超限则建议 `--scope`+`--merge` 分模块;`partial:false` 即 discover 完成、写最终产物。discover 产物落盘均原子(`.tmp`+`os.replace`),见 `core/contracts/init/discover-cache.md`。
-
-## Re-entrancy & compaction
-
-> **进度真相源 = 磁盘 `<target>/.mgh-init/`(checkpoints / `.done` / 产物 / `run_config.json`);对话记忆只是缓存,不是真相源。** 这把 compact / crash / 新 session 三种中断坍缩为**同一种恢复路径**——「读磁盘状态 → 继续」。
-
-1. claude `/compact` 与 opencode 自动压缩(~95% 触发)是**模型生成摘要**,**可能丢掉**本命令壳灌入的编排纪律系统提示词(硬边界 / fan-out 三元组 / NEVER 拼路径)。故续跑 SHALL **NEVER** 依赖「记得自己在第几步」。
-2. **`--resume` 或任何压缩事件后,编排器第一步 SHALL 调 `resume_state.py`** 从磁盘重派生 `step` + `next_action` + `tiers`,据此继续 fan-out / 下一步(见上方「当前步骤 / 下一步」recipe)。压缩后:`resume_state.py` 给当前 step → 据以 `list_steps.py --step <id>` 取确切调用行(配套语义,单步确切脚本路径 / 调用行 / IO shape)。
-3. 上下文吃紧时编排器 **MAY** **干净停止**(跑完当前 fan-out 波次、落 `.done`、不留半截单元)→ **新 session `/mgh-init --resume` 续**;此路径**优于**人工 `/compact`(后者摘要可能丢编排纪律导致执行路径偏离——直击用户痛点)。新 session 重灌命令壳 = 完整纪律提示词,进度由磁盘重派生,故 compact 是否丢提示词**无关紧要**。干净停止**亦** `rm <target>/.mgh-init/.active` 移除哨兵(或留待 resume step 0 重写覆盖;残留哨兵只挡脚本写、不挡 JSON/`.md`/读)。
-4. 既有 per-call `timeout` + discover `partial:true` + `--resume` 纪律**保持不变**(本段为 additive)。`run_config.json` 作起始态意图、`init_manifest.json` 作终态(磁盘 schema 不变)。
-5. **`.failed` = 终态**(确认失败,区别于 `.done` 的成功完成):`--resume` 跳过 `.failed` 单元(**不重派**);crash 无 ack → 无 marker → 单元仍 `pending` → 重派(crash ≠ 确认失败)。escape hatch = 人工 `rm <unit>.json.failed` 后 `--resume` 重派该单元。失败计数从磁盘(`resume_state.py`/`list_*` stdout `tiers`/`failed`)读,**NEVER** 对话记忆(见步骤 8)。
-5. **fan-out 波次 run-to-completion**:scout reader / T1 induct / T3 rulewriter 任一波次进行中,编排器 **MUST NOT** 因规模大(数百至 ~1000 单元)停下征求用户「拆分/跳过/终止」、**SHALL** 迭代 `list_*` stdout `pending[]`(以 `max_concurrent` 并发起 subagent)跑到 `pending` 为空。规模与边界(大 fan-out 计数 / 部分覆盖 / `.failed`/跳过单元 / 残留盲区)**SHALL** 流入既有披露渠道——`init_manifest.json::boundaries[]` + `report.md` + `resume_state.py` `notes[]`——**NEVER** 作为运行中阻塞式提问;披露计数取自磁盘 `resume_state.py`/`list_*` stdout(**NEVER** 对话记忆)。仅约束**运行已提交后**(波次进行中);i0 花 token **前**的 `--large-repo-threshold` → 建议 `--scope`+`--merge` 前置建议保持不变(见步骤 0)。
+> **stdout 直消费**:Bash tool result 已含 stdout(最后一行是 JSON);NEVER 把确定性脚本输出重定向到 `$env:TEMP`/`%TEMP%`/`/tmp` 再回读——直接取工具返回值。
 
 ## Orchestration flow
 
 ```
-0. parse + self-check(发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`(**花 token 前**前置建议;波次进行中不再因规模打断,见 Re-entrancy & compaction);扫描期向 stderr 打印进度)
+0. parse + self-check(发现脚本统计源文件数,超 `--large-repo-threshold` 则建议 `--scope`+`--merge`(**花 token 前**前置建议;波次进行中不再因规模打断,见 orchestrator-discipline fragment);扫描期向 stderr 打印进度)
    · **起步**:`Bash: export MGH_INIT_ACTIVE=1`(声明运行域,激活 PreToolUse hook,含子树外 Write/Edit 拦截)
    · **run_config(无状态 resume 意图源)**:起步后、花 token 前,**原子写** `<target>/.mgh-init/run_config.json`
      (起始态意图:记决定步骤图的本次 flag;与终态 `init_manifest.json` 边界清晰、互不替代):
@@ -133,6 +105,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
         --scout <target>/.mgh-init/scout_candidates.json --audit <target>/.mgh-init/checkpoints/scout/audit.json \
         --clusters <target>/.mgh-init/clusters.json
      · 候选集并入 `source:"scout"`;clusters.json **追加** scout 簇(regex 簇与其 usage_sites 不变)。复用 `discover_controls.form_clusters`,无逻辑漂移。
+     · **并入>0 级联失效**:fold-in 实际并入 N>0 候选时自动删除下游 t2/t3/t4 聚合 `.done`(stderr 注明 + stdout `invalidated_tiers[]`),使 scout 补完后 plain `--resume` 重跑 T2–T4;并入 0(全重复/全失败)不删(输入没变)。
      · **终态**:`scout_candidates.json` / `controls_candidates.json` / `clusters.json` 此时为终态——不再二次聚合 / 重切批(NEVER `_aggregate_scout.py`)。
 3c. (optional, codegraph-gated) init-resolve — 仅当 `codegraph=on` **且** `unresolved[]` 非空时执行;
      排空文本/AST 图结构性漏掉的框架路由 / DI / AOP / interface→impl / 反射控制。**non-fatal + bounded**:
@@ -151,8 +124,14 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
    [clusters.json::clusters[]] → list_clusters.py --materialize → [stdout slim pending[](每项 `input_path`/`bytes`/`oversize`/`checkpoint_path`/`done_marker`/`slice_dir`)]
      py .opencode/mgh-core/scripts/list_clusters.py --clusters <target>/.mgh-init/clusters.json --checkpoints <target>/.mgh-init/checkpoints/t1 --candidates <target>/.mgh-init/controls_candidates.json --materialize <target>/.mgh-init/inputs/t1
      → stdout `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`;物化每簇完整记录(簇字段 + 候选命中回查 `controls_candidates.json`)到 `inputs/t1/<unit>.input.json`(≤ `--max-unit-bytes`;oversize 簇切 `<cluster_id>::shard-<n>`)
+     · **scout 闸门**:`run_config.json` 启用 scout(`no_scout=false`)而 scout 层未完成时,`list_clusters.py` **退出码 2**(`{"error":"scout-incomplete-gate"}`,无 `pending[]`,stderr 给 recipe)——先完成 scout 层,NEVER 以纯 regex 簇继续 T1(`--no-scout` 显式绕行则闸门跳过)。
    按 `offset`/`effective_limit` 翻页(单页 > `--orch-budget-bytes` 时 `shrunk:true`;NEVER wrapper `.py`);per unit in page `pending[]`(NOT 顶层;`--resume` 跳过已 `.done`/`.failed`):
      - spawn init-induct(透传 `input_path` + checkpoint_path + done_marker + failed_marker + slice_dir + `<list_steps script_abs 派生的绝对 chunk_sources 路径>`;subagent 读 `input_path`,运行时发现的大证据文件写 `<绝对 chunk_sources> --out <slice_dir>/<safe-stem>.slice.json` 并回读该确切路径)→ 成功则恰好写 `checkpoint_path`(绝对) + touch `done_marker`;失败回 `failed <原因>` ack → 编排器写 `failed_marker`、不重试不阻断(见上「fan-out 单元 `failed` ack」)
+4b. T1→T2 边界闸门(T1 fan-out 波次完成后、进 T2 前 MUST 跑;BOM 剥离 + 形状校验,与 step 5 的 T2 边界 `validate_inventory` 对偶):
+     py .opencode/mgh-core/scripts/validate_t1_records.py --strip-bom --checkpoints <target>/.mgh-init/checkpoints/t1
+     py .opencode/mgh-core/scripts/validate_t1_records.py --check --checkpoints <target>/.mgh-init/checkpoints/t1
+   · `--strip-bom` 始终先跑(无损、idempotent,剥离 LLM 子代理 `Write` 产物的前导 UTF-8 BOM 宿主产物);`--check` 是 fail-loud 形状闸门(根级 `cluster_id`/`name`/`category`∈8/`kind`∈vvah 6-enum/`category`→`kind` 归一/`evidence`≥1 非空锚点/`entry_points` 列表/`confidence` 数值 + 无嵌套 `controls[]` 漂移签名)。
+   · `--check` 退出码 2(形状漂移)→ 外科式重派:对 stdout `violations[]` 每项 `rm <其 file>.done` 失效该违例簇 `.done` marker、重跑 `list_clusters` 重派该簇;NEVER 带破损 T1 记录进 T2 综合。BOM 非 shape 违例(`--check` 内存剥 BOM、记 `bom[]` advisory;`--strip-bom` 已磁盘剥离,故 `--check` 实跑时不见 BOM)。空目录 = `ok:true, records:0`(T1 是否跑过由 `resume_state` 判,非形状 validator)。
 5. T2: **先判聚合预算** — `py .opencode/mgh-core/scripts/plan_aggregate.py --node t2 --init-dir <target>/.mgh-init --budget <max-aggregate-bytes> [--materialize <target>/.mgh-init/inputs/t2]`
      · `needs_reduce=false`(≤ `--max-aggregate-bytes`,常见小仓)→ 既有 **single-context** `init-synthesis`(all T1 records, no raw code)→ `controls_inventory.json` + `checkpoints/t2/.done`(行为等价于引入硬阈值前)。
      · `needs_reduce=true`(> 预算)→ 每 shard 扇出 `init-synthesis`(partial;读 shard `pending[].input_path`,ack 回传,恰好写 `pending[].checkpoint_path`)→ 单一 **rollup** `init-synthesis` 仅吞 `rollup.summary_paths`(各 shard 摘要)→ 写 `controls_inventory.json` + `checkpoints/t2/.done`。**每个大模型请求 ≤ 预算**。
@@ -180,6 +159,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
    · manifest 含 `codegraph:{available,used,resolved_count,unresolved_residual}`:`available`=检测到 `.codegraph/`+CLI;`used`=`codegraph=on` 且 `init-resolve` 实跑;`resolved_count`/`unresolved_residual` 取自 `resolved.json`(经
      `py .opencode/mgh-core/scripts/describe_artifact.py --in <target>/.mgh-init/resolved.json --field resolved --count` 计数,NEVER `py -c`);`codegraph=off` 时 `used=false`/`resolved_count=0`,不出现解析计数。report.md 同步披露 codegraph 用量 + 残留盲区。
    · **fan-out 失败披露**(任一 tier `failed>0`):据 `resume_state.py` stdout `tiers[<tier>].failed`(磁盘真相、**NEVER** 对话记忆)写 `init_manifest.json::failures`(per-tier `{done,failed,total}`)+ `boundaries[]`(「fan-out 单元确认失败、已跳过、终局需人评」)+ `report.md` 同步披露失败计数/率。
+   · **scout_merged 落账**:读 `resume_state.py` stdout `tiers.scout.merged`(fold-in 实际并入数;fold-in 未跑 / `--no-scout` 时缺省)写入 `init_manifest.json::scout.scout_merged`(既有 `scout` 段增字段,不改段结构)。
    · **收尾移除哨兵**:`rm <target>/.mgh-init/.active`(run 完成;避免残留哨兵锁死日常开发)
 ```
 
@@ -206,6 +186,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 | scout audit | subagent `init-scout-audit` (opt) | `core/prompts/stages/init-scout-audit.md` |
 | scout fold-in | **script** | `core/scripts/merge_scout.py` (reuses `discover_controls.form_clusters`) |
 | inventory validate | **script** | `core/scripts/validate_inventory.py` (T2 边界;`design_controls` 兼容 + evidence 锚点 + kind 归一) |
+| T1 record gate | **script** | `core/scripts/validate_t1_records.py` (T1→T2 边界;`--check` 形状 + `--strip-bom` 无损 BOM 剥离) |
 | stage boundary check | **script** | `discover_controls`/`plan_scout`/`merge_scout` `--check`(每 stage 产物校验) |
 
 ### Deterministic invocation (Bash)
@@ -224,6 +205,9 @@ py .opencode/mgh-core/scripts/discover_controls.py --repo . --out ./.mgh-init --
 py .opencode/mgh-core/scripts/write_runconfig.py --target . --format opencode --no-scout
 py .opencode/mgh-core/scripts/resume_state.py --target .
 py .opencode/mgh-core/scripts/resume_state.py --target . --check
+# 过期凭证(scout 未完 + 下游 .done)先预览再清除,然后 --resume 重跑 t2/t3/t4
+py .opencode/mgh-core/scripts/resume_state.py --target . --invalidate-stale --dry-run
+py .opencode/mgh-core/scripts/resume_state.py --target . --invalidate-stale
 # 聚合硬阈值闸门(T2 / scout-merge):≤ 预算 single-context;> 预算 map-reduce
 py .opencode/mgh-core/scripts/plan_aggregate.py --node t2 --init-dir ./.mgh-init --budget 262144 --materialize ./.mgh-init/inputs/t2
 py .opencode/mgh-core/scripts/plan_aggregate.py --node scout-merge --init-dir ./.mgh-init --budget 262144
@@ -237,12 +221,15 @@ py .opencode/mgh-core/scripts/list_scout_batches.py --scout-plan ./.mgh-init/sco
 py .opencode/mgh-core/scripts/merge_scout.py --candidates ./.mgh-init/controls_candidates.json --scout ./.mgh-init/scout_candidates.json --audit ./.mgh-init/checkpoints/scout/audit.json --clusters ./.mgh-init/clusters.json
 py .opencode/mgh-core/scripts/merge_scout.py --check ./.mgh-init/scout_candidates.json
 py .opencode/mgh-core/scripts/validate_inventory.py --inventory ./.mgh-init/controls_inventory.json
+py .opencode/mgh-core/scripts/validate_t1_records.py --strip-bom --checkpoints ./.mgh-init/checkpoints/t1
+py .opencode/mgh-core/scripts/validate_t1_records.py --check --checkpoints ./.mgh-init/checkpoints/t1
 py .opencode/mgh-core/scripts/list_rule_jobs.py --inventory ./.mgh-init/controls_inventory.json --format opencode --checkpoints ./.mgh-init/checkpoints/t3 --target . --rules-dir docs/security-controls --materialize ./.mgh-init/inputs/t3 --offset 0 --limit 50 --max-unit-bytes 196608 --orch-budget-bytes 65536
 py .opencode/mgh-core/scripts/assemble_rules.py --target . --format opencode
 ```
 
 ### Resume / cache
 - **`--resume` 首步** = `py .opencode/mgh-core/scripts/resume_state.py --target <target>` → 读 stdout `step`/`next_action`/`tiers` 继续(进度纯从磁盘 `<target>/.mgh-init/` 重派生;**NEVER** 靠对话记忆判步骤)。`--check` 可在起步校验磁盘状态自洽(退出码 2 = 不自洽)。
+- **过期凭证 recipe**:起步 `resume_state.py --check` 若报「scout 启用 + scout 未完 + 下游 t2/t3/t4 `.done`」违例(退出码 2)= 下游 marker 是基于 regex-only 输入的**过期凭证** → 先 `py .opencode/mgh-core/scripts/resume_state.py --target <target> --invalidate-stale --dry-run` 预览,再 `--invalidate-stale` 清除,然后续跑——NEVER 手工 `del` 下游 marker、NEVER 静默跳过已过期 tier。
 - **新 session 运行域 env 重注入**:`--resume` 走同一命令壳 step 0 → 重新 `export MGH_INIT_ACTIVE=1`;并在 fan-out 前从既有 `controls_candidates.json::repo` 重设 `MGH_TARGET`(产物在盘上、`describe_artifact.py --field repo`,无需重跑 discover)。**确定性脚本本身不读 env**(flag + 磁盘驱动),env 仅影响 hook 子树守卫强度。
 - Work units: i1 per file, **scout per batch**, T1 per cluster, T2/T4 whole, T3 per category.
 - `<target>/.mgh-init/checkpoints/<tier>/<unit>.json.done`(成功)**或** `.failed`(确认失败)= 终态,gate `--resume`(均跳过、不重派);`run_config.json` 使 `--resume` 免重输 flag。
@@ -262,7 +249,7 @@ py .opencode/mgh-core/scripts/assemble_rules.py --target . --format opencode
 - LLM-induced candidates — human review required.
 - **Existence ≠ effectiveness** (CVE-2025-41248).
 - Call-graph textual/AST — misses AOP/reflection/DI/framework-routing; surface `unresolved[]`.
-- **宿主 shell 超时**:opencode 可经环境变量 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局 shell 超时,但**须在 opencode 启动前就绪**(会话中途 `export` 不被 opencode 插件进程继承,与运行域 env 同可靠性边界);per-call `timeout`(见「Orchestrator discipline」长跑 Bash 超时纪律)是跨宿主公共杠杆、会话内即时生效。
+- **宿主 shell 超时**:opencode 可经环境变量 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`(默认 120000)提升全局 shell 超时,但**须在 opencode 启动前就绪**(会话中途 `export` 不被 opencode 插件进程继承,与运行域 env 同可靠性边界);per-call `timeout`(见 orchestrator-discipline fragment 长跑 Bash 超时纪律)是跨宿主公共杠杆、会话内即时生效。
 - **点前缀路径默认不扫描**(tooling/VCS/IDE/build/config/索引,如 `.opencode`/`.claude`/`.codegraph`/`.github`):控制定义点落在 `.xxx` 内时默认不会被发现,须传 `--include-dotfiles` 才纳入;discover stdout `dotfiles_skipped` 计本次跳过的点前缀源文件数;`report.md` / `init_manifest.json::boundaries[]` 披露该边界。
 - **测试源码树默认不扫描**(`src/test`/`src/tests` 前缀与 `tests`/`__tests__`/`__mocks__`/`spec`/`specs` 目录段):控制定义点落在测试目录内时默认不会被发现,须传 `--include-tests` 才纳入;discover stdout `tests_skipped` 计本次跳过的测试源文件数;`report.md` / `init_manifest.json::boundaries[]` 披露该边界。
 - ≥1.5M-line repos: prefer `--scope` per module + `--merge`.

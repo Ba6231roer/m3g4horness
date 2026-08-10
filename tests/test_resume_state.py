@@ -27,13 +27,18 @@ WC = _load("write_runconfig")
 
 
 class _State:
-    """Build a synthetic .mgh-init under a temp target."""
-    def __init__(self, fmt="opencode", **rc_flags):
+    """Build a synthetic run dir under a temp target."""
+    def __init__(self, fmt="opencode", run_root=".mgh-init", **rc_flags):
         self.target = Path(tempfile.mkdtemp(prefix="mgh_rs_"))
-        self.init = self.target / ".mgh-init"
+        self.run_root = run_root
+        self.init = self.target / run_root
         self.init.mkdir(parents=True, exist_ok=True)
-        # write run_config via the real writer (stateless-resume intent source)
+        # write run_config via the real writer (stateless-resume intent source).
+        # Only pass --run-root for non-default names so the default case exercises the
+        # bare --target path (byte-equivalent to the prior hard-coded .mgh-init behavior).
         argv = ["write_runconfig.py", "--target", str(self.target), "--format", fmt]
+        if run_root != ".mgh-init":
+            argv += ["--run-root", run_root]
         for k, v in rc_flags.items():
             argv.append(f"--{k.replace('_', '-')}")
             if not isinstance(v, bool):
@@ -64,6 +69,18 @@ class _State:
 
     def main(self, *extra):
         argv = ["resume_state.py", "--init-dir", str(self.init)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = RS.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def main_target(self, *extra):
+        """Resolve the run dir from --target (+ optional --run-root), NOT --init-dir."""
+        argv = ["resume_state.py", "--target", str(self.target)] + list(extra)
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -280,6 +297,197 @@ class TestResumeState(unittest.TestCase):
         s.touch("checkpoints/scout/audit.json.failed")
         st = s.state()
         self.assertEqual(st["tiers"]["scout"]["failed"], 1)   # only scout-001
+
+
+    # ---- --run-root: default equivalence / named dir / --init-dir priority ----
+
+    def _base_discover(self, run_root=".mgh-init"):
+        s = _State(no_scout=True, run_root=run_root)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        return s
+
+    def test_run_root_default_equals_init_dir_resolution(self):
+        # --target <t> (no flags) resolves to <t>/.mgh-init == --init-dir <t>/.mgh-init.
+        s = self._base_discover()
+        code_def, out_def, _ = s.main_target()                  # default resolution
+        code_id, out_id, _ = s.main()                           # explicit --init-dir
+        self.assertEqual(code_def, 0)
+        self.assertEqual(code_id, 0)
+        self.assertEqual(json.loads(out_def)["step"], json.loads(out_id)["step"])
+        self.assertEqual(json.loads(out_def)["tiers"], json.loads(out_id)["tiers"])
+
+    def test_run_root_explicit_default_byte_equivalent(self):
+        # --target <t> ≡ --target <t> --run-root .mgh-init (spec: byte-level identical).
+        s = self._base_discover()
+        c1, o1, _ = s.main_target()
+        c2, o2, _ = s.main_target("--run-root", ".mgh-init")
+        self.assertEqual(c1, c2)
+        self.assertEqual(o1, o2)                                # byte-identical stdout
+
+    def test_run_root_named_dir_read(self):
+        # --run-root .mgh-ut-init reads <t>/.mgh-ut-init; default --target misses it.
+        # Only run_config present (no discover products) -> step="discover".
+        s = _State(no_scout=True, run_root=".mgh-ut-init")
+        code, out, _ = s.main_target("--run-root", ".mgh-ut-init")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["step"], "discover")   # only run_config present
+        # default --target resolves <t>/.mgh-init (absent here) -> exit 1
+        code2, _, _ = s.main_target()
+        self.assertEqual(code2, 1)
+
+    def test_init_dir_overrides_run_root(self):
+        # --init-dir wins over --run-root even when --run-root names a nonexistent dir.
+        s = self._base_discover()                               # .mgh-init populated -> t2
+        code, out, _ = s.main("--run-root", ".mgh-does-not-exist")
+        self.assertEqual(code, 0)                               # --init-dir won
+        self.assertEqual(json.loads(out)["step"], "t2")         # read .mgh-init, not bogus dir
+
+
+# ---- scout-tier gate / stale-credential + D4 scout consistency (fix-mgh-init-scout-stranding) ----
+
+
+class TestScoutConsistency(unittest.TestCase):
+    """--check stale-credential + scout-contribution violations, --invalidate-stale
+    dry-run/real consistency, tiers.scout.merged additive field."""
+
+    def _scout_enabled(self):
+        s = _State()  # scout enabled (no_scout=false)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        return s
+
+    # --- stale credentials: scout incomplete + downstream aggregate .done ---
+
+    def test_check_stale_violation_t2_only(self):
+        s = self._scout_enabled()
+        s.touch("checkpoints/t2/synthesis.json.done")  # no scout_plan → scout incomplete
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("stale" in v["issue"] for v in violations),
+                        [v["issue"] for v in violations])
+
+    def test_check_stale_violation_t3_only(self):
+        s = self._scout_enabled()
+        s.touch("checkpoints/t3/authorization.opencode.json.done")
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("stale" in v["issue"] for v in violations),
+                        [v["issue"] for v in violations])
+
+    def test_check_stale_violation_t4_only(self):
+        s = self._scout_enabled()
+        s.touch("checkpoints/t4/consistency.json.done")
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("stale" in v["issue"] for v in violations),
+                        [v["issue"] for v in violations])
+
+    def test_check_no_stale_when_scout_complete(self):
+        s = self._scout_enabled()
+        s.write_json("scout_plan.json", {"repo": str(s.target), "batches": [],
+                                         "truncated": False})  # 0 batches → complete
+        s.write_json("controls_inventory.json", {"repo": str(s.target), "format": "opencode",
+                                                  "controls": []})
+        s.touch("checkpoints/t2/synthesis.json.done")
+        s.touch("checkpoints/t3/authorization.opencode.json.done")
+        s.touch("checkpoints/t4/consistency.json.done")
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)                     # complete → NOT stale
+        self.assertTrue(json.loads(out)["ok"])
+
+    def test_invalidate_stale_dry_run_lists_not_deletes(self):
+        s = self._scout_enabled()
+        t2 = s.touch("checkpoints/t2/synthesis.json.done")
+        t4 = s.touch("checkpoints/t4/consistency.json.done")
+        code, out, _ = s.main("--invalidate-stale", "--dry-run")
+        self.assertEqual(code, 0)
+        data = json.loads(out)["invalidate_stale"]
+        self.assertTrue(data["dry_run"])
+        self.assertEqual(len(data["markers"]), 2)
+        self.assertTrue(t2.exists() and t4.exists())   # dry-run touches nothing
+
+    def test_invalidate_stale_deletes_markers(self):
+        s = self._scout_enabled()
+        t2 = s.touch("checkpoints/t2/synthesis.json.done")
+        t4 = s.touch("checkpoints/t4/consistency.json.done")
+        code, out, _ = s.main("--invalidate-stale")
+        self.assertEqual(code, 0)
+        data = json.loads(out)["invalidate_stale"]
+        self.assertFalse(data["dry_run"])
+        self.assertEqual(len(data["removed"]), 2)
+        self.assertFalse(t2.exists() and t4.exists())  # really removed
+        # after removal, --check no longer reports the stale violation
+        code2, out2, _ = s.main("--check")
+        self.assertEqual(code2, 0)                     # no markers left → consistent
+        self.assertTrue(json.loads(out2)["ok"])
+
+    # --- D4: scout contribution consistency ---
+
+    def test_check_scout_stranded_violation(self):
+        # batches>0 + readers terminal + provenance.scout_merged absent = stranded
+        s = self._scout_enabled()
+        s.write_json("scout_plan.json", {"repo": str(s.target), "batches": [
+            {"batch_id": "b1"}], "truncated": False})
+        s.write_json("checkpoints/scout/b1.json", {"batch_id": "b1"})
+        s.touch("checkpoints/scout/b1.json.done")
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("never merged" in v["issue"] for v in violations),
+                        [v["issue"] for v in violations])
+
+    def test_check_scout_merged_zero_disclosed_not_gating(self):
+        # scout_merged=0 → --check exit 0 + notes[] disclosure (recall-gap advisory)
+        s = self._scout_enabled()
+        s.write_json("scout_plan.json", {"repo": str(s.target), "batches": [
+            {"batch_id": "b1"}], "truncated": False})
+        s.write_json("checkpoints/scout/b1.json", {"batch_id": "b1"})
+        s.touch("checkpoints/scout/b1.json.done")
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "provenance": {"scout_merged": 0}})
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertTrue(data["ok"])
+        self.assertTrue(any("merged 0" in n for n in data["notes"]),
+                        data["notes"])
+
+    # --- tiers.scout.merged additive field (resolve) ---
+
+    def test_tiers_scout_merged_present_when_foldin_recorded(self):
+        s = _State()
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "provenance": {"scout_merged": 5}})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        s.write_json("scout_plan.json", {"repo": str(s.target), "batches": [], "truncated": False})
+        st = s.state()
+        self.assertEqual(st["tiers"]["scout"].get("merged"), 5)
+
+    def test_tiers_scout_merged_absent_when_foldin_not_run(self):
+        s = _State()  # no provenance / no scout_plan → fold-in never ran
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        st = s.state()
+        self.assertNotIn("merged", st["tiers"]["scout"])
+
+    def test_resolve_notes_merged_zero_disclosure(self):
+        s = _State()
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "provenance": {"scout_merged": 0}})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        s.write_json("scout_plan.json", {"repo": str(s.target), "batches": [
+            {"batch_id": "b1"}], "truncated": False})
+        s.write_json("checkpoints/scout/b1.json", {"batch_id": "b1"})
+        s.touch("checkpoints/scout/b1.json.done")
+        st = s.state()
+        self.assertTrue(any("merged 0" in n for n in st["notes"]), st["notes"])
 
 
 if __name__ == "__main__":

@@ -41,6 +41,8 @@ subagents) and run deterministic stage scripts (bash). Shared assets live at
 
 **硬边界(`NEVER`)**:(a) `write`/`edit` 任何 `.py`——大编排器(`mgh_sast.py`)**或**一次性微脚本(`py -c` 产物、`_prep_chunks.py`、`_aggregate_verify.py`、`<run>_helper.py`);(b) `bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读 `security-scan/**` / `scope_manifest.json`);(c) `read` 叶子 `.py` 源码。
 
+**`NEVER` 向系统临时目录写中间文件再回读**:确定性脚本 stdout 在 Bash tool result(最后一行是 JSON),直接消费;NEVER 重定向到 `$env:TEMP`/`%TEMP%`/`/tmp` 再回读。
+
 **implementation-intention(需 X → 触发器 Y,NEVER `py -c`)**——每个常被手搓的需求都有合法出口:
 - **工作清单** → `list_chunks.py`(s4 fan-out)/ `list_verify_jobs.py`(s6 fan-out);
 - **瞄一眼结构** → `describe_artifact.py --keys/--sample/--shape/--field`(**NEVER** `py -c`、**NEVER** `read` 整份大 JSON);

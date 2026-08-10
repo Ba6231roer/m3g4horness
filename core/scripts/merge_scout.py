@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from discover_controls import form_clusters  # reuse grouping logic, no drift
+from init_tier import INIT_CATEGORIES, normalize_category, stale_marker_paths  # single source of truth
 
 
 def _normalize(c, i):
@@ -30,7 +31,13 @@ def _normalize(c, i):
     Returns None when ANY required field (`category` or `file`) is missing/empty so the
     caller skips + warns (both are required downstream — never fabricate either). All field
     access uses `.get`; no required field is direct-indexed (defense-in-depth for when
-    `--check` is bypassed: a single malformed candidate is skipped, not a KeyError abort)."""
+    `--check` is bypassed: a single malformed candidate is skipped, not a KeyError abort).
+
+    Category is deterministically normalized to the canonical 8-category form via
+    init_tier.normalize_category AT THE FOLD-IN BOUNDARY so T2 / validate_inventory only
+    see canonical names (a drifted scout name like access-control/auth maps to its
+    canonical member; the caller skips + warns a candidate whose normalized category is
+    NOT one of the 8)."""
     if not c.get("category") or not c.get("file"):
         return None
     a = c.get("anchor") or {}
@@ -38,7 +45,7 @@ def _normalize(c, i):
         "id": c.get("id") or f"S-{i:04d}",
         "file": c.get("file"),
         "line": c.get("line"),
-        "category": c.get("category"),
+        "category": normalize_category(c.get("category")),
         "kind": c.get("kind"),
         "pattern": c.get("pattern") or a.get("class") or a.get("method") or "",
         "anchor": a,
@@ -98,9 +105,11 @@ def _emit_load_error(detail):
 
 def _run_check(scout_path: Path):
     """R5.9 boundary check: validate scout_candidates.json. Every candidate MUST carry
-    `source:"scout"`, a concrete `file:line` anchor, and a non-empty `category`; the file
-    MUST parse as JSON. Any boundary failure (malformed JSON / unreadable / bad wrapper /
-    field violation) returns exit 2 so the orchestrator gate reruns S4; success exit 0."""
+    `source:"scout"`, a concrete `file:line` anchor, and a non-empty `category` that
+    normalizes (init_tier alias map) into the canonical 8 — drift is caught HERE at the
+    fold-in boundary, not at T2; the file MUST parse as JSON. Any boundary failure
+    (malformed JSON / unreadable / bad wrapper / field violation) returns exit 2 so the
+    orchestrator gate reruns S4; success exit 0."""
     violations = []
     try:
         raw = scout_path.read_text(encoding="utf-8")
@@ -137,6 +146,9 @@ def _run_check(scout_path: Path):
             violations.append({"index": i, "issue": "missing line"})
         if not c.get("category"):
             violations.append({"index": i, "issue": "missing category"})
+        elif normalize_category(c.get("category")) not in INIT_CATEGORIES:
+            violations.append({"index": i, "issue":
+                               f"category {c.get('category')!r} not in the 8 canonical init categories"})
     ok = not violations
     print(f"[merge_scout --check] {scout_path}: {'OK' if ok else f'{len(violations)} violation(s)'}",
           file=sys.stderr)
@@ -191,7 +203,9 @@ def main():
         seen.add(k)
         fresh_raw.append(c)
     # normalize; skip + warn on any candidate missing a required field (category/file)
-    # (belt-and-suspenders for the audit path, which does not pass through --check)
+    # OR whose category does not normalize into the canonical 8 (D3 — a drifted name is
+    # never passed downstream; belt-and-suspenders for the audit path, which does not
+    # pass through --check)
     fresh = []
     skipped = 0
     for i, c in enumerate(fresh_raw):
@@ -201,6 +215,13 @@ def main():
             print(f"[merge_scout] warn: scout candidate #{i} "
                   f"({c.get('file', '?')}:{c.get('line', '?')}) "
                   f"missing required field(s): {', '.join(missing)} - skipped",
+                  file=sys.stderr)
+            skipped += 1
+            continue
+        if n["category"] not in INIT_CATEGORIES:
+            print(f"[merge_scout] warn: scout candidate #{i} "
+                  f"({c.get('file', '?')}:{c.get('line', '?')}) "
+                  f"category {n['category']!r} not in the 8 canonical categories - skipped",
                   file=sys.stderr)
             skipped += 1
             continue
@@ -224,12 +245,33 @@ def main():
     Path(args.clusters).write_text(
         json.dumps(cl, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    # --- cascade invalidation: fold-in actually ADDED candidates → downstream aggregate
+    # .done markers are stale credentials (produced from regex-only input) → delete them
+    # so --resume re-runs t2/t3/t4 with the scout clusters included. added==0 (all
+    # duplicate / all failed) → input unchanged → downstream markers stay valid. t1
+    # per-cluster markers are NOT touched (scout clusters re-enumerate as new pending
+    # units after fold-in).
+    invalidated_tiers = []
+    if len(fresh) > 0:
+        for p in stale_marker_paths(Path(args.candidates).resolve().parent):
+            try:
+                p.unlink()
+                tn = p.parent.name
+                if tn not in invalidated_tiers:
+                    invalidated_tiers.append(tn)
+            except OSError:
+                pass  # marker already gone / unwritable — non-fatal, idempotent
+        invalidated_tiers.sort()
+
     print(f"[merge_scout] +{len(fresh)} scout candidates, +{len(scout_clusters)} scout clusters"
-          + (f", {skipped} skipped (missing required field)" if skipped else ""),
+          + (f", {skipped} skipped" if skipped else "")
+          + (f", cascade-invalidated downstream aggregate markers {invalidated_tiers}"
+             if invalidated_tiers else ""),
           file=sys.stderr)
     print(json.dumps({"scout_candidates_added": len(fresh),
                       "scout_clusters_added": len(scout_clusters),
-                      "skipped": skipped}))
+                      "skipped": skipped,
+                      "invalidated_tiers": invalidated_tiers}))
     return 0
 
 

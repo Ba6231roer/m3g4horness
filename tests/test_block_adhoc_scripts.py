@@ -13,7 +13,8 @@ HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "releases" / "claude-code" / "hooks" / "block_adhoc_scripts.py"
 
 _DOMAIN_ENV = {"init": "MGH_INIT_ACTIVE", "sast": "MGH_SAST_ACTIVE",
-               "sra": "MGH_SRA_ACTIVE", "srr": "MGH_SRR_ACTIVE"}
+               "sra": "MGH_SRA_ACTIVE", "srr": "MGH_SRR_ACTIVE",
+               "ut-init": "MGH_UT_INIT_ACTIVE"}
 
 
 def _load():
@@ -48,8 +49,10 @@ def _run_hook(mod, payload, domain="init", active="1"):
     return code, err.getvalue()
 
 
-_RUN_ROOTS = {"init": ".mgh-init", "sast": "security-scan", "sra": ".mgh-sra", "srr": ".mgh-srr"}
-_DOMAIN_KEYS = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE")
+_RUN_ROOTS = {"init": ".mgh-init", "sast": "security-scan", "sra": ".mgh-sra",
+              "srr": ".mgh-srr", "ut-init": ".mgh-ut-init"}
+_DOMAIN_KEYS = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE",
+                "MGH_UT_INIT_ACTIVE")
 
 
 def _run_with_sentinel(mod, payload, domain, sentinel_dict, mgh_target_env=None):
@@ -227,6 +230,86 @@ class TestBlockAdhocScriptsInit(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class TestBlockAdhocScriptsUtInit(unittest.TestCase):
+    """/mgh-ut-init run-domain (MGH_UT_INIT_ACTIVE=1) — the fifth domain. Same shape as init's
+    positive allowlist: ut-init writes rules into .claude/rules + docs/test-conventions +
+    AGENTS.md, so root-level pollution fails loud just like init's."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _run(self, payload, active="1"):
+        return _run_hook(self.m, payload, domain="ut-init", active=active)
+
+    def _run_with_target(self, payload, target):
+        old = os.environ.get("MGH_TARGET")
+        if target is None:
+            os.environ.pop("MGH_TARGET", None)
+        else:
+            os.environ["MGH_TARGET"] = target
+        try:
+            return self._run(payload)
+        finally:
+            if old is None:
+                os.environ.pop("MGH_TARGET", None)
+            else:
+                os.environ["MGH_TARGET"] = old
+
+    def test_block_introspection_py_c(self):
+        code, err = self._run({"tool_name": "Bash", "tool_input": {
+            "command": 'py -c "import json; json.load(open(\'x.json\'))"'}})
+        self.assertEqual(code, 2)
+        self.assertIn("list_test_groups", err)  # recipe points at the ut work-list primitive
+
+    def test_block_adhoc_py_write(self):
+        code, err = self._run({"tool_name": "Write", "tool_input": {
+            "file_path": "_prep_extract.py"}})
+        self.assertEqual(code, 2)
+        self.assertIn("_prep_extract.py", err)
+
+    def test_block_root_pollution(self):
+        # ut-init writes rules into the project root — a root-level temp file fails loud
+        # (same in-tree root-pollution shape init guards against).
+        target = tempfile.mkdtemp(prefix="mgh_ut_tgt_")
+        code, err = self._run_with_target({"tool_name": "Write", "tool_input": {
+            "file_path": f"{target}/temp_groups1.json"}}, target)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned ut-init subtrees", err)
+
+    def test_pass_sanctioned_subtrees(self):
+        target = tempfile.mkdtemp(prefix="mgh_ut_tgt_")
+        for rel in (".mgh-ut-init/inputs/t1/u.input.json",
+                    ".claude/rules/test-junit5.md",
+                    "docs/test-conventions/mockito.md",
+                    "AGENTS.md"):
+            code, err = self._run_with_target({"tool_name": "Write", "tool_input": {
+                "file_path": f"{target}/{rel}"}}, target)
+            self.assertEqual(code, 0, f"ut-init sanctioned write blocked: {rel}\n{err}")
+
+    def test_block_out_of_tree_drive_root(self):
+        target = tempfile.mkdtemp(prefix="mgh_ut_tgt_")
+        code, err = self._run_with_target({"tool_name": "Write", "tool_input": {
+            "file_path": "D:/xxxraw.json"}}, target)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned ut-init subtrees", err)
+
+    def test_block_cat_test_groups_aggregate(self):
+        code, err = self._run({"tool_name": "Bash", "tool_input": {
+            "command": "cat .mgh-ut-init/test_groups.json"}})
+        self.assertEqual(code, 2)
+        self.assertIn("input_path", err)
+
+    def test_sentinel_activates_introspection_block(self):
+        # env unset, disk sentinel .mgh-ut-init/.active present -> guard activates (opencode
+        # reliability boundary closed for the fifth domain too).
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Bash", "tool_input": {
+                "command": 'py -c "import json; json.load(open(\'x.json\'))"'}},
+            "ut-init", {"domain": "mgh-ut-init", "target": "", "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("describe_artifact", err)
+
+
 class TestBlockAdhocScriptsSentinel(unittest.TestCase):
     """Disk-sentinel activation (D1): the guard activates via <cwd>/<run-root>/.active even
     when NO MGH_*_ACTIVE env is set -- closing the opencode reliability boundary (the .ts
@@ -378,6 +461,74 @@ class TestBlockAdhocScriptsAggregateRead(unittest.TestCase):
         # input primitive (NOT a whole-read) — MUST pass (request-context-budget adoption).
         code, _ = self._bash("py .claude/mgh-core/scripts/ingest_requirements.py "
                              "--doc req.md --materialize .mgh-srr/inputs/augment", domain="srr")
+        self.assertEqual(code, 0)
+
+
+class TestBlockAdhocScriptsTempIo(unittest.TestCase):
+    """Temp-dir write + read-back within a SINGLE Bash invocation is blocked (defense-in-depth
+    for the orchestrator stdout-consumption discipline; the primary fix is the fragment's
+    "stdout 直消费"). Conservative: write-only temp I/O, in-tree redirects, read-only temp
+    access, and inactive sessions all pass."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _bash(self, cmd, domain="init", active="1"):
+        return _run_hook(self.m, {"tool_name": "Bash", "tool_input": {"command": cmd}},
+                         domain=domain, active=active)
+
+    # --- BLOCK: temp write + read-back in the same invocation ---
+    def test_block_pwsh_env_temp_write_readback(self):
+        code, err = self._bash(
+            r'py .claude/mgh-core/scripts/list_scout_batches.py --scout-plan .mgh-init/scout_plan.json '
+            r'> $env:TEMP/scout_page0.json; Get-Content $env:TEMP/scout_page0.json -Raw | ConvertFrom-Json')
+        self.assertEqual(code, 2)
+        self.assertIn("stdout", err)
+        self.assertIn("stdout 直消费", err)   # recipe points at the discipline's direct-consumption
+
+    def test_block_posix_tmp_write_readback(self):
+        code, _ = self._bash(
+            r'py .claude/mgh-core/scripts/list_scout_batches.py --scout-plan x '
+            r'> /tmp/scout_page0.json; cat /tmp/scout_page0.json | jq .')
+        self.assertEqual(code, 2)
+
+    def test_block_env_tmp_variant(self):
+        code, _ = self._bash(r'py x.py > $env:TMP/scout.json; type $env:TMP\scout.json')
+        self.assertEqual(code, 2)
+
+    def test_block_pct_temp_variant(self):
+        code, _ = self._bash(r'py x.py > %TEMP%\scout.json & type %TEMP%\scout.json')
+        self.assertEqual(code, 2)
+
+    def test_block_quoted_path(self):
+        code, _ = self._bash(r'py x.py > "$env:TEMP/x.json"; gc "$env:TEMP/x.json"')
+        self.assertEqual(code, 2)
+
+    # --- PASS: conservative non-blocks ---
+    def test_pass_in_tree_redirect(self):
+        # redirect to the sanctioned subtree is NOT a temp-dir pattern -> pass.
+        code, _ = self._bash(r'py .claude/mgh-core/scripts/discover_controls.py --repo . '
+                             r'> .mgh-init/discover_stdout.log')
+        self.assertEqual(code, 0)
+
+    def test_pass_temp_write_without_readback(self):
+        # write-only temp I/O (no read-back) is NOT flagged — handled by the discipline prompt.
+        code, _ = self._bash(r'py .claude/mgh-core/scripts/discover_controls.py --repo . > /tmp/debug.log')
+        self.assertEqual(code, 0)
+
+    def test_pass_temp_read_only(self):
+        # read-only temp access (no write in the same invocation) is NOT a pairing.
+        code, _ = self._bash(r'cat /tmp/old.json')
+        self.assertEqual(code, 0)
+
+    def test_pass_leaf_flag_temp_path(self):
+        # a `--out /tmp/...` flag (no `>` redirect) is NOT flagged.
+        code, _ = self._bash(r'py .claude/mgh-core/scripts/chunk_sources.py --out /tmp/slice.json')
+        self.assertEqual(code, 0)
+
+    def test_pass_inactive_session(self):
+        # outside any run-domain: no Bash scan at all.
+        code, _ = self._bash(r'py x.py > /tmp/x.json; cat /tmp/x.json', active="")
         self.assertEqual(code, 0)
 
 

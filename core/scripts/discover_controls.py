@@ -56,6 +56,9 @@ from expand_scope import (  # reuse, no rewrite (D2)
     SOURCE_EXT, EXCLUDE_DIR, DEF_CALL, FRAMEWORK_RX,
     walk_sources, package_to_dirs, collect_dir,
 )
+# category -> vvah kind (deterministic; single source of truth = init_tier, so no
+# script can drift its own copy — a drifted kind/category reaches validate_inventory).
+from init_tier import KIND  # noqa: E402
 
 # Stronger Java method pattern than expand_scope's DEF_CALL: the upstream pattern
 # misses methods with a return type (e.g. "public static String mask(...)"), which
@@ -132,13 +135,6 @@ COMPILED = {cat: [re.compile(rx) for rx in rxs] for cat, rxs in CATEGORY_PATTERN
 _QUICK_RX = re.compile("|".join(
     f"(?:{rx})" for rxs in CATEGORY_PATTERNS.values() for rx in rxs))
 
-# category -> vvah kind (deterministic; see core/contracts/init/inventory.md)
-KIND = {
-    "input-validation": "input-validation",
-    "authentication": "auth", "authorization": "auth",
-    "data-masking": "other", "crypto": "other", "csrf": "other",
-    "rate-limiting": "other", "audit-logging": "other",
-}
 # Annotations that scatter across files → distributed shape (cluster by token).
 DISTRIBUTED = {"@Valid", "@Validated", "@PreAuthorize", "@PostAuthorize",
                "@Secured", "@RolesAllowed", "@DenyAll", "@PermitAll",

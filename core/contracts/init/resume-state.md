@@ -13,9 +13,11 @@ Called as the FIRST action on `--resume` and after any host context compaction
 
 ```
 py resume_state.py --target <dir> [--init-dir <dir>] [--check]
+py resume_state.py --target <dir> [--init-dir <dir>] --invalidate-stale [--dry-run]
 ```
 
 `--init-dir` 覆盖默认 `<target>/.mgh-init`。`--check` = 自洽校验(见末尾)。
+`--invalidate-stale` = 清除「scout 未完 + 下游 t2/t3/t4 `.done`」过期凭证(见末尾);`--dry-run` 只列不删。
 
 ## stdout shape
 
@@ -27,7 +29,7 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--check]
   "resumable": true,
   "tiers": {
     "discover": {"done": 1, "failed": 0, "total": 1},
-    "scout":    {"done": 0, "failed": 0, "total": 0},
+    "scout":    {"done": 0, "failed": 0, "total": 0, "merged": 3},
     "t1":       {"done": 2, "failed": 1, "total": 5},
     "t2":       {"done": 0, "failed": 0, "total": 1},
     "t3":       {"done": 0, "failed": 0, "total": 0},
@@ -99,9 +101,25 @@ fold-in 检测:`merge_scout.py` 设 `provenance.scout_merged`(即便 0 scout 候
 
 ## `--check`(自洽校验)
 
-校验磁盘状态自洽(承边界校验泛化),不自洽 → 退出码 2 + `violations[]`;自洽 → 退出码 0。
+校验磁盘状态自洽,不自洽 → 退出码 2 + `violations[]`;自洽 → 退出码 0。stdout 另含 `notes[]`
+(advisory 披露,非 gate)。
 检查项(机械化、低误报):t2 `.done` 在但 `controls_inventory.json` 缺;inventory 在但 t2 标记缺;
 t3 `.done` 在但 inventory 缺;`scout_candidates.json` 在但 merge 标记缺;t1 `.done` 孤儿(无兄弟记录);
 **同 id 既有 `.done` 又有 `.failed`**(ambiguous terminal,scout/t1/t3 三 checkpoint 目录);discover 产物不一致
 (`controls_candidates.json` 与 `clusters.json` 须同在或同缺)。`.failed` 无 sibling 记录**不**报违例
 (失败可不产记录体);`.done` 无记录仍按既有孤儿规则报。
+
+scout 启用(`no_scout` falsy)时的两条确定性违例(tier 数据依赖不变量):
+- **过期凭证**:scout 未完成 但 t2/t3/t4 任一 `.done` 存在(基于 regex-only 输入产出)→ 退出码 2,
+  recipe 指向 `--invalidate-stale`(先 `--dry-run`)。
+- **scout 搁浅**:`scout_plan.batches>0` + readers 全终态 + `provenance.scout_merged` 缺失 → 退出码 2
+  (跑了却从未并入);`scout_merged` 存在但为 `0` → **非 gate**,进 `notes[]` 醒目披露「审阅 N 批并入 0,可能召回缺口」。
+
+## `--invalidate-stale [--dry-run]`
+
+确定性清除「scout 启用 + scout 未完成 + 下游 t2/t3/t4 `.done`」的过期凭证,使 scout 补完后 plain
+`--resume` 重跑 T1–T4 免手工删 marker。失效范围 = t2 `{synthesis.json.done,.done}`、t3 `*.json.done`、
+t4 `{consistency.json.done,.done}`;**保留** t1 各簇 `.done`(scout 簇在 fold-in 后自然成新 pending)。
+`--dry-run` 只列不删(stdout `markers[]`),实删 stdout `removed[]`;dry-run 与实删共用同一
+`init_tier.stale_marker_paths`(两者一致)。幂等(已删则无害)。该范围与 `merge_scout.py` fold-in 的
+级联失效完全一致(上游输入变更点自动触发,本命令是 resume 前的显式兜底)。

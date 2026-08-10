@@ -29,20 +29,14 @@ import sys
 from pathlib import Path
 
 # Self-locate this script's dir so any future sibling import resolves under any cwd /
-# host-agent invocation (direct `py`/`python`). validate_inventory currently has no
-# sibling import, but the guard keeps it in the self-contained family (R5.3a).
+# host-agent invocation (direct `py`/`python`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Deterministic category->kind normalization (single source of truth: must match
-# discover_controls.KIND). Drift here or in the inventory is a real bug.
-KIND = {
-    "input-validation": "input-validation",
-    "authentication": "auth", "authorization": "auth",
-    "data-masking": "other", "crypto": "other", "csrf": "other",
-    "rate-limiting": "other", "audit-logging": "other",
-}
+# Canonical 8 categories + category->kind map (single source of truth: init_tier).
+# Drift here or in the inventory is a real bug; importing keeps every consumer aligned.
+from init_tier import KIND, INIT_CATEGORIES  # noqa: E402
+
 VVAH_KINDS = {"auth", "sandbox", "input-validation", "aslr", "cfi", "other"}
-INIT_CATEGORIES = set(KIND.keys())
 
 
 def main():

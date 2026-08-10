@@ -45,6 +45,13 @@ class TestZeroRuntimeDeps(unittest.TestCase):
             self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
                             f"{s}.py missing — not covered by the zero-dep scan")
 
+    def test_validate_t1_records_is_scanned(self):
+        # fix-mgh-init-t1-record-schema-drift: new stdlib-only T1 boundary validator
+        # (sibling-imports init_tier). Assert it exists and is therefore covered by the
+        # zero-dep glob scan above (the general test proves stdlib/sibling-only imports).
+        self.assertTrue((SCRIPTS / "validate_t1_records.py").is_file(),
+                        "validate_t1_records.py missing — not covered by the zero-dep scan")
+
     def test_new_sast_scripts_are_scanned(self):
         # harden-mgh-sast-orchestration-discipline + add-mgh-sast-design-controls
         # additions exist + are glob-scanned
@@ -112,6 +119,16 @@ class TestZeroRuntimeDeps(unittest.TestCase):
         # therefore covered by the zero-dep glob scan above (the general test proves they
         # import stdlib only — no sibling import needed).
         for s in ("resume_state", "plan_aggregate", "write_runconfig"):
+            self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
+                            f"{s}.py missing — not covered by the zero-dep scan")
+
+    def test_new_ut_init_scripts_are_scanned(self):
+        # add-mgh-ut-init: eight new stdlib-only leaf scripts. Assert they exist and are
+        # therefore covered by the zero-dep glob scan above (the general test proves they
+        # import stdlib/sibling only).
+        for s in ("classify_tests", "list_test_groups", "assemble_test_rules",
+                  "validate_test_rules", "derive_mutators", "resume_ut_init_state",
+                  "write_ut_runconfig", "list_ut_steps"):
             self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
                             f"{s}.py missing — not covered by the zero-dep scan")
 

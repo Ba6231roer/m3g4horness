@@ -14,7 +14,7 @@ labels are NOT flagged):
   2. failure id       \\bFD\\d+\\b                     e.g. FD8, FD3
   3. decision id      \\bD\\d+\\b                      e.g. D12, D9 = D12
   4. dev-manual xref  AGENTS\\.md\\s+R\\d              e.g. AGENTS.md R1–R4
-  5. change-folder    (add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst)-…
+  5. change-folder    (add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst|srr|ut-init)-…
   6. upstream doc     glasswing_docs/
   7. dev-file ptr     \\btask\\.\\d+\\.md\\b           e.g. task.260630.md
   8. dev-meta         范式锚点 / 承\\s*R\\d+ / 兑现\\s*R\\d+
@@ -72,7 +72,7 @@ PATTERNS = [
     ("dev_manual_xref",
      re.compile(r"AGENTS\.md\s+R\d"), "AGENTS.md R1–R4"),
     ("change_folder",
-     re.compile(r"\b(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst)-[a-z0-9-]+"),
+     re.compile(r"\b(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst|srr|ut-init)-[a-z0-9-]+"),
      "improve-mgh-init-llm-discovery"),
     ("upstream_doc",
      re.compile(r"glasswing_docs/"), "glasswing_docs/09"),

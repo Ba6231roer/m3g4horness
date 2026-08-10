@@ -33,6 +33,8 @@ DEFAULT_SHELLS = [
     ROOT / "releases" / "opencode" / "command" / "mgh-sra.md",
     ROOT / "releases" / "claude-code" / "commands" / "mgh-srr.md",
     ROOT / "releases" / "opencode" / "command" / "mgh-srr.md",
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-ut-init.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-ut-init.md",
 ]
 # mgh-sast shells and the shell-level (non-script) flags their flag table MUST advertise
 # (--controls is the shell's own flag, not a *.py flag, so the bash-block extractor below
@@ -68,6 +70,7 @@ LIST_SCRIPTS = [
     ROOT / "core" / "scripts" / "list_rule_jobs.py",
     ROOT / "core" / "scripts" / "list_chunks.py",
     ROOT / "core" / "scripts" / "list_verify_jobs.py",
+    ROOT / "core" / "scripts" / "list_test_groups.py",
 ]
 # /mgh-srr intake + render adapter flags that MUST appear in their scripts' --help
 # (request-context-budget adoption; R5.1 contract surface). Asserted directly so the contract
@@ -99,14 +102,42 @@ SRA_SHELL_REQUIRED_FLAGS = ["--max-aggregate-bytes"]
 # --help (the contract surface). Asserted directly so the contract holds even if a shell's
 # fenced example is trimmed — --help IS the interface the agent learns from.
 RESUME_SCRIPT = ROOT / "core" / "scripts" / "resume_state.py"
-RESUME_REQUIRED_FLAGS = ["--target", "--init-dir", "--check"]
+RESUME_REQUIRED_FLAGS = ["--target", "--init-dir", "--run-root", "--check"]
 PLAN_AGG_SCRIPT = ROOT / "core" / "scripts" / "plan_aggregate.py"
 PLAN_AGG_REQUIRED_FLAGS = ["--node", "--init-dir", "--budget", "--materialize",
                            "--offset", "--limit", "--orch-budget-bytes"]
 WRITE_RUNCONFIG_SCRIPT = ROOT / "core" / "scripts" / "write_runconfig.py"
-WRITE_RUNCONFIG_REQUIRED_FLAGS = ["--target", "--format", "--init-dir", "--scope",
+WRITE_RUNCONFIG_REQUIRED_FLAGS = ["--target", "--format", "--init-dir", "--run-root", "--scope",
                                   "--no-scout", "--no-codegraph", "--skip-consistency",
                                   "--merge", "--include-dotfiles", "--max-aggregate-bytes"]
+# /mgh-ut-init shells advertise the shell-level request-context-budget + format flag
+# (--max-aggregate-bytes is consumed by the orchestrator for the synthesize aggregate node,
+# not a *.py; --format is the required format mutex). Asserted in text, mirrored across both
+# shells (R5.1).
+UT_INIT_SHELLS = [
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-ut-init.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-ut-init.md",
+]
+UT_INIT_SHELL_REQUIRED_FLAGS = ["--max-aggregate-bytes", "--format"]
+# /mgh-ut-init leaf flags that MUST appear in each script's --help (R5.1 contract surface).
+# Asserted directly so the contract holds even if a shell's fenced example is trimmed.
+CLASSIFY_SCRIPT = ROOT / "core" / "scripts" / "classify_tests.py"
+CLASSIFY_REQUIRED_FLAGS = ["--repo", "--out", "--scope", "--check", "--subsplit-threshold"]
+ASSEMBLE_TEST_SCRIPT = ROOT / "core" / "scripts" / "assemble_test_rules.py"
+ASSEMBLE_TEST_REQUIRED_FLAGS = ["--target", "--format", "--check", "--rules-dir"]
+VALIDATE_TEST_SCRIPT = ROOT / "core" / "scripts" / "validate_test_rules.py"
+VALIDATE_TEST_REQUIRED_FLAGS = ["--inventory"]
+DERIVE_MUTATORS_SCRIPT = ROOT / "core" / "scripts" / "derive_mutators.py"
+DERIVE_MUTATORS_REQUIRED_FLAGS = ["--repo", "--out", "--check"]
+RESUME_UT_SCRIPT = ROOT / "core" / "scripts" / "resume_ut_init_state.py"
+RESUME_UT_REQUIRED_FLAGS = ["--target", "--init-dir", "--run-root", "--check"]
+WRITE_UT_RUNCONFIG_SCRIPT = ROOT / "core" / "scripts" / "write_ut_runconfig.py"
+WRITE_UT_RUNCONFIG_REQUIRED_FLAGS = ["--target", "--format", "--init-dir", "--run-root",
+                                     "--skip-consistency", "--uniform-sample",
+                                     "--hetero-sample", "--subsplit-threshold",
+                                     "--max-aggregate-bytes"]
+LIST_UT_STEPS_SCRIPT = ROOT / "core" / "scripts" / "list_ut_steps.py"
+LIST_UT_STEPS_REQUIRED_FLAGS = ["--target", "--step"]
 PY = sys.executable
 
 # A CLI flag is `--long` or `-s` preceded by a non-word boundary (whitespace/start),
@@ -278,6 +309,35 @@ def main():
     for script, req_flags in ((RESUME_SCRIPT, RESUME_REQUIRED_FLAGS),
                               (PLAN_AGG_SCRIPT, PLAN_AGG_REQUIRED_FLAGS),
                               (WRITE_RUNCONFIG_SCRIPT, WRITE_RUNCONFIG_REQUIRED_FLAGS)):
+        if not script.is_file():
+            failures.append(f"script not found: {script}")
+            continue
+        declared = declared_flags(script)
+        if declared is None:
+            failures.append(f"{script.name}: `--help` failed")
+            continue
+        for flag in req_flags:
+            if flag not in declared:
+                failures.append(f"{script.name}: --help missing required {flag!r}")
+
+    # /mgh-ut-init shells must advertise the shell-level request-context-budget + format flag.
+    for shell in UT_INIT_SHELLS:
+        if not shell.is_file():
+            failures.append(f"shell not found: {shell}")
+            continue
+        text = shell.read_text(encoding="utf-8")
+        for flag in UT_INIT_SHELL_REQUIRED_FLAGS:
+            if flag not in text:
+                failures.append(f"{shell.name}: flag table missing required {flag!r}")
+
+    # /mgh-ut-init leaf flags MUST be declared in each script's --help (R5.1).
+    for script, req_flags in ((CLASSIFY_SCRIPT, CLASSIFY_REQUIRED_FLAGS),
+                              (ASSEMBLE_TEST_SCRIPT, ASSEMBLE_TEST_REQUIRED_FLAGS),
+                              (VALIDATE_TEST_SCRIPT, VALIDATE_TEST_REQUIRED_FLAGS),
+                              (DERIVE_MUTATORS_SCRIPT, DERIVE_MUTATORS_REQUIRED_FLAGS),
+                              (RESUME_UT_SCRIPT, RESUME_UT_REQUIRED_FLAGS),
+                              (WRITE_UT_RUNCONFIG_SCRIPT, WRITE_UT_RUNCONFIG_REQUIRED_FLAGS),
+                              (LIST_UT_STEPS_SCRIPT, LIST_UT_STEPS_REQUIRED_FLAGS)):
         if not script.is_file():
             failures.append(f"script not found: {script}")
             continue

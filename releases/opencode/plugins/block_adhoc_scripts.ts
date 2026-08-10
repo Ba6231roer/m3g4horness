@@ -54,7 +54,12 @@ async function runGuard(payload: unknown): Promise<{ code: number; stderr: strin
         cmd: [py, guard],
         cwd: process.cwd(),
         env: process.env, // inherit — carries MGH_*_ACTIVE if set at opencode launch
-        stdin: stdin,
+        // Bun.spawn in opencode's bundled Bun rejects a STRING stdin (TypeError: stdio must
+        // be 'inherit'|'pipe'|'ignore'|Bun.file|number|null); a Blob is accepted and delivers
+        // the JSON payload. (Confirmed opencode 1.18.3: a bare `stdin: stdin` threw inside
+        // runGuard -> caught -> fail-soft-pass -> the guard NEVER blocked. Probe-reproduced;
+        // this was the real D7 root cause, not plugin loading / tool-id / cwd.)
+        stdin: new Blob([stdin]),
         stdout: "ignore",
         stderr: "pipe",
       })

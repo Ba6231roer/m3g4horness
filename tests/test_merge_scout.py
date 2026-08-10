@@ -218,5 +218,141 @@ class TestMainFoldIn(unittest.TestCase):
         self.assertEqual(data["skipped"], 0)
 
 
+# ---- D3: fold-in boundary category normalization (fix-mgh-init-scout-stranding) ----
+
+
+class TestFoldInNormalize(unittest.TestCase):
+    """init_tier.normalize_category maps non-canonical scout categories at fold-in so T2
+    only sees the canonical 8; an UNMAPPED category is skipped + warned, never passed."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_msc_norm_"))
+        _w(self.d / "cc.json", {"repo": "r", "candidates": [
+            {"id": "R-1", "file": "x.java", "line": 1, "source": "regex",
+             "category": "crypto", "pattern": "@Enc", "anchor": {"class": "X"}}]})
+        _w(self.d / "cl.json", {"repo": "r", "clusters": [
+            {"cluster_id": "crypto::X::regex1", "category": "crypto",
+             "usage_sites": ["x.java"], "evidence_files": ["x.java"],
+             "candidate_ids": ["R-1"]}], "truncated": False})
+
+    def _fold(self, scout_cands):
+        _w(self.d / "sc.json", {"repo": "r", "candidates": scout_cands})
+        return _run(["--candidates", str(self.d / "cc.json"),
+                     "--scout", str(self.d / "sc.json"),
+                     "--clusters", str(self.d / "cl.json")])
+
+    def test_alias_normalization_hits(self):
+        # drifted "access-control" folds in as canonical "authorization"
+        code, out, err = self._fold([
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "access-control", "evidence_snippet": "ok",
+             "anchor": {"class": "Authz"}}])
+        self.assertEqual(code, 0)
+        self.assertNotIn("warn", err)
+        self.assertEqual(json.loads(out)["scout_candidates_added"], 1)
+        cc = json.loads((self.d / "cc.json").read_text(encoding="utf-8"))
+        scout = next(c for c in cc["candidates"] if c["source"] == "scout")
+        self.assertEqual(scout["category"], "authorization")
+        cl = json.loads((self.d / "cl.json").read_text(encoding="utf-8"))
+        self.assertTrue(any(c["category"] == "authorization" for c in cl["clusters"]))
+
+    def test_unmapped_category_skipped_warned(self):
+        # "runtime-guard" is not canonical and not aliased → skip + warn, NOT folded
+        code, out, err = self._fold([
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "runtime-guard", "evidence_snippet": "ok",
+             "anchor": {"class": "Guard"}}])
+        self.assertEqual(code, 0)
+        self.assertIn("not in the 8 canonical categories", err)
+        data = json.loads(out)
+        self.assertEqual(data["scout_candidates_added"], 0)
+        self.assertEqual(data["skipped"], 1)
+
+    def test_check_rejects_noncanonical_exit2(self):
+        sc = _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "runtime-guard"}]})
+        code, out, _ = _run(["--check", str(sc)])
+        self.assertEqual(code, 2)
+        issues = {v["issue"] for v in json.loads(out)["violations"]}
+        self.assertTrue(any("canonical" in i for i in issues), issues)
+
+    def test_check_passes_canonical_and_alias_exit0(self):
+        # canonical + aliased (access-control → authorization) both pass --check
+        sc = _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"file": "a.java", "line": 3, "source": "scout", "category": "authorization"},
+            {"file": "b.java", "line": 5, "source": "scout", "category": "access-control"}]})
+        code, out, _ = _run(["--check", str(sc)])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out)["ok"])
+
+
+# ---- D2: fold-in cascade invalidation of downstream aggregate .done ----
+
+_CASCADE_CLUSTERS = [
+    {"cluster_id": "crypto::X::regex1", "category": "crypto",
+     "usage_sites": ["x.java"], "evidence_files": ["x.java"], "candidate_ids": ["R-1"]}]
+
+
+class TestFoldInCascade(unittest.TestCase):
+    """fold-in with scout_candidates_added > 0 cascade-invalidates t2/t3/t4 aggregate
+    .done (stale credentials from regex-only input); added == 0 leaves them intact."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_msc_cas_"))
+        _w(self.d / "cc.json", {"repo": "r", "candidates": [
+            {"id": "R-1", "file": "x.java", "line": 1, "source": "regex",
+             "category": "crypto", "pattern": "@Enc", "anchor": {"class": "X"}}]})
+        _w(self.d / "cl.json", {"repo": "r", "clusters": _CASCADE_CLUSTERS,
+                                "truncated": False})
+
+    def _markers(self):
+        cp = self.d / "checkpoints"
+        rels = ("t2/synthesis.json.done",
+                "t3/authorization.opencode.json.done",
+                "t4/consistency.json.done")
+        out = []
+        for rel in rels:
+            p = cp / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("", encoding="utf-8")
+            out.append(p)
+        return out
+
+    def _fold(self, scout_cands):
+        _w(self.d / "sc.json", {"repo": "r", "candidates": scout_cands})
+        return _run(["--candidates", str(self.d / "cc.json"),
+                     "--scout", str(self.d / "sc.json"),
+                     "--clusters", str(self.d / "cl.json")])
+
+    def test_foldin_added_gt0_invalidates_downstream(self):
+        markers = self._markers()
+        code, out, _ = self._fold([
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "authorization", "evidence_snippet": "ok",
+             "anchor": {"class": "Authz"}}])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertGreaterEqual(data["scout_candidates_added"], 1)
+        self.assertEqual(data["invalidated_tiers"], ["t2", "t3", "t4"])
+        for m in markers:
+            self.assertFalse(m.exists(), f"{m} should be cascade-invalidated")
+
+    def test_foldin_added_eq0_keeps_downstream(self):
+        markers = self._markers()
+        # scout candidate duplicates the regex candidate (same file/anchor/category) →
+        # dedup removes it → added == 0 → input unchanged → markers stay valid
+        code, out, _ = self._fold([
+            {"file": "x.java", "line": 1, "source": "scout",
+             "category": "crypto", "evidence_snippet": "ok",
+             "anchor": {"class": "X"}}])
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["scout_candidates_added"], 0)
+        self.assertEqual(data["invalidated_tiers"], [])
+        for m in markers:
+            self.assertTrue(m.exists(), f"{m} must survive when added == 0")
+
+
 if __name__ == "__main__":
     unittest.main()

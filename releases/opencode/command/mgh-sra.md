@@ -54,6 +54,8 @@ leaf scripts (Bash) and spawning stage subagents. Shared assets live at `.openco
 
 **硬边界(`NEVER`)**:(a) `Write` 任何 `.py`——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读 `.mgh-sra/**` 或 `change_context.json`);(c) `Read` 叶子 `.py` 源码。
 
+**`NEVER` 向系统临时目录写中间文件再回读**:确定性脚本 stdout 在 Bash tool result(最后一行是 JSON),直接消费;NEVER 重定向到 `$env:TEMP`/`%TEMP%`/`/tmp` 再回读。
+
 **implementation-intention(需 X → 合法出口 Y,NEVER `py -c`)**:
 - **工作清单 + fan-out 路径** → `prepare_augment.py --materialize` stdout 即 **slim 分页**待办壳(含 `pending[]` 每项**绝对** `draft_path`/`done_marker`/`input_path`/`bytes`/`oversize` + `clarify_path` + `project_root` + `offset`/`effective_limit`/`shrunk`);编排器**逐字读该 stdout**、**逐字透传**路径给 subagent;**NEVER** 自拼 `<change-root>/<cap>`、**NEVER** `py -c` 算路径、**NEVER** 相对路径;
 - **需某 cap 完整输入** → `prepare_augment --materialize` stdout 的 `pending[].input_path`(绝对,该 cap 的 requirements + 业务面 + candidate_controls 切片 + memory);**NEVER** 整份读 `change_context.json`、**NEVER** `py -c`、**NEVER** 内联传记录给 subagent(subagent **自读** `input_path`);

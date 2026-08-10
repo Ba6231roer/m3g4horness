@@ -25,8 +25,10 @@ OC_GUARD = ROOT / "releases" / "opencode" / "hooks" / "block_adhoc_scripts.py"
 SHIM = ROOT / "releases" / "opencode" / "plugins" / "block_adhoc_scripts.ts"
 
 
-_RUN_ROOTS = {"init": ".mgh-init", "sast": "security-scan", "sra": ".mgh-sra", "srr": ".mgh-srr"}
-_DOMAIN_KEYS = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE")
+_RUN_ROOTS = {"init": ".mgh-init", "sast": "security-scan", "sra": ".mgh-sra",
+              "srr": ".mgh-srr", "ut-init": ".mgh-ut-init"}
+_DOMAIN_KEYS = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE",
+                "MGH_UT_INIT_ACTIVE")
 
 
 def _run_guard_sentinel(mod, payload, domain, sentinel_dict):
@@ -88,7 +90,8 @@ def normalize(tool: str, args: dict):
 def _run_guard(mod, payload, domain_env, target=None):
     """Feed a normalized payload to the guard. domain_env is one of MGH_*_ACTIVE, or None to
     simulate 'outside any run-domain' (guard MUST pass silently). Returns (exit_code, stderr)."""
-    keys = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE")
+    keys = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE",
+            "MGH_UT_INIT_ACTIVE")
     old_active = {k: os.environ.pop(k, None) for k in keys}
     old_target = os.environ.get("MGH_TARGET")
     for k in keys:
@@ -203,6 +206,38 @@ class TestNormalizationParity(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("describe_artifact", err)
 
+    def test_bash_temp_write_readback_blocked(self):
+        # new temp-dir I/O rule decides identically on the opencode side (same guard twin).
+        code, err = self._oc("bash", {"command": r'py x.py > /tmp/x.json; cat /tmp/x.json'})
+        self.assertEqual(code, 2)
+        self.assertIn("stdout", err)
+
+    # --- MGH_UT_INIT_ACTIVE: the fifth run-domain decides identically on both ends ---
+    def test_ut_init_domain_introspection_blocked(self):
+        code, err = self._oc("bash",
+            {"command": 'py -c "import json; json.load(open(\'x.json\'))"'},
+            domain_env="MGH_UT_INIT_ACTIVE")
+        self.assertEqual(code, 2)
+        self.assertIn("mgh-ut-init", err)
+        self.assertIn("list_test_groups", err)   # ut recipe points at ut work-list primitive
+
+    def test_ut_init_domain_root_pollution_blocked(self):
+        target = tempfile.mkdtemp(prefix="mgh_ut_op_")
+        code, err = self._oc("write", {"filePath": f"{target}/temp_clusters1.json"},
+                             domain_env="MGH_UT_INIT_ACTIVE", target=target)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned ut-init subtrees", err)
+
+    def test_ut_init_sanctioned_subtree_passes(self):
+        target = tempfile.mkdtemp(prefix="mgh_ut_op_")
+        for rel in (".mgh-ut-init/inputs/t1/u.input.json",
+                    ".claude/rules/test-junit5.md",
+                    "docs/test-conventions/mockito.md",
+                    "AGENTS.md"):
+            code, err = self._oc("write", {"filePath": f"{target}/{rel}"},
+                                 domain_env="MGH_UT_INIT_ACTIVE", target=target)
+            self.assertEqual(code, 0, f"ut-init sanctioned write blocked: {rel}\n{err}")
+
 
 class TestGuardByteParity(unittest.TestCase):
     """§4.4 — opencode guard twin MUST be byte-identical to the claude canonical (single logic)."""
@@ -217,19 +252,22 @@ class TestGuardByteParity(unittest.TestCase):
         text = SHIM.read_text(encoding="utf-8")
         # the shim MUST NOT reimplement guard decision logic (glue only — single decision source).
         # Forbidden tokens track the current guard internals: sentinel + script-ext set +
-        # init allowlist + activation/out-of-tree/introspection.
+        # init allowlist + activation/out-of-tree/introspection + temp-dir I/O detection.
         for forbidden in ("_INTRO_TOKENS", "_PYC_RX", "_SCRIPT_EXTS", "_read_sentinel",
-                          "_resolve_domain", "_init_write_blocked", "_is_out_of_tree",
-                          "_INIT_SUBTREES", "out_roots"):
+                          "_resolve_domain", "_allowlist_write_blocked", "_is_out_of_tree",
+                          "_ALLOWLIST_SUBTREES", "out_roots", "_detect_temp_io", "_TEMP_WRITE_RX"):
             self.assertNotIn(forbidden, text, f"shim reimplements guard logic ({forbidden}) — not glue-only")
 
     def test_both_guards_embed_new_sentinel_logic(self):
         """Byte-identity must be of the NEW guard, not a stale twin: both canonical and opencode
-        guard carry the sentinel-activation + script-ext-set + init-allowlist logic."""
+        guard carry the sentinel-activation + script-ext-set + init-allowlist + temp-dir I/O
+        detection logic."""
         for guard in (CC_GUARD, OC_GUARD):
             text = guard.read_text(encoding="utf-8")
             for marker in ("_read_sentinel", "_resolve_domain", "_SCRIPT_EXTS",
-                           "_init_write_blocked", "_INIT_SUBTREES", "out_roots", ".active"):
+                           "_allowlist_write_blocked", "_ALLOWLIST_SUBTREES", "out_roots",
+                           ".active", "_detect_temp_io", "_TEMP_WRITE_RX", "_temp_path_rx",
+                           "MGH_UT_INIT_ACTIVE", ".mgh-ut-init", "test_groups.json"):
                 self.assertIn(marker, text, f"{guard.name} missing new-logic marker {marker}")
 
     def test_ts_not_in_zero_dep_scan_set(self):
@@ -242,6 +280,19 @@ class TestGuardByteParity(unittest.TestCase):
         import ast
         with self.assertRaises((SyntaxError, ValueError)):
             ast.parse(SHIM.read_text(encoding="utf-8"))
+
+    def test_shim_feeds_stdin_via_blob_not_string(self):
+        """Regression guard for the D7 root cause: opencode's bundled Bun rejects a STRING
+        stdin (TypeError: stdio must be 'inherit'|'pipe'|'ignore'|Bun.file|number|null) -> the
+        shim MUST feed the guard payload as a Blob. A bare `stdin: <string>` silently throws
+        inside runGuard -> fail-soft-pass -> the guard never blocks (confirmed opencode 1.18.3).
+        The Bun.spawn runtime call is NOT exercisable in CI (no Bun), so this asserts the source
+        form; manual opencode verification covers the runtime delivery."""
+        text = SHIM.read_text(encoding="utf-8")
+        self.assertIn(
+            "new Blob([stdin])", text,
+            "shim must feed stdin as new Blob([stdin]); a bare string stdin throws in opencode's "
+            "bundled Bun and silently disables the guard (the D7 root cause)")
 
 
 if __name__ == "__main__":

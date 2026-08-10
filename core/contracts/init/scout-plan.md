@@ -64,3 +64,11 @@ Consumer: orchestrator merges with regex candidates → `form_clusters`.
 - `unresolved[]`:scout 发现的 DI/AOP/反射等文本调用图无法解析的控制(并入既有
   `unresolved[]`,标 source)。
 - merge 只做跨批去重 + 命名归一;**不做 canonical 判定**(留给 T2)。
+- **类别归一在 fold-in 边界**(`merge_scout.py` 调 `init_tier.normalize_category`):
+  `access-control→authorization`、`auth→authentication` 等确定性别名映射在写入
+  `controls_candidates.json` 前完成,T2 只见规范 8 类;未映射的非规范类在 fold-in / `--check`
+  边界 fail-loud(退出码 2),**不**带漂移进 T2。
+- **fold-in 级联失效**:`merge_scout.py` fold-in 实际并入候选数 > 0 时,删除下游聚合 `.done`
+  (t2 `synthesis.json.done`/`.done`、t3 `*.json.done`、t4 `consistency.json.done`/`.done`),
+  stderr 注明 + stdout `invalidated_tiers[]`;并入 == 0(全重复/全失败)时不删(输入没变)。
+  t1 各簇 `.done` 保留(scout 簇 fold-in 后自然成新 pending)。

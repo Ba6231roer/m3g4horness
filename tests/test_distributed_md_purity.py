@@ -95,6 +95,25 @@ class TestDistributedPurity(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["violations"], [])
 
+    def test_ut_init_artifacts_scanned_and_clean(self):
+        # ut-init shells + stage prompts + agent defs + contracts (task 9.3 / 10.6) MUST pass
+        # distribution-purity (no dev-only provenance / dangling refs).
+        root = HERE.parent
+        files = ([root / "releases" / "claude-code" / "commands" / "mgh-ut-init.md",
+                  root / "releases" / "opencode" / "command" / "mgh-ut-init.md"]
+                 + [root / "core" / "prompts" / "stages" / f"ut-{s}.md"
+                    for s in ("extract", "synthesize", "rulewriter", "rules-consistency")]
+                 + [root / "releases" / "claude-code" / "agents" / f"ut-{s}.md"
+                    for s in ("extract", "synthesize", "rulewriter", "rules-consistency")]
+                 + [root / "releases" / "opencode" / "agent" / f"ut-{s}.md"
+                    for s in ("extract", "synthesize", "rulewriter", "rules-consistency")]
+                 + sorted((root / "core" / "contracts" / "ut-init").glob("*.md")))
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
     # --- codegraph as an operational external-tool reference is NOT a dev-meta violation
     def test_codegraph_reference_not_flagged(self):
         body = ("When codegraph=on, call codegraph_explore or `codegraph explore` (Bash);\n"

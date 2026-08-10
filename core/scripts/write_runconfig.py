@@ -18,11 +18,15 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py write_runconfig.py --target <dir> --format opencode|claude [--init-dir <dir>]
-       [--scope ..] [--scope-mode defined|applicable] [--no-scout] [--no-codegraph]
-       [--skip-consistency] [--merge <partials-dir>] [--include-dotfiles] [--include-tests]
-       [--max-unit-bytes B] [--orch-budget-bytes B] [--max-aggregate-bytes B]
+       [--run-root <name>] [--scope ..] [--scope-mode defined|applicable] [--no-scout]
+       [--no-codegraph] [--skip-consistency] [--merge <partials-dir>] [--include-dotfiles]
+       [--include-tests] [--max-unit-bytes B] [--orch-budget-bytes B] [--max-aggregate-bytes B]
        [--scout-budget N] [--scout-batch-bytes B] [--scout-batch-cap N] [--scout-audit-pct N]
        [--language <lang>] [--rules-dir <path>] [--out <path>]
+
+  Run-dir resolution priority: --init-dir > <target>/<--run-root> (default <target>/.mgh-init);
+  run_config.json then lands at <init-dir>/run_config.json (or --out). Default --run-root
+  .mgh-init is byte-equivalent to the prior hard-coded behavior.
 
 stdout (structured JSON; stderr = diagnostics only, R5.3b):
   {"run_config": "<abs run_config.json>", "target": "<abs target>", "format": "...",
@@ -79,7 +83,9 @@ def main():
     ap.add_argument("--format", required=True, choices=["opencode", "claude"],
                     help="rule format (also selects rule_path layout; required)")
     ap.add_argument("--init-dir",
-                    help=".mgh-init output dir (default: <target>/.mgh-init)")
+                    help="run dir full path (highest priority, overrides --run-root)")
+    ap.add_argument("--run-root", default=".mgh-init",
+                    help="run dir NAME under <target> (default .mgh-init; used when --init-dir absent)")
     ap.add_argument("--scope", help="path:<dir>|package:<pkg>|file:<glob>")
     ap.add_argument("--scope-mode", choices=["defined", "applicable"], default="defined")
     ap.add_argument("--no-scout", action="store_true",
@@ -134,8 +140,10 @@ def main():
             return 2
 
     target_abs = str(Path(args.target).resolve())
-    init_dir = Path(args.init_dir).resolve() if args.init_dir \
-        else (Path(target_abs) / ".mgh-init").resolve()
+    if args.init_dir:
+        init_dir = Path(args.init_dir).resolve()
+    else:
+        init_dir = (Path(target_abs) / args.run_root).resolve()
     rc_path = Path(args.out).resolve() if args.out else (init_dir / "run_config.json").resolve()
 
     run_config = {

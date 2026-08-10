@@ -10,6 +10,13 @@ CLI(`--help` 即契约):
 py list_clusters.py --clusters <clusters.json> [--checkpoints <t1-dir>]
 ```
 
+> **scout-tier 闸门(确定性 tier 顺序)**:`<clusters.json 同目录>/run_config.json` 存在且 `no_scout`
+> falsy(scout 启用)而 scout 层未完成(`init_tier.scout_complete` false)→ **退出码 2** + stdout
+> `{"error":"scout-incomplete-gate",...}` + **不产 `pending[]`**,stderr 给 recipe(读
+> `resume_state.py` 的 `step`/`next_action` 先完成 scout 层;`--no-scout` 可显式绕行)。`run_config`
+> 缺失(裸 clusters.json / 测试夹具)或 `no_scout` 为真 → 闸门跳过(向后兼容)。编排器 MUST NOT 以纯
+> regex 簇清单继续 T1。
+
 stdout(结构化 JSON;stderr 仅诊断):
 ```json
 {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<ClusterLite>, ...], "truncated": false}
@@ -40,5 +47,10 @@ stdout(结构化 JSON;stderr 仅诊断):
 | `truncated` | 透传 `clusters.json::truncated`(无静默截断) |
 
 不变式(非切分簇):`total == done + failed + len(pending)`。空 clusters(0 候选)→ `total:0`,退出码仍 `0`。
+
+> **T1→T2 形状闸门**:T1 fan-out 写出的 `checkpoints/t1/*.json`(记录 schema + validator 契约见
+> [`t1-record-schema.md`](t1-record-schema.md))在进 T2 前 SHALL 经 `validate_t1_records.py --strip-bom`
+> 然后 `--check`;形状漂移(嵌套 `controls[]`/缺字段/枚举越界)退出码 2 → 失效违例簇 `.done` marker、
+> 重跑本脚本重派该簇,NEVER 带破损记录进 T2(T2 按契约字段直取会静默丢弃漂移记录)。
 退出码 `0/1/2`。`checkpoint_path`/`done_marker`/`failed_marker`/`slice_dir` **仅存在于本 stdout**,不写入磁盘产物
 (磁盘 `checkpoints/t1/<safe(cluster_id)>.json` schema 不变;记录内 `unit` = canonical cluster_id;切片落 `<slice_dir>` 下 ephemeral、随 `.mgh-init/` gitignore)。

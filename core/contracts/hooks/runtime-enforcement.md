@@ -19,9 +19,9 @@ the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 
 | Field | Purpose |
 |---|---|
-| `domain` | `mgh-init` / `mgh-sast` / `mgh-sra` / `mgh-srr` (advisory; discovery is by path) |
+| `domain` | `mgh-init` / `mgh-sast` / `mgh-sra` / `mgh-srr` / `mgh-ut-init` (advisory; discovery is by path) |
 | `target` | abs project root (Windows-native; **MUST** come from a Python leaf-script stdout — `describe_artifact --field repo` / `prepare_augment`/`ingest_requirements` stdout `project_root` / `write_runconfig` stdout `target` — never bash `pwd`, which emits MSYS `/c/...` that pathlib mis-resolves on Windows) |
-| `out_roots[]` | abs roots for customized `--out` / `--rules-dir` (init only; honors custom output locations without over-blocking) |
+| `out_roots[]` | abs roots for customized `--out` / `--rules-dir` (init & ut-init; honors custom output locations without over-blocking) |
 | `v` | schema version |
 
 ### Per-domain run-root (sentinel location, cwd-relative)
@@ -32,14 +32,16 @@ the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 | `mgh-sast` | `MGH_SAST_ACTIVE` | `security-scan` | `<cwd>/security-scan/.active` |
 | `mgh-sra` | `MGH_SRA_ACTIVE` | `.mgh-sra` | `<cwd>/.mgh-sra/.active` |
 | `mgh-srr` | `MGH_SRR_ACTIVE` | `.mgh-srr` | `<cwd>/.mgh-srr/.active` |
+| `mgh-ut-init` | `MGH_UT_INIT_ACTIVE` | `.mgh-ut-init` | `<cwd>/.mgh-ut-init/.active` |
 
 ### Lifecycle
 
 - **step 0 (orchestrator, Bash)**: after `export MGH_<DOM>_ACTIVE=1`, write the sentinel.
   `target` filled from the first Python leaf-script stdout that yields the abs project root
   (init: `write_runconfig`/`describe_artifact`; sra: `prepare_augment`; srr: `ingest_requirements`;
-  sast: activation-only — `target` empty, out-of-tree uses `MGH_TARGET` env on claude / degrades
-  on opencode, sast output already narrowed to `security-scan/`).
+  ut-init: `write_ut_runconfig`; sast: activation-only — `target` empty, out-of-tree uses
+  `MGH_TARGET` env on claude / degrades on opencode, sast output already narrowed to
+  `security-scan/`).
 - **completion / clean-stop (orchestrator, Bash)**: `rm <sentinel>` so a stale sentinel does
   not arm the guard during subsequent day-to-day dev. Residual (crash without cleanup) only
   blocks script writes, never JSON/`.md`/reads; user may `rm` manually.
@@ -61,11 +63,11 @@ target was pinned).
    mattered while inactive, at which point `main()` already returned 0). Leaf scripts are
    read-only at runtime. `.json`/`.md` are not in the set (legit artifacts).
 3. **Write confinement** — `Write`/`Edit` resolved target:
-   - **all domains**: block if OUTSIDE the resolved `MGH_TARGET` tree (drive root, `%TEMP%`,
+   - **all five domains**: block if OUTSIDE the resolved `MGH_TARGET` tree (drive root, `%TEMP%`,
      another project dir).
-   - **`mgh-init` additionally** (positive allowlist): block unless inside a sanctioned subtree.
-     `out_roots[]` extends the allowlist. sast/sra/srr retain the out-of-tree check **without**
-     the allowlist.
+   - **`mgh-init` AND `mgh-ut-init` additionally** (positive allowlist): block unless inside a
+     sanctioned subtree (see the two tables below). `out_roots[]` extends the allowlist.
+     sast/sra/srr retain the out-of-tree check **without** the allowlist.
 4. **Bash whole-read** of a multi-unit aggregate (cat/head/tail/type/Get-Content of
    `clusters.json` / `controls_candidates.json` / `scout_plan.json` / `controls_inventory.json`
    / `s3_chunks.json` / `s5_filtered.json` / `scope_manifest.json` / `change_context.json`)
@@ -78,6 +80,19 @@ target was pinned).
 | `<target>/.mgh-init/**` | artifacts / checkpoints / inputs / manifest / report / sentinel |
 | `<target>/.claude/rules/**` | claude rules output |
 | `<target>/docs/security-controls/**` | opencode per-category detail files |
+| `<target>/AGENTS.md` | opencode lazy index |
+| `out_roots[]` (sentinel) | customized `--out` / `--rules-dir` abs roots |
+
+### `mgh-ut-init` sanctioned subtrees (positive allowlist)
+
+Same shape as init (ut-init writes rules into the project root too): `mgh-ut-init` is the
+fifth run-domain and the second rules-writing command.
+
+| Subtree | Purpose |
+|---|---|
+| `<target>/.mgh-ut-init/**` | artifacts / checkpoints / inputs / run_config / sentinel |
+| `<target>/.claude/rules/**` | claude test-convention rules output (`test-*.md`) |
+| `<target>/docs/test-conventions/**` | opencode per-category detail files |
 | `<target>/AGENTS.md` | opencode lazy index |
 | `out_roots[]` (sentinel) | customized `--out` / `--rules-dir` abs roots |
 

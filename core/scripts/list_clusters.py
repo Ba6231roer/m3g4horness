@@ -10,6 +10,14 @@ Replaces hand-rolled `py -c "import json..."` introspection in the orchestrator
 MUST NOT `len()` the wrapper — that yields 3, the top-level key count, not the
 cluster count).
 
+Scout-tier gate (deterministic tier ordering): when `<clusters.json 同目录>/run_config.json`
+exists with `no_scout` falsy (scout enabled) and the scout tier is NOT complete
+(`init_tier.scout_complete`), list_clusters refuses to emit a T1 work-list — exit 2 +
+stdout `{"error":"scout-incomplete-gate",...}` + stderr recipe — so the orchestrator
+CANNOT fan out T1 on a regex-only cluster set (the stranded-scout failure). run_config
+absent (bare clusters.json / test fixture) or `no_scout` true → gate skipped (can't judge
+scout intent / explicit regex-only is legal).
+
 Per-unit input materialization (`--materialize`, request-context-budget): each cluster's
 COMPLETE input record (cluster fields + candidate hits looked up from controls_candidates.json)
 is written to `<dir>/<unit>.input.json`; `pending[]` becomes a SLIM envelope carrying
@@ -59,7 +67,7 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
     by effective_limit. shrunk=true iff a page was auto-tightened to ≤ --orch-budget-bytes.
 
 Exit codes (R5.3b): 0 ok (incl. empty clusters) · 1 clusters.json missing/malformed ·
-2 misuse (argparse / bad budget). Idempotent, no TTY.
+2 misuse (argparse / bad budget / scout-incomplete-gate). Idempotent, no TTY.
 """
 from __future__ import annotations
 import argparse
@@ -67,10 +75,11 @@ import json
 import sys
 from pathlib import Path
 
-# FD2 family convention: self-locate this script's dir so any future sibling import
-# resolves under any cwd / host-agent invocation (direct `py`/`python`). list_clusters
-# currently has no sibling import, but the guard keeps it in the self-contained family.
+# Self-locate this script's dir so the sibling `init_tier` import resolves under any
+# cwd / host-agent invocation (direct `py`/`python`) — R5.3a.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from init_tier import scout_complete  # noqa: E402
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — aligns with --big-file-bytes 200KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
@@ -308,7 +317,10 @@ def main():
     ap = argparse.ArgumentParser(
         description="list pending T1 clusters from clusters.json (deterministic work-list)")
     ap.add_argument("--clusters", required=True,
-                    help="path to clusters.json (wrapper dict {repo,clusters,truncated})")
+                    help="path to clusters.json (wrapper dict {repo,clusters,truncated}); "
+                         "T1 scout gate: if <dir>/run_config.json enables scout and the scout "
+                         "tier is incomplete, exits 2 with {\"error\":\"scout-incomplete-gate\"} "
+                         "and emits no pending[] (no_scout or absent run_config skips the gate)")
     ap.add_argument("--checkpoints",
                     help="T1 checkpoint dir (default: <clusters>/../checkpoints/t1)")
     ap.add_argument("--candidates",
@@ -353,6 +365,34 @@ def main():
     clusters = wrapper["clusters"]
     checkpoints_dir = (Path(args.checkpoints).resolve() if args.checkpoints
                        else (clusters_path.parent / "checkpoints" / "t1").resolve())
+
+    # --- scout-tier gate (deterministic tier ordering; see module docstring) ---
+    # <clusters.json 同目录>/run_config.json decides scout intent. run_config absent
+    # (bare clusters.json / test fixture) or no_scout=true → gate skipped (conservative
+    # pass-through / explicit regex-only). scout enabled + incomplete → fail-loud so the
+    # orchestrator CANNOT fan out T1 on a regex-only cluster set.
+    init_dir = clusters_path.resolve().parent
+    rc_path = init_dir / "run_config.json"
+    if rc_path.is_file():
+        try:
+            rc = json.loads(rc_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            rc = None
+        if isinstance(rc, dict) and not rc.get("no_scout"):
+            if not scout_complete(init_dir):
+                print(f"error: scout tier incomplete but run_config enables scout "
+                      f"(no_scout=false) — T1 must NOT proceed on regex-only clusters. "
+                      f"Read `py resume_state.py --target <target>` stdout step/next_action "
+                      f"to finish the scout tier first; pass --no-scout to explicitly run "
+                      f"regex-only.", file=sys.stderr)
+                print(json.dumps({"error": "scout-incomplete-gate",
+                                  "init_dir": str(init_dir),
+                                  "clusters": str(clusters_path),
+                                  "hint": "finish the scout tier (resume_state.py) or "
+                                          "re-run /mgh-init with --no-scout"},
+                                 ensure_ascii=False))
+                return 2
+
     done = _done_ids(checkpoints_dir)
     failed = _failed_ids(checkpoints_dir)
     materialize = bool(args.materialize)

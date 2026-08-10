@@ -14,17 +14,34 @@ the execution path (the orchestrator never relies on "remembering" the step).
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
-  py resume_state.py --target <dir> [--init-dir <dir>] [--check]
+  py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] [--check]
+       [--invalidate-stale [--dry-run]]
 
-  --target   target project root (default: .). init-dir = <target>/.mgh-init.
-  --init-dir explicit .mgh-init dir (overrides <target>/.mgh-init).
+  --target   target project root (default: .).
+  --init-dir explicit run dir (full path; highest priority).
+  --run-root run dir NAME under <target> (default .mgh-init; used when --init-dir absent).
   --check    boundary check (R5.9): validate on-disk state self-consistency; exit 0/2.
+  --invalidate-stale
+             delete stale downstream t2/t3/t4 aggregate `.done` markers (scout enabled +
+             incomplete → those markers were produced from regex-only input); combine
+             with --dry-run to preview. Same marker set as the merge_scout fold-in cascade.
+  --dry-run  with --invalidate-stale: list the markers that would be removed, delete nothing.
+
+  Run-dir resolution priority: --init-dir > <target>/<--run-root> (default <target>/.mgh-init).
+  Default --run-root .mgh-init is byte-equivalent to the prior hard-coded behavior.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"target":"<abs>","format":"...","step":"<enum>","resumable":bool,
-   "tiers":{"discover":{done,failed,total},"scout":{..},"t1":{..},"t2":{..},"t3":{..},"t4":{..}},
+   "tiers":{"discover":{done,failed,total},"scout":{done,failed,total[,merged]},"t1":{..},"t2":{..},"t3":{..},"t4":{..}},
    "next_action":{"kind":"bash|subagent|done","desc":"...","absolute_paths":["<abs>",...]},
    "notes":["..."]}
+  tiers.scout carries an ADDITIVE `merged` field (fold-in actual scout candidates merged
+  into controls_candidates.json) ONLY when controls_candidates.json::provenance.scout_merged
+  exists — scout disabled / fold-in not yet run → omitted (keeps the base shape stable).
+
+--invalidate-stale stdout (R5.3b):
+  dry-run: {"invalidate_stale":{"dry_run":true,"markers":["<abs>",...]}}
+  real:    {"invalidate_stale":{"dry_run":false,"removed":["<abs>",...]}}
 
 step ∈ not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done. The blocking
 sequence is discover→scout→t1→t2→t3→assemble→t4→done; survey/resolve are optional/non-fatal
@@ -38,8 +55,8 @@ templated <target>). `run_config.json` missing/unparseable → exit 2 + stderr r
 /mgh-init --<flags>); NEVER silently guess the step graph.
 
 Exit codes (R5.3b): 0 ok · 1 init-dir missing/not a dir · 2 misuse / run_config missing /
---check self-consistency violation (incl. a unit carrying BOTH .done and .failed). Read-only,
-idempotent, no TTY.
+--check self-consistency violation (incl. a unit carrying BOTH .done and .failed).
+Read-only (except the explicit --invalidate-stale action), idempotent, no TTY.
 """
 from __future__ import annotations
 import argparse
@@ -47,10 +64,14 @@ import json
 import sys
 from pathlib import Path
 
-# Self-locate this script's dir so any future sibling import resolves under any cwd /
-# host-agent invocation (direct `py`/`python`). resume_state currently has no sibling import,
-# but the guard keeps it in the self-contained family (R5.3a).
+# Self-locate this script's dir so the sibling `init_tier` import resolves under any
+# cwd / host-agent invocation (direct `py`/`python`) — R5.3a.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Shared deterministic predicates/constants (single source of truth): scout-tier
+# completion for the step derivation + stale-marker enumeration for --check /
+# --invalidate-stale.
+from init_tier import scout_complete, stale_marker_paths  # noqa: E402
 
 
 def _load_json(path: Path):
@@ -134,6 +155,18 @@ def _foldin_done(candidates_path: Path) -> bool:
     if err or not isinstance(cd, dict):
         return False
     return isinstance(cd.get("provenance"), dict) and "scout_merged" in cd["provenance"]
+
+
+def _scout_merged_value(candidates_path: Path):
+    """Actual scout candidates merged into controls_candidates.json
+    (provenance.scout_merged); None when fold-in never ran (key absent)."""
+    cd, err = _load_json(candidates_path)
+    if err or not isinstance(cd, dict):
+        return None
+    prov = cd.get("provenance")
+    if not isinstance(prov, dict):
+        return None
+    return prov.get("scout_merged")
 
 
 def _next(kind: str, desc: str, paths) -> dict:
@@ -220,11 +253,19 @@ def resolve(init_dir: Path):
     t3_done_count = _count_markers(t3_cp, f"*.{fmt}.json.done") if inventory.is_file() else 0
     t3_failed_count = _count_markers(t3_cp, f"*.{fmt}.json.failed") if inventory.is_file() else 0
 
+    scout_tier = {"done": scout_done_count if not no_scout else 0,
+                  "failed": scout_failed_count if not no_scout else 0,
+                  "total": scout_total if not no_scout else 0}
+    if not no_scout:
+        merged = _scout_merged_value(candidates)
+        if merged is not None:
+            # additive: only when fold-in actually recorded a merge count (keeps the
+            # base {done,failed,total} shape stable when scout is disabled / fold-in
+            # not yet run).
+            scout_tier["merged"] = merged
     tiers = {
         "discover": {"done": 1 if discover_done else 0, "failed": 0, "total": 1},
-        "scout": {"done": scout_done_count if not no_scout else 0,
-                  "failed": scout_failed_count if not no_scout else 0,
-                  "total": scout_total if not no_scout else 0},
+        "scout": scout_tier,
         "t1": {"done": t1_done_count, "failed": t1_failed_count, "total": clusters_total},
         "t2": {"done": 1 if _t2_done(init_dir) else 0, "failed": 0, "total": 1},
         "t3": {"done": t3_done_count, "failed": t3_failed_count, "total": t3_total},
@@ -244,6 +285,19 @@ def resolve(init_dir: Path):
             else:
                 notes.append(f"{tier_name}: {failed_n}/{tier_total} units failed (terminal, "
                              f"skipped); see .failed markers for reasons (advisory, non-gating).")
+
+    # --- scout consistency / stale-credential disclosure (advisory; never gates/derives step) ---
+    if not no_scout and not scout_complete(init_dir):
+        stale = stale_marker_paths(init_dir)
+        if stale:
+            notes.append("stale credentials: scout incomplete but downstream t2/t3/t4 .done "
+                         "exist (regex-only input) — run `resume_state.py --check` then "
+                         "`--invalidate-stale` before --resume")
+    if not no_scout and scout_total > 0 and scout_terminal_count >= scout_total:
+        merged = _scout_merged_value(candidates)
+        if merged == 0:
+            notes.append(f"scout reviewed {scout_total} batch(es) but merged 0 candidates — "
+                         "possible recall gap (advisory, non-gating).")
 
     # --- optional/non-fatal tier notes (never gate) ---
     if enriched.is_file():
@@ -273,8 +327,7 @@ def resolve(init_dir: Path):
                     [init_dir, candidates, clusters_p])
         if discover_partial:
             notes.append("discover: partial — cache/scan_progress present; re-dispatch --resume.")
-    elif (not no_scout) and not _scout_complete(init_dir, scout_plan, scout_candidates,
-                                                candidates, scout_total, scout_terminal_count):
+    elif (not no_scout) and not scout_complete(init_dir):
         step, nxt = _scout_step(init_dir, scout_plan, scout_candidates, candidates,
                                 clusters_p, scout_cp, scout_total, scout_terminal_count, notes)
     elif clusters_total and (t1_done_count + t1_failed_count) < clusters_total:
@@ -326,21 +379,6 @@ def _empty_tiers() -> dict:
     return {k: dict(z) for k in ("discover", "scout", "t1", "t2", "t3", "t4")}
 
 
-def _scout_complete(init_dir, scout_plan, scout_candidates, candidates,
-                    scout_total, scout_terminal_count) -> bool:
-    """Scout tier fully done = plan exists AND (0 batches OR (scout_candidates + merge.done +
-    fold-in all done)). `scout_terminal_count` (done+failed reader batches) is accepted for
-    symmetry with `_scout_step` but not used here — completion is gated on the merge/fold-in
-    artifacts, not the reader-batch count."""
-    if not scout_plan.is_file():
-        return False
-    if scout_total == 0:
-        return True  # nothing to scout
-    if not (scout_candidates.is_file() and _scout_merge_done(init_dir)):
-        return False
-    return _foldin_done(candidates)
-
-
 def _scout_step(init_dir, scout_plan, scout_candidates, candidates, clusters_p,
                 scout_cp, scout_total, scout_terminal_count, notes) -> tuple:
     if not scout_plan.is_file():
@@ -375,11 +413,14 @@ def _scout_step(init_dir, scout_plan, scout_candidates, candidates, clusters_p,
 
 
 def check(init_dir: Path) -> dict:
-    """R5.9 self-consistency validation. Returns {ok, violations[]}; caller exits 0/2."""
+    """R5.9 self-consistency validation. Returns {ok, violations[], notes[]}; caller
+    exits 0/2. notes[] carries advisory disclosures (scout reviewed but merged 0)."""
     violations = []
+    notes = []
     cfg, recipe = _run_config(init_dir)
     if cfg is None:
-        return {"ok": False, "violations": [{"issue": recipe}]}
+        return {"ok": False, "violations": [{"issue": recipe}], "notes": []}
+    no_scout = bool(cfg.get("no_scout"))
     candidates = init_dir / "controls_candidates.json"
     clusters_p = init_dir / "clusters.json"
     inventory = init_dir / "controls_inventory.json"
@@ -415,16 +456,54 @@ def check(init_dir: Path) -> dict:
     if clusters_p.is_file() != candidates.is_file():
         violations.append({"issue": "discover products inconsistent: controls_candidates.json and "
                                     "clusters.json must both exist or both be absent"})
-    return {"ok": not violations, "violations": violations}
+    # --- scout consistency + stale-credential checks (scout enabled only) ---
+    if not no_scout:
+        sp, sp_err = _load_json(init_dir / "scout_plan.json")
+        batches = 0
+        if not sp_err and isinstance(sp, dict) and isinstance(sp.get("batches"), list):
+            batches = len(sp["batches"])
+        terminal = (_count_markers(scout_cp, "*.json.done", exclude=("merge.json", "audit.json"))
+                    + _count_markers(scout_cp, "*.json.failed", exclude=("merge.json", "audit.json")))
+        # stale credentials: scout incomplete but downstream aggregate .done exist
+        # (they were produced from regex-only input — resume must not trust them).
+        if not scout_complete(init_dir):
+            stale = stale_marker_paths(init_dir)
+            if stale:
+                violations.append({"issue": "scout enabled + incomplete but downstream "
+                                            "t2/t3/t4 .done present (stale credentials from "
+                                            "regex-only input) — run `resume_state.py "
+                                            "--invalidate-stale` (preview: --dry-run) before --resume"})
+        # scout contribution consistency: ran all batches but never merged = stranded;
+        # merged 0 is disclosed as a note, NOT a gate.
+        if batches > 0 and terminal >= batches:
+            merged = _scout_merged_value(candidates)
+            if merged is None:
+                violations.append({"issue": "scout ran all batches but never merged "
+                                            "(provenance.scout_merged absent) — stranded; run "
+                                            "init-scout-merge + merge_scout fold-in"})
+            elif merged == 0:
+                notes.append(f"scout reviewed {batches} batch(es) but merged 0 candidates — "
+                             "possible recall gap (advisory, not a gate)")
+    return {"ok": not violations, "violations": violations, "notes": notes}
 
 
 def main():
     ap = argparse.ArgumentParser(
         description="derive /mgh-init current step + next action purely from disk (re-entrant)")
     ap.add_argument("--target", default=".", help="target project root (default .)")
-    ap.add_argument("--init-dir", help="explicit .mgh-init dir (default <target>/.mgh-init)")
+    ap.add_argument("--init-dir",
+                    help="explicit run dir (full path; highest priority, overrides --run-root)")
+    ap.add_argument("--run-root", default=".mgh-init",
+                    help="run dir NAME under <target> (default .mgh-init; used when --init-dir absent)")
     ap.add_argument("--check", action="store_true",
                     help="boundary check (R5.9): validate on-disk state self-consistency, exit 0/2")
+    ap.add_argument("--invalidate-stale", action="store_true",
+                    help="delete stale downstream t2/t3/t4 aggregate .done markers (scout "
+                         "enabled + incomplete → regex-only credentials); combine with "
+                         "--dry-run to preview (same marker set as merge_scout fold-in)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --invalidate-stale: list the markers that would be removed, "
+                         "delete nothing")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk on
     # Chinese Windows) so stdout JSON parses everywhere. Before parse_args so --help is
     # utf-8 too. No-op on StringIO (in-process tests).
@@ -439,10 +518,32 @@ def main():
     if args.init_dir:
         init_dir = Path(args.init_dir).resolve()
     else:
-        init_dir = (Path(args.target).resolve() / ".mgh-init").resolve()
+        init_dir = (Path(args.target).resolve() / args.run_root).resolve()
     if not init_dir.is_dir():
         print(f"error: init-dir not found: {init_dir} (run /mgh-init first)", file=sys.stderr)
         return 1
+
+    if args.invalidate_stale:
+        markers = stale_marker_paths(init_dir)
+        if args.dry_run:
+            print(f"[resume_state --invalidate-stale --dry-run] {len(markers)} stale marker(s) "
+                  f"would be removed", file=sys.stderr)
+            print(json.dumps({"invalidate_stale": {"dry_run": True,
+                                                   "markers": [str(p) for p in markers]}},
+                             ensure_ascii=False))
+            return 0
+        removed = []
+        for p in markers:
+            try:
+                p.unlink()
+                removed.append(str(p))
+            except OSError as e:
+                print(f"warn: cannot remove {p}: {e}", file=sys.stderr)
+        print(f"[resume_state --invalidate-stale] removed {len(removed)} stale marker(s)",
+              file=sys.stderr)
+        print(json.dumps({"invalidate_stale": {"dry_run": False, "removed": removed}},
+                         ensure_ascii=False))
+        return 0
 
     if args.check:
         result = check(init_dir)

@@ -96,5 +96,46 @@ class TestWriteRunconfig(unittest.TestCase):
         self.assertFalse(cfg["include_tests"])
 
 
+    def test_run_root_default_writes_mgh_init(self):
+        # default (no --run-root) -> <target>/.mgh-init/run_config.json (old behavior).
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_rr1_")).resolve()
+        code, _, _ = _run("--target", str(target), "--format", "opencode")
+        self.assertEqual(code, 0)
+        self.assertTrue((target / ".mgh-init" / "run_config.json").is_file())
+
+    def test_run_root_named_dir(self):
+        # --run-root .mgh-ut-init -> <target>/.mgh-ut-init/run_config.json.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_rr2_")).resolve()
+        code, out, _ = _run("--target", str(target), "--format", "opencode",
+                            "--run-root", ".mgh-ut-init")
+        self.assertEqual(code, 0)
+        rc = target / ".mgh-ut-init" / "run_config.json"
+        self.assertTrue(rc.is_file())
+        self.assertEqual(json.loads(out)["run_config"], str(rc.resolve()))
+
+    def test_init_dir_overrides_run_root(self):
+        # --init-dir wins over --run-root; run_config lands in --init-dir, NOT --run-root.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_rr3_")).resolve()
+        custom = target / "custom"
+        code, out, _ = _run("--target", str(target), "--format", "opencode",
+                            "--run-root", ".mgh-ut-init", "--init-dir", str(custom))
+        self.assertEqual(code, 0)
+        self.assertTrue((custom / "run_config.json").is_file())
+        self.assertFalse((target / ".mgh-ut-init" / "run_config.json").is_file())
+
+    def test_run_root_explicit_default_byte_equivalent(self):
+        # no --run-root ≡ --run-root .mgh-init (spec: default is byte-equivalent).
+        t1 = Path(tempfile.mkdtemp(prefix="mgh_wc_rr4_")).resolve()
+        t2 = Path(tempfile.mkdtemp(prefix="mgh_wc_rr5_")).resolve()
+        _, o1, _ = _run("--target", str(t1), "--format", "opencode")
+        _, o2, _ = _run("--target", str(t2), "--format", "opencode", "--run-root", ".mgh-init")
+        a1, a2 = json.loads(o1), json.loads(o2)
+        # identical schema/flags; run_config/target differ only by the temp dir.
+        for k in ("format", "mode", "no_scout", "no_codegraph", "skip_consistency"):
+            self.assertEqual(a1[k], a2[k])
+        self.assertEqual(Path(a1["run_config"]), (t1 / ".mgh-init" / "run_config.json").resolve())
+        self.assertEqual(Path(a2["run_config"]), (t2 / ".mgh-init" / "run_config.json").resolve())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ Producer: command orchestrator (i4). Consumer: humans, `/mgh-sra`, `/mgh-blst`, 
   "scope": {"seed": "...", "scope-mode": "defined|applicable"},
   "counts": {"candidates": 0, "controls": 0, "clusters": 0, "unresolved": 0, "out_of_scope": 0, "truncated": false},
   "failures": {"scout": {"done": 0, "failed": 0, "total": 0}, "t1": {"done": 0, "failed": 0, "total": 0}, "t3": {"done": 0, "failed": 0, "total": 0}},
-  "scout": {"enabled": true, "skeleton_total": 0, "scout_targets": 0, "batches": 0, "deep_read_files": 0, "audit_sampled": 0, "audit_found": 0},
+  "scout": {"enabled": true, "skeleton_total": 0, "scout_targets": 0, "batches": 0, "deep_read_files": 0, "audit_sampled": 0, "audit_found": 0, "scout_merged": 0},
   "codegraph": {"available": false, "used": false, "resolved_count": 0, "unresolved_residual": 0},
   "rules": {"block": "security-controls", "rules_dir": "docs/security-controls (opencode; absent for claude)", "rules_layout": "lazy-index (opencode) | path-scoped (claude)", "categories": 0, "migrated_legacy_blocks": 0, "lint": {"ok": true, "violations": []}},
   "provenance": {"discover": "discover_controls.py", "induct": "init-induct(T1)", "synthesis": "init-synthesis(T2)", "rules": "init-rulewriter(T3)+assemble_rules.py", "scout": "init-scout/merge/audit", "resolve": "init-resolve(codegraph)"},
@@ -36,6 +36,10 @@ Producer: command orchestrator (i4). Consumer: humans, `/mgh-sra`, `/mgh-blst`, 
   "artifacts": {"candidates":".mgh-init/controls_candidates.json","resolved":".mgh-init/resolved.json (only when codegraph=on & unresolved non-empty)","inventory":".mgh-init/controls_inventory.json","run_config":".mgh-init/run_config.json (start-state intent; stateless-resume source, written step 0)","rules-detail(opencode)":"docs/security-controls/*.md (shipped, per-category H1 docs)","rules":"<target>/.claude/rules|<target>/AGENTS.md (security-controls lazy index) + docs/security-controls/*.md (opencode)","report":".mgh-init/report.md"}
 }
 ```
+
+`scout.scout_merged` = fold-in 实际并入 `controls_candidates.json` 的 scout 候选数
+(取值于 `merge_scout.py` 写入的 `provenance.scout_merged`;`resume_state.py` stdout
+`tiers.scout.merged` 同源)。`--no-scout` 或 fold-in 未跑时该字段缺省/为空,不声称 scout 并入量。
 
 ### Checkpoint units (`<target>/.mgh-init/checkpoints/<unit>.json`)
 

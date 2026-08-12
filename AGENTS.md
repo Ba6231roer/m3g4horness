@@ -171,10 +171,12 @@ flowchart LR
   - ③ 显式废对冲词 + RFC-2119 normative 动词(`MUST/SHALL` 取代 `should/may`,机器可检)。
   - ④ 验收用可证伪清单 + schema 示例(非散文);命令行示例逐字可执行;无长代码块(承 R3)。
   - ⑤ **禁令清楚则不举例**:抽象规则醒目且无歧义时,枚举反例是冗余(承 R3);只在 agent 可能猜不到边界时才给最小反例。
-- **R5.6 命令壳薄壳 + token 硬预算**:壳只放 编排流 + stage→组件表 + 确切确定性调用 + 边界披露;
-  正文 ≤500 行 / ≤5000 tokens(Codex 硬上限 8KB;`description:` ≤1536 chars);详情移
-  `core/prompts/`,只深一级;按域分文件;禁 `@` 强制内联(改用 `REQUIRED SUB-SKILL: Use X` 标记);
-  `--help`/无参 → 打印 flag 表并 STOP(花 token 前先校验)。
+- **R5.6 命令壳薄壳 + token 硬预算(防回归硬上限)**:壳只放 编排流骨架 + stage→组件表 + 确切确定性调用 + 边界披露;
+  详情移 `core/prompts/`,只深一级;按域分文件;禁 `@` 强制内联(改用 `REQUIRED SUB-SKILL: Use X` 标记,opencode 无跨文件自动内联,该标记纯模型解释 = lazy `Read`);
+  `--help`/无参 → 打印 flag 表并 STOP(花 token 前先校验);`description:` ≤1536 chars。
+  - **token 硬上限(强制性,lint fail-loud 防回归)**:编排器壳正文 **≤ 5,000 tok**;编排器加载的 fragments **逐个评估单次 Read 轮尺寸是否结构良好**(无硬求和上限;三者磁盘 `mid_tokens` 合计 ≤ ~10,000 作**防漂移** lint,标注根据 = 磁盘大小防漂移、**非**运行时叠加占用);子 agent 有效系统(agent def + stage prompt + 其加载的 fragments)≤ 5,000 tok。理由〔硬上限不是来自上下文算术,而是承重观察:opencode 无平台命令体尺寸上限(已核实 `packages/core/src/v1/config/command.ts`)、命令体作为触发消息仅一次性进 USER 历史(非每轮 system)、fragment 经 `REQUIRED SUB-SKILL` 仅为模型 lazy `Read` 产出的单次 USER 历史项(非每轮 system 税),故**压缩阈值不绑定壳/fragment 尺寸**(完整机制 + 源码行号见 [`docs/opencode-context-mechanics.md`](docs/opencode-context-mechanics.md),开发涉及压缩/加载时**先读**);但壳常驻历史 + 是弱模型唯一可靠的行为指令源,经验上结构良好的 mgh-* 壳(mgh-sast/ut-init)自然落在 ~4.5–5K,超 ~2×(mgh-init 9.4K)即冗余信号 + 注意力/执行忠实度衰减——硬上限 = 防松散迭代再膨胀回本次优化前〕(原「fragments 合计 ≤ 3,000 tok」求和上限已废,据 opencode 运行时模型重接地,见 `harden-mgh-init-shell-budget` design D6 + 报告 §9)。落地方式 = **保真度优先**裁剪(删冗余/重复/R5.10 dev-meta,迁可分片细节进按需 fragment;**MUST NOT** 删承重处理流程节点与已修 bug 防线,见报告「⚠ 裁剪前提:保真度优先」);超尺寸壳 SHALL **shard-to-fit**(抽子流程进 lazy fragment),NEVER 靠删承重内容硬凑达标。`description:` 简练(便于命令选择器;opencode 源码**未**强制 maxLength,约束由本规自管)。
+  - **行数非硬约束(已废 500 行)**:zh-dense 承载比 ~25–35 tok/line → 5K tok 对应 ~145–200 行,原「500 行」上限松 2.5–3.5×。LINE 仅作 drafting 指引,**TOKEN 是约束维度**。
+  - **lint 强制(防回归,承 R5.8)**:`tools/measure_prompts.py` 已存在(stdlib,`mid_tokens` 工作值 + 高/低区间);新增 `tools/check_distributed_prompt_budget.py`(或并入 `tools/check_contracts.py`)对每个 mgh-* 壳 + 子 agent 有效系统断言 ≤ 上限,失败 exit 2 + 接 CI。**回归语义**:lint 也 flag 增量(相对上次 release 基线的字节/token 增长超阈值)→ review,防慢漂移积累成突破。
 - **R5.7 评估驱动 + hook 强制闭环**(同号两段;**段 A 评估方法论** + **段 B hook 强制闭环**):
   **段 A 评估方法论(TDD-for-docs)**:改 `core/prompts/**` 前先建 baseline(无该提示词跑 ≥5 次 capture
   失败模式,variance 是指标)→ blind A/B 对比 pass rate/tokens → 新命令由 A 实例写、全新 B 实例
@@ -241,8 +243,9 @@ m3g4horness/
 ├── releases/opencode/        # opencode shell → 装入 .opencode/
 │   ├── command/{mgh-sast,mgh-init,mgh-sra,mgh-blst}.md
 │   └── agent/sast-*.md
-├── docs/                     # 分发指南 + upstream-index(原项目引用)
-│   └── upstream/             # 逐功能分析分文档
+├── docs/                     # 分发指南 + upstream-index(原项目引用) + opencode 机制参考
+│   ├── upstream/             # 逐功能分析分文档
+│   └── opencode-context-mechanics.md  # opencode 上下文/压缩机制(开发涉及压缩时先读)
 ├── tools/                    # 构建期工具(extract_prompts / gen_*),不随安装分发
 └── tests/                    # 确定性阶段单测
 ```

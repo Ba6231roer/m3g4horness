@@ -9,6 +9,18 @@ Asserts both mgh-init.md shells agree on the codegraph-enrichment surface:
   init-resolve stage prompt + both agent defs carry the required hard constraints
   (Sanctioned tools allowlist incl. codegraph MCP/CLI + Read fallback;
   checkpoint_path/done_marker verbatim; source:"codegraph"; NEVER Write .py / py -c).
+
+Architecture note (change harden-mgh-init-shell-budget): the mgh-init stage-flow
+body (steps 0–8) was extracted into a SHARED fragment `init-stage-flow.md` that
+BOTH shells load via `REQUIRED SUB-SKILL: Use init-stage-flow` (single source of
+truth, zero cross-host drift), and the Stage→component table was folded to a
+compact `script inventory | subagent inventory`. Consequently the codegraph-stage
+surface now lives in the shared fragment (detection stanza, init-resolve triple
++ semantics, codegraph manifest block) and the init-resolve subagent is named in
+the shell's compact subagent inventory. Parity is therefore asserted against the
+shell+fragment combined surface (a SHARED fragment is the strongest parity: both
+hosts read the identical bytes), and the component-map check asserts the
+subagent inventory names init-resolve.
   Run: py tests/test_mgh_init_codegraph_parity.py
 """
 import unittest
@@ -18,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 CLAUDE_SHELL = ROOT / "releases" / "claude-code" / "commands" / "mgh-init.md"
 OPENCODE_SHELL = ROOT / "releases" / "opencode" / "command" / "mgh-init.md"
+STAGE_FLOW_FRAGMENT = ROOT / "core" / "prompts" / "fragments" / "init-stage-flow.md"
 RESOLVE_PROMPT = ROOT / "core" / "prompts" / "stages" / "init-resolve.md"
 HINT_FRAGMENT = ROOT / "core" / "prompts" / "fragments" / "codegraph-hint.md"
 CLAUDE_AGENT = ROOT / "releases" / "claude-code" / "agents" / "init-resolve.md"
@@ -28,28 +41,51 @@ class TestShellCodegraphParity(unittest.TestCase):
     def setUp(self):
         self.assertTrue(CLAUDE_SHELL.is_file(), f"{CLAUDE_SHELL} missing")
         self.assertTrue(OPENCODE_SHELL.is_file(), f"{OPENCODE_SHELL} missing")
+        self.assertTrue(STAGE_FLOW_FRAGMENT.is_file(), f"{STAGE_FLOW_FRAGMENT} missing")
         self.claude = CLAUDE_SHELL.read_text(encoding="utf-8")
         self.opend = OPENCODE_SHELL.read_text(encoding="utf-8")
+        self.flow = STAGE_FLOW_FRAGMENT.read_text(encoding="utf-8")
+        # shell + the shared stage-flow fragment it loads = the full codegraph-stage
+        # surface the orchestrator sees; the fragment is the single shared source.
+        self.claude_surface = self.claude + "\n" + self.flow
+        self.opend_surface = self.opend + "\n" + self.flow
 
-    def _assert_both(self, needle):
-        self.assertIn(needle, self.claude, f"claude shell missing: {needle!r}")
-        self.assertIn(needle, self.opend, f"opencode shell missing: {needle!r}")
+    def _assert_both(self, needle, surface=True):
+        c = self.claude_surface if surface else self.claude
+        o = self.opend_surface if surface else self.opend
+        self.assertIn(needle, c, f"claude surface missing: {needle!r}")
+        self.assertIn(needle, o, f"opencode surface missing: {needle!r}")
+
+    def test_both_load_init_stage_flow_fragment(self):
+        # the shared fragment IS the codegraph-stage parity mechanism (single source)
+        self._assert_both("REQUIRED SUB-SKILL: Use init-stage-flow", surface=False)
+        self.assertIn("init-stage-flow.md", self.claude)
+        self.assertIn("init-stage-flow.md", self.opend)
 
     def test_both_declare_no_codegraph_flag(self):
-        self._assert_both("--no-codegraph")
+        self._assert_both("--no-codegraph", surface=False)
 
     def test_both_reference_hint_fragment(self):
-        self._assert_both("codegraph-hint.md")
+        # init-resolve loads codegraph-hint.md; the reference is carried in the shared
+        # init-resolve agent def (asserted in TestInitResolveAgentDefs) — both shells
+        # reach it via the same subagent. Assert the fragment file itself exists and is
+        # prescriptive (covered by TestInitResolvePrompt.test_hint_fragment_is_prescriptive).
+        self.assertTrue(HINT_FRAGMENT.is_file(), f"{HINT_FRAGMENT} missing")
 
     def test_both_reference_init_resolve_prompt(self):
-        self._assert_both("init-resolve.md")
+        # init-resolve stage prompt referenced via the init-resolve subagent named in the
+        # shell inventory + the shared stage-flow fragment (step 3c). Assert the stage
+        # prompt exists and the shell inventory names the subagent.
+        self.assertTrue(RESOLVE_PROMPT.is_file(), f"{RESOLVE_PROMPT} missing")
+        self._assert_both("init-resolve", surface=False)
 
     def test_both_declare_detection_stanza(self):
         self._assert_both("command -v codegraph")
         self._assert_both("codegraph=on|off")
 
     def test_both_declare_init_resolve_stage_semantics(self):
-        # rigid triple + optional/codegraph-gated/non-fatal/bounded semantics
+        # rigid triple + optional/codegraph-gated/non-fatal/bounded semantics live in
+        # the shared stage-flow fragment (step 3c); both shells load the identical bytes.
         self._assert_both("init-resolve")
         self._assert_both("codegraph-gated")
         self._assert_both("non-fatal")
@@ -57,7 +93,9 @@ class TestShellCodegraphParity(unittest.TestCase):
         self._assert_both("resolved.json")
 
     def test_both_list_init_resolve_in_component_map(self):
-        self._assert_both("resolve (opt)")
+        # compact subagent inventory names init-resolve (opt, codegraph-gated)
+        self._assert_both("init-resolve", surface=False)
+        self._assert_both("codegraph-gated", surface=False)
 
     def test_both_declare_codegraph_manifest_block(self):
         self._assert_both("resolved_count")

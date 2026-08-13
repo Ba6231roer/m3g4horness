@@ -17,7 +17,7 @@ rest of `.mgh-init/`.
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
-  py write_runconfig.py --target <dir> --format opencode|claude [--init-dir <dir>]
+  py write_runconfig.py --target <dir> [--format opencode|claude] [--init-dir <dir>]
        [--run-root <name>] [--scope ..] [--scope-mode defined|applicable] [--no-scout]
        [--no-codegraph] [--skip-consistency] [--merge <partials-dir>] [--include-dotfiles]
        [--include-tests] [--max-unit-bytes B] [--orch-budget-bytes B] [--max-aggregate-bytes B]
@@ -31,7 +31,7 @@ CLI contract (`--help` is the contract surface, R5.1):
 stdout (structured JSON; stderr = diagnostics only, R5.3b):
   {"run_config": "<abs run_config.json>", "target": "<abs target>", "format": "...",
    "mode": "normal|merge", "no_scout": false, "no_codegraph": false, "skip_consistency": false}
-Exit codes (R5.3b): 0 written · 2 misuse (argparse / bad budget / missing --target/--format).
+Exit codes (R5.3b): 0 written · 2 misuse (argparse / bad budget / missing --target).
 Idempotent (create-if-not-exists + overwrite), no TTY.
 """
 from __future__ import annotations
@@ -80,8 +80,8 @@ def main():
         description="atomically write <target>/.mgh-init/run_config.json (start-state intent)")
     ap.add_argument("--target", required=True,
                     help="target project root (recorded ABSOLUTE; the run's repo root)")
-    ap.add_argument("--format", required=True, choices=["opencode", "claude"],
-                    help="rule format (also selects rule_path layout; required)")
+    ap.add_argument("--format", default="opencode", choices=["opencode", "claude"],
+                    help="rule format (default opencode; pass claude for .claude/rules/*.md)")
     ap.add_argument("--init-dir",
                     help="run dir full path (highest priority, overrides --run-root)")
     ap.add_argument("--run-root", default=".mgh-init",

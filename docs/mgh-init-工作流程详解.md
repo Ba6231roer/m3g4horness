@@ -90,7 +90,7 @@ flowchart TD
 
 | #          | 节点            | 主流程                            | 扇出          | 角色提示词(md)                                                            | 用到的 py 脚本                                                          | 功能(人话)                                                                                                                                  | 产出                                                                                 |                      |
 | ---------- | ------------- | ------------------------------ | ----------- | -------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------- |
-| i0         | 起步自检          | —(编排器)                         | —           | 无(编排器自身)                                                             | 复用 `discover_controls` 计数                                          | 校验参数(`--format` 必填)、检查子代理模型可用、统计源文件、大仓前置建议、声明运行域;**检测 codegraph**(`test -d <target>/.codegraph && command -v codegraph`)置 `codegraph=on | off` 信号透传 subagent                                                                 | 无文件;stderr 进度 + 大仓建议 |
+| i0         | 起步自检          | —(编排器)                         | —           | 无(编排器自身)                                                             | 复用 `discover_controls` 计数                                          | 校验参数(`--format` 默认 `opencode`,省略即 opencode)、检查子代理模型可用、统计源文件、大仓前置建议、声明运行域;**检测 codegraph**(`test -d <target>/.codegraph && command -v codegraph`)置 `codegraph=on | off` 信号透传 subagent                                                                 | 无文件;stderr 进度 + 大仓建议 |
 | i1         | 发现 discover   | ✅                              | —           | 无(脚本)                                                                | `discover_controls.py`(+`expand_scope.py`);大文件用 `chunk_sources.py` | 正则闸门扫存量控制 + 文本/AST 调用图,机械产出候选/聚类/骨架                                                                                                     | `controls_candidates.json`、`clusters.json`、`skeleton.json`                         |                      |
 | i1b        | 富化 survey     | ⚙️ 可选                          | 单个          | `init-survey.md`                                                     | 无(只读脚本产物)                                                          | 对确定性输出做轻量人工式富化:纠正错分类、给明显误报降置信                                                                                                           | `i1_enriched.json`(仅审计参考,**非** T1 输入;缺失不阻断)                                        |                      |
 | 3b-plan    | 侦察批次规划        | ✅(非 `--no-scout`)              | —           | 无(脚本)                                                                | `plan_scout.py`                                                    | 按字节预算 + 包内聚,把"regex 没覆盖的目标"切成多个批                                                                                                        | `scout_plan.json`(batches[])                                                       |                      |
@@ -118,7 +118,8 @@ flowchart TD
 
 ### i0 — 起步自检(编排器)
 
-- **干什么**:花 token 之前先校验。`--format claude|opencode` 不填直接报错停下;检查
+- **干什么**:花 token 之前先校验。`--format claude|opencode` 默认 `opencode`(省略即
+  opencode,显式传 `claude` 才产 `.claude/rules/*.md`);检查
   子代理模型是否可用;统计源文件数,超过阈值(`--large-repo-threshold`,默认 15000)就建议
   改用 `--scope` 分模块 + `--merge` 合并,而不是硬跑全仓。**同时检测 codegraph**:项目根有
   `.codegraph/` **且** PATH 上能找到 `codegraph` 命令,二者都满足才置 `codegraph=on`,否则 `off`;

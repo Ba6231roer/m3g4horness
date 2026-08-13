@@ -3,8 +3,9 @@
 """Unit tests for write_runconfig.py — atomic run_config.json start-state intent writer.
 
 Asserts: atomic write of <target>/.mgh-init/run_config.json; target recorded ABSOLUTE;
---no-scout / mode=merge / skip_consistency recorded; --target/--format required (exit 2);
-stdout ack shape. Run from a non-script cwd (import robustness).
+--no-scout / mode=merge / skip_consistency recorded; --target required (exit 2); --format
+defaults to opencode (omitted -> exit 0); stdout ack shape. Run from a non-script cwd
+(import robustness).
 """
 import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
 from pathlib import Path
@@ -69,6 +70,15 @@ class TestWriteRunconfig(unittest.TestCase):
     def test_missing_required_exit2(self):
         code, _, _ = _run("--format", "opencode")  # no --target
         self.assertEqual(code, 2)
+
+    def test_format_defaults_opencode(self):
+        # Omitting --format (no --target conflict) -> exit 0 + format == "opencode".
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_fmt_")).resolve()
+        code, out, _ = _run("--target", str(target))
+        self.assertEqual(code, 0)
+        cfg = json.loads((target / ".mgh-init" / "run_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["format"], "opencode")
+        self.assertEqual(json.loads(out)["format"], "opencode")
 
     def test_bad_budget_exit2(self):
         target = Path(tempfile.mkdtemp(prefix="mgh_wc4_")).resolve()

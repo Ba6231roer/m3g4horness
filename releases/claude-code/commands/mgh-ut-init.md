@@ -1,5 +1,5 @@
 ---
-description: Discover the test conventions a project actually uses (framework / mock / assertion / fixture / naming / dependency) by classifying the test source tree into layer-groups, sampling each group, and inducing agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/test-conventions/; claude: .claude/rules/test-*.md). Lean LLM-first pipeline (classify → per-group sample extraction → synthesize → rules). --format claude|opencode required (structures differ, never mix). Weak tests are flagged, NOT promoted as house-style. Rules are LLM-induced candidates needing human review.
+description: Discover the test conventions a project actually uses (framework / mock / assertion / fixture / naming / dependency) by classifying the test source tree into layer-groups, sampling each group, and inducing agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/test-conventions/; claude: .claude/rules/test-*.md). Lean LLM-first pipeline (classify → per-group sample extraction → synthesize → rules). --format defaults opencode (pass claude for .claude/rules/test-*.md; structures differ, never mix). Weak tests are flagged, NOT promoted as house-style. Rules are LLM-induced candidates needing human review.
 allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 ---
 
@@ -27,7 +27,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 ## Parse arguments (validate BEFORE spending tokens)
 
 - `--target <dir>` (default `.`)
-- `--format opencode|claude` — **required** (mutex). Missing → error + STOP.
+- `--format opencode|claude` (default `opencode`; pass `claude` for `<target>/.claude/rules/test-*.md`)
 - `--out <path>` (claude default `<target>/.claude/rules`; opencode default `<target>/AGENTS.md`)
 - `--rules-dir <path>` (opencode default `<target>/docs/test-conventions`; 详述文件目录,透传给 `list_test_groups.py`/`assemble_test_rules.py`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>`(限定测试源码树范围)
@@ -52,8 +52,8 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
    · **起步**:`Bash: export MGH_UT_INIT_ACTIVE=1`(声明运行域,激活 PreToolUse hook,含子树外 Write/Edit 拦截)
    · **run_config(无状态 resume 意图源)**:起步后、花 token 前,**原子写** `<target>/.mgh-ut-init/run_config.json`
      (起始态意图:记决定步骤图的本次 flag;与终态 `ut_manifest.json` 边界清晰、互不替代):
-     `py .claude/mgh-core/scripts/write_ut_runconfig.py --target <abs target> --format <fmt> [--scope ..] [--skip-consistency] [--uniform-sample ..] [--hetero-sample ..] [--subsplit-threshold ..] [--max-unit-bytes ..] [--orch-budget-bytes ..] [--max-aggregate-bytes ..]`
-     该文件使 `/mgh-ut-init --resume` **无需重输 flag**;`resume_ut_init_state.py` 据它解析分支。
+     `py .claude/mgh-core/scripts/write_ut_runconfig.py --target <abs target> [--format <fmt>] [--scope ..] [--skip-consistency] [--uniform-sample ..] [--hetero-sample ..] [--subsplit-threshold ..] [--max-unit-bytes ..] [--orch-budget-bytes ..] [--max-aggregate-bytes ..]`
+     **`--format` 默认 opencode(省略即 opencode);仅当用户显式传 `--format claude` 时透传之。**该文件使 `/mgh-ut-init --resume` **无需重输 flag**;`resume_ut_init_state.py` 据它解析分支。
      `--resume` 复用既有 run_config(不覆盖);新 run(`.mgh-ut-init/` 不存在或被清)重写。
    · **哨兵(磁盘激活信号,opencode 可靠激活兜底)**:`write_ut_runconfig.py` stdout 的 `target` 即**绝对项目根**
      (Windows 原生、供守卫 `Path.resolve()` 判树;**NEVER** 用 bash `pwd`,其 MSYS `/c/...` 在 Windows pathlib 误解析)。

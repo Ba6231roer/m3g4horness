@@ -1,5 +1,5 @@
 ---
-description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/security-controls/; claude: path-scoped .claude/rules/*.md). Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format claude|opencode required (structures differ, never mix). Supports --scope/--resume/--merge and large-file sharding. Findings are LLM-induced candidates needing human review.
+description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/security-controls/; claude: path-scoped .claude/rules/*.md). Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format defaults opencode (pass claude for .claude/rules/*.md; structures differ, never mix). Supports --scope/--resume/--merge and large-file sharding. Findings are LLM-induced candidates needing human review.
 allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 ---
 
@@ -21,7 +21,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 ## Parse arguments (validate BEFORE spending tokens)
 
 - `--target <dir>` (default `.`)
-- `--format opencode|claude` — **required** (mutex). Missing → error + STOP.
+- `--format opencode|claude` (default `opencode`; pass `claude` for `<target>/.claude/rules/*.md`)
 - `--out <path>` (claude default `<target>/.claude/rules`; opencode default `<target>/AGENTS.md`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
 - `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)

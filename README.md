@@ -106,8 +106,8 @@ i1 discover(确定性·regex 扫源)
   → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性
 ```
 
-- **`--format` 必填且互斥**：`claude`（产 `<target>/.claude/rules/security-<cat>.md`）与
-  `opencode`（产单个 `<target>/AGENTS.md` 受管块），结构不混。
+- **`--format`（默认 `opencode`，可选）**：`opencode`（产单个 `<target>/AGENTS.md` 受管块，默认）
+  与 `claude`（产 `<target>/.claude/rules/security-<cat>.md`，显式 opt-in），结构不混。
 - 产 `controls_inventory.json`（与 vvah `design_controls` schema 兼容）——是 `/mgh-sra`
   （三信号匹配）与 `/mgh-sast --controls`（注入降 FP）的**共享输入**。
 - 大仓友好：`--scope` 按模块切片 + `--merge` 合并；`--resume` 续跑（上下文吃紧/中断后无损恢复，见下方「中断恢复」）；`--rebuild-cache` 重建调用图。
@@ -138,7 +138,7 @@ i1 discover(确定性·regex 扫源)
 | Flag | 作用 |
 |---|---|
 | `--target <dir>` | 待扫描项目根（默认 `.`）。 |
-| `--format claude\|opencode` | **必填**（互斥）：决定 rules 产物结构与落位。 |
+| `--format claude\|opencode` | 可选，默认 `opencode`；`claude` 决定 rules 产物结构与落位（结构不混）。 |
 | `--out <path>` | rules 输出位置（claude 默认 `<target>/.claude/rules`；opencode 默认 `<target>/AGENTS.md`）。 |
 | `--scope path:<dir>\|package:<pkg>\|file:<glob>` | 仅扫指定范围（大仓分块）；配 `--scope-mode defined\|applicable`（默认 `defined`）。 |
 | `--language <lang>` | 限定语言（默认自动探测）。 |

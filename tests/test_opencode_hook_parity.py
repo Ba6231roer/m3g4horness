@@ -212,6 +212,32 @@ class TestNormalizationParity(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("stdout", err)
 
+    # --- file-association script-exec rule: decides identically on the opencode side ---
+    def test_bash_file_assoc_callop_blocked(self):
+        # the observed Windows scout deadlock shape (opencode runs Bash under PowerShell ->
+        # `& "<abs>.py"` resolves the .py association -> Notepad/dialog deadlock). The
+        # normalized opencode bash event reaches the SAME guard decision as claude.
+        code, err = self._oc("bash", {"command":
+            r'& "D:\proj\.opencode\mgh-core\scripts\chunk_sources.py" --out x y.java'})
+        self.assertEqual(code, 2)
+        self.assertIn("file association", err)
+
+    def test_bash_file_assoc_bare_py_blocked(self):
+        code, _ = self._oc("bash", {"command":
+            r'"D:\proj\.opencode\mgh-core\scripts\chunk_sources.py" --in x'})
+        self.assertEqual(code, 2)
+
+    def test_bash_file_assoc_py_launcher_passes(self):
+        code, _ = self._oc("bash", {"command":
+            r'py "D:\proj\chunk_sources.py" --in x --out y.json'})
+        self.assertEqual(code, 0)
+
+    def test_bash_file_assoc_script_as_arg_passes(self):
+        # operand-vs-arg: a .py that is only a --flag arg to a launched command passes.
+        code, _ = self._oc("bash", {"command":
+            r'py "D:\proj\discover.py" --in "D:\other.py"'})
+        self.assertEqual(code, 0)
+
     # --- MGH_UT_INIT_ACTIVE: the fifth run-domain decides identically on both ends ---
     def test_ut_init_domain_introspection_blocked(self):
         code, err = self._oc("bash",
@@ -255,7 +281,8 @@ class TestGuardByteParity(unittest.TestCase):
         # init allowlist + activation/out-of-tree/introspection + temp-dir I/O detection.
         for forbidden in ("_INTRO_TOKENS", "_PYC_RX", "_SCRIPT_EXTS", "_read_sentinel",
                           "_resolve_domain", "_allowlist_write_blocked", "_is_out_of_tree",
-                          "_ALLOWLIST_SUBTREES", "out_roots", "_detect_temp_io", "_TEMP_WRITE_RX"):
+                          "_ALLOWLIST_SUBTREES", "out_roots", "_detect_temp_io", "_TEMP_WRITE_RX",
+                          "_is_file_assoc_script_exec", "_CMD_BODY_EXT_RX", "_LAUNCHER_PREFIXES"):
             self.assertNotIn(forbidden, text, f"shim reimplements guard logic ({forbidden}) — not glue-only")
 
     def test_both_guards_embed_new_sentinel_logic(self):
@@ -267,7 +294,9 @@ class TestGuardByteParity(unittest.TestCase):
             for marker in ("_read_sentinel", "_resolve_domain", "_SCRIPT_EXTS",
                            "_allowlist_write_blocked", "_ALLOWLIST_SUBTREES", "out_roots",
                            ".active", "_detect_temp_io", "_TEMP_WRITE_RX", "_temp_path_rx",
-                           "MGH_UT_INIT_ACTIVE", ".mgh-ut-init", "test_groups.json"):
+                           "MGH_UT_INIT_ACTIVE", ".mgh-ut-init", "test_groups.json",
+                           "_is_file_assoc_script_exec", "_CMD_BODY_EXT_RX",
+                           "_LAUNCHER_PREFIXES", "_CALL_OP_RX"):
                 self.assertIn(marker, text, f"{guard.name} missing new-logic marker {marker}")
 
     def test_ts_not_in_zero_dep_scan_set(self):

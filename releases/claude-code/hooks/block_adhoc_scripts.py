@@ -38,6 +38,15 @@ Blocks the real-world failure shapes —
   (d) Bash whole-read of a multi-unit aggregate (cat/head/tail/type/Get-Content of
       clusters.json / controls_candidates.json / scout_plan.json / controls_inventory.json /
       s3_chunks.json / s5_filtered.json / scope_manifest.json / change_context.json).
+  (e) Bash execution of a script-extension file via the shell's file association — a
+      script-ext path as the command body (PowerShell call-operator `& "<…>.py"` OR a bare
+      `"<…>.py"` / `./x.sh` first command token) WITHOUT an explicit interpreter-launcher
+      prefix. On win32 opencode runs every Bash command under PowerShell
+      (`tool/shell.ts`: `powershell -Command …`), so the degraded form resolves the file
+      association (e.g. `.py` -> Notepad), opening a GUI editor / "create file?" dialog that
+      blocks the shell tool and deadlocks the run. Canonical `py "<abs script>"` /
+      `python` / `bash` / `pwsh -File` pass (explicit interpreter -> no file association);
+      a script path that is only a `--flag <path>` argument is NOT blocked.
 On a hit: exit 2 (Claude Code blocks the call) + stderr recipe pointing at the sanctioned
 primitives (list_* --materialize input_path / describe_artifact / producer stdout).
 
@@ -101,6 +110,31 @@ _AGGREGATES = {
 # (pwsh). Legit leaf scripts never use these on an aggregate (they pass it as --flag <path>).
 _READ_VERB = re.compile(r'(?:^|[\s;&|(])(?:cat|head|tail|type|Get-Content|gc)\b', re.IGNORECASE)
 
+# Explicit interpreter-launcher prefixes that PASS the file-association rule (block D1):
+# when one of these precedes a script path, the shell runs the interpreter (no file
+# association). Stored as a set of the FIRST launcher token + a few two-token forms
+# (`pwsh -File`, `cmd /c`, …) matched against the command's leading tokens.
+_LAUNCHER_PREFIXES = (
+    "py", "python", "python3", "python2",
+    "bash", "sh", "dash", "zsh",
+    "pwsh -file", "pwsh -command",
+    "powershell -file", "powershell -command",
+    "cmd /c", "cmd /k",
+)
+# A leading PowerShell call-operator `&` (optionally followed by spaces) before a
+# script-ext path = invocation via file association (the observed deadlock shape).
+_CALL_OP_RX = re.compile(r'^\s*&\s*')
+# A script-ext path token at command-body position: quote-wrapped OR bare (incl. a
+# leading `./` / `.\` / `/`). Matches the leading command token only (anchored).
+# _SCRIPT_EXTS already include the literal dot and re.escape keeps it; do NOT add a
+# second `\.` prefix (that would require a double dot). The path body allows any
+# non-space, non-quote char so both `"…\chunk_sources.py"` and `./x.sh` match.
+_SCRIPT_EXT_ALT = "|".join(re.escape(e) for e in _SCRIPT_EXTS)
+# group 1 = the bare/quoted script-ext token at the start (sans quotes/call-op).
+_CMD_BODY_EXT_RX = re.compile(
+    r'^\s*(?:&\s*)?"?\'?([^\s"\']*(?:' + _SCRIPT_EXT_ALT + r'))"?\'?(?:\s|$)',
+    re.IGNORECASE)
+
 # A write-redirect (`>` / `>>`) to a path under a known temp dir, capturing the written path.
 # Temp dir patterns: $env:TEMP/$env:TMP/%TEMP%/%TMP% (Windows), /tmp/$TMPDIR (POSIX);
 # case-insensitive (Windows env vars). A path separator is required so `$env:TEMP2/...`,
@@ -157,6 +191,52 @@ def _is_whole_aggregate_read(cmd: str, domain: str) -> bool:
         return False
     low = cmd.lower()
     return any(a in low for a in aggs)
+
+
+def _is_file_assoc_script_exec(cmd: str) -> bool:
+    r"""True iff a Bash command executes a script-extension file via the shell's file
+    association -- i.e. a script-ext path is the COMMAND BODY (PowerShell call-operator
+    `& "<…>.py"` OR the first command token, quote-wrapped or bare like `./x.sh`) AND no
+    explicit interpreter-launcher prefix precedes it in that simple command.
+
+    Defense-in-depth Bash-command rule (peer of temp-I/O + aggregate-read). The observed
+    Windows failure shape: opencode runs every Bash command under PowerShell
+    (`tool/shell.ts`: win32 -> `powershell -Command …`); a degraded
+    `& "…\chunk_sources.py" --out …` resolves the `.py` file association (e.g. Notepad on
+    a machine where `.py` is associated with an editor), opening a GUI editor / "create
+    file?" dialog that blocks the shell tool, hangs the subagent ack, and deadlocks the
+    parent `task.wait`.
+
+    Operand-vs-arg distinction: only the command-BODY position is matched, so
+    `py foo.py`, `python "…\.py"`, `bash x.sh`, `pwsh -File x.ps1` PASS (explicit
+    launcher -> interpreter, no file association), and a script path that appears only as
+    a `--flag <path>` argument to a legitimately-launched command also passes. Regex over
+    the observed shape (not a shell parser) -- does NOT claim exhaustive coverage of every
+    possible file-association form."""
+    # Only the FIRST simple command matters (before `;` / `|` / `&&` / `||`): the body
+    # position is where file association bites. Splitting on these delimiters isolates it
+    # so a trailing `; <something>.py` arg in a later clause does not false-trip the
+    # leading-token anchor.
+    first = re.split(r'[;|]', cmd, maxsplit=1)[0]
+    m = _CMD_BODY_EXT_RX.search(first)
+    if not m:
+        return False
+    # A leading call-operator `&` already implies file association (no launcher); otherwise
+    # check the first non-empty token: if it is a known launcher prefix (incl. two-token
+    # forms), this is an explicit-interpreter invocation -> PASS.
+    if _CALL_OP_RX.search(first):
+        return True
+    toks = first.strip().split()
+    if not toks:
+        return True
+    lead = toks[0].lower()
+    if lead in ("py", "python", "python3", "python2", "bash", "sh", "dash", "zsh"):
+        return False
+    # two-token launcher forms: `pwsh -File`, `cmd /c`, …
+    two = " ".join(t.lower() for t in toks[:2])
+    if two in _LAUNCHER_PREFIXES:
+        return False
+    return True
 
 
 def _is_blocked_script_write(path: str) -> bool:
@@ -318,6 +398,20 @@ def main():
         if _is_whole_aggregate_read(cmd, domain):
             sys.stderr.write(
                 f"blocked: whole-read of a multi-unit aggregate in {domain} run-domain.\n"
+                f"  {_recipe(domain)}\n")
+            return 2
+        if _is_file_assoc_script_exec(cmd):
+            sys.stderr.write(
+                f"blocked: script executed via file association in {domain} run-domain.\n"
+                f"  A script-extension path was used as the command body without an explicit "
+                f"interpreter launcher (PowerShell call-operator `& \"<…>.py\"` or a bare "
+                f"\"<…>.py\"/`./x.sh` as the command). On win32 opencode runs every Bash "
+                f"command under PowerShell, so this resolves the `.py`/`.ps1` file "
+                f"association (e.g. Notepad), opening a GUI editor / \"create file?\" dialog "
+                f"that blocks the shell tool and deadlocks the run.\n"
+                f"  Use the explicit-launcher form VERBATIM: `py \"<abs script>\" …` (or "
+                f"`python`/`bash`/`pwsh -File`). NEVER `& \"<abs>.py\"`, NEVER a bare "
+                f"\"<abs>.py\" command body.\n"
                 f"  {_recipe(domain)}\n")
             return 2
     elif tool in ("Write", "Edit"):

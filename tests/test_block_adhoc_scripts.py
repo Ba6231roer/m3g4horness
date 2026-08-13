@@ -776,5 +776,108 @@ class TestBlockAdhocScriptsSrr(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class TestBlockAdhocScriptsFileAssoc(unittest.TestCase):
+    """Bash execution of a script-extension file via the shell's file association is blocked
+    in every run-domain (defense-in-depth; the primary fix is the stage-prompt `py <abs>`
+    recipe). A script-ext path used as the COMMAND BODY (PowerShell call-operator
+    `& "<…>.py"`, a bare `"<…>.py"` first token, or `./x.sh`) without an explicit
+    interpreter-launcher prefix is the observed Windows deadlock shape (opencode runs every
+    Bash command under PowerShell -> `.py` file association -> Notepad/dialog). Operand-vs-
+    arg: a script path that is only a `--flag` argument to a launched command passes."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _bash(self, cmd, domain="init", active="1"):
+        return _run_hook(self.m, {"tool_name": "Bash", "tool_input": {"command": cmd}},
+                         domain=domain, active=active)
+
+    # --- BLOCK: script-ext path as command body, no launcher prefix ---
+    def test_block_pwsh_callop_py(self):
+        # the observed scout deadlock shape verbatim
+        code, err = self._bash(
+            r'& "D:\proj\.opencode\mgh-core\scripts\chunk_sources.py" '
+            r'--out "D:\proj\.mgh-init\slices\scout\scout-003" "d:\proj\X.java"')
+        self.assertEqual(code, 2)
+        self.assertIn("file association", err)
+        self.assertIn("py", err)            # recipe points at the explicit-launcher form
+
+    def test_block_bare_quoted_py_as_command_body(self):
+        code, _ = self._bash(r'"D:\proj\.opencode\mgh-core\scripts\chunk_sources.py" --in x')
+        self.assertEqual(code, 2)
+
+    def test_block_pwsh_callop_ps1(self):
+        code, _ = self._bash(r'& "C:\scripts\setup.ps1"')
+        self.assertEqual(code, 2)
+
+    def test_block_bare_dot_slash_sh(self):
+        code, _ = self._bash('./x.sh')
+        self.assertEqual(code, 2)
+
+    def test_block_bare_dot_slash_py(self):
+        code, _ = self._bash('./x.py --flag 1')
+        self.assertEqual(code, 2)
+
+    def test_block_callop_no_space(self):
+        code, _ = self._bash('&"x.bat"')
+        self.assertEqual(code, 2)
+
+    # --- PASS: explicit interpreter-launcher prefix -> interpreter, no file association ---
+    def test_pass_py_launcher(self):
+        code, _ = self._bash(r'py "D:\proj\chunk_sources.py" --in x --out y.json')
+        self.assertEqual(code, 0)
+
+    def test_pass_python_launcher(self):
+        code, _ = self._bash(r'python "D:\proj\chunk_sources.py" --in x')
+        self.assertEqual(code, 0)
+
+    def test_pass_python3_launcher(self):
+        code, _ = self._bash(r'python3 "D:\proj\chunk_sources.py" --in x')
+        self.assertEqual(code, 0)
+
+    def test_pass_bash_launcher(self):
+        code, _ = self._bash('bash "x.sh"')
+        self.assertEqual(code, 0)
+
+    def test_pass_pwsh_file_launcher(self):
+        code, _ = self._bash('pwsh -File "x.ps1"')
+        self.assertEqual(code, 0)
+
+    def test_pass_powershell_file_launcher(self):
+        code, _ = self._bash('powershell -File "x.ps1"')
+        self.assertEqual(code, 0)
+
+    def test_pass_cmd_c_launcher(self):
+        code, _ = self._bash('cmd /c "x.bat"')
+        self.assertEqual(code, 0)
+
+    # --- operand-vs-arg: a script path that is only a --flag argument is NOT blocked ---
+    def test_pass_script_path_as_flag_arg(self):
+        # `py discover.py --in <other>.py` -- the .py is an arg, not the command body
+        code, _ = self._bash(r'py "D:\proj\discover.py" --in "D:\other.py"')
+        self.assertEqual(code, 0)
+
+    def test_pass_legit_leaf_with_py_launcher(self):
+        code, _ = self._bash(
+            "py .claude/mgh-core/scripts/discover_controls.py --repo . --out .mgh-init")
+        self.assertEqual(code, 0)
+
+    # --- clause isolation: a trailing .py in a later clause does not false-trip ---
+    def test_pass_trailing_py_after_semicolon(self):
+        code, _ = self._bash('py x.py; echo done.py')
+        self.assertEqual(code, 0)
+
+    # --- inactive session: no Bash scan at all (same as every other rule) ---
+    def test_pass_inactive_session(self):
+        code, _ = self._bash('& "x.py"', active="")
+        self.assertEqual(code, 0)
+
+    # --- cross-domain: the rule fires identically in every run-domain ---
+    def test_block_sast_domain(self):
+        code, err = self._bash(r'& "D:\proj\chunk_sources.py" --in x', domain="sast")
+        self.assertEqual(code, 2)
+        self.assertIn("mgh-sast", err)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -78,6 +78,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 - **Existence ≠ effectiveness** (CVE-2025-41248).
 - Call-graph textual/AST — misses AOP/reflection/DI/framework-routing; surface `unresolved[]`.
 - **Scout coverage is partial, not whole-repo**;scout 非确定(簇数 run-to-run 可能变化);残留盲区见 `report.md`。
+- **Windows `.py` 文件关联风险**:win32 下 opencode 经 PowerShell 执行每条 Bash 命令;脚本侧 leaf(如切片)`MUST` 用显式 `py "<abs>.py"` launcher 调用,**NEVER** `& "<abs>.py"` 或裸 `"<abs>.py"` 命令体(会按 `.py` 文件关联解析为编辑器/弹窗 → 死锁整个 run)。
 - 面向人读的非代码内容(`report.md`、`init_manifest.json::boundaries[]` 文案、rules 正文)用**简体中文**;锚点/路径/frontmatter 保持原样。
 
 > 其余边界细节(dotfiles/tests 默认跳过、宿主 shell 超时、codegraph 富化辅助、请求上下文预算、大仓 `--scope`/`--merge`)由脚本写入 `init_manifest.json::boundaries[]` + `report.md`(运行时落盘),摘要**复述**命中项即可,NEVER 遗漏**实际触发**的边界触发计数。

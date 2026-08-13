@@ -156,6 +156,18 @@ def main():
     ap.add_argument("--window", type=int, default=40)
     ap.add_argument("--out", default="shards.json")
     args = ap.parse_args()
+    # R5.9 self-check: --out MUST be a file path, NOT an existing directory. The observed
+    # misuse was a subagent passing the bare slice DIR (e.g. ".../scout-003") instead of
+    # "<slice_dir>/<safe-stem>.slice.json" -- silently writing into a mis-shaped path. Fail
+    # loud at the leaf rather than emitting a broken artifact. Does NOT re-validate --in
+    # (argparse required=True already does) or --line (absence = legit skeleton-mode req).
+    out_path = Path(args.out)
+    if out_path.is_dir():
+        sys.stderr.write(
+            f"error: --out resolves to an existing directory, not a file: {args.out}\n"
+            f"  pass a file path: --out <slice_dir>/<safe-stem>.slice.json "
+            f"(<safe-stem> = the source file's stem). NEVER pass --out a directory.\n")
+        return 2
     p = Path(args.inp)
     lang = file_lang(p)
     big = is_big(p, args.big_file_bytes)

@@ -72,6 +72,32 @@ class TestChunkSources(unittest.TestCase):
         self.assertTrue(self.cs.is_big(self.big, 50))   # ~400 bytes > 50
         self.assertFalse(self.cs.is_big(self.big, 10_000_000))
 
+    def test_out_dir_guard_fails_loud(self):
+        """R5.9 self-check: `--out <existing dir>` exits 2 + recipe (the observed misuse
+        passed the bare slice DIR instead of <slice_dir>/<safe-stem>.slice.json)."""
+        import subprocess
+        out_dir = self.repo / "slices"
+        out_dir.mkdir()
+        r = subprocess.run(
+            [sys.executable, str(SCRIPTS / "chunk_sources.py"),
+             "--in", str(self.big), "--out", str(out_dir)],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("NEVER pass --out a directory", r.stderr)
+        self.assertIn("<safe-stem>", r.stderr)   # recipe names the canonical file form
+
+    def test_out_file_still_writes(self):
+        """A file `--out` writes normally (the dir guard does not over-block)."""
+        import subprocess
+        out_file = self.repo / "out" / "Big.slice.json"
+        out_file.parent.mkdir()
+        r = subprocess.run(
+            [sys.executable, str(SCRIPTS / "chunk_sources.py"),
+             "--in", str(self.big), "--line", "1", "--out", str(out_file)],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(out_file.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

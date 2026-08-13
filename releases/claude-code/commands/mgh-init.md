@@ -8,7 +8,7 @@ allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `discover_controls.py` / `chunk_sources.py` / `plan_scout.py` / `merge_scout.py` / `assemble_rules.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。claude 下 T3 直写 `.claude/rules/security-<cat>.md`,由 `assemble_rules.py --format claude --check` 做纯净性 lint(见步骤 6b)。
 
 > **运行域 + hook**:`install.sh` 向目标项目 `.claude/settings.json` 注入 PreToolUse hook(`block-adhoc-scripts`),
-> 运行域内拦 `py -c` 内省、一切脚本扩展名写入、子树外 `Write`/`Edit`(命中退出码 2)。**守卫激活 = `MGH_INIT_ACTIVE=1` env 或磁盘哨兵 `<target>/.mgh-init/.active`**(哨兵写法见 step 0;纪律见 orchestrator-discipline fragment)。
+> 运行域内拦 `py -c` 内省、一切脚本扩展名写入、子树外 `Write`/`Edit`(命中退出码 2)。**守卫激活 = `MGH_INIT_ACTIVE=1` env 或磁盘哨兵 `<target>/.mgh-init/.active`**(哨兵写法见 bootstrap fragment;纪律见 orchestrator-discipline fragment)。
 > opt-out = `install.sh --no-enforce-hook`(纪律仍由 orchestrator-discipline fragment + 边界校验兜底)。
 
 You are the **orchestrator** of the mgh-init pipeline. Carry it out by running the
@@ -42,11 +42,11 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 
 编排器 = 宿主 agent(非物化脚本);完整纪律见上述 fragment。本壳下文 stage 流给 init 专属实例(确切 `list_steps.py`/`list_clusters.py`/`list_scout_batches.py`/`list_rule_jobs.py`/`resume_state.py`/`write_runconfig.py` 调用行、产物清单、`MGH_INIT_ACTIVE` + `.mgh-init/.active` 哨兵、init 边界披露)。
 
-> **REQUIRED SUB-SKILL: Use init-stage-flow** — 加载 mgh-init stage 流逐步细节(claude `.claude/mgh-core/prompts/fragments/init-stage-flow.md`):step 0–8 的 run_config 写、哨兵生命周期、codegraph 检测、discover/scout/T1/T2/T3/T4 的 fan-out 刚性三元组与 `--check` 校验、聚合硬阈值、级联失效与失败落账。
+> **stage 流细节按需加载(per-step fragment,非同时驻留)**:`--step <id>` 只吃 `resume_state.py` stdout `step` 的**命名 id**;NEVER 数字索引。当前步执行前 `py .claude/mgh-core/scripts/resume_state.py --target <target>` → 读 stdout `step` + `stage_flow_files[]` → `py .claude/mgh-core/scripts/list_steps.py --step <step>` 取确切调用行 → **Read `stage_flow_files[0]`**(当前步 fragment `.claude/mgh-core/prompts/fragments/init-stage/<step>.md`)加载该步纪律。**NEVER 整份加载全部 step fragment、NEVER 从对话记忆判当前步**。**fresh-run(首 run,`<target>/.mgh-init/` 不存在 / resume_state exit 1)不走该循环**:Read `.claude/mgh-core/prompts/fragments/init-stage/bootstrap.md`(固定路径)按之执行 bootstrap(run_config 原子写 / 哨兵 / MGH_TARGET / codegraph),再 resume_state → `discover` 进统一循环;NEVER 对 bootstrap 调 `list_steps --step <数字>`。
 
 ## Orchestration flow
 
-> **完整 stage 流逐步细节(step 0–8)见 init-stage-flow fragment**(上方 SUB-SKILL 指令):parse+self-check → run_config+哨兵+codegraph 检测(step 0)→ discover(2)→ init-survey opt(3)→ SCOUT FAN-OUT(3b)→ init-resolve opt(3c)→ T1 FAN-OUT(4)→ T1→T2 闸门(4b)→ T2(5)→ T3 FAN-OUT(6)→ ASSEMBLE/LINT(6b)→ T4(7)→ manifest+report+收尾(8)。下方 Stage→组件表给全图概览。
+> **完整 stage 流逐步细节见 per-step fragment 集 `init-stage/{<step>}.md`**(经上方 recipe 按当前步加载):`not-started`(bootstrap)→ `discover` → `survey`(opt)→ `scout` → `resolve`(opt)→ `t1` → T1→T2 闸门 → `t2` → `t3` → `assemble`(BUILD INDEX+LINT)→ `t4` → `merge`(--merge 模式)→ `done`。下方 Stage→组件表给全图概览。
 
 ### Stage → component map
 
@@ -58,10 +58,10 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - 每 stage 产物经产出者 `--check` 校验(`discover_controls`/`plan_scout`/`merge_scout`/`validate_inventory`/`validate_t1_records`/`assemble_rules`)。
 
 ### Resume / cache
-- **`--resume` 首步** = `py .claude/mgh-core/scripts/resume_state.py --target <target>` → 读 stdout `step`/`next_action`/`tiers` 继续(进度纯从磁盘 `<target>/.mgh-init/` 重派生;**NEVER** 靠对话记忆判步骤)。`--check` 可在起步校验磁盘状态自洽(退出码 2 = 不自洽)。
+- **`--resume`/压缩后第一步** = `py .claude/mgh-core/scripts/resume_state.py --target <target>` → 读 stdout `step` + `discipline_reminders[]`,**先按该步纪律执行**(gate `--check` 闸门 / 路径配方 / 适用 NEVER),再 `py .claude/mgh-core/scripts/list_steps.py --step <step>`(`--step` 取命名 id;NEVER 数字索引)取确切调用行继续(进度纯从磁盘 `<target>/.mgh-init/` 重派生)——NEVER 靠对话记忆判步骤、NEVER 跳过 gate、NEVER 在 `discipline_reminders[]` 空时静默继续(空纪律仅对 `done` 步合法)。`--check` 可在起步校验磁盘状态自洽(退出码 2 = 不自洽)。
 - **过期凭证 recipe**:起步 `resume_state.py --check` 若报「scout 启用 + scout 未完 + 下游 t2/t3/t4 `.done`」违例(退出码 2)= 下游 marker 是基于 regex-only 输入的**过期凭证** → 先 `py .claude/mgh-core/scripts/resume_state.py --target <target> --invalidate-stale --dry-run` 预览,再 `--invalidate-stale` 清除,然后续跑——NEVER 手工 `del` 下游 marker、NEVER 静默跳过已过期 tier。
-- **新 session 运行域 env 重注入**:`--resume` 走同一命令壳 step 0 → 重新 `export MGH_INIT_ACTIVE=1`;并在 fan-out 前从既有 `controls_candidates.json::repo` 重设 `MGH_TARGET`(产物在盘上、`describe_artifact.py --field repo`,无需重跑 discover)。**确定性脚本本身不读 env**(flag + 磁盘驱动),env 仅影响 hook 子树守卫强度。
-- **launch-cwd 前置(跨 session 纪律)**:step 0 首调 `list_steps.py` 用相对 `.claude/mgh-core/scripts/` 路径,解析于编排器 Bash cwd(命令壳加载处 = 目标项目根)。下游工具路径经其 stdout `script_abs` 已全钉死绝对,但**首调本身**依赖从目标项目根发起;从歧义 cwd 调用可使首调命中错 install 副本。新 session 续跑前确认 cwd。
+- **新 session 运行域 env 重注入**:`--resume` 走同一命令壳 bootstrap(not-started)步 → 重新 `export MGH_INIT_ACTIVE=1`;并在 fan-out 前从既有 `controls_candidates.json::repo` 重设 `MGH_TARGET`(产物在盘上、`describe_artifact.py --field repo`,无需重跑 discover)。**确定性脚本本身不读 env**(flag + 磁盘驱动),env 仅影响 hook 子树守卫强度。
+- **launch-cwd 前置(跨 session 纪律)**:**首次** `list_steps.py` 调用(discover 步)用相对 `.claude/mgh-core/scripts/` 路径,解析于编排器 Bash cwd(命令壳加载处 = 目标项目根)。下游工具路径经其 stdout `script_abs` 已全钉死绝对,但**首调本身**依赖从目标项目根发起;从歧义 cwd 调用可使首调命中错 install 副本。新 session 续跑前确认 cwd。
 - Work units (isolation unit): i1 per file, **scout per batch**, T1 per cluster, T2/T4 whole, T3 per category.
 - `<target>/.mgh-init/checkpoints/<tier>/<unit>.json.done`(成功)**或** `.failed`(确认失败)= 终态,gate `--resume`(均跳过、不重派);`run_config.json` 使 `--resume` 免重输 flag。
 - Call graph is rebuilt by discover each run; pass `--rebuild-cache` to force (mtime-based skip otherwise).

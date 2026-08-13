@@ -17,9 +17,11 @@
    ⇒ **壳尺寸不随轮次累乘**,「每轮固定开销」是误述。
 2. **opencode 无 step-aware 淘汰**。只有两种降上下文手段:压缩(整段 head 摘要,溢出阈值触发,§2)+ prune(只清工具输出,§3)。
    没有任何东西按「N 轮未使用」或「步骤完成」丢弃单个 fragment/skill。
-3. **skill 受 prune 保护,反而更难被淘汰**。`PRUNE_PROTECTED_TOOLS = ["skill"]`(`compaction.ts:31,303`)。
-   想用「skill + 等压缩丢掉它」来省上下文是**反向**:skill body 进来后比 lazy-Read fragment 更持久。
-   ⇒ mgh-* 的「fragment 经 REQUIRED SUB-SKILL 懒加载」**已经是**「用完自然老化」的正确范式(§5)。
+3. **skill 受 prune 保护,fragment(Read 输出)受 prune 回收**。`PRUNE_PROTECTED_TOOLS = ["skill"]`(`compaction.ts:31,303`),
+   **仅此一项**受保护;Read 输出是 `type:"tool"` 且 `part.tool === "read"`(`read.ts:69`),**不在保护集 → 受 prune 回收**(§3)。
+   想用「skill + 等压缩丢掉它」来省上下文是**反向**:skill body 受保护、比 lazy-Read fragment 更持久。
+   ⇒ fragment(Read 输出)与 Bash stdout **同样**可被 prune 回收(在尾部 40K 保护窗外即清);二者**唯一区别于 shell 壳体**——
+   壳体是 **USER 文本消息**,prune 不碰(只压缩@~130K 摘要化)。这是「拆分 stage 流进 fragment 真有运行时收益」的机制根据(§5)。
 
 ---
 
@@ -46,13 +48,18 @@ system = [...env, ...instructions, ...(mcpInstructions?[...]:[]), ...(skills?[..
 
 | 内容类型 | 落在哪 | 每轮 system 开销? | 受 prune? | 压缩时? |
 |---|---|---|---|---|
-| `/mgh-init` **壳体** | 一次性 **USER 消息**(触发轮) | ❌ 仅触发轮 | ❌(非工具输出) | 入 head → 摘要化 |
-| 经 `@file` / **REQUIRED SUB-SKILL 的 Read** | Read 产出的 **USER 文本 part**(读取轮) | ❌ 单轮 | ❌ | 老化入 head → 摘要化 |
-| **fragment** 本身(磁盘文件) | 不主动进上下文;被 Read 才进 | ❌ | ❌ | 同上 |
-| **skill body**(模型调用 skill 工具后) | **工具结果** | ❌ 单次加载后驻留 | ❌ **受保护** | 仅整段压缩摘要 |
+| `/mgh-init` **壳体** | 一次性 **USER 消息**(触发轮) | ❌ 仅触发轮 | ❌(**USER 文本**,非工具输出;prune 只清 `type:"tool"`) | 入 head → 摘要化(唯一出路) |
+| 经 `@file` / **REQUIRED SUB-SKILL 的 Read** | **工具输出**(`type:"tool"`,`part.tool==="read"`,`read.ts:69`) | ❌ 单轮 | ✅(**不在保护集**,§3) | 入 head → 截断 2K 摘要 |
+| **fragment** 本身(磁盘文件) | 不主动进上下文;被 Read 才进 | ❌ | ✅(同上,以 Read 输出形态) | 同上 |
+| **skill body**(模型调用 skill 工具后) | **工具输出**(`part.tool==="skill"`) | ❌ 单次加载后驻留 | ❌ **受保护**(`PRUNE_PROTECTED_TOOLS`) | 仅整段压缩摘要 |
 | **skill 列表**(name+desc) | **SYSTEM 每轮** | ✅(很小) | N/A(每轮重生) | N/A |
 | 目标项目 **AGENTS.md** | **SYSTEM 每轮** | ✅(外部不可控) | N/A | N/A |
-| 普通**工具结果**(Bash stdout 等) | 工具结果 in history | ❌ | ✅(§3) | 入 head → 截断摘要 |
+| 普通**工具结果**(Bash stdout / Grep / Agent…) | 工具输出 in history | ❌ | ✅(**凡 `type:"tool"` 且非 skill**,§3) | 入 head → 截断 2K 摘要 |
+
+> **关键纠错(2026-08-12,承 §0.3)**:此前一版此表把「Read 输出 / fragment」标为 `❌ 不受 prune`,**错误**。
+> opencode 源码核实:prune(`compaction.ts:291-310`)遍历**所有** `type === "tool"` part,仅跳过 `PRUNE_PROTECTED_TOOLS=["skill"]`(`:303`)。
+> Read 工具 id 为 `"read"`(`read.ts:69`),其输出是普通 tool part,**受 prune 回收**——与 Bash stdout 同类。
+> 唯一**真不受 prune** 的是 **USER 文本消息**(命令壳体)— 它根本不是 `type:"tool"`。这一区分是 R5.6 预算模型(§6)与「拆 fragment 真收益」(§5)的承重根据。
 
 **命令壳注入点**(`prompt.ts:1432-1451`):`/mgh-init` 的 `template` 经 `resolvePromptParts`(`@file`→file part,`@agent`→agent part)解析,
 结果 `parts` 进 `prompt()` → `createUserMessage` 持久化为**一条 USER 消息**(`prompt.ts:635,656`)。
@@ -107,14 +114,17 @@ tail 改为按 token 保留 `DEFAULT_KEEP_TOKENS=8000`(core `compaction.ts:13`)�
 `compaction.prune`(`compaction.ts:279-323`),**每个 loop 迭代末尾跑**(`prompt.ts:1338`):
 
 - 仅当 `cfg.compaction?.prune === true` 启用(`compaction.ts:281`)。
-- 从最新消息**倒序**扫工具 part,累计其输出 token;**保护最近 `PRUNE_PROTECT=40000` token 的工具输出**(`compaction.ts:29,307`)。
+- 从最新消息**倒序**扫 **`type === "tool"` 的 part**(`compaction.ts:301`),累计其输出 token;**保护最近 `PRUNE_PROTECT=40000` token 的工具输出**(`compaction.ts:29,307`)。
 - 跳过最近 2 轮(`compaction.ts:296-297`),遇到已压缩的旧工具输出即停(`compaction.ts:304`)。
-- **`PRUNE_PROTECTED_TOOLS = ["skill"]`**(`compaction.ts:31,303`):**skill 工具输出永不被 prune**。
+- **`PRUNE_PROTECTED_TOOLS = ["skill"]`**(`compaction.ts:31,303`):**仅 skill 工具输出永不被 prune**;其余工具(`read`/`bash`/`grep`/`task`(subagent)/…)输出**均**可被回收。
 - 仅当可 prune 量 > `PRUNE_MINIMUM=20000`(`compaction.ts:28,314`)才实际清(置 `part.state.time.compacted`,清空输出文本)。
-- **只清工具输出文本**,不碰 USER 消息、system、命令壳体。
+- **只清 `type:"tool"` 的工具输出文本**,不碰 USER 消息、system、命令壳体。
 
-> ⇒ **prune 治不了「壳/fragment 太长」**——它们不是工具输出。prune 真正帮 mgh-* 的是回收**确定性脚本的大 stdout**
-> (`list_*` 分页、`discover_controls` 产物),这正是 R5.3(b)「stdout=JSON 严格分流 + 摘要 + 分页」与 `--orch-budget-bytes` 的杠杆。
+> ⇒ **prune 能回收「fragment(Read 输出)/确定性脚本 stdout/subagent 结果摘要」,但治不了「命令壳体太长」**——
+> 壳体是 USER 文本消息、非 `type:"tool"`,prune 不碰,只等压缩@~130K 摘要化。
+> 这一**非对称**是 R5.6 预算模型(§6)的承重根据:**把内容从「USER 文本区(只压缩)」迁到「工具输出区(prune 可回收)」= 真运行时收益**。
+> prune 真正帮 mgh-* 的杠杆是回收**确定性脚本的大 stdout**(`list_*` 分页、`discover_controls` 产物)+ **Read 加载的 fragment**
+> + **subagent 扇出结果摘要**,这正是 R5.3(b)「stdout=JSON 严格分流 + 摘要 + 分页」与 `--orch-budget-bytes` 的杠杆(详见 `docs/mgh-init-budget-analysis.md`)。
 
 ---
 
@@ -136,26 +146,30 @@ tail 改为按 token 保留 `DEFAULT_KEEP_TOKENS=8000`(core `compaction.ts:13`)�
 
 ## 5. 那 mgh-* 的「fragment 用完自然老化」到底怎么实现?
 
-不需要任何特殊机制——`REQUIRED SUB-SKILL: Use <fragment>` 的 lazy-Read **本身**就是「加载一次 → 老化 → 压缩时摘要」的模型:
+`REQUIRED SUB-SKILL: Use <fragment>` 的 lazy-Read 把 fragment 内容以 **Read 工具输出**(`type:"tool"`,`part.tool==="read"`)形态注入 history——
+这意味着它**受 prune 回收(§3),不必等压缩@~130K**。这是「拆分 stage 流进 fragment 真有运行时收益」的机制根据:
 
 ```
 轮次     SYSTEM(每轮重派生)            HISTORY(累积,受压缩/prune 管)
 ─────    ─────────────────────         ─────────────────────────────────
- 1       env+AGENTS+mcp+skills-list    [U] /mgh-init 壳体(parse-args+表+SUB-SKILL 指令)
- 2       同上(壳不在)                  [U](Read orchestrator-discipline)  ← 编排器发 Read
- 3       同上                           [U](Read init-stage-flow)          ← 早期 step 内容
- 4..k    同上                           [tool] list_steps/discover/list_* stdout(受 prune 回收)
+ 1       env+AGENTS+mcp+skills-list    [U] /mgh-init 壳体(USER 文本;prune 不碰,只压缩摘要)  ← primacy 区
+ 2       同上(壳不在)                  [tool](Read orchestrator-discipline)  ← read 输出,prunable
+ 3       同上                           [tool](Read init-stage-flow)          ← read 输出,prunable
+ 4..k    同上                           [tool] list_steps/discover/list_* stdout(均 prunable)
  k+1..   同上                           [tool] 更多 fan-out 结果 ──────▶ 累积增长
- ~130K   同上                           ⚡ 触发压缩 → head(含早期 step 那次 Read)被摘要
+ ~超 40K 保护窗                          ⚡ prune 触发 → 早期 read 输出 + 旧 stdout 被回收(每轮!)
+ ~130K   同上                           ⚡ 触发压缩 → head(含 USER 壳体 + 未回收的 tool 输出)被摘要
 ```
 
-- 早期 step 的 fragment Read 出现在**第 3 轮的 USER 文本**,之后被后续工具结果堆压、**自然老化入 head 中段**——
-  这正是期望行为(编排器后期不再需要它;`resume_state.py` 是磁盘真相源,见 R5.4)。
-- 到下一个 ~130K 压缩点,它随 head 一起被摘要——**无需 step-aware 淘汰**。
-- **它不是每轮 system 开销**(§1 表),所以「它在 history 里驻留到压缩」不构成每轮税。
+- **关键非对称**:fragment(Read 输出)与 fan-out stdout 都是 `type:"tool"` → **一旦滚出尾部 40K 保护窗就被 prune 清空**(每轮检查,`PRUNE_MINIMUM=20000` 门槛)。
+  命令**壳体**是 USER 文本消息 → prune **不碰**,只等 ~130K 压缩摘要。⇒ 把内容从「USER 文本区」迁到「工具输出区」= **真运行时收益**(更早被回收)。
+- 早期 step 的 fragment Read 出现在**第 3 轮的工具输出**,几轮后随 fan-out stdout 堆叠**滚出 40K 窗即被 prune**——
+  无需 step-aware 淘汰、无需等压缩。编排器后期不再需要它(`resume_state.py` 是磁盘真相源,见 R5.4)。
+- **它不是每轮 system 开销**(§1 表),所以即便 prune 尚未清它,也不构成每轮税。
 
-⇒ `init-stage-flow` fragment(`harden-mgh-init-shell-budget` D1/D2)是**正确且最优**的载体:
-单次 lazy Read、自然老化、磁盘兜底。**不**需要为它引入 skill。
+⇒ `init-stage-flow` fragment 的拆分**有真运行时收益**(收益机制 = 「USER 文本区 → 工具输出区」的 prune 可回收性迁移,
+**不是**「它不是 system 税」——后者为真但与收益无关,旧版 §5/D6 误把它当收益根据)。fragment 懒加载**仍是**正确范式
+(优于塞进 skill——skill body 受 prune 保护、更难回收,见 §4)。更进一步的优化方向见 `docs/mgh-init-budget-analysis.md`。
 
 ---
 
@@ -177,7 +191,10 @@ R5.6 的 5,000 tok 壳上限**仍成立**,但**根据是**:
 - fragment:按「单次 Read 轮的尺寸」逐个评估(结构是否良好),**不强制求和 ≤ N**。
 - 若要一个「防回归」的总盘子上限,标注其**根据是磁盘大小防漂移**,而非运行时叠加占用。
 
-详见 [`docs/review-prompt-length-budget-150k.md`](review-prompt-length-budget-150k.md) §2.1 与本次修订新增节。
+> **⚠ prune 默认关限定(2026-08-12)**:`compaction.prune` 默认 `false`(`config.ts:154-156`)——fragment/Read 输出「受 prune 回收」的机制(§3/§5)对**默认用户不生效**(prune 不跑,累积到压缩)。
+> 故「fragment 是单次 lazy Read 的 USER 项、非每轮 system 税」为真,但**它是『不亏』的消极结论,不是『省预算』的收益根据**;
+> 预算层的真收益 = 缩壳(USER 区每短 1 tok 都省)+ fragment **非同时驻留**(按步拆 + resume 只加载当前步,见 §B)。
+> 完整分析 + 决策排序见 [`docs/mgh-init-budget-analysis.md`](mgh-init-budget-analysis.md) §1.2 纠错 2 / §A / §B;本文件 §3/§5 已纠错但本节原措辞未同步,现补限定。
 
 ---
 
@@ -194,5 +211,6 @@ R5.6 的 5,000 tok 壳上限**仍成立**,但**根据是**:
 - [ ] 摘要模板/上限仍在 core `compaction.ts:16-46` + `SUMMARY_OUTPUT_TOKENS=4096`。
 - [ ] 仍无 fragment/include 自动内联(`resolvePromptParts` `prompt.ts:157-191` 仅处理 `@file`/`@agent`)。
 
-> 数据点(本次核实,2026-08-12):opencode `mgh-init` 壳 9,224 mid tok / 259 行;`orchestrator-discipline` 2,466 mid tok / 54 行。
+> 数据点(2026-08-12 核实):`mgh-init` 壳(claude 2,916 mid / 91 行;opencode 2,853 mid / 84 行,落地 `harden-mgh-init-shell-budget` 后);
+> `orchestrator-discipline` 2,466 mid / 54 行;`init-stage-flow` 4,769 mid / 130 行(磁盘合计 ~10.1K,非运行时足迹,见 budget-analysis §1.2)。
 > 行号引用 opencode 源;token/行引用本仓 `tools/measure_prompts.py`。

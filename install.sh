@@ -89,6 +89,7 @@ cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 _missing=()
 for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules \
          list_clusters list_scout_batches list_rule_jobs list_steps describe_artifact validate_inventory validate_t1_records \
+         discipline_core \
          prepare_augment merge_augment merge_memory ingest_requirements render_report \
          list_chunks list_verify_jobs prefilter dedup emit_sarif \
          classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \

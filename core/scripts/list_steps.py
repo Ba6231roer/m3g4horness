@@ -27,8 +27,9 @@ CLI contract (`--help` is the contract surface, R5.1):
   --target   target project root (default: .); accepted for future extension,
              not used in manifest content (static contract).
   --step     emit only the single step with this id (e.g., "t1", "discover");
-             exits 2 if id not recognized (closed set, R5.3b). Default: emit
-             all steps.
+             named ids only; NOT numeric indices (e.g. --step 0 → exit 2 +
+             actionable hint). Exits 2 if id not recognized (closed set, R5.3b).
+             Default: emit all steps.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"steps": [{step, kind, script_abs, invocation, input{}, output{}}]}
@@ -39,6 +40,11 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - invocation  = copy-pasteable Bash invocation line: "py <script_abs> <args>"
   - input{}     = {artifact: "<name>", shape: "<shape>"}
   - output{}    = {artifact: "<name>", shape: "<shape>", path_pattern: "<pattern>"}
+  - discipline  = per-step discipline subset {gates[], path_recipes[], nevers[]}
+                (gate shapes / fan-out path recipes / applicable NEVER) — identical
+                to resume_state.py stdout `discipline_reminders[]` for the same step
+                (shared static table in discipline_core.py; `done`/`not-started` and
+                unknown steps → EMPTY structure)
 
 Exit codes (R5.3b): 0 ok · 1 target not a dir · 2 misuse (--step not found).
 Idempotent, no TTY, read-only.
@@ -51,6 +57,11 @@ from pathlib import Path
 
 # Self-locate so sibling imports resolve under any cwd / host-agent invocation.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Shared static per-step discipline table (single source of truth, D1): identical
+# to resume_state.py stdout `discipline_reminders[]` for the same step (D5 asserts
+# byte-verbatim equality). discipline_core is pure data — no IO, no side effects.
+from discipline_core import get_discipline  # noqa: E402
 
 
 # Static step→IO table (D2: data-driven, defined once). Step id set matches
@@ -201,6 +212,7 @@ def _build_step(entry: dict) -> dict:
         "invocation": _invocation(script_abs, cli_args),
         "input": entry["input"],
         "output": entry["output"],
+        "discipline": get_discipline(step_id),
     }
 
 
@@ -211,7 +223,8 @@ def main():
                     help="target project root (default .); accepted for future extension")
     ap.add_argument("--step", metavar="<id>",
                     help="emit only the single step with this id (e.g. t1, discover); "
-                         "exits 2 if not recognized (closed set)")
+                         "named ids only; NOT numeric indices; exits 2 if not "
+                         "recognized (closed set)")
     # Emit JSON cleanly regardless of host console codepage (e.g. cp936/gbk on Chinese
     # Windows) so stdout parses everywhere. No-op on StringIO (in-process tests).
     for stream in (sys.stdout, sys.stderr):
@@ -235,8 +248,12 @@ def main():
     # Filter by --step if requested
     if args.step:
         if args.step not in step_ids:
-            print(f"error: unknown step id: {args.step!r} (known: {sorted(step_ids)})",
-                  file=sys.stderr)
+            msg = f"error: unknown step id: {args.step!r} (known: {sorted(step_ids)})"
+            if args.step.isdigit():
+                msg += ("; step ids are NAMED enums (from resume_state.py stdout step, "
+                        "or run list_steps.py without --step to list all); "
+                        "numeric indices are NOT accepted")
+            print(msg, file=sys.stderr)
             return 2
         steps = [s for s in steps if s["step"] == args.step]
         print(f"[list_steps] emitting single step: {args.step}", file=sys.stderr)

@@ -124,6 +124,20 @@ class TestListSteps(unittest.TestCase):
         # stderr should list known steps
         self.assertIn("known:", err)
 
+    def test_step_numeric_exit_2_with_hint(self):
+        """--step 0 (numeric index) → exit 2 + stderr with known list AND
+        actionable hint (named enums; numeric indices NOT accepted); stdout has
+        no partial manifest (exit-2 path must not emit JSON)."""
+        code, out, err = self._run("--step", "0")
+        self.assertEqual(code, 2, "should exit 2 for numeric --step id")
+        self.assertIn("unknown step id", err)
+        self.assertIn("known:", err)
+        # Actionable hint: named enums + how to get them + numeric rejection
+        self.assertIn("NAMED enums", err)
+        self.assertIn("numeric indices are NOT accepted", err)
+        # stdout must carry no partial manifest (not mixed into JSON surface)
+        self.assertEqual(out.strip(), "", "exit-2 numeric id must not emit manifest on stdout")
+
     def test_default_emits_all_steps(self):
         """Default (no --step) emits all steps."""
         code, out, _ = self._run()
@@ -152,7 +166,7 @@ class TestListSteps(unittest.TestCase):
 
     def test_all_steps_json_structure(self):
         """Each step has required fields: step, kind, script, script_abs, invocation,
-        input{}, output{}."""
+        input{}, output{}, discipline{}."""
         code, out, _ = self._run()
         self.assertEqual(code, 0)
         data = self._json(out)
@@ -166,11 +180,31 @@ class TestListSteps(unittest.TestCase):
             self.assertIn("output", step)
             # kind is either bash or subagent
             self.assertIn(step["kind"], ("bash", "subagent"))
+            # per-step discipline subset {gates, path_recipes, nevers} always present
+            self.assertIn("discipline", step)
+            self.assertIn("gates", step["discipline"])
+            self.assertIn("path_recipes", step["discipline"])
+            self.assertIn("nevers", step["discipline"])
+
+    def test_step_discipline_matches_resume_state(self):
+        """list_steps --step <id> discipline == resume_state.py discipline_reminders[]
+        for the same step (single source of truth, D1; D5 consistency guard)."""
+        rs = _load("resume_state")
+        for step_id in ("t1", "scout", "t3", "discover", "done", "not-started"):
+            code, out, _ = self._run("--step", step_id)
+            self.assertEqual(code, 0, f"step {step_id}: exit != 0")
+            data = self._json(out)
+            self.assertEqual(len(data["steps"]), 1)
+            got = data["steps"][0]["discipline"]
+            self.assertEqual(got, rs.get_discipline(step_id),
+                             f"step {step_id}: discipline differs from resume_state")
 
     # ---- 4.6 零依赖 AST 扫描 ----
 
     def test_zero_stdlib_imports_only(self):
-        """AST scan: list_steps.py imports only stdlib modules (R2)."""
+        """AST scan: list_steps.py imports only stdlib or a same-dir sibling (R2).
+        Sibling allowance mirrors test_zero_deps.py — list_steps imports the shared
+        static discipline table `discipline_core` (no third-party import)."""
         source = (SCRIPTS / "list_steps.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         imports = set()
@@ -181,10 +215,11 @@ class TestListSteps(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     imports.add(node.module.split(".")[0])
-        # stdlib modules allowed (expand as needed)
+        # stdlib modules allowed (expand as needed) + same-dir sibling scripts
         stdlib = {"__future__", "argparse", "json", "sys", "pathlib", "ast", "contextlib",
                   "importlib", "io", "tempfile", "unittest"}
-        non_stdlib = imports - stdlib
+        allowed = stdlib | {p.stem for p in SCRIPTS.glob("*.py")}
+        non_stdlib = imports - allowed
         self.assertEqual(non_stdlib, set(),
                        f"non-stdlib imports found: {non_stdlib}")
 

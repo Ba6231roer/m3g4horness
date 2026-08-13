@@ -490,5 +490,159 @@ class TestScoutConsistency(unittest.TestCase):
         self.assertTrue(any("merged 0" in n for n in st["notes"]), st["notes"])
 
 
+# ---- per-step discipline_reminders[] (complete-r5-4-per-step-discipline; D5) ----
+
+
+class TestDisciplineReminders(unittest.TestCase):
+    """stdout discipline_reminders[] carries the CURRENT step's discipline subset
+    (gate shapes / path recipes / NEVER), derived (NOT persisted), incremental to the
+    existing 7 fields. done/not-started → EMPTY structure (field恒存在)."""
+
+    def test_t1_step_carries_shape_gate(self):
+        # ① non-empty + covers the load-bearing T1→T2 shape gate
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": "auth::X::aa", "category": "authorization", "kind": "auth"}],
+            "truncated": False})
+        st = s.state()
+        self.assertEqual(st["step"], "t1")
+        dr = st["discipline_reminders"]
+        self.assertTrue(dr["gates"] or dr["path_recipes"] or dr["nevers"],
+                        "t1 discipline must not be empty")
+        gate_commands = " ".join(g["command"] for g in dr["gates"])
+        self.assertIn("validate_t1_records", gate_commands)  # T1→T2 shape gate
+        # fan-out path recipe + applicable NEVER present
+        self.assertTrue(any("checkpoint_path" in p["desc"] for p in dr["path_recipes"]),
+                        [p["desc"] for p in dr["path_recipes"]])
+        self.assertTrue(any("clusters.json" in n for n in dr["nevers"]),
+                        dr["nevers"])
+
+    def test_done_step_empty_discipline(self):
+        # ② done → EMPTY structure (field恒存在, shape stable)
+        s = _State(no_scout=True, skip_consistency=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        s.write_json("controls_inventory.json", {"repo": str(s.target), "format": "opencode",
+                                                  "controls": []})
+        s.touch("checkpoints/t2/synthesis.json.done")
+        s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
+        st = s.state()
+        self.assertEqual(st["step"], "done")
+        self.assertEqual(st["discipline_reminders"],
+                         {"gates": [], "path_recipes": [], "nevers": []})
+
+    def test_merge_mode_short_circuit_carries_discipline(self):
+        # merge short-circuit state also carries the field (shape stability)
+        s = _State(merge="/tmp/partials")
+        st = s.state()
+        self.assertEqual(st["step"], "merge")
+        self.assertIn("discipline_reminders", st)
+        self.assertTrue(st["discipline_reminders"]["path_recipes"])
+
+    def test_stdout_incremental_fields_intact(self):
+        # ③ stdout is still single-object JSON; existing 7 fields unchanged + new field
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        code, out, _ = s.main()
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        for f in ("target", "format", "step", "resumable", "tiers", "next_action", "notes"):
+            self.assertIn(f, data)
+        self.assertIn("discipline_reminders", data)
+        # existing field semantics unchanged
+        self.assertEqual(data["step"], "t2")       # empty clusters → t2 (from test base)
+        self.assertEqual(data["tiers"]["t1"], {"done": 0, "failed": 0, "total": 0})
+
+
+# ---- stage_flow_files[] (split-mgh-init-stage-flow-per-step) ----
+
+
+class TestStageFlowFiles(unittest.TestCase):
+    """stdout stage_flow_files[] carries the CURRENT step's SINGLE per-step
+    fragment absolute path (non-co-residency: never all-remaining, never step 0);
+    not-started/done → [] (bootstrap shell self-hosted / no further load). It is a
+    resume DERIVED value — deterministic for the same disk state, NOT persisted."""
+
+    def _frag(self, step):
+        return str((SCRIPTS.parent / "prompts" / "fragments" / "init-stage"
+                    / f"{step}.md").resolve())
+
+    def _base_t1_run(self):
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                  "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": "auth::X::aa", "category": "authorization", "kind": "auth"},
+            {"cluster_id": "crypto::Y::bb", "category": "crypto", "kind": "other"}],
+            "truncated": False})
+        s.write_json("checkpoints/t1/auth_X_aa.json", {"unit": "auth::X::aa"})
+        s.touch("checkpoints/t1/auth_X_aa.json.done")
+        return s
+
+    def test_current_step_single_abs_path(self):
+        # ① 处于某步的 run → stage_flow_files[] = 该步单个绝对路径
+        s = self._base_t1_run()
+        st = s.state()
+        self.assertEqual(st["step"], "t1")
+        self.assertEqual(st["stage_flow_files"], [self._frag("t1")])
+        self.assertTrue(Path(st["stage_flow_files"][0]).is_absolute())
+
+    def test_current_step_only_not_all_remaining(self):
+        # ③ 只含当前步(非 all-remaining,非 step 0)
+        s = self._base_t1_run()
+        st = s.state()
+        self.assertEqual(len(st["stage_flow_files"]), 1)
+        for later in ("t2", "t3", "assemble", "t4", "done"):
+            self.assertNotIn(self._frag(later), st["stage_flow_files"])
+
+    def test_done_step_empty(self):
+        # ② done → [] (no further load)
+        s = _State(no_scout=True, skip_consistency=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                  "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        s.write_json("controls_inventory.json", {"repo": str(s.target), "format": "opencode",
+                                                  "controls": []})
+        s.touch("checkpoints/t2/synthesis.json.done")
+        s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
+        st = s.state()
+        self.assertEqual(st["step"], "done")
+        self.assertEqual(st["stage_flow_files"], [])
+
+    def test_not_started_empty_direct(self):
+        # ② not-started → [] (bootstrap shell self-hosts step 0; resolve() never
+        # emits not-started — earliest resolved step is discover)
+        self.assertEqual(RS._stage_flow_files("not-started"), [])
+        self.assertEqual(RS._stage_flow_files("done"), [])
+
+    def test_merge_mode_carries_merge_fragment(self):
+        s = _State(merge="/tmp/partials")
+        st = s.state()
+        self.assertEqual(st["step"], "merge")
+        self.assertEqual(st["stage_flow_files"], [self._frag("merge")])
+
+    def test_deterministic_same_disk_state(self):
+        # ④ 同磁盘状态两次调用逐字一致(衍生量,不持久化)
+        s = self._base_t1_run()
+        self.assertEqual(s.state()["stage_flow_files"], s.state()["stage_flow_files"])
+        # not persisted to any .mgh-init file
+        self.assertFalse(any("stage_flow" in str(p) for p in s.init.rglob("*")))
+
+    def test_stdout_shape_stable_field_present(self):
+        # stdout JSON carries the field (shape stable) with existing fields intact
+        s = self._base_t1_run()
+        code, out, _ = s.main()
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertIn("stage_flow_files", data)
+        self.assertEqual(data["step"], "t1")
+        self.assertEqual(data["stage_flow_files"], [self._frag("t1")])
+
+
 if __name__ == "__main__":
     unittest.main()

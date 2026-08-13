@@ -34,10 +34,27 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"target":"<abs>","format":"...","step":"<enum>","resumable":bool,
    "tiers":{"discover":{done,failed,total},"scout":{done,failed,total[,merged]},"t1":{..},"t2":{..},"t3":{..},"t4":{..}},
    "next_action":{"kind":"bash|subagent|done","desc":"...","absolute_paths":["<abs>",...]},
-   "notes":["..."]}
+   "notes":["..."],
+   "discipline_reminders":{"gates":[{id,desc,command,fail_exit}],"path_recipes":[{id,desc,source}],"nevers":["..."]},
+   "stage_flow_files":["<abs>",...]}
   tiers.scout carries an ADDITIVE `merged` field (fold-in actual scout candidates merged
   into controls_candidates.json) ONLY when controls_candidates.json::provenance.scout_merged
   exists — scout disabled / fold-in not yet run → omitted (keeps the base shape stable).
+  discipline_reminders = the CURRENT step's discipline subset (gate shapes + path recipes +
+  applicable NEVER), from the shared static table in discipline_core.py. It is a RESUME
+  DERIVED value — NOT persisted to disk (source of truth stays `<target>/.mgh-init/` products
+  + `.done`/`.failed` + run_config.json); `done`/`not-started` and unknown steps yield the
+  EMPTY structure (field恒存在, shape stable). `--check` (R5.9) does not cover this field.
+  stage_flow_files = the CURRENT step's SINGLE per-step stage-flow fragment
+  (<mgh-core>/prompts/fragments/init-stage/<step>.md, `Path.resolve()` absolute, Windows
+  native) for step ∈ discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge; EMPTY [] for
+  `not-started` (bootstrap is loaded by the shell's fresh-run recipe via fixed-path Read of
+  `init-stage/bootstrap.md`) and `done` (no further load). NON all-remaining (current step
+  only, never the not-started step / never the rest). Also a RESUME DERIVED value — NOT
+  persisted to any `<target>/.mgh-init/` file, `--check` does not cover it.
+  The orchestrator Reads stage_flow_files[0] to load ONLY the current step's discipline
+  (non-co-residency; the file is NOT existence-checked here so an abnormal install surfaces
+  naturally as a Read failure, not a silent skip).
 
 --invalidate-stale stdout (R5.3b):
   dry-run: {"invalidate_stale":{"dry_run":true,"markers":["<abs>",...]}}
@@ -72,6 +89,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # completion for the step derivation + stale-marker enumeration for --check /
 # --invalidate-stale.
 from init_tier import scout_complete, stale_marker_paths  # noqa: E402
+# Shared static per-step discipline table (single source of truth, D1): the
+# current step's gate shapes / path recipes / applicable NEVER subset, re-derived
+# after compaction so the "how to execute THIS step" survives head-summary loss.
+from discipline_core import get_discipline  # noqa: E402
 
 
 def _load_json(path: Path):
@@ -173,6 +194,33 @@ def _next(kind: str, desc: str, paths) -> dict:
     return {"kind": kind, "desc": desc, "absolute_paths": [str(p) for p in paths]}
 
 
+# Per-step stage-flow fragment dir: `<mgh-core>/prompts/fragments/init-stage/`.
+# `__file__` self-locate (R5.3a) makes the path follow the install mirror
+# (claude `.claude/mgh-core/` / opencode `.opencode/mgh-core/`) with zero
+# host-specific code — the fragment set is mirrored by install.sh `cp -r core/`.
+_STAGE_FLOW_DIR = Path(__file__).resolve().parent.parent / "prompts" / "fragments" / "init-stage"
+# Step keys that map 1:1 to a per-step fragment file (single source of truth =
+# the runtime step enum). not-started (bootstrap) and done are excluded: bootstrap
+# is loaded by the shell's fresh-run recipe via fixed-path Read of
+# init-stage/bootstrap.md, done has no further load.
+_FRAGMENT_STEPS = frozenset({
+    "discover", "survey", "scout", "resolve", "t1", "t2", "t3", "assemble",
+    "t4", "merge",
+})
+
+
+def _stage_flow_files(step: str) -> list:
+    """Current step's single per-step fragment absolute path (Path.resolve()),
+    or [] for not-started (bootstrap loaded by the shell's fresh-run recipe via
+    fixed-path Read of init-stage/bootstrap.md) / done (no further load). NEVER
+    all-remaining, NEVER the not-started step. The file is NOT existence-checked
+    (an abnormal install yields an absolute path the orchestrator's Read fails on
+    naturally, not a silent skip); stderr advisory is left to the caller."""
+    if step not in _FRAGMENT_STEPS:
+        return []
+    return [str((_STAGE_FLOW_DIR / f"{step}.md").resolve())]
+
+
 def resolve(init_dir: Path):
     """Build the full state dict from disk. Returns (state, None) or (None, recipe_str)
     when run_config is missing (caller exits 2)."""
@@ -209,6 +257,8 @@ def resolve(init_dir: Path):
                 f"merge partial inventories from {partials} (evidence-anchor merge) then STOP",
                 [Path(target)]),
             "notes": notes,
+            "discipline_reminders": get_discipline("merge"),
+            "stage_flow_files": _stage_flow_files("merge"),
         }
         return state, None
 
@@ -370,6 +420,8 @@ def resolve(init_dir: Path):
     state = {
         "target": target, "format": fmt, "step": step, "resumable": resumable,
         "tiers": tiers, "next_action": nxt, "notes": notes,
+        "discipline_reminders": get_discipline(step),
+        "stage_flow_files": _stage_flow_files(step),
     }
     return state, None
 

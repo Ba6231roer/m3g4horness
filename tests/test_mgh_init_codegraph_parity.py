@@ -10,17 +10,21 @@ Asserts both mgh-init.md shells agree on the codegraph-enrichment surface:
   (Sanctioned tools allowlist incl. codegraph MCP/CLI + Read fallback;
   checkpoint_path/done_marker verbatim; source:"codegraph"; NEVER Write .py / py -c).
 
-Architecture note (change harden-mgh-init-shell-budget): the mgh-init stage-flow
-body (steps 0–8) was extracted into a SHARED fragment `init-stage-flow.md` that
-BOTH shells load via `REQUIRED SUB-SKILL: Use init-stage-flow` (single source of
-truth, zero cross-host drift), and the Stage→component table was folded to a
-compact `script inventory | subagent inventory`. Consequently the codegraph-stage
-surface now lives in the shared fragment (detection stanza, init-resolve triple
-+ semantics, codegraph manifest block) and the init-resolve subagent is named in
+Architecture note (changes harden-mgh-init-shell-budget →
+split-mgh-init-stage-flow-per-step): the mgh-init stage-flow body (steps 0–8)
+was extracted from a single SHARED fragment `init-stage-flow.md` into a per-step
+fragment SET `init-stage/{bootstrap,discover,survey,scout,resolve,t1,t2,t3,
+assemble,t4,merge,done}.md` that BOTH shells load per-step (single source of
+truth, zero cross-host drift) via the recipe: resume_state → stdout `step` +
+`stage_flow_files[]` → Read the current step's single fragment. The Stage→component
+table was folded to a compact `script inventory | subagent inventory`.
+Consequently the codegraph-stage surface now lives in the per-step fragments
+(detection stanza in bootstrap.md, init-resolve triple + semantics in resolve.md,
+codegraph manifest block in done.md) and the init-resolve subagent is named in
 the shell's compact subagent inventory. Parity is therefore asserted against the
-shell+fragment combined surface (a SHARED fragment is the strongest parity: both
-hosts read the identical bytes), and the component-map check asserts the
-subagent inventory names init-resolve.
+shell+fragment-set combined surface (a SHARED fragment set is the strongest
+parity: both hosts read the identical bytes), and the component-map check
+asserts the subagent inventory names init-resolve.
   Run: py tests/test_mgh_init_codegraph_parity.py
 """
 import unittest
@@ -30,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 CLAUDE_SHELL = ROOT / "releases" / "claude-code" / "commands" / "mgh-init.md"
 OPENCODE_SHELL = ROOT / "releases" / "opencode" / "command" / "mgh-init.md"
-STAGE_FLOW_FRAGMENT = ROOT / "core" / "prompts" / "fragments" / "init-stage-flow.md"
+STAGE_FLOW_DIR = ROOT / "core" / "prompts" / "fragments" / "init-stage"
 RESOLVE_PROMPT = ROOT / "core" / "prompts" / "stages" / "init-resolve.md"
 HINT_FRAGMENT = ROOT / "core" / "prompts" / "fragments" / "codegraph-hint.md"
 CLAUDE_AGENT = ROOT / "releases" / "claude-code" / "agents" / "init-resolve.md"
@@ -41,12 +45,14 @@ class TestShellCodegraphParity(unittest.TestCase):
     def setUp(self):
         self.assertTrue(CLAUDE_SHELL.is_file(), f"{CLAUDE_SHELL} missing")
         self.assertTrue(OPENCODE_SHELL.is_file(), f"{OPENCODE_SHELL} missing")
-        self.assertTrue(STAGE_FLOW_FRAGMENT.is_file(), f"{STAGE_FLOW_FRAGMENT} missing")
+        self.assertTrue(STAGE_FLOW_DIR.is_dir(), f"{STAGE_FLOW_DIR} missing")
         self.claude = CLAUDE_SHELL.read_text(encoding="utf-8")
         self.opend = OPENCODE_SHELL.read_text(encoding="utf-8")
-        self.flow = STAGE_FLOW_FRAGMENT.read_text(encoding="utf-8")
-        # shell + the shared stage-flow fragment it loads = the full codegraph-stage
-        # surface the orchestrator sees; the fragment is the single shared source.
+        # shell + the per-step stage-flow fragment set it loads per-step = the full
+        # codegraph-stage surface the orchestrator sees; the fragment set is the
+        # single shared source (both hosts read the identical bytes).
+        self.flow = "\n".join(sorted(p.read_text(encoding="utf-8")
+                                     for p in STAGE_FLOW_DIR.glob("*.md")))
         self.claude_surface = self.claude + "\n" + self.flow
         self.opend_surface = self.opend + "\n" + self.flow
 
@@ -56,11 +62,18 @@ class TestShellCodegraphParity(unittest.TestCase):
         self.assertIn(needle, c, f"claude surface missing: {needle!r}")
         self.assertIn(needle, o, f"opencode surface missing: {needle!r}")
 
-    def test_both_load_init_stage_flow_fragment(self):
-        # the shared fragment IS the codegraph-stage parity mechanism (single source)
-        self._assert_both("REQUIRED SUB-SKILL: Use init-stage-flow", surface=False)
-        self.assertIn("init-stage-flow.md", self.claude)
-        self.assertIn("init-stage-flow.md", self.opend)
+    def test_both_recipe_loads_same_per_step_fragment_set(self):
+        # the per-step fragment set IS the codegraph-stage parity mechanism (single
+        # shared source); both shells load it via the SAME recipe (resume_state →
+        # stage_flow_files[] → Read the current step's single fragment).
+        self._assert_both("resume_state.py --target", surface=False)
+        self._assert_both("stage_flow_files", surface=False)
+        self.assertIn("init-stage/", self.claude)
+        self.assertIn("init-stage/", self.opend)
+        # the fragment set exists as the shared source (bootstrap = detection stanza,
+        # resolve = init-resolve triple, done = codegraph manifest block)
+        for name in ("bootstrap.md", "resolve.md", "done.md"):
+            self.assertTrue((STAGE_FLOW_DIR / name).is_file(), f"{name} missing")
 
     def test_both_declare_no_codegraph_flag(self):
         self._assert_both("--no-codegraph", surface=False)

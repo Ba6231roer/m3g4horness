@@ -32,6 +32,16 @@ py list_steps.py [--target <dir>] [--step <id>]
 ```
 
 `--target` 接受但不使用(未来扩展锚点)。`--step <id>` 打单步(闭集,未知 id → exit 2)。
+`--step` **只接受命名枚举 id**(与 `resume_state.py` step 枚举一致:
+`not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done`);数字索引
+(如 `--step 0`)→ exit 2(闭集拒歧义)+ stderr 附**可操作 hint**(id 是命名枚举、读
+`resume_state.py` stdout `step` 或 `list_steps.py` 不带 `--step` 列全表;numeric indices
+NOT accepted)。
+
+**bootstrap 可达性**:`not-started`(bootstrap)不在 `stage_flow_files[]`(`resume_state.py` 对
+not-started 返回空数组、run_config 前 exit 1)——fresh-run 的 bootstrap 正文由壳 **fixed-path
+Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 bootstrap 调
+`list_steps --step <数字>`。
 
 ## stdout shape
 
@@ -45,7 +55,8 @@ py list_steps.py [--target <dir>] [--step <id>]
       "script_abs": "<abs path> | null",
       "invocation": "py <script_abs> <args> | null",
       "input": {"artifact": "<name> | null", "shape": "<shape> | null"},
-      "output": {"artifact": "<name>", "shape": "<shape>", "path_pattern": "<pattern>"}
+      "output": {"artifact": "<name>", "shape": "<shape>", "path_pattern": "<pattern>"},
+      "discipline": {"gates": [{id,desc,command,fail_exit}], "path_recipes": [{id,desc,source}], "nevers": ["<NEVER ...>"]}
     }
   ]
 }
@@ -60,6 +71,9 @@ py list_steps.py [--target <dir>] [--step <id>]
 - `input{}input`/`output` = 该步消费/产出的**逻辑 artifact**(非物理路径;
   物理路径见各 tier 的 `list_*` stdout `checkpoint_path`/`rule_path`/`done_marker`,
   扇出路径契约)
+- `discipline` = 该步纪律子集(gate 闸门形状 `--check` 命令 + 退出码 2 / fan-out 路径配方 /
+  适用 NEVER),与 `resume_state.py` stdout 同 step 的 `discipline_reminders[]` **逐字一致**
+  (共享静态表 `core/scripts/discipline_core.py`,单一真相;`done`/`not-started`/未知 → 空结构)
 
 ## Step→IO 表
 

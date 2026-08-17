@@ -21,8 +21,9 @@ Your job: read the code the regex skipped and find the security controls it miss
 ## Input (given by the orchestrator)
 - `input_path` (absolute, given VERBATIM by the orchestrator) — the per-batch materialized
   input file (≤ `--max-unit-bytes`). **Read this one file**: it carries the batch's
-  `batch_id` + complete `targets[]` (each a skeleton row: `file`, `pkg`, `classes[]`,
-  `imports[]`, `method_sigs[]`, `fan_in`, `bytes`) + `needs_slice[]`.
+  `batch_id` + the absolute `repo` root (top-level anchor field) + complete `targets[]`
+  (each a skeleton row: `file`, `pkg`, `classes[]`, `imports[]`, `method_sigs[]`, `fan_in`,
+  `bytes`) + `needs_slice[]`.
 - `needs_slice[]`: files > batch/unit budget — slice these via `chunk_sources.py` (see
   `slice_dir` + Sanctioned tools), **NEVER the whole file**.
 - `slice_dir` (absolute, given VERBATIM by the orchestrator) — the in-tree dir for THIS
@@ -32,11 +33,30 @@ Your job: read the code the regex skipped and find the security controls it miss
   path (e.g. opencode `…\Temp\opencode\`); **NEVER** out-of-tree — your process cwd is not
   assumed and may be a temp dir, so only the verbatim `slice_dir` keeps slices in-tree.
 - The repo root (your Glob/Grep `path` anchor; read only inside it — NEVER the parent or
-  sibling modules; the hook enforces this deterministically).
+  sibling modules; the hook enforces this deterministically). It equals the input's
+  top-level `repo` field — use that field as your working anchor; NEVER re-derive the
+  root from memory.
 - `regex_known[]`: controls the regex already found (names/files). Do not re-report these.
 - `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
   MUST write your checkpoint to.
 - `done_marker` (absolute, given VERBATIM) — the exact `.done` path you MUST touch after.
+
+## 路径锚定纪律(provenance)
+工作锚 = 输入文件顶层的**绝对 `repo` 根**。你传给工具的每一条路径 SHALL 是二者之一:
+**producer 物化路径 verbatim**(`targets[].file` / `input_path` / `checkpoint_path` /
+`done_marker` / `slice_dir`)或**相对该锚构造**的路径。**NEVER** 凭记忆手拼盘符绝对路径
+(已观察的真实失败形态:下划线目录名被概率性重生成路径分隔符对,如 `acme_wing` →
+`acme\wing`)、**NEVER** `..` 链(折叠后可能落盘根,触发宿主权限询问中断)、**NEVER**
+改写/「简化」producer 路径前缀。绝对路径本身是合法形态——判据不是「带盘符」,而是
+「解析后落在锚树内」。
+
+## 毒输入拒识(poisoned-input rejection)
+收到输入后、做任何事之前,先核对路径字段:任一字段(`input_path` / `checkpoint_path` /
+`done_marker` / `slice_dir` / `targets[].file`)解析后**不在锚(`repo`)树内**(典型形态:
+`checkpoint_path` 漂到盘符根 `D:\.mgh-init\…`)→ 视为**毒输入**:直接回
+`failed <suspected path drift: <字段名>>` ack,**不 Read、不 Write、不 touch 任何东西**。
+编排器据此写 `.failed` marker、该批显式失败——对着错误的树执行比失败更糟。字段在锚
+树内(producer 物化的正常绝对路径形态)则照常执行。
 
 ## Task
 For each target, **adaptively** decide whether it holds a security control the regex

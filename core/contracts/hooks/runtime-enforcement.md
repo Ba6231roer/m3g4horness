@@ -6,12 +6,23 @@ may co-write it for `/mgh-init` as an optimization). Consumer: the shared guard
 the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 `openspec/specs/runtime-hook-enforcement/spec.md`.
 
-> **激活 = env 或磁盘哨兵。** 守卫在一个 mgh 运行域内激活当且仅当
-> (a) env `MGH_<DOM>_ACTIVE=1` 已设,**或** (b) `<cwd>/<run-root>/.active` 哨兵存在。
-> 哨兵绕开 opencode「插件进程不继承 mid-session bash 导出的 env」的可靠性边界——env-only
-> 激活在 opencode 上整 run 休眠,哨兵兜底。运行域外(二者皆无):退出码 0 放行(零日常噪声)。
+> **激活 = env 或磁盘哨兵(最优锚点起有界向上发现)。** 守卫在一个 mgh 运行域内激活当且仅当
+> (a) env `MGH_<DOM>_ACTIVE=1` 已设,**或** (b) 锚到盘根链上任一级 `<dir>/<run-root>/.active`
+> 哨兵存在。锚 = **最优可用 cwd 信号**:hook stdin payload 的 `cwd` 字段(claude PreToolUse
+> 携带会话/工具 cwd——发起工具调用的那个上下文)优先,缺省回退守卫进程 cwd(opencode 插件
+> 进程)。哨兵发现从锚自身起**向上 walk**(锚 → 逐祖先,至盘根或 16 级有界,先到者止),每级
+> 查 `<dir>/<run-root>/.active`。向上 walk 闭合锚错配缺口:reader subagent(或从别处启动的
+> 宿主)锚 cwd 是 target 子目录任意深度,仍能在 `<target>/<run-root>/.active` 命中哨兵——旧
+> cwd-only 单点发现在该锚下找不到哨兵 → 守卫休眠 → 读/写侧全部静默降级放行。哨兵绕开
+> opencode「插件进程不继承 mid-session bash 导出的 env」的可靠性边界。运行域外(锚起向上
+> walk 全链有界皆无哨兵且无 env):退出码 0 放行(零日常噪声)。
+>
+> **opencode 残余边界(显式运行要求,非缺陷)**:插件进程 cwd = opencode 服务器启动目录,env
+> 又不继承——若从 target 树**外**启动 opencode,锚不在 target 链上,守卫整 run 休眠。守卫
+> **NEVER 整盘扫描补偿**(性能 + 越权)。运行要求:**在 target 根或其子目录启动 opencode**。
+> 这优于现状(现状连从 target 子目录启动都休眠)。
 
-## Sentinel `<cwd>/<run-root>/.active`
+## Sentinel `<dir>/<run-root>/.active` (anchored upward discovery)
 
 ```json
 {"domain": "mgh-init", "target": "<abs target>", "out_roots": ["<abs>..."], "v": 1}
@@ -24,15 +35,19 @@ the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 | `out_roots[]` | abs roots for customized `--out` / `--rules-dir` (init & ut-init; honors custom output locations without over-blocking) |
 | `v` | schema version |
 
-### Per-domain run-root (sentinel location, cwd-relative)
+### Per-domain run-root (sentinel location, discovered on the anchor chain)
 
 | Domain | env flag | run-root | sentinel path |
 |---|---|---|---|
-| `mgh-init` | `MGH_INIT_ACTIVE` | `.mgh-init` | `<cwd>/.mgh-init/.active` |
-| `mgh-sast` | `MGH_SAST_ACTIVE` | `security-scan` | `<cwd>/security-scan/.active` |
-| `mgh-sra` | `MGH_SRA_ACTIVE` | `.mgh-sra` | `<cwd>/.mgh-sra/.active` |
-| `mgh-srr` | `MGH_SRR_ACTIVE` | `.mgh-srr` | `<cwd>/.mgh-srr/.active` |
-| `mgh-ut-init` | `MGH_UT_INIT_ACTIVE` | `.mgh-ut-init` | `<cwd>/.mgh-ut-init/.active` |
+| `mgh-init` | `MGH_INIT_ACTIVE` | `.mgh-init` | `<dir>/.mgh-init/.active` |
+| `mgh-sast` | `MGH_SAST_ACTIVE` | `security-scan` | `<dir>/security-scan/.active` |
+| `mgh-sra` | `MGH_SRA_ACTIVE` | `.mgh-sra` | `<dir>/.mgh-sra/.active` |
+| `mgh-srr` | `MGH_SRR_ACTIVE` | `.mgh-srr` | `<dir>/.mgh-srr/.active` |
+| `mgh-ut-init` | `MGH_UT_INIT_ACTIVE` | `.mgh-ut-init` | `<dir>/.mgh-ut-init/.active` |
+
+`<dir>` runs over the anchor-to-drive-root chain (anchor itself first, then each ancestor,
+bounded to 16 levels / the filesystem root). The anchor = payload `cwd` (claude) ?? guard
+process cwd (opencode).
 
 ### Lifecycle
 
@@ -49,9 +64,9 @@ the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 ## MGH_TARGET resolution (subtree check)
 
 Precedence: **env `MGH_TARGET` > `sentinel.target` > degrade**. When both are absent the
-subtree check degrades to pass (cwd is the implicit run root — sentinel discovery is
-cwd-relative — but is **not** used as a hard block target, to avoid over-blocking when no
-target was pinned).
+subtree check degrades to pass (the anchor is the implicit run-root context — sentinel
+discovery is anchor-relative — but is **not** used as a hard block target, to avoid
+over-blocking when no target was pinned).
 
 ## Runtime write discipline (active guard)
 
@@ -138,6 +153,8 @@ temp-I/O / file-assoc blocks still fire).
 | Tool abstraction | `Glob` / `Grep` | `path` (default = cwd) | resolved `path` outside; `path` absent + cwd outside (cwd-drift leak) |
 | Tool abstraction | — | `pattern` / `glob` | **NOT parsed** (the `path` anchor is authoritative; conservative vs false positives) |
 | Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside, OR no abs path + cwd outside |
+| Path resolution | `..` chain (e.g. `<target>\aa\bb\cc\..\..\..\..\xxxx` folding to a drive root) | the resolved path | `Path.resolve()` folds `..` segments; a chain that climbs out of the tree resolves outside and is blocked (the reported D-root permission-prompt interrupt shape) |
+| Path resolution | hallucinated out-of-tree prefix (an underscore dir name regenerated as a separator pair, e.g. `acme_wing` → `acme\wing`) | the resolved path | resolves outside the tree and is blocked by the same out-of-tree judgment — no directory-name semantics are attempted |
 
 A hit → exit 2 + stderr **read-side recipe** (points at "read only this batch's `input_path`/
 `targets[]`; anchor `Glob`/`Grep` (and `rg`/`grep`/… in Bash) at the repo root; NEVER read
@@ -154,9 +171,30 @@ thus resolves the same file under any cwd AND stays inside the target tree (so t
 check passes it) — closing the non-subjective out-of-tree read path (fan-out output paths
 are already absolute for the write side; this extends that absolutization to the read side).
 
+## Guard tool-surface wiring coverage (CI-enforced invariant)
+
+The guard's decision-branch tool set (every tool name `main()` dispatches on: `Bash`,
+`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `ApplyPatch`, `Read`, `Glob`, `Grep`) SHALL
+be fully covered by **BOTH** host wiring faces, enforced by a regression test:
+
+| Face | What must cover every guard tool name | Where |
+|---|---|---|
+| claude install face | the default PreToolUse matcher `_DEFAULT_MATCHER` (`\|`-split) | `tools/install_hook.py` |
+| opencode plugin face | the `.ts` shim `HANDLED` set + its lowercase `normalize` mapping | `releases/opencode/plugins/block_adhoc_scripts.ts` |
+
+Adding a guard decision branch WITHOUT extending both wiring faces SHALL fail the regression
+test (`tests/test_opencode_hook_parity.py::TestWiringCoverage`) — structurally closing the
+"dead branch" gap class on both hosts. The claude matcher previously covered only
+`Bash|Write|Edit`, leaving the read-side / tool-face branches unconsulted (an out-of-tree
+`Read` reached the host permission prompt and interrupted the run instead of failing loud
+with a recipe); nothing prevented the same drift on opencode. Reinstall evolves a legacy
+matcher (`Bash|Write|Edit` ⊂ default) in place; a user-customized non-subset matcher is left
+untouched (stderr note).
+
 ## Cross-references
 
 - Guard source (single decision source): `releases/claude-code/hooks/block_adhoc_scripts.py`
   (opencode twin byte-identical; parity test `tests/test_opencode_hook_parity.py`).
-- Guard unit tests: `tests/test_block_adhoc_scripts.py`.
+- Guard unit tests: `tests/test_block_adhoc_scripts.py` (incl. upward-walk sentinel discovery).
+- Wiring coverage test: `tests/test_opencode_hook_parity.py::TestWiringCoverage`.
 - Install / opt-out (`--no-enforce-hook`): `install.sh` + `core/contracts/.../spec.md` per command.

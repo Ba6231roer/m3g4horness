@@ -9,17 +9,28 @@ Activation = env OR disk sentinel (closes the opencode "plugin process does not 
 mid-session bash-exported env -> guard dormant for a whole run" reliability boundary).
 Active inside a mgh run-domain when EITHER (a) env MGH_INIT_ACTIVE=1 / MGH_SAST_ACTIVE=1 /
 MGH_SRA_ACTIVE=1 / MGH_SRR_ACTIVE=1 / MGH_UT_INIT_ACTIVE=1 is set, OR (b) a disk sentinel
-<cwd>/<run-root>/.active exists, where run-root is the domain's run dir (init->.mgh-init,
-sast->security-scan, sra->.mgh-sra, srr->.mgh-srr, ut-init->.mgh-ut-init). The sentinel is
-JSON {"domain","target","out_roots[]","v":1},
+.active exists at <dir>/<run-root>/.active for ANY dir on the anchor-to-drive-root chain,
+where run-root is the domain's run dir (init->.mgh-init, sast->security-scan, sra->.mgh-sra,
+srr->.mgh-srr, ut-init->.mgh-ut-init). The anchor is the BEST available cwd signal: the
+`cwd` field of the hook's stdin payload when present (claude PreToolUse carries the
+session/tool cwd — the context that issued the tool call), falling back to the guard
+process's own cwd (opencode plugin process). Sentinel discovery walks UPWARD from the
+anchor (anchor itself first, then each ancestor, bounded to 16 levels / the filesystem
+root, whichever first), so a subagent whose anchor cwd is a subdirectory of the target at
+ANY depth still discovers the sentinel at <target>/<run-root>/.active (the prior cwd-only
+lookup missed it -> guard dormant -> whole read/write side silently degraded). An anchor
+entirely outside the target tree (e.g. an opencode server started elsewhere) does NOT hit
+-> correct dormancy (documented residual boundary; the guard NEVER scans the drive). The
+sentinel is JSON {"domain","target","out_roots[]","v":1},
 written by the orchestrator at step 0 via Bash and removed on completion/clean-stop.
-Outside all run-domains (neither env nor sentinel): exit 0 silently (zero day-to-day noise).
+Outside all run-domains (neither env nor sentinel on the whole walked chain): exit 0
+silently (zero day-to-day noise).
 Contract: core/contracts/hooks/runtime-enforcement.md.
 
 MGH_TARGET for the subtree check resolves with precedence env MGH_TARGET > sentinel.target.
-When both are absent the subtree check degrades to pass (cwd is the implicit run root —
-sentinel discovery is cwd-relative — but is NOT used as a hard block target, to avoid
-over-blocking when the orchestrator did not pin one).
+When both are absent the subtree check degrades to pass (the anchor is the implicit run
+root context — sentinel discovery is anchor-relative — but is NOT used as a hard block
+target, to avoid over-blocking when the orchestrator did not pin one).
 
 Blocks the real-world failure shapes —
   (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( / .json);
@@ -96,8 +107,9 @@ import re
 import sys
 from pathlib import Path
 
-# Per-domain run-domain env flag + cwd-relative run-root (where the .active sentinel lives).
-# Precedence order when more than one is active (rare): sast > sra > srr > init.
+# Per-domain run-domain env flag + run-root (where the .active sentinel lives, discovered
+# on the anchor-to-drive-root chain). Precedence order when more than one is active (rare):
+# sast > sra > srr > init.
 _DOMAINS = (
     ("mgh-sast", "MGH_SAST_ACTIVE", "security-scan"),
     ("mgh-sra", "MGH_SRA_ACTIVE", ".mgh-sra"),
@@ -105,6 +117,10 @@ _DOMAINS = (
     ("mgh-init", "MGH_INIT_ACTIVE", ".mgh-init"),
     ("mgh-ut-init", "MGH_UT_INIT_ACTIVE", ".mgh-ut-init"),
 )
+# Sentinel upward-walk bound: ancestors checked above the anchor before giving up (the
+# filesystem root stops the walk early). Covers realistic Windows depths (~6 in the
+# reported anchor-mismatch shape) with headroom, and bounds the per-call stat cost.
+_WALK_MAX_LEVELS = 16
 
 # A `py -c` / `python -c` / `python3 -c` invocation (preceded by start or a shell
 # delimiter, so it does not match a substring of another token).
@@ -542,12 +558,34 @@ def _safe_resolve(p: str):
         return None
 
 
-def _resolve_domain(cwd: Path):
+def _resolve_domain(anchor: Path):
     """Return (domain, sentinel_or_None) for the active run-domain, else (None, None).
-    Active = env MGH_<DOM>_ACTIVE=1 OR <cwd>/<run-root>/.active sentinel present."""
+    Active = env MGH_<DOM>_ACTIVE=1 OR a .active sentinel at <dir>/<run-root>/.active for
+    ANY dir on the anchor-to-drive-root chain (best-anchor + bounded upward walk).
+
+    The anchor is the BEST available cwd signal (see main(): payload `cwd` field when the
+    host carries it, else the guard process cwd). Walking UP closes the anchor-mismatch
+    gap: a reader subagent whose anchor cwd is a subdirectory of the target at ANY depth
+    still finds the sentinel at <target>/<run-root>/.active — the prior cwd-only lookup
+    missed it and the whole guard silently degraded to pass. An anchor entirely outside
+    the target tree does not hit -> correct dormancy (the guard NEVER scans the drive).
+    Bounded to _WALK_MAX_LEVELS ancestors (or the filesystem root, whichever first) so a
+    pathological deep chain cannot degrade performance (~1 stat x domains per level)."""
+    chain = [anchor]
+    for _ in range(_WALK_MAX_LEVELS):
+        parent = chain[-1].parent
+        if parent == chain[-1]:  # reached the filesystem root
+            break
+        chain.append(parent)
     for domain, env_key, run_root in _DOMAINS:
-        sentinel = _read_sentinel(cwd / run_root / ".active")
-        if os.environ.get(env_key, "") == "1" or sentinel is not None:
+        sentinel = None
+        for d in chain:
+            sentinel = _read_sentinel(d / run_root / ".active")
+            if sentinel is not None:
+                break
+        # sentinel discovery runs even under env activation (a co-present sentinel still
+        # contributes target / out_roots[] to the checks — mirrors the prior semantics).
+        if sentinel is not None or os.environ.get(env_key, "") == "1":
             return domain, sentinel
     return None, None
 
@@ -671,18 +709,28 @@ def _emit_bash_write_block(domain, cmd, kind, dest, target, out_roots):
 
 
 def main():
+    # Read stdin FIRST: the payload's `cwd` field (claude PreToolUse carries the session/
+    # tool cwd) is the BEST activation anchor — it is the context that issued the tool
+    # call (a subagent's cwd may be a target subdirectory while the hook process cwd is
+    # not). Fall back to the guard process cwd (opencode plugin process) when absent.
+    try:
+        payload = json.load(sys.stdin)
+    except (OSError, ValueError):
+        return 0  # cannot inspect -> never block
     cwd = Path.cwd()
-    domain, sentinel = _resolve_domain(cwd)
+    pcwd = payload.get("cwd")
+    anchor = cwd
+    if isinstance(pcwd, str) and pcwd.strip():
+        r = _safe_resolve(pcwd.strip())
+        if r is not None:
+            anchor = r
+    domain, sentinel = _resolve_domain(anchor)
     if domain is None:
         return 0  # outside any run-domain: pass silently (zero day-to-day noise)
     target = _resolve_target(sentinel)
     out_roots = (sentinel or {}).get("out_roots") or []
     if not isinstance(out_roots, list):
         out_roots = []
-    try:
-        payload = json.load(sys.stdin)
-    except (OSError, ValueError):
-        return 0  # cannot inspect -> never block
     tool = payload.get("tool_name", "")
     ti = payload.get("tool_input") or {}
 

@@ -975,6 +975,206 @@ class TestReadSideConfinement(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class TestSentinelUpwardWalk(unittest.TestCase):
+    """Best-anchor + bounded upward sentinel discovery (harden-mgh-init-scout-path-binding,
+    activation layer D1). The anchor = the hook payload `cwd` field when present (claude
+    PreToolUse carries the session/tool cwd — the context that issued the tool call),
+    falling back to the guard process cwd (opencode plugin process). The walk closes the
+    anchor-mismatch gap: a reader subagent whose anchor cwd is a subdirectory of the target
+    at ANY depth still discovers the sentinel at <target>/<run-root>/.active (the prior
+    cwd-only lookup missed it -> guard dormant -> whole read/write side silently degraded).
+    An anchor entirely outside the target tree does NOT hit -> correct dormancy."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _run_at_anchor(self, payload, anchor: Path, sentinel_at: Path | None,
+                       sentinel_dict, mgh_target_env=None):
+        """Run main() with the guard process cwd = a NEUTRAL temp dir (never the sentinel
+        tree), the payload carrying `cwd`=anchor, and an optional sentinel at sentinel_at.
+        Env: no MGH_*_ACTIVE (pure sentinel-activation path). Restores cwd + env."""
+        old_active = {k: os.environ.pop(k, None) for k in _DOMAIN_KEYS}
+        old_target = os.environ.get("MGH_TARGET")
+        if mgh_target_env is None:
+            os.environ.pop("MGH_TARGET", None)
+        else:
+            os.environ["MGH_TARGET"] = mgh_target_env
+        neutral = tempfile.mkdtemp(prefix="mgh_walk_neutral_")
+        spath = sentinel_at / ".active" if sentinel_at is not None else None
+        if spath is not None:
+            spath.parent.mkdir(parents=True, exist_ok=True)
+            spath.write_text(json.dumps(sentinel_dict), encoding="utf-8")
+        old_cwd, old_stdin = os.getcwd(), sys.stdin
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            os.chdir(neutral)
+            body = dict(payload)
+            body["cwd"] = str(anchor)
+            sys.stdin = io.StringIO(json.dumps(body))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.chdir(old_cwd)
+            if spath is not None:
+                try:
+                    spath.unlink()
+                except OSError:
+                    pass
+            for k, v in old_active.items():
+                if v is not None:
+                    os.environ[k] = v
+            if old_target is None:
+                os.environ.pop("MGH_TARGET", None)
+            else:
+                os.environ["MGH_TARGET"] = old_target
+        return code, err.getvalue()
+
+    def setUp_target_tree(self):
+        """target/.mgh-init/.active sentinel root + a deep subdirectory anchor."""
+        target = Path(tempfile.mkdtemp(prefix="mgh_walk_tgt_"))
+        (target / ".mgh-init").mkdir(parents=True, exist_ok=True)
+        deep = target / "aa" / "bb" / "cc"
+        deep.mkdir(parents=True, exist_ok=True)
+        return target, deep
+
+    def test_subdir_anchor_walks_up_to_sentinel_and_blocks(self):
+        # anchor = target subdirectory (3 levels deep); sentinel at <target>/.mgh-init/.active
+        # -> upward walk hits -> guard active -> out-of-tree Read blocked (exit 2).
+        target, deep = self.setUp_target_tree()
+        code, err = self._run_at_anchor(
+            {"tool_name": "Read", "tool_input": {"file_path": r"D:\out\x.java"}},
+            deep, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+
+    def test_payload_cwd_takes_precedence_over_process_cwd(self):
+        # payload cwd = target subdir; guard PROCESS cwd = neutral temp (NOT in the target
+        # chain). Discovery MUST use the payload cwd (the prior cwd-only lookup at the
+        # process cwd missed the sentinel -> dormant -> pass).
+        target, deep = self.setUp_target_tree()
+        code, err = self._run_at_anchor(
+            {"tool_name": "Bash", "tool_input": {
+                "command": 'py -c "import json; json.load(open(\'x.json\'))"'}},
+            deep, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("describe_artifact", err)
+
+    def test_subdir_anchor_in_tree_read_passes(self):
+        # anchor inside the tree, Read inside the SAME target tree -> pass (the walk arms
+        # the guard without over-blocking legitimate batch reads).
+        target, deep = self.setUp_target_tree()
+        code, _ = self._run_at_anchor(
+            {"tool_name": "Read", "tool_input": {"file_path": str(target / "src" / "X.java")}},
+            deep, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 0)
+
+    def test_outside_tree_anchor_stays_dormant(self):
+        # anchor = a temp dir entirely outside the target chain (opencode started
+        # elsewhere): no hit on the walked chain -> dormant -> exit 0 (documented residual
+        # boundary; the guard NEVER scans the drive).
+        elsewhere = Path(tempfile.mkdtemp(prefix="mgh_walk_out_"))
+        target, _ = self.setUp_target_tree()
+        code, _ = self._run_at_anchor(
+            {"tool_name": "Bash", "tool_input": {
+                "command": 'py -c "import json; json.load(open(\'x.json\'))"'}},
+            elsewhere, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 0)
+
+    def test_anchor_walk_bounded_16_levels(self):
+        # a 17-level deep anchor with the sentinel at its root still arms the guard only if
+        # the sentinel dir is within 16 ancestors. Build 20 levels; the sentinel at the top
+        # root is BEYOND the bound from the deep anchor -> dormant (bounded walk, no
+        # pathological deep-chain stat cost).
+        root = Path(tempfile.mkdtemp(prefix="mgh_walk_deep_"))
+        (root / ".mgh-init").mkdir(parents=True, exist_ok=True)
+        deep = root
+        for i in range(20):
+            deep = deep / f"d{i:02d}"
+        deep.mkdir(parents=True, exist_ok=True)
+        code, _ = self._run_at_anchor(
+            {"tool_name": "Bash", "tool_input": {
+                "command": 'py -c "import json; json.load(open(\'x.json\'))"'}},
+            deep, root / ".mgh-init",
+            {"domain": "mgh-init", "target": str(root), "out_roots": [], "v": 1})
+        self.assertEqual(code, 0)   # beyond the 16-level bound -> not discovered
+
+    def test_walk_hits_within_bound(self):
+        # mirror: a 15-level deep anchor (within the bound) still discovers the sentinel.
+        root = Path(tempfile.mkdtemp(prefix="mgh_walk_ok_"))
+        (root / ".mgh-init").mkdir(parents=True, exist_ok=True)
+        deep = root
+        for i in range(15):
+            deep = deep / f"d{i:02d}"
+        deep.mkdir(parents=True, exist_ok=True)
+        code, err = self._run_at_anchor(
+            {"tool_name": "Bash", "tool_input": {
+                "command": 'py -c "import json; json.load(open(\'x.json\'))"'}},
+            deep, root / ".mgh-init",
+            {"domain": "mgh-init", "target": str(root), "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("describe_artifact", err)
+
+    def test_multi_domain_first_hit_by_precedence(self):
+        # two sentinels on the same chain (sra BELOW init in _DOMAINS order wins: sast >
+        # sra > srr > init): anchor under a tree carrying both -> sra dispatched.
+        target, deep = self.setUp_target_tree()
+        (target / ".mgh-sra").mkdir(parents=True, exist_ok=True)
+        sra_sent = target / ".mgh-sra" / ".active"
+        sra_sent.write_text(json.dumps(
+            {"domain": "mgh-sra", "target": str(target), "out_roots": [], "v": 1}),
+            encoding="utf-8")
+        try:
+            code, err = self._run_at_anchor(
+                {"tool_name": "Bash", "tool_input": {
+                    "command": 'py -c "import json; json.load(open(\'x.json\'))"'}},
+                deep, target / ".mgh-init",
+                {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+            self.assertEqual(code, 2)
+            self.assertIn("mgh-sra", err)   # sra precedes init in _DOMAINS
+        finally:
+            try:
+                sra_sent.unlink()
+            except OSError:
+                pass
+
+    # --- the two real-world provenance shapes (proposal Why): .. chain + hallucinated
+    #     prefix, judged under sentinel activation with the anchor deep in the tree ---
+    def test_dotdot_chain_drive_root_overshoot_blocked(self):
+        # `Read <target>\aa\bb\cc\..\..\..\..\..\..\xxxx` folds to the drive root ->
+        # outside the target tree -> exit 2 + read-side recipe (the reported D-root
+        # permission-prompt interrupt shape, caught BEFORE it reaches the host).
+        target, deep = self.setUp_target_tree()
+        chain_path = str(deep) + "\\..\\..\\..\\..\\..\\..\\xxxx"
+        code, err = self._run_at_anchor(
+            {"tool_name": "Read", "tool_input": {"file_path": chain_path}},
+            deep, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+
+    def test_hallucinated_prefix_out_of_tree_blocked(self):
+        # target dir is <tmp>/acme_wing_curr_proj; the model hallucinates the underscore
+        # name as a separator pair (<tmp>/acme/wing/curr_proj) -> resolves outside the
+        # tree -> exit 2 (same out-of-tree judgment, no directory-name semantics).
+        target = Path(tempfile.mkdtemp(prefix="acme_wing_"))
+        (target / ".mgh-init").mkdir(parents=True, exist_ok=True)
+        deep = target / "src"
+        deep.mkdir(parents=True, exist_ok=True)
+        hallucinated = str(target.parent / "acme" / "wing" / "curr_proj" / "src" / "X.java")
+        code, err = self._run_at_anchor(
+            {"tool_name": "Read", "tool_input": {"file_path": hallucinated}},
+            deep, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+
+
 class TestBlockAdhocScriptsFileAssoc(unittest.TestCase):
     """Bash execution of a script-extension file via the shell's file association is blocked
     in every run-domain (defense-in-depth; the primary fix is the stage-prompt `py <abs>`

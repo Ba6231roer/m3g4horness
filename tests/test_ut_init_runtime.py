@@ -90,6 +90,20 @@ class TestUtInitRuntime(unittest.TestCase):
             self.assertTrue(Path(item["input_path"]).is_file(), item["input_path"])
             self.assertEqual(data["total"], data["done"] + data["failed"] + len(data["pending"]))
 
+    def test_extract_input_carries_top_level_repo_anchor(self):
+        # fan-out input anchor: each materialized extract input.json carries the ABSOLUTE
+        # repo root top-level (reader anchors tool paths on it without re-deriving).
+        self._classify()
+        r = self._run(LIST, "--tier", "extract", "--groups", str(self.out / "test_groups.json"),
+                      "--checkpoints", str(self.out / "checkpoints" / "extract"),
+                      "--materialize", str(self.out / "inputs" / "extract"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for item in json.loads(r.stdout)["pending"]:
+            inp = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(inp.get("repo"), str(self.repo.resolve()),
+                             f"{item['group_id']} input.json missing the top-level repo anchor")
+            self.assertTrue(Path(inp["repo"]).is_absolute())
+
     def test_extract_resume_skips_done_group_with_arrow_unit(self):
         # a `::`-containing group id is _safe_name-encoded on disk; resume detection reads the
         # canonical `unit` from the sibling record, so a done group is skipped (not re-listed).
@@ -128,6 +142,9 @@ class TestUtInitRuntime(unittest.TestCase):
         self.assertEqual(Path(item["rule_path"]).name, "junit5.md")
         self.assertIn("test-conventions", item["rule_path"])
         self.assertTrue(Path(item["input_path"]).is_file())
+        # rules-tier input also carries the top-level repo anchor (absolute --target).
+        inp = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(inp.get("repo"), str(self.repo.resolve()))
 
     def test_chunk_sources_reuse_via_ut_paths(self):
         # task 2.3: shared chunk_sources.py is path-generic — reusable for ut slices. The

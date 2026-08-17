@@ -30,8 +30,11 @@ import { fileURLToPath } from "node:url"
 // normalize() extracts into paths[] (glue-only field extraction — the guard decides). A DIRECT
 // `rg`/`grep`/… in Bash routes through the `bash` tool (handled above) and the guard's Bash
 // file-search rule — it does NOT need a HANDLED entry here (only the native read/glob/grep
-// TOOLS do).
-const HANDLED = new Set(["bash", "write", "edit", "read", "glob", "grep", "apply_patch"])
+// TOOLS do). multiedit/notebookedit are CLAUDE-native tool ids with no opencode counterpart —
+// they are listed (and routed through the generic filePath fallback) ONLY to keep the wiring
+// invariant "shim HANDLED ⊇ guard dispatch set" machine-checkable; opencode never emits them.
+const HANDLED = new Set(["bash", "write", "edit", "read", "glob", "grep", "apply_patch",
+  "multiedit", "notebookedit"])
 
 // apply_patch `patchText` marker lines (opencode packages/core/src/patch.ts:35-51):
 //   *** Add File: <path>      *** Update File: <path>      *** Delete File: <path>
@@ -88,9 +91,11 @@ function normalize(tool: string, args: Record<string, unknown> | undefined) {
     }
     return { tool_name: "ApplyPatch", tool_input: { paths, operations } }
   }
-  // write / edit / read all carry a file path under filePath/file_path/path.
+  // write / edit / read (and the claude-native multiedit/notebookedit ids, kept for the
+  // wiring invariant) all carry a file path under filePath/file_path/path.
   const fp = (args?.filePath as string) ?? (args?.file_path as string) ?? (args?.path as string) ?? ""
-  const name = tool === "read" ? "Read" : tool === "write" ? "Write" : "Edit"
+  const name = tool === "read" ? "Read" : tool === "write" ? "Write"
+    : tool === "multiedit" ? "MultiEdit" : tool === "notebookedit" ? "NotebookEdit" : "Edit"
   return { tool_name: name, tool_input: { file_path: fp } }
 }
 

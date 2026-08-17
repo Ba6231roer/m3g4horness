@@ -380,6 +380,19 @@ class TestListClustersMaterialize(unittest.TestCase):
         inp = json.loads(Path(crypto["input_path"]).read_text(encoding="utf-8"))
         self.assertEqual(len(inp["candidates"]), 3)
 
+    def test_input_carries_top_level_repo_anchor(self):
+        # fan-out input anchor: each materialized unit input carries the ABSOLUTE repo
+        # root as a top-level field (reader subagent anchors tool paths on it without
+        # re-deriving; poisoned-path rejection judges against this anchor).
+        p = self._write(_LC_CLUSTERS, _LC_CANDS)
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        for it in json.loads(out)["pending"]:
+            inp = json.loads(Path(it["input_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(inp.get("repo"), str(self.d.resolve()),
+                             f"{it['cluster_id']} input.json missing the top-level repo anchor")
+            self.assertTrue(Path(inp["repo"]).is_absolute())
+
     def test_paging_offset_limit(self):
         p = self._write(_LC_CLUSTERS, _LC_CANDS)
         _, out, _ = self._run(p, "--offset", "1", "--limit", "1")

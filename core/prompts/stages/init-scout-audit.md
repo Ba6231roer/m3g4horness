@@ -14,7 +14,15 @@ to prove each target actually IS a missed control.
 - `audit_targets[]`: a deterministic random sample (≈ `--scout-audit-pct`) of skeleton
   rows that scout-readers rejected (emitted no candidate for). Each row is the usual
   skeleton metadata (`file`, `pkg`, `classes`, `imports`, `method_sigs`, `fan_in`).
-- The repo root.
+- The repo root (your working anchor = the absolute `repo` root from the orchestrator /
+  input — NEVER re-derived from memory).
+
+## 路径锚定纪律 + 毒输入拒识
+工具路径 SHALL 是 producer 物化路径 verbatim 或相对锚(repo 根)构造;**NEVER** 凭记忆
+手拼盘符绝对路径(下划线目录名会被概率性重生成分隔符对)、**NEVER** `..` 链、**NEVER**
+改写 producer 路径前缀。收到输入先核对:任一路径字段(`audit_targets[].file`)解析后
+**不在锚树内** → 视为**毒输入**:回 `failed <suspected path drift>` ack,不 Read / 不
+Write / 不 touch 任何东西。绝对路径本身合法——判据是「解析后在锚树内」,非「带盘符」。
 
 ## Task
 For each audit target, **actively try to find a control** the reader missed:

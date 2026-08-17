@@ -485,5 +485,69 @@ class TestGuardByteParity(unittest.TestCase):
         self.assertIn("args?.include", text)
 
 
+class TestWiringCoverage(unittest.TestCase):
+    """Guard tool-surface wiring coverage (harden-mgh-init-scout-path-binding, consultation
+    layer D2) — ONE invariant across both hosts: every tool name the guard's main()
+    dispatches on MUST be covered by BOTH wiring faces:
+      (a) the claude-side default PreToolUse matcher injected by tools/install_hook.py
+          (`_DEFAULT_MATCHER`, `|`-split);
+      (b) the opencode .ts shim's HANDLED set via its lowercase mapping in normalize().
+    Adding a guard decision branch without extending both wiring faces = a DEAD branch on
+    that host (the claude matcher previously covered only Bash|Write|Edit, so the
+    read-side branches were never consulted and an out-of-tree Read reached the host
+    permission prompt instead of failing loud). This test structurally closes that gap
+    class: forget to extend a face -> CI fails here."""
+
+    _DISPATCH_RX = re.compile(
+        r'if tool == "([A-Za-z_]+)"'          # if tool == "Bash"
+        r'|elif tool in \(([^)]*)\)')         # elif tool in ("Read", "Glob", ...)
+
+    def _guard_dispatch_tools(self):
+        """Statically extract every tool name the guard's main() dispatches on. The
+        dispatch shape is fixed (`if tool == "X"` / `elif tool in ("X", "Y")`); if the
+        guard is ever refactored to another shape this extractor (and this test) must be
+        updated in lockstep — same maintenance contract as the parity mirror above."""
+        src = CC_GUARD.read_text(encoding="utf-8")
+        names = set()
+        for m in self._DISPATCH_RX.finditer(src):
+            if m.group(1):
+                names.add(m.group(1))
+            else:
+                for lit in re.findall(r'"([A-Za-z_]+)"', m.group(2)):
+                    names.add(lit)
+        self.assertTrue(names, "no dispatch tools extracted — extractor drifted from the "
+                               "guard's main() dispatch shape")
+        return names
+
+    def test_every_guard_branch_is_in_claude_matcher(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "install_hook_wiring", ROOT / "tools" / "install_hook.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        matcher = {t.strip() for t in mod._DEFAULT_MATCHER.split("|") if t.strip()}
+        missing = self._guard_dispatch_tools() - matcher
+        self.assertFalse(missing,
+            f"guard dispatches on {sorted(missing)} but the claude PreToolUse default "
+            f"matcher does not carry them — those branches are DEAD on claude (extend "
+            f"tools/install_hook.py::_DEFAULT_MATCHER)")
+
+    def test_every_guard_branch_is_in_shim_handled(self):
+        shim = SHIM.read_text(encoding="utf-8")
+        handled = re.search(r'const HANDLED = new Set\(\[(.*?)\]\)', shim, re.DOTALL)
+        self.assertIsNotNone(handled, "shim HANDLED set not found — shim drifted")
+        handled_set = {t.strip().strip('"\'') for t in handled.group(1).split(",") if t.strip()}
+        # the shim normalizes to the guard's tool_name via lowercase ids; map each
+        # dispatch name to its lowercase / opencode-native id.
+        oc_ids = {n.lower().replace("applypatch", "apply_patch") for n in
+                  self._guard_dispatch_tools()}
+        # Bash -> bash, ApplyPatch -> apply_patch, Read/Glob/Grep -> read/glob/grep, etc.
+        missing = {i for i in oc_ids if i not in handled_set}
+        self.assertFalse(missing,
+            f"guard dispatches on {sorted(missing)} but the opencode shim HANDLED set does "
+            f"not carry them — those branches are DEAD on opencode (extend HANDLED + "
+            f"normalize in block_adhoc_scripts.ts)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

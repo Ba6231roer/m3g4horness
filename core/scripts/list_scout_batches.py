@@ -31,6 +31,9 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
    "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
   - pending[] item: {batch_id, targets_count, bytes, needs_slice[], input_path,
                      checkpoint_path, done_marker, failed_marker, oversize, slice_dir}
+  - each materialized <batch_id>.input.json ALSO carries the absolute `repo` root as a
+    TOP-LEVEL field (fan-out input anchor: the reader anchors its tool paths on it and
+    rejects path fields resolving outside the anchored tree as poisoned).
   - failed         = #confirmed-failed reader batches (`.failed` marker; terminal,
                      excluded from pending, NOT retried on --resume; done+failed+pending
                      = total). Crash with no `failed` ack → no marker → batch stays pending.
@@ -152,7 +155,14 @@ def _write_batch_input(inputs_dir: Path, batch_id: str, batch: dict, repo):
     wrong tree. An absolute `file` resolves identically under any cwd AND stays inside the
     MGH_TARGET tree (so the read-side hook passes it) — closing the non-subjective out-of-
     tree read path (R5.3(b) fan-out path absolutization, extended to the read side).
-    `needs_slice[]` entries (repo-relative file paths) are absolutized the same way."""
+    `needs_slice[]` entries (repo-relative file paths) are absolutized the same way.
+
+    The input ALSO carries the absolute `repo` root as a TOP-LEVEL field (same source as
+    the stdout `repo`): every reader subagent's input then carries a deterministic anchor
+    without re-deriving it — the reader anchors all its tool paths on this field (verbatim
+    producer-materialized paths, or paths built relative to the anchor) and rejects input
+    path fields that resolve outside the anchored tree as poisoned (fan-out input anchor
+    contract, shared with list_clusters / list_test_groups)."""
     inputs_dir.mkdir(parents=True, exist_ok=True)
     repo_path = Path(repo) if repo else None
 
@@ -190,6 +200,7 @@ def _write_batch_input(inputs_dir: Path, batch_id: str, batch: dict, repo):
         abs_needs_slice.append(af if af is not None else nf)
     inp = {
         "batch_id": batch_id,
+        "repo": str(repo_path.resolve()) if repo_path else "",
         "targets": abs_targets,
         "needs_slice": abs_needs_slice,
         "bytes": batch.get("bytes", 0),

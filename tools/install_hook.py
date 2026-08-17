@@ -13,9 +13,16 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/sys/pathlib).
 
 CLI (`--help` is the contract surface):
   py install_hook.py --settings <path> --hook-command <cmd>
-       [--matcher Bash|Write|Edit] [--remove]
+       [--matcher Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep] [--remove]
 
-stdout (R5.3b): {"settings":"...","action":"added|present|removed","matcher":"..."}
+Matcher evolution (idempotent): on reinstall over an existing entry, a matcher that is a
+SUBSET of the current default (by `|`-split set comparison, e.g. the legacy
+`Bash|Write|Edit`) is updated in place to the full default (the guard's read-side /
+tool-face branches are consulted only when the matcher carries them); a user-customized
+non-subset matcher is left untouched (stderr note). An explicit `--matcher` value skips
+the evolution (it already pins the intent).
+
+stdout (R5.3b): {"settings":"...","action":"added|present|evolved|removed","matcher":"..."}
 stderr = diagnostics. Exit codes (R5.3b): 0 ok · 1 IO error · 2 misuse.
 """
 from __future__ import annotations
@@ -26,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-_DEFAULT_MATCHER = "Bash|Write|Edit"
+_DEFAULT_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep"
 # idempotency anchor: a PreToolUse entry is "ours" if any of its hook commands references
 # this substring (stable across reinstalls even if the matcher text is edited).
 _OUR_MARKER = "block_adhoc_scripts"
@@ -52,6 +59,19 @@ def _find_ours(preuse: list) -> int:
             if isinstance(h, dict) and _OUR_MARKER in (h.get("command") or ""):
                 return i
     return -1
+
+
+def _matcher_is_legacy_subset(matcher) -> bool:
+    """True iff `matcher` is a strict subset of the current default (by `|`-split set
+    comparison) — i.e. an EARLIER shipped default (e.g. the legacy `Bash|Write|Edit`),
+    not a user customization. Reinstall evolves such entries in place so already-installed
+    projects converge on the full guard tool surface (the guard's read-side / tool-face
+    branches are consulted only when the matcher carries them)."""
+    if not isinstance(matcher, str) or not matcher.strip():
+        return False
+    have = {t.strip() for t in matcher.split("|") if t.strip()}
+    want = {t.strip() for t in _DEFAULT_MATCHER.split("|") if t.strip()}
+    return bool(have) and have < want
 
 
 def main():
@@ -95,7 +115,21 @@ def main():
                 "hooks": [{"type": "command", "command": args.hook_command}],
             })
             action = "added"
-        # if present: leave the user's possibly-customized entry untouched (idempotent)
+        elif args.matcher != _DEFAULT_MATCHER:
+            # explicit --matcher pins the intent; never second-guess it (idempotent).
+            pass
+        elif _matcher_is_legacy_subset(preuse[idx].get("matcher")):
+            # reinstall over an earlier shipped default -> evolve in place (fresh matcher
+            # only; the user's hook commands / other fields stay untouched).
+            legacy = preuse[idx].get("matcher", "")
+            preuse[idx]["matcher"] = _DEFAULT_MATCHER
+            action = "evolved"
+            print(f"[install_hook] evolved legacy matcher {legacy!r} -> {_DEFAULT_MATCHER!r}",
+                  file=sys.stderr)
+        else:
+            # present with a user-customized (non-subset) matcher or already-current:
+            # leave the entry untouched (idempotent).
+            pass
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",

@@ -19,6 +19,16 @@ NOT see other groups (by design).
   JSON to.
 - `done_marker` (absolute, VERBATIM) — the exact `.done` path you MUST touch after.
 
+## 路径锚定纪律 + 毒输入拒识
+工作锚 = 输入文件顶层的**绝对 `repo` 根**(无该字段时 = 编排器透传的 repo 根)。工具
+路径 SHALL 是 producer 物化路径 verbatim 或相对锚构造;**NEVER** 凭记忆手拼盘符绝对
+路径(下划线目录名会被概率性重生成分隔符对)、**NEVER** `..` 链、**NEVER** 改写 producer
+路径前缀。收到输入先核对:任一路径字段(`input_path`/`checkpoint_path`/`done_marker`/
+`sample[].file`)解析后**不在锚树内**(典型:漂到盘符根)→ 视为**毒输入**:回
+`failed <suspected path drift: <字段名>>` ack,不 Read / 不 Write / 不 touch 任何东西
+(编排器写 `.failed`,对错树执行比失败更糟)。绝对路径本身合法——判据是「解析后在锚树
+内」,非「带盘符」。
+
 ## Task
 Extract this layer's **test conventions** — what the team actually does — from the sample,
 across six dimensions: 框架 framework / mock / 断言 assertion / 夹具 fixture / 命名 naming /

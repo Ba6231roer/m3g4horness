@@ -361,6 +361,21 @@ class TestListScoutBatchesMaterialize(unittest.TestCase):
         self.assertIn("targets", inp)            # full targets[] sunk into input file
         self.assertEqual(item["bytes"], _BATCHES[0]["bytes"])
 
+    def test_input_carries_top_level_repo_anchor(self):
+        # fan-out input anchor: each materialized input.json carries the ABSOLUTE repo
+        # root as a top-level field (same source as stdout repo) — the reader subagent
+        # anchors its tool paths on it WITHOUT re-deriving (harden-mgh-init-scout-path-binding).
+        p = self._write(_BATCHES)
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["repo"], str(self.d))       # stdout repo unchanged
+        for item in data["pending"]:
+            inp = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(inp.get("repo"), str(self.d),
+                             f"{item['batch_id']} input.json missing the top-level repo anchor")
+            self.assertTrue(Path(inp["repo"]).is_absolute())
+
     def test_oversize_batch_flagged_not_sharded(self):
         # scout batches are the plan unit: oversize -> flag, never shard
         batches = [{"batch_id": "scout-big", "targets": [{"file": "x"}],

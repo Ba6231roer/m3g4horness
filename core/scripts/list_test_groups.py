@@ -161,6 +161,7 @@ def _materialize_extract(inputs_dir: Path, group: dict, sample: list, repo: Path
     unit_id = group.get("id") or group.get("layer") or "unknown"
     base = {
         "group_id": unit_id,
+        "repo": str(repo),
         "layer": group.get("layer"),
         "family": group.get("family"),
         "uniformity": group.get("uniformity"),
@@ -192,7 +193,7 @@ def _run_extract(args) -> int:
     if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
         print("error: test_groups.json must be a wrapper {repo,groups[]}", file=sys.stderr)
         return 1
-    repo = Path(data.get("repo") or Path(args.groups).parent.parent)
+    repo = Path(data.get("repo") or Path(args.groups).parent.parent).resolve()
     checkpoints_dir = (Path(args.checkpoints).resolve() if args.checkpoints
                        else (Path(args.groups).parent / "checkpoints" / "extract").resolve())
     inputs_dir = Path(args.materialize).resolve() if args.materialize else None
@@ -313,7 +314,8 @@ def _run_rules(args) -> int:
             "done_marker": dm, "failed_marker": fm,
         }
         if inputs_dir:
-            ipath, nbytes = _write_category_input(inputs_dir, cat, by_cat.get(cat, []))
+            ipath, nbytes = _write_category_input(inputs_dir, cat, by_cat.get(cat, []),
+                                                  repo=str(Path(args.target).resolve()))
             item["input_path"] = ipath
             item["bytes"] = nbytes
             oversize = nbytes > args.max_unit_bytes
@@ -340,9 +342,11 @@ def _run_rules(args) -> int:
     return 0
 
 
-def _write_category_input(inputs_dir: Path, category: str, records: list):
+def _write_category_input(inputs_dir: Path, category: str, records: list, repo: str = ""):
+    """Rules-tier materialized input; `repo` (absolute target root) rides top-level as the
+    fan-out input anchor (same contract as the extract tier + init's producers)."""
     inputs_dir.mkdir(parents=True, exist_ok=True)
-    inp = {"category": category, "rules": records}
+    inp = {"category": category, "repo": repo, "rules": records}
     path = (inputs_dir / f"{_safe_name(category)}.input.json").resolve()
     path.write_text(json.dumps(inp, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path), path.stat().st_size

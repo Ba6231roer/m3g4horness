@@ -106,10 +106,15 @@ def _abs_file(raw, repo_path):
 def _absolutize_paths(obj, repo_path):
     """Walk a materialized input record (cluster header + candidate hits) and make every
     file path ABSOLUTE (resolved against the repo root), preserving the original value as
-    `repo_relative`. Operates on a shallow copy; returns the copy."""
+    `repo_relative`. ALSO sinks the absolute `repo` root into the record as a TOP-LEVEL
+    field (fan-out input anchor: the reader subagent anchors its tool paths on it without
+    re-deriving, and rejects input path fields resolving outside the anchored tree as
+    poisoned — shared contract with list_scout_batches / list_test_groups). Operates on a
+    shallow copy; returns the copy."""
     if not isinstance(obj, dict) or repo_path is None:
         return obj
     out = dict(obj)
+    out["repo"] = str(repo_path)
     for key in ("evidence_files", "usage_sites"):
         if isinstance(out.get(key), list):
             out[key] = [_abs_file(p, repo_path) for p in out[key]]
@@ -463,8 +468,11 @@ def main():
         emitted = False
         if materialize:
             hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
-            repo_path = Path(wrapper["repo"]) if isinstance(wrapper.get("repo"), str) \
-                and wrapper["repo"] else None
+            try:
+                repo_path = Path(wrapper["repo"]).resolve() \
+                    if isinstance(wrapper.get("repo"), str) and wrapper["repo"] else None
+            except (OSError, ValueError):
+                repo_path = None
             for uid, ipath, nbytes in _resolve_units(cid, cluster, hits,
                                                      args.max_unit_bytes, inputs_dir,
                                                      repo_path):

@@ -391,6 +391,28 @@ class TestNormalizationParity(unittest.TestCase):
                            target=r"D:\parent\sonA")
         self.assertEqual(code, 2)
 
+    # --- leaf-script source read block decides identically on the opencode side (f2) ---
+    def test_read_leaf_script_source_blocked(self):
+        # normalized opencode read event -> guard blocks the mgh-core/scripts leaf source
+        # Read with the leaf recipe (same decision the claude side renders).
+        code, err = self._oc("read", {
+            "filePath": r"D:\proj\.opencode\mgh-core\scripts\list_clusters.py"})
+        self.assertEqual(code, 2)
+        self.assertIn("leaf script source", err)
+        self.assertIn("stderr", err)
+
+    def test_read_leaf_script_path_arg_blocked(self):
+        # `path` arg-name fallback also reaches the leaf-source decision (D9 parity).
+        code, _ = self._oc("read", {
+            "path": r"D:\proj\.claude\mgh-core\scripts\resume_state.py"})
+        self.assertEqual(code, 2)
+
+    def test_read_target_own_py_passes_leaf_rule(self):
+        # the target project's own .py (no mgh-core/scripts segment) passes on opencode too.
+        code, _ = self._oc("read", {"filePath": r"D:\proj\src\auth\PermGuard.py"},
+                           target=r"D:\proj")
+        self.assertEqual(code, 0)
+
     def test_grep_include_arg_normalized(self):
         # grep source field: schema `include` falls back to `glob` — normalize maps include.
         self.assertEqual(
@@ -420,7 +442,7 @@ class TestGuardByteParity(unittest.TestCase):
                           "_is_file_assoc_script_exec", "_CMD_BODY_EXT_RX", "_LAUNCHER_PREFIXES",
                           "_read_out_of_tree", "_out_of_tree_file_search", "_FILE_SEARCH_VERBS",
                           "_FILE_SEARCH_VERB_RX", "_ABS_PATH_TOKEN_RX", "_read_recipe",
-                          "is_relative_to",
+                          "is_relative_to", "_is_leaf_script_read",
                           "_WRITE_VERBS", "_DELETE_VERBS", "_MUTATION_VERB_RX",
                           "_out_of_tree_mutation", "_REDIRECT_RX", "_PYC_WRITE_TOKENS",
                           "_write_recipe", "_COPY_MOVE_DEST_VERBS",
@@ -442,6 +464,7 @@ class TestGuardByteParity(unittest.TestCase):
                            "_LAUNCHER_PREFIXES", "_CALL_OP_RX",
                            "_read_out_of_tree", "_out_of_tree_file_search", "_FILE_SEARCH_VERBS",
                            "_FILE_SEARCH_VERB_RX", "_ABS_PATH_TOKEN_RX", "_read_recipe",
+                           "_is_leaf_script_read", "leaf script source",
                            "_WRITE_VERBS", "_DELETE_VERBS", "_MUTATION_VERB_RX",
                            "_out_of_tree_mutation", "_REDIRECT_RX", "_PYC_WRITE_TOKENS",
                            "_write_recipe", "ApplyPatch"):

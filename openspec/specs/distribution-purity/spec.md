@@ -8,7 +8,7 @@ TBD - created by archiving change purify-distributed-md. Update Purpose after ar
 Shipped md artifacts MUST be free of dev-only provenance and dangling references.
 
 经 `install.sh` 装入目标项目的所有 md 工具产物(命令壳、agent 定义、subagent stage
-提示词、I/O 契约、skills)MUST NOT 携带任何只在本仓研发语境才有意义的引用。在业务项目
+提示词、I/O 契约、skills、**面向人类的命令 man 说明**)MUST NOT 携带任何只在本仓研发语境才有意义的引用。在业务项目
 环境这些是**悬空指针**——浪费 token,且目标项目常有自带 `AGENTS.md` / 无关编号,会误导
 subagent。被禁类别 SHALL 覆盖(经 6-agent 全量审计确认的完整清单):
 
@@ -24,8 +24,8 @@ subagent。被禁类别 SHALL 覆盖(经 6-agent 全量审计确认的完整清�
    (与下面「受保护类」的 `Source:` 头 / Apache 归因 / 操作性 schema 匹配区分——后者保留)。
 
 本约束的「shipped md」文件集 SHALL 与 `install.sh` 实际拷贝的 source globs 同源(命令壳 /
-agents / skills / `core/prompts/**` / `core/contracts/**`),二者不得漂移。脚本 `.py`、
-`AGENTS.md` 本身、`openspec/**` SHALL NOT 在本约束范围内。
+agents / skills / `core/prompts/**` / `core/contracts/**` / **`docs/man/**`**),二者不得漂移。脚本
+`.py`、`AGENTS.md` 本身、`openspec/**` SHALL NOT 在本约束范围内。
 
 #### Scenario: Decision-ID parenthetical is a violation
 
@@ -56,6 +56,11 @@ agents / skills / `core/prompts/**` / `core/contracts/**`),二者不得漂移。
 
 - **WHEN** `core/scripts/*.py` 或 hook `.py` 注释含 `# hardens R5.2`
 - **THEN** 该溯源注释可保留(脚本只被执行,注释面向本仓维护者),不在约束范围
+
+#### Scenario: Man page is shipped and scanned
+
+- **WHEN** `docs/man/<cmd>.md` 经 `install.sh` 分发到目标项目
+- **THEN** 它属于 shipped md 文件集,SHALL 被 `check_distributed_purity.py` 扫描;人话措辞自然规避悬空引用,但仍受本 lint 兜底
 
 ### Requirement: Dangling references resolved by delete-or-graft, never losing operational content
 

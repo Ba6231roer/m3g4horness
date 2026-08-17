@@ -1,0 +1,10 @@
+# plain-language preamble allowlist — change-names exempted from the
+# `> **人话序**` existence check (check_plain_language.py).
+# Rationale: these changes were proposed BEFORE the plain-language doctrine
+# existed (add-plain-language-doctrine); their authors are not required to
+# backfill preambles. New changes MUST NOT be added here — write the preamble.
+add-mgh-telemetry-seam
+add-mgh-ut
+add-skill-dev-experience-doc
+extract-ut-shared-helpers
+harden-mgh-init-deterministic-enforcement

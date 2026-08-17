@@ -5,7 +5,9 @@
 跨五命令(`/mgh-init`|`/mgh-sast`|`/mgh-sra`|`/mgh-srr`|`/mgh-ut-init`)共享的运行时纪律守卫契约——激活模型
 (env 或磁盘哨兵)、运行域脚本只读、脚本扩展名集、写入受信子树限定。取代此前分散在各命令 spec、
 措辞漂移的重复 hook 要求,作为 `block_adhoc_scripts` 守卫(双端 byte-identical)的单一真相源。本能力由
-change `harden-mgh-opencode-hook-enforcement` 建立、`add-mgh-ut-init` 扩到第 5 域 `mgh-ut-init`。
+change `harden-mgh-opencode-hook-enforcement` 建立、`add-mgh-ut-init` 扩到第 5 域 `mgh-ut-init`、
+`harden-mgh-init-deterministic-enforcement` 把 init 域哨兵写入改为 `write_runconfig` 确定性副作用
+(+ `resume_state --check` 存在性校验 + re-arm)并增读侧叶源码拦截。
 ## Requirements
 ### Requirement: Run-domain activation via env or disk sentinel
 
@@ -19,8 +21,15 @@ stopping at the filesystem root or after a bounded depth of 16 levels, whichever
 `<dir>/<run-root>/.active` at each level. `<run-root>` is the domain's run directory:
 `mgh-init`→`.mgh-init/`, `mgh-sast`→`security-scan/`, `mgh-sra`→`.mgh-sra/`, `mgh-srr`→`.mgh-srr/`,
 `mgh-ut-init`→`.mgh-ut-init/`. The sentinel SHALL be JSON
-`{"domain":"mgh-<d>","target":"<abs target>","out_roots":["<abs>..."],"v":1}`, written by the
-orchestrator at step 0 via `Bash` and removed at run completion / clean-stop. `MGH_TARGET` for the
+`{"domain":"mgh-<d>","target":"<abs target>","out_roots":["<abs>..."],"v":1}` — for `/mgh-init`
+written by a **deterministic script side-effect** (`write_runconfig.py` co-writes it atomically with
+`run_config.json`, reusing the Windows-native `target_abs` and deriving `out_roots[]` from non-default
+`--out`/`--rules-dir`), NOT by an orchestrator `Bash printf`; `resume_state.py --check` SHALL validate
+its existence whenever `run_config.json` exists and the pipeline is not `done` (missing sentinel
+mid-run = guard dormant = exit 2 + re-arm recipe; `done` without it is not a violation), and
+`--rearm-sentinel` SHALL rewrite it deterministically from the persisted `run_config.target`.
+Other domains write it from the orchestrator at step 0 via `Bash`; every domain removes it at run
+completion / clean-stop. `MGH_TARGET` for the
 subtree check SHALL resolve with precedence **env `MGH_TARGET` > sentinel.`target` > degrade** —
 when neither pins a target the subtree (out-of-tree) check SHALL pass; the script-extension write
 block and `py -c` introspection block still fire whenever the guard is active. Outside all
@@ -78,7 +87,19 @@ compensate.
 
 #### Scenario: Orchestrator writes sentinel at step 0 and removes on completion
 - **WHEN** 审阅 `mgh-*.md` 编排流起步与完成态
-- **THEN** step 0 含写 `<target>/.mgh-<domain>/.active` 的 Bash 步;run 完成 / 干净停止含移除该哨兵的步
+- **THEN** step 0 经确定性脚本(`write_runconfig` 副作用,init/ut-init)写 `<target>/.mgh-<domain>/.active`(非编排器 `printf`);run 完成 / 干净停止含移除该哨兵的步
+
+#### Scenario: write_runconfig writes the sentinel as a deterministic side-effect
+- **WHEN** 编排器 step 0 执行 `py …/write_runconfig.py --target <abs target> [--out <custom>] [--rules-dir <custom>]`
+- **THEN** 除原子写 `<init-dir>/run_config.json` 外,脚本**确定性**写 `<init-dir>/.active` 哨兵(`domain` 按 run-root、`target`= 其 stdout 的 `target`(Windows 原生绝对)、`out_roots[]` = 非默认 `--out`/`--rules-dir` 解析后绝对根(默认产物根不列)、`v:1`);哨兵不依赖编排器读懂并执行 `printf` 配方——脚本一跑哨兵必在
+
+#### Scenario: resume_state --check fails when the sentinel is missing mid-run
+- **WHEN** `run_config.json` 存在、`resume_state.py` 判定 step ≠ `done`(流水线进行中),但 `<init-dir>/.active` 哨兵缺失
+- **THEN** `resume_state.py --check` 退出码 2 + recipe(守卫休眠 → 先 re-arm 哨兵,NEVER 静默继续);`done` 步(已收尾)则哨兵缺失非违例
+
+#### Scenario: resume re-arms the sentinel deterministically from run_config.target
+- **WHEN** 编排器 `--resume`(哨兵已在上一 run 完成时移除/或残留待覆盖),`resume_state.py --rearm-sentinel` 提供确定性 re-arm(据磁盘 `run_config.target` 重写 `<init-dir>/.active`)
+- **THEN** 哨兵经确定性脚本重写(非编排器 `printf`),守卫在 fan-out 前即可靠激活
 
 #### Scenario: mgh-ut-init activates via env or sentinel as the fifth domain
 - **WHEN** `MGH_UT_INIT_ACTIVE=1` env 已设,**或**锚起向上 walk 链上某级 `<dir>/.mgh-ut-init/.active` 哨兵存在
@@ -363,6 +384,47 @@ reader anchoring requirement).
 #### Scenario: Inactive session passes all reads
 - **WHEN** neither any `MGH_*_ACTIVE` env nor any sentinel is present on the whole walked chain and
   the model issues any `Read`/`Glob`/`Grep`
+- **THEN** the guard exits 0 silently (zero day-to-day noise; install/CI/dev unaffected)
+
+### Requirement: Leaf script source read blocked (read-side peer of scripts read-only)
+
+When active in an mgh run-domain, the guard SHALL block a `Read` whose resolved `file_path` is a
+script-extension file (extension in `{.py, .ps1, .sh, .bash, .zsh, .bat, .cmd, .ts, .js, .mjs, .cjs}`)
+located under the installed `<mgh-core>/scripts/` mirror of the target project (both
+`.claude/mgh-core/scripts/` and `.opencode/mgh-core/scripts/` install layouts) — fail-loud (exit 2)
++ a recipe pointing at "report errors from stderr, NEVER Read leaf script source". This is the
+read-side peer of the existing "leaf scripts read-only" write rule: leaf scripts are already
+write-blocked at runtime; this closes the remaining context-bloat path where the orchestrator or a
+subagent pulls a leaf `.py` (200–900 lines ≈ 3–10K tokens) into its context to "debug" a `--check`
+failure, which accelerates compaction and risks the agent reasoning about internals. The block
+SHALL NOT apply to the target project's own `.py` source (only the installed mgh-core leaf scripts,
+identified by the `mgh-core/scripts` path segment); it SHALL NOT apply to `Read` of non-script
+artifacts (`.json`/`.md`). When the guard is inactive (no env, no sentinel), the read SHALL pass
+(install/CI/dev unaffected).
+
+#### Scenario: Reading a leaf .py during a run is blocked
+- **WHEN** an `mgh-init` run-domain is active (env `MGH_INIT_ACTIVE=1` OR `<cwd>/.mgh-init/.active`
+  sentinel present), and the model issues `Read`
+  `file_path=D:\parent\sonA\.claude\mgh-core\scripts\list_clusters.py`
+- **THEN** the guard resolves the path under `mgh-core/scripts/` with a script extension and blocks
+  with exit 2 + a recipe ("report errors from stderr, NEVER Read leaf script source") — the leaf
+  source does not enter context
+
+#### Scenario: Reading the target project's own .py passes
+- **WHEN** an `mgh-init` run-domain is active with `MGH_TARGET=D:\parent\sonA`, and a reader issues
+  `Read` `file_path=D:\parent\sonA\src\auth\PermGuard.java` or `D:\parent\sonA\src\auth\PermGuard.py`
+- **THEN** the guard passes (exit 0) — the block targets only installed mgh-core leaf scripts, not
+  the working project's source
+
+#### Scenario: Reading a script-extension file outside mgh-core passes
+- **WHEN** an `mgh-init` run-domain is active, and the model issues `Read` of a `.py` that is NOT
+  under a `mgh-core/scripts` path segment (e.g. a vendored `D:\parent\sonA\tools\helper.py`)
+- **THEN** the guard passes (exit 0) — the path-segment condition is the discriminator, not the
+  extension alone
+
+#### Scenario: Inactive session passes leaf-script reads
+- **WHEN** neither any `MGH_*_ACTIVE` env nor any `<run-root>/.active` sentinel is present and the
+  model issues `Read` of `mgh-core/scripts/list_clusters.py`
 - **THEN** the guard exits 0 silently (zero day-to-day noise; install/CI/dev unaffected)
 
 ### Requirement: opencode shim normalizes read-side tools to the guard

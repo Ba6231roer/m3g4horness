@@ -15,7 +15,7 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] [--check]
-       [--invalidate-stale [--dry-run]]
+       [--invalidate-stale [--dry-run]] [--rearm-sentinel]
 
   --target   target project root (default: .).
   --init-dir explicit run dir (full path; highest priority).
@@ -60,6 +60,19 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   dry-run: {"invalidate_stale":{"dry_run":true,"markers":["<abs>",...]}}
   real:    {"invalidate_stale":{"dry_run":false,"removed":["<abs>",...]}}
 
+--rearm-sentinel stdout (R5.3b; idempotent):
+  {"rearm_sentinel":{"sentinel":"<abs .active>","domain":"mgh-init","target":"<abs>",
+                     "out_roots":["<abs>",...]}}
+
+Sentinel existence check (--check, and advisory in the resolve path): a run in progress
+(run_config.json present, step != done) with <init-dir>/.active MISSING means the runtime
+guard is dormant for the whole run on hosts that do not inherit mid-session env (opencode)
+— scripts read-only / subtree confinement silently disabled. --check fails loud (exit 2)
+with a re-arm recipe; a done step without the sentinel is NOT a violation (the run has been
+torn down; the guard SHOULD be dormant). `--rearm-sentinel` deterministically rewrites the
+sentinel from the persisted run_config (target + rules_dir/out-derived out_roots) — the
+`/mgh-init --resume` first step MAY invoke it after compaction or a clean stop removed it.
+
 step ∈ not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done. The blocking
 sequence is discover→scout→t1→t2→t3→assemble→t4→done; survey/resolve are optional/non-fatal
 (surfaced in notes[], never gate progress). Each fan-out tier (scout/t1/t3) is "complete
@@ -72,12 +85,15 @@ templated <target>). `run_config.json` missing/unparseable → exit 2 + stderr r
 /mgh-init --<flags>); NEVER silently guess the step graph.
 
 Exit codes (R5.3b): 0 ok · 1 init-dir missing/not a dir · 2 misuse / run_config missing /
---check self-consistency violation (incl. a unit carrying BOTH .done and .failed).
-Read-only (except the explicit --invalidate-stale action), idempotent, no TTY.
+--check self-consistency violation (incl. a unit carrying BOTH .done and .failed; incl. an
+in-progress run whose sentinel .active is missing — guard dormant).
+Read-only (except the explicit --invalidate-stale / --rearm-sentinel actions), idempotent,
+no TTY.
 """
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -103,6 +119,51 @@ def _load_json(path: Path):
         return None, f"unreadable: {e}"
     except ValueError as e:
         return None, f"malformed JSON: {e}"
+
+
+def _atomic_write_json(path: Path, obj):
+    """Write `<path>.tmp` then `os.replace` (atomic; mirrors write_runconfig)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _derive_out_roots(cfg, init_dir: Path) -> list:
+    """Sentinel out_roots[] re-derivation from the persisted run_config (mirror of
+    write_runconfig._derive_out_roots): non-default `rules_dir` only — the run_config.json
+    path itself IS inside <init-dir> (the run root is already sanctioned), so only a custom
+    rules_dir extends the guard allowlist here. Default roots are built into the guard."""
+    roots = []
+    rd = cfg.get("rules_dir")
+    if isinstance(rd, str) and rd.strip():
+        target = cfg.get("target") or str(init_dir.parent.resolve())
+        defaults = {
+            ".mgh-init": str((Path(target) / "docs" / "security-controls").resolve()),
+            ".mgh-ut-init": str((Path(target) / "docs" / "test-conventions").resolve()),
+        }
+        try:
+            r = str(Path(rd).resolve())
+            if r != defaults.get(".mgh-init"):
+                roots.append(r)
+        except (OSError, ValueError):
+            pass
+    return roots
+
+
+def rearm_sentinel(init_dir: Path, cfg) -> Path:
+    """Deterministically rewrite <init-dir>/.active from the persisted run_config (design
+    D2): domain from the run root name, target = run_config.target (the authoritative
+    persisted root), out_roots re-derived. Atomic + idempotent. Returns the sentinel path."""
+    run_root = init_dir.name
+    domain = "mgh-ut-init" if run_root == ".mgh-ut-init" else "mgh-init"
+    target = cfg.get("target") or str(init_dir.parent.resolve())
+    sentinel_path = init_dir / ".active"
+    _atomic_write_json(sentinel_path, {
+        "domain": domain, "target": target,
+        "out_roots": _derive_out_roots(cfg, init_dir), "v": 1,
+    })
+    return sentinel_path
 
 
 def _run_config(init_dir: Path):
@@ -508,6 +569,18 @@ def check(init_dir: Path) -> dict:
     if clusters_p.is_file() != candidates.is_file():
         violations.append({"issue": "discover products inconsistent: controls_candidates.json and "
                                     "clusters.json must both exist or both be absent"})
+    # sentinel existence: a run in progress with the guard-activation sentinel missing means
+    # the runtime guard is dormant (scripts read-only / subtree confinement silently
+    # disabled on hosts that do not inherit mid-session env). Fail loud with a re-arm recipe
+    # — NEVER silently continue. A done run without the sentinel is NOT a violation.
+    state, _ = resolve(init_dir)
+    if state is not None and state.get("step") != "done":
+        if not (init_dir / ".active").is_file():
+            violations.append({"issue": "run in progress but <init-dir>/.active sentinel "
+                                        "missing — the runtime guard is DORMANT (script writes "
+                                        "read-only / subtree confinement disabled on opencode); "
+                                        "re-arm: `resume_state.py --rearm-sentinel` (or re-run "
+                                        "write_runconfig.py), NEVER silently continue"})
     # --- scout consistency + stale-credential checks (scout enabled only) ---
     if not no_scout:
         sp, sp_err = _load_json(init_dir / "scout_plan.json")
@@ -556,6 +629,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="with --invalidate-stale: list the markers that would be removed, "
                          "delete nothing")
+    ap.add_argument("--rearm-sentinel", action="store_true",
+                    help="deterministically rewrite <init-dir>/.active from run_config "
+                         "(target + rules_dir-derived out_roots); the /mgh-init --resume "
+                         "first step after compaction / clean-stop")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk on
     # Chinese Windows) so stdout JSON parses everywhere. Before parse_args so --help is
     # utf-8 too. No-op on StringIO (in-process tests).
@@ -604,6 +681,20 @@ def main():
               file=sys.stderr)
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["ok"] else 2
+
+    if args.rearm_sentinel:
+        cfg, recipe = _run_config(init_dir)
+        if cfg is None:
+            print(f"error: {recipe}", file=sys.stderr)
+            return 2
+        sp = rearm_sentinel(init_dir, cfg)
+        print(f"[resume_state --rearm-sentinel] rewrote {sp}", file=sys.stderr)
+        print(json.dumps({"rearm_sentinel": {
+            "sentinel": str(sp), "domain": "mgh-ut-init" if init_dir.name == ".mgh-ut-init"
+                                            else "mgh-init",
+            "target": cfg.get("target") or str(init_dir.parent.resolve()),
+            "out_roots": _derive_out_roots(cfg, init_dir)}}, ensure_ascii=False))
+        return 0
 
     state, recipe = resolve(init_dir)
     if state is None:

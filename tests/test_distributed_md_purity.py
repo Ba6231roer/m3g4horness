@@ -114,6 +114,37 @@ class TestDistributedPurity(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["violations"], [])
 
+    # --- add-plain-language-doctrine: man pages are shipped human-facing md →
+    #     docs/man/ joins SCAN_DIRS and all 5 man pages MUST pass purity; the
+    #     10 command shells each gain a `docs/man/<cmd>.md` human-reader pointer
+    #     (also purity-scanned here to prove the pointer line itself is clean).
+    def test_man_pages_scanned_and_clean(self):
+        root = HERE.parent
+        man_dir = root / "docs" / "man"
+        files = [man_dir / f"{c}.md" for c in
+                 ("mgh-sast", "mgh-init", "mgh-sra", "mgh-srr", "mgh-ut-init")]
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
+    def test_shell_man_pointers_present_and_clean(self):
+        root = HERE.parent
+        shells = ([root / "releases" / "claude-code" / "commands" / f"{c}.md" for c in
+                   ("mgh-sast", "mgh-init", "mgh-sra", "mgh-srr", "mgh-ut-init")]
+                  + [root / "releases" / "opencode" / "command" / f"{c}.md" for c in
+                     ("mgh-sast", "mgh-init", "mgh-sra", "mgh-srr", "mgh-ut-init")])
+        for s in shells:
+            self.assertTrue(s.is_file(), f"{s} missing")
+            body = s.read_text(encoding="utf-8")
+            cmd = s.stem
+            self.assertIn(f"docs/man/{cmd}.md", body,
+                          f"{s} missing human-reader pointer to docs/man/{cmd}.md")
+        r = run_lint("--files", *[str(s) for s in shells])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
     # --- codegraph as an operational external-tool reference is NOT a dev-meta violation
     def test_codegraph_reference_not_flagged(self):
         body = ("When codegraph=on, call codegraph_explore or `codegraph explore` (Bash);\n"

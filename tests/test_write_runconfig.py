@@ -146,6 +146,66 @@ class TestWriteRunconfig(unittest.TestCase):
         self.assertEqual(Path(a1["run_config"]), (t1 / ".mgh-init" / "run_config.json").resolve())
         self.assertEqual(Path(a2["run_config"]), (t2 / ".mgh-init" / "run_config.json").resolve())
 
+    # ---- sentinel co-write (deterministic side-effect) ----
+
+    def test_sentinel_cowritten_with_fields(self):
+        # run_config write ALSO writes <init-dir>/.active with domain/target/out_roots/v.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_sent1_")).resolve()
+        code, out, _ = _run("--target", str(target), "--format", "opencode")
+        self.assertEqual(code, 0)
+        sp = target / ".mgh-init" / ".active"
+        self.assertTrue(sp.is_file(), "sentinel .active must co-exist after write_runconfig")
+        sent = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(sent["domain"], "mgh-init")
+        self.assertEqual(sent["target"], str(target))          # Windows-native abs target
+        self.assertEqual(sent["out_roots"], [])                # default roots NOT listed
+        self.assertEqual(sent["v"], 1)
+        self.assertEqual(json.loads(out)["sentinel"], str(sp.resolve()))
+
+    def test_sentinel_default_roots_not_listed(self):
+        # default product roots are built into the guard allowlist — out_roots stays empty
+        # unless --out/--rules-dir deviate from the defaults.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_sent2_")).resolve()
+        _run("--target", str(target), "--format", "claude",
+             "--rules-dir", str(target / "docs" / "security-controls"))  # = claude default? no:
+        # docs/security-controls IS the opencode default rules dir; passing it explicitly is
+        # byte-equal to the default → still not listed.
+        sent = json.loads((target / ".mgh-init" / ".active").read_text(encoding="utf-8"))
+        self.assertEqual(sent["out_roots"], [])
+
+    def test_sentinel_custom_out_and_rules_dir_listed(self):
+        # non-default --out (custom run_config path → its parent dir) and --rules-dir are
+        # listed as abs roots so the guard's allowlist extends to them.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_sent3_")).resolve()
+        custom_out = target / "custom-run" / "run_config.json"
+        custom_rules = target / "custom-rules"
+        code, out, _ = _run("--target", str(target), "--format", "opencode",
+                            "--out", str(custom_out), "--rules-dir", str(custom_rules))
+        self.assertEqual(code, 0)
+        sent = json.loads((target / ".mgh-init" / ".active").read_text(encoding="utf-8"))
+        self.assertEqual(sent["out_roots"],
+                         [str(custom_out.resolve().parent), str(custom_rules.resolve())])
+        self.assertTrue(all(Path(r).is_absolute() for r in sent["out_roots"]))
+
+    def test_sentinel_idempotent_rewrite(self):
+        # second invocation overwrites cleanly (no .tmp residue, no duplicate roots, same v).
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_sent4_")).resolve()
+        _run("--target", str(target), "--format", "opencode")
+        _run("--target", str(target), "--format", "opencode")
+        init = target / ".mgh-init"
+        sent = json.loads((init / ".active").read_text(encoding="utf-8"))
+        self.assertEqual(sent["v"], 1)
+        self.assertFalse(any(p.name.endswith(".tmp") for p in init.iterdir()),
+                         [p.name for p in init.iterdir()])
+
+    def test_sentinel_domain_follows_run_root(self):
+        # --run-root .mgh-ut-init → domain "mgh-ut-init" + sentinel inside .mgh-ut-init.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_sent5_")).resolve()
+        _run("--target", str(target), "--format", "opencode", "--run-root", ".mgh-ut-init")
+        sp = target / ".mgh-ut-init" / ".active"
+        self.assertTrue(sp.is_file())
+        self.assertEqual(json.loads(sp.read_text(encoding="utf-8"))["domain"], "mgh-ut-init")
+
 
 if __name__ == "__main__":
     unittest.main()

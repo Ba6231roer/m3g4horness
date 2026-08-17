@@ -144,7 +144,20 @@ else
   echo "• --no-enforce-hook: block-adhoc-scripts enforcement not injected; discipline via shell bright-lines + R5.9"
 fi
 
-# 6) Land the PIPL/GB-T 35273 sensitive-catalog .example template (D11). The committed
+# 6) Land the human-readable man pages (docs/man/ → <target>/docs/man/).
+#    Plain-language per-command explanations for human readers; the command
+#    shells point here with a one-line pointer. Idempotent mkdir+cp, same
+#    layer as the security-controls/ detail files mgh-init writes later.
+MAN_SRC="$HERE/docs/man"
+if [[ -d "$MAN_SRC" ]]; then
+  mkdir -p "$TARGET/docs/man"
+  cp -r "$MAN_SRC/." "$TARGET/docs/man/"
+  echo "✓ landed docs/man/ (human-readable man pages for /mgh-* commands)"
+else
+  echo "⚠ docs/man/ not landed (source missing: $MAN_SRC; non-blocking)" >&2
+fi
+
+# 7) Land the PIPL/GB-T 35273 sensitive-catalog .example template (D11). The committed
 #    core/scripts/sensitive_catalog.json.example is the canonical 37-item template (kept in
 #    sync with sensitive_catalog.py::DEFAULT_TEMPLATE by tests/test_sensitive_catalog.py
 #    anti-drift). NOT auto-applied — the company MUST `cp` it to sensitive_catalog.json or

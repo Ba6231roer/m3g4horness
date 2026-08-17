@@ -1,7 +1,10 @@
 # Contract: runtime hook enforcement (`block_adhoc_scripts`)
 
-Producer: orchestrator shell step 0 (Bash `printf` writes the sentinel; `write_runconfig.py`
-may co-write it for `/mgh-init` as an optimization). Consumer: the shared guard
+Producer: for `/mgh-init` (and `/mgh-ut-init`, which shares the writer), the sentinel is a
+**deterministic side-effect of `write_runconfig.py`** (co-written atomically with
+`run_config.json`; `resume_state.py --check` validates its existence mid-run and
+`--rearm-sentinel` rewrites it from the persisted `run_config.target` on resume); other
+domains write it from the orchestrator shell step 0 (Bash). Consumer: the shared guard
 `releases/{claude-code/hooks,opencode/hooks}/block_adhoc_scripts.py` (byte-identical twin;
 the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 `openspec/specs/runtime-hook-enforcement/spec.md`.
@@ -51,12 +54,25 @@ process cwd (opencode).
 
 ### Lifecycle
 
-- **step 0 (orchestrator, Bash)**: after `export MGH_<DOM>_ACTIVE=1`, write the sentinel.
-  `target` filled from the first Python leaf-script stdout that yields the abs project root
-  (init: `write_runconfig`/`describe_artifact`; sra: `prepare_augment`; srr: `ingest_requirements`;
-  ut-init: `write_ut_runconfig`; sast: activation-only — `target` empty, out-of-tree uses
-  `MGH_TARGET` env on claude / degrades on opencode, sast output already narrowed to
-  `security-scan/`).
+- **step 0 (deterministic for init/ut-init)**: after `export MGH_<DOM>_ACTIVE=1`,
+  `write_runconfig.py` co-writes the sentinel as a side-effect of its atomic
+  `run_config.json` write — `target` = the already-computed Windows-native `target_abs`,
+  `out_roots[]` derived from non-default `--out`/`--rules-dir` (default product roots are
+  built into the guard allowlist and never listed). The orchestrator NEVER needs a
+  `printf` recipe; the script running IS the sentinel existing. Other domains (sra/srr/
+  sast) write it from the orchestrator step 0: `target` from the first Python leaf-script
+  stdout that yields the abs project root (sra: `prepare_augment`; srr: `ingest_requirements`;
+  sast: activation-only — `target` empty, out-of-tree uses `MGH_TARGET` env on claude /
+  degrades on opencode, sast output already narrowed to `security-scan/`).
+- **existence check (`resume_state.py --check`, init/ut-init)**: a run in progress
+  (`run_config.json` present ∧ step ≠ `done`) with the sentinel missing = the guard is
+  DORMANT → fail-loud (exit 2) with a re-arm recipe; a `done` run without the sentinel is
+  NOT a violation (the guard should be dormant then).
+- **resume re-arm (`resume_state.py --rearm-sentinel`, init/ut-init)**: deterministically
+  rewrites the sentinel from the persisted `run_config.target` (+ `rules_dir`-derived
+  out_roots) — the `--resume` / post-compaction first step; atomic + idempotent. Single
+  source convention: fresh run → `write_runconfig` side-effect; resume → `resume_state`
+  re-arm; both derive from `run_config`, never from an orchestrator `printf`.
 - **completion / clean-stop (orchestrator, Bash)**: `rm <sentinel>` so a stale sentinel does
   not arm the guard during subsequent day-to-day dev. Residual (crash without cleanup) only
   blocks script writes, never JSON/`.md`/reads; user may `rm` manually.
@@ -150,6 +166,7 @@ temp-I/O / file-assoc blocks still fire).
 | Layer | Tool / shape | Anchor | Blocked when |
 |---|---|---|---|
 | Tool abstraction | `Read` | `file_path` | resolved `file_path` outside the target tree |
+| Tool abstraction | `Read` (leaf-source rule) | `file_path` | script extension ∧ `mgh-core/scripts` path segment (installed leaf script source — the read-side peer of "leaf scripts read-only"; target-project `.py` and non-script artifacts pass; fires even in the degrade-no-target case) |
 | Tool abstraction | `Glob` / `Grep` | `path` (default = cwd) | resolved `path` outside; `path` absent + cwd outside (cwd-drift leak) |
 | Tool abstraction | — | `pattern` / `glob` | **NOT parsed** (the `path` anchor is authoritative; conservative vs false positives) |
 | Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside, OR no abs path + cwd outside |

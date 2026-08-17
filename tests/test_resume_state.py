@@ -401,6 +401,68 @@ class TestScoutConsistency(unittest.TestCase):
         self.assertEqual(code, 0)                     # complete → NOT stale
         self.assertTrue(json.loads(out)["ok"])
 
+    # --- sentinel existence check + deterministic re-arm (guard-dormancy defense) ---
+
+    def test_check_sentinel_missing_in_progress_exit2(self):
+        # run_config present, step != done, .active removed (manual delete / legacy run)
+        # → guard DORMANT → --check fails loud with a re-arm recipe.
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        (s.init / ".active").unlink()                  # _State co-wrote it; simulate loss
+        self.assertFalse((s.init / ".active").exists())
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("sentinel" in v["issue"] and "re-arm" in v["issue"]
+                            for v in violations), [v["issue"] for v in violations])
+
+    def test_check_sentinel_missing_done_step_exit0(self):
+        # done run without the sentinel is NOT a violation (guard SHOULD be dormant).
+        s = _State(no_scout=True, skip_consistency=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        s.write_json("controls_inventory.json", {"repo": str(s.target), "format": "opencode",
+                                                  "controls": []})
+        s.touch("checkpoints/t2/synthesis.json.done")
+        s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
+        (s.init / ".active").unlink()
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out)["ok"])
+
+    def test_rearm_sentinel_writes_from_run_config(self):
+        # --rearm-sentinel rewrites .active deterministically: target == run_config.target,
+        # domain by run root, idempotent.
+        s = _State(no_scout=True)
+        (s.init / ".active").unlink()                  # simulate clean-stop removal
+        code, out, _ = s.main("--rearm-sentinel")
+        self.assertEqual(code, 0)
+        sp = s.init / ".active"
+        self.assertTrue(sp.is_file())
+        sent = json.loads(sp.read_text(encoding="utf-8"))
+        rc = json.loads((s.init / "run_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(sent["target"], rc["target"])
+        self.assertEqual(sent["domain"], "mgh-init")
+        self.assertEqual(sent["v"], 1)
+        data = json.loads(out)["rearm_sentinel"]
+        self.assertEqual(data["sentinel"], str(sp.resolve()))
+        self.assertEqual(data["target"], rc["target"])
+        # after re-arm, --check passes again (dormancy closed)
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+
+    def test_state_helper_sentinel_cowritten(self):
+        # the _State fixture itself proves write_runconfig co-writes the sentinel: every
+        # in-progress run built through the real writer carries .active from step 0.
+        s = _State(no_scout=True)
+        self.assertTrue((s.init / ".active").is_file())
+        sent = json.loads((s.init / ".active").read_text(encoding="utf-8"))
+        self.assertEqual(sent["domain"], "mgh-init")
+        self.assertEqual(sent["target"], str(s.target))
+
     def test_invalidate_stale_dry_run_lists_not_deletes(self):
         s = self._scout_enabled()
         t2 = s.touch("checkpoints/t2/synthesis.json.done")

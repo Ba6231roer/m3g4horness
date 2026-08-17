@@ -975,6 +975,89 @@ class TestReadSideConfinement(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class TestLeafScriptReadBlock(unittest.TestCase):
+    """Leaf-script source read block (f2) — the read-side peer of "leaf scripts read-only".
+    A `Read` of a script-extension file under an installed `mgh-core/scripts/` path segment
+    fails loud (exit 2 + stderr recipe); the target project's own `.py`, a non-mgh-core
+    `.py`, non-script artifacts, and inactive sessions all pass. The path segment is the
+    discriminator, NOT the extension alone (design D3)."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _read(self, payload, active="1"):
+        return _run_hook(self.m, payload, domain="init", active=active)
+
+    def test_read_claude_layout_leaf_py_blocked(self):
+        # .claude/mgh-core/scripts/*.py — the canonical claude install layout.
+        code, err = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": r"D:\parent\sonA\.claude\mgh-core\scripts\list_clusters.py"}})
+        self.assertEqual(code, 2)
+        self.assertIn("leaf script source", err)
+        self.assertIn("stderr", err)                     # recipe: report errors from stderr
+
+    def test_read_opencode_layout_leaf_py_blocked(self):
+        # .opencode/mgh-core/scripts/*.py — the opencode install layout (host-neutral match).
+        code, err = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": r"D:\parent\sonA\.opencode\mgh-core\scripts\discover_controls.py"}})
+        self.assertEqual(code, 2)
+        self.assertIn("leaf script source", err)
+
+    def test_read_leaf_ps1_blocked(self):
+        # any script extension under mgh-core/scripts (not just .py).
+        code, _ = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": r"D:\parent\sonA\.claude\mgh-core\scripts\helper.ps1"}})
+        self.assertEqual(code, 2)
+
+    def test_read_target_own_py_passes(self):
+        # the target project's own source (.py AND .java) — extension alone is NOT the
+        # discriminator; without the mgh-core/scripts segment it passes.
+        for fp in (r"D:\parent\sonA\src\auth\PermGuard.py",
+                   r"D:\parent\sonA\src\auth\PermGuard.java"):
+            code, _ = self._read({"tool_name": "Read", "tool_input": {"file_path": fp}})
+            self.assertEqual(code, 0, fp)
+
+    def test_read_non_mgh_core_py_passes(self):
+        # a vendored .py outside the mgh-core/scripts segment (e.g. target's tools/).
+        code, _ = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": r"D:\parent\sonA\tools\helper.py"}})
+        self.assertEqual(code, 0)
+
+    def test_read_mgh_core_non_script_artifact_passes(self):
+        # .json/.md under mgh-core (prompts/contracts) are NOT script sources — pass.
+        for fp in (r"D:\parent\sonA\.claude\mgh-core\prompts\fragments\t1.md",
+                   r"D:\parent\sonA\.opencode\mgh-core\contracts\hooks\runtime-enforcement.md",
+                   r"D:\parent\sonA\.mgh-init\checkpoints\scout\batch-001.json"):
+            code, _ = self._read({"tool_name": "Read", "tool_input": {"file_path": fp}})
+            self.assertEqual(code, 0, fp)
+
+    def test_inactive_session_passes_leaf_read(self):
+        # no env, no sentinel -> guard dormant -> leaf Read passes (install/CI/dev).
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {
+                "file_path": r"D:\parent\sonA\.claude\mgh-core\scripts\list_clusters.py"}},
+            "init", None)
+        self.assertEqual(code, 0)
+
+    def test_sentinel_activated_leaf_read_blocked(self):
+        # sentinel activation (opencode mid-session shape) also enforces the leaf read block.
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {
+                "file_path": r"D:\parent\sonA\.opencode\mgh-core\scripts\list_clusters.py"}},
+            "init", {"domain": "mgh-init", "target": r"D:\parent\sonA", "out_roots": [],
+                     "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("leaf script source", err)
+
+    def test_glob_grep_not_affected_by_leaf_rule(self):
+        # the leaf rule fires on Read only; Glob/Grep carry no file_path (pattern tools) and
+        # stay governed by the out-of-tree anchor check (here: no path + temp cwd IS the
+        # cwd-drift shape for Grep, and Glob in-tree passes — both unchanged semantics).
+        code, _ = self._read({"tool_name": "Glob", "tool_input": {
+            "pattern": "mgh-core/scripts/*.py", "path": r"D:\parent\sonA"}})
+        self.assertEqual(code, 0)                        # Glob anchor in-tree → pass
+
+
 class TestSentinelUpwardWalk(unittest.TestCase):
     """Best-anchor + bounded upward sentinel discovery (harden-mgh-init-scout-path-binding,
     activation layer D1). The anchor = the hook payload `cwd` field when present (claude

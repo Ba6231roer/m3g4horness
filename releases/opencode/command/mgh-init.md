@@ -4,6 +4,8 @@ description: Discover existing reusable security controls in a project (input-va
 
 # /mgh-init — discover existing security controls → agent rules
 
+> 人类读者:通俗说明见 `docs/man/mgh-init.md`。
+
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `discover_controls.py` / `chunk_sources.py` / `plan_scout.py` / `merge_scout.py` / `assemble_rules.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。opencode 下 T3 每 category 直写**详述文件**(`docs/security-controls/<cat>.md`,独立 H1 文档),`assemble_rules.py` 扫该目录建 `AGENTS.md` 简洁**惰性索引块**(按需加载,见步骤 6b)。
 
 > **运行域 + hook**:`install.sh` 向目标项目 `.opencode/plugins/` 注入 `tool.execute.before` 插件(`block-adhoc-scripts`),

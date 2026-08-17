@@ -21,8 +21,10 @@ labels are NOT flagged):
 
 Scan set mirrors install.sh source globs (design D1): releases/<platform>/
 {commands,agents,skills} (claude) / {command,agent} (opencode) + core/prompts/**
-+ core/contracts/**. Exempt by construction: *.py, AGENTS.md, openspec/**,
-tools/, tests/, docs/, README, task.*, core/docs/ (R1 attribution records).
++ core/contracts/** + docs/man/** (human-readable man pages, shipped since
+add-plain-language-doctrine). Exempt by construction: *.py, AGENTS.md,
+openspec/**, tools/, tests/, docs/ (dev-only remainder), README, task.*,
+core/docs/ (R1 attribution records).
 
 Upstream jargon (vvah / vvaharness / design_controls as谱系归因) is NOT a hard
 boundary — same shape as protected `Source:` headers / Apache attribution /
@@ -49,8 +51,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
-# Scan roots mirror install.sh source set (design D1). *.md only; .py / docs /
-# openspec / AGENTS.md are out of scope by not being listed here.
+# Scan roots mirror install.sh source set (design D1). *.md only; .py /
+# openspec / AGENTS.md are out of scope by not being listed here. docs/ is
+# dev-only EXCEPT docs/man/ — the human-readable man pages ship via
+# install.sh (add-plain-language-doctrine), so they ARE the shipped set.
 SCAN_DIRS = [
     ROOT / "releases" / "claude-code" / "commands",
     ROOT / "releases" / "claude-code" / "agents",
@@ -59,6 +63,7 @@ SCAN_DIRS = [
     ROOT / "releases" / "opencode" / "agent",
     ROOT / "core" / "prompts",
     ROOT / "core" / "contracts",
+    ROOT / "docs" / "man",
 ]
 
 # (name, compiled, example) — the 8 high-precision prohibited patterns.

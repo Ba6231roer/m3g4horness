@@ -14,6 +14,15 @@ Atomic (`.tmp` + `os.replace`): a SIGKILL mid-write leaves at most a stale `.tmp
 truncated/half-written JSON (承 discover_controls._atomic_write_json). Gitignored with the
 rest of `.mgh-init/`.
 
+Sentinel co-write (deterministic side-effect): alongside run_config.json the script ALSO
+atomically writes `<init-dir>/.active` — the disk sentinel that activates the
+block_adhoc_scripts runtime guard on hosts whose plugin process does not inherit
+mid-session env (opencode): `{"domain":"mgh-init"|"mgh-ut-init" (by --run-root),
+"target":<abs target>,"out_roots":[non-default --out/--rules-dir abs roots],"v":1}`.
+Idempotent — the script running IS the sentinel existing; the orchestrator NEVER needs a
+Bash printf recipe. `/mgh-init --resume` re-arms it via resume_state.py (plain invocation
+rewrites it from run_config.target).
+
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
@@ -30,7 +39,8 @@ CLI contract (`--help` is the contract surface, R5.1):
 
 stdout (structured JSON; stderr = diagnostics only, R5.3b):
   {"run_config": "<abs run_config.json>", "target": "<abs target>", "format": "...",
-   "mode": "normal|merge", "no_scout": false, "no_codegraph": false, "skip_consistency": false}
+   "mode": "normal|merge", "no_scout": false, "no_codegraph": false, "skip_consistency": false,
+   "sentinel": "<abs .active>"}
 Exit codes (R5.3b): 0 written · 2 misuse (argparse / bad budget / missing --target).
 Idempotent (create-if-not-exists + overwrite), no TTY.
 """
@@ -73,6 +83,39 @@ def _atomic_write_json(path: Path, obj):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _derive_out_roots(args, target_abs: str) -> list:
+    """Non-default product roots for the sentinel's out_roots[]: `--out` and `--rules-dir`
+    (each resolved ABSOLUTE against cwd) when they differ from the defaults. Default product
+    roots (<target>/.mgh-init | .mgh-ut-init, .claude/rules, docs/security-controls |
+    docs/test-conventions, <target>/AGENTS.md) are BUILT INTO the guard's allowlist and are
+    NEVER listed (design D1: out_roots[] only EXTENDS, it does not mirror). `--out` here is
+    the run_config.json path (not a rules dir) — its parent dir is the custom run root."""
+    roots = []
+    if args.out:
+        try:
+            roots.append(str(Path(args.out).resolve().parent))
+        except (OSError, ValueError):
+            pass
+    if args.rules_dir:
+        defaults = {
+            ".mgh-init": str((Path(target_abs) / "docs" / "security-controls").resolve()),
+            ".mgh-ut-init": str((Path(target_abs) / "docs" / "test-conventions").resolve()),
+        }
+        try:
+            rd = str(Path(args.rules_dir).resolve())
+            if rd != defaults.get(args.run_root):
+                roots.append(rd)
+        except (OSError, ValueError):
+            pass
+    # de-dup, order-stable (an --out inside --rules-dir would otherwise list the parent twice)
+    seen, out = set(), []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
 
 
 def main():
@@ -174,6 +217,17 @@ def main():
         },
     }
     _atomic_write_json(rc_path, run_config)
+    # Sentinel co-write (deterministic side-effect): the disk activation signal for the
+    # runtime guard. domain derives from --run-root (init vs ut-init share this writer);
+    # target reuses the already-computed Windows-native target_abs. Idempotent overwrite.
+    sentinel_path = init_dir / ".active"
+    sentinel = {
+        "domain": "mgh-ut-init" if args.run_root == ".mgh-ut-init" else "mgh-init",
+        "target": target_abs,
+        "out_roots": _derive_out_roots(args, target_abs),
+        "v": 1,
+    }
+    _atomic_write_json(sentinel_path, sentinel)
     ack = {
         "run_config": str(rc_path),
         "target": target_abs,
@@ -182,9 +236,11 @@ def main():
         "no_scout": run_config["no_scout"],
         "no_codegraph": run_config["no_codegraph"],
         "skip_consistency": run_config["skip_consistency"],
+        "sentinel": str(sentinel_path),
     }
     print(f"[write_runconfig] wrote {rc_path} (mode={run_config['mode']}, "
-          f"format={args.format}, no_scout={run_config['no_scout']})", file=sys.stderr)
+          f"format={args.format}, no_scout={run_config['no_scout']}) + sentinel "
+          f"{sentinel_path}", file=sys.stderr)
     print(json.dumps(ack, ensure_ascii=False))
     return 0
 

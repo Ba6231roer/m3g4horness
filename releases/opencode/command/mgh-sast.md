@@ -4,6 +4,8 @@ description: 9-stage agentic SAST (survey → threat-model → decompose → dee
 
 # /mgh-sast — agentic SAST pipeline (opencode)
 
+> 人类读者:通俗说明见 `docs/man/mgh-sast.md`。
+
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(bash / spawn agent / read / write / edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `prefilter.py` / `dedup.py` / `emit_sarif.py` / `list_chunks.py` / `list_verify_jobs.py` / `describe_artifact.py` 里,直接 `bash` 调用即可,无需 `read` 其源码,也不要另写 `.py` 去包装或重实现。
 
 > **运行域 + hook**:`install.sh` 向本仓 `.opencode/plugins/` 注入 `tool.execute.before`

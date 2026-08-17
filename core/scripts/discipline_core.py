@@ -62,7 +62,6 @@ _DISCIPLINE = {
         ],
         "nevers": [
             "NEVER 用 py -c 内省 discover 产物",
-            "NEVER Read discover_controls.py 源码(报错看 stderr)",
         ],
     },
     # step 3 — init-survey (optional subagent; advisory + non-fatal).

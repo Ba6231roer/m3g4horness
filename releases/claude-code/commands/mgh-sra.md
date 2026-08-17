@@ -5,6 +5,8 @@ allowed-tools: Read, Glob, Grep, Bash, Agent, Write, Edit
 
 # /mgh-sra — openspec 安全设计补充(security requirements augmentation)
 
+> 人类读者:通俗说明见 `docs/man/mgh-sra.md`。
+
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit /
 > AskUserQuestion)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `prepare_augment.py` /
 > `merge_augment.py` / `merge_memory.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写

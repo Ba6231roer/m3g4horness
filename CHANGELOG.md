@@ -16,6 +16,27 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — plain-language doctrine (audience declaration + human-facing assets)
+
+- R3 now declares an **audience** for every artifact (human / agent / dual): human-facing
+  files (man pages, glossary, proposal preambles) follow plain-language norms
+  (phenomenon→cause→fix, terms defined on first use); agent-facing discipline (RFC-2119,
+  NEVER chains, flag tables) stays byte-stable and is explicitly NOT softened. Proposals
+  open with a `> **人话序**` blockquote (~200–300 chars: phenomenon → root cause → what
+  changes → how to verify); `tools/check_plain_language.py` (stdlib) enforces the
+  deterministic subset — missing preamble fails loud (exit 2), known coined-jargon and
+  english-atom density WARN (exit 0), scoped to human-facing files only
+  (`tools/plain_language_allowlist.txt` exempts 5 pre-doctrine changes).
+- New human-facing assets: `docs/glossary.md` (seeded ~45 terms; "define before use" for
+  human-facing prose) and `docs/man/<cmd>.md` ×5 (plain-language pages: what it does /
+  what it touches / what it produces / honest boundaries). install.sh now lands
+  `docs/man/` into target projects; the 10 command shells (5 × claude/opencode) each
+  carry a one-line human-reader pointer.
+- `check_distributed_purity.py::SCAN_DIRS` gains `docs/man/` — shipped md set stays
+  identical to install.sh globs (166 files scanned clean). Regression:
+  `tests/test_plain_language.py` (13 tests) + two new purity assertions (man pages clean;
+  pointers present + clean).
+
 ### Changed — `/mgh-sast` pins s4 big-file slice outputs in-tree + absolute tool-script paths
 - The s4 deep-dive big-file slice output (`chunk_sources.py --out`) — the sast-side fan-out
   gap left open by `harden-mgh-init-slice-and-tool-pinning` (its Non-Goals deferred sast to

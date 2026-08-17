@@ -13,9 +13,9 @@
 
 ## Orchestrator discipline
 
-编排器 = 宿主 agent,**不写代码**。确定性叶脚本经 `Bash` 执行;**NEVER `Read` 叶子 `.py` 源码进上下文**(报错看 stderr,不读源码)。
+编排器 = 宿主 agent,**不写代码**。确定性叶脚本经 `Bash` 执行;叶子 `.py` 源码不进上下文(hook 已确定性拦截 `mgh-core/scripts` 下叶源码 `Read`;报错看 stderr)。
 
-**硬边界(`NEVER`)**:(a) `Write` 任何脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`、`<run>_helper.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读该命令运行目录 `**`);(c) `Read` 叶子 `.py` 源码。
+**硬边界(`NEVER`)**:(a) `Write` 任何脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`、`<run>_helper.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读该命令运行目录 `**`)。(叶源码 `Read` 已由 hook 确定性拦截,不再是提示词要求;报错看 stderr。)
 
 **`NEVER` 向系统临时目录写中间文件再回读**:编排器 MUST NOT 把确定性脚本 stdout 重定向到磁盘文件再回读——尤其 `$env:TEMP` / `%TEMP%` / `/tmp` / `TMPDIR`。Bash tool result 已含 stdout,**直接从工具返回值取 JSON(最后一行)、在你的推理里解析 `pending[]`**;**NEVER** 用文件中介。同一条 Bash 调用内「写 temp + 回读」的配对模式视为违纪。
 

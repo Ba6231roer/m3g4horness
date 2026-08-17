@@ -67,16 +67,35 @@ flowchart LR
   内网零联网分发)。未经确认不得新增 `requirements.txt` 或 import 第三方包。
 - 现有「零运行时依赖」是产品特性(install 时有自检),**不得因为图方便而引入运行时依赖**。
 
-### R3 — 文档输出规范:简练、面向 AI、索引化
+### R3 — 文档输出规范:简练、索引化、受众声明制
 
 **所有文档输出任务**遵守:
 
-- **简练准确,面向 AI 阅读**。结论先行;不写废话与寒暄。
+- **简练准确,按受众声明写作**。agent 面产物面向 AI 阅读:结论先行;不写废话与寒暄。人类面
+  产物面向人:现象→原因→改法叙事,术语首现给一句解释,允许同义复述(冗余是读者的锚点)。
+- **受众声明制**:每份产物声明受众 ∈ {人类 / agent / 双受众},按下表归类;R5.5 措辞纪律
+  (RFC-2119 动词、`NEVER` 链、recipe)只辖 agent 操作面,SHALL NOT 蔓延到人类面。`proposal.md`
+  是唯一双受众文件(人话序对维护者讲 why,对 apply agent 亦提供背景)。
+- **人类面用词前词典必有**:`docs/glossary.md` 缺条目则先补词典再使用;词典自由增补,不设准入审批。
 - **不保留长代码块**(最多 3–5 行内联片段)。让 AI 通过 **文件名 / 类名 / 方法名 / `文件:行号`**
   自行索引到具体实现,不要把实现贴进文档。
 - 表格优先(映射、状态、清单用表格)。
 - **仅对真正复杂的长逻辑用 mermaid 画图**(状态流转、多阶段流水线、调用关系等);简单逻辑
   不画。
+
+**受众分类表**(防人话化蔓延 / 防 agent 面被软化):
+
+| 受众 | 文件 |
+| --- | --- |
+| 人类 | `docs/man/**`、`docs/glossary.md`、proposal 人话序、终端报告(`report.md`/详述文件) |
+| agent | 命令壳纪律段、stage 提示词、`core/contracts/**`、JSON schema、`NEVER` 链、flag 表 |
+| 双受众 | `proposal.md`(人话序 + 结构化 why/what/capabilities/impact) |
+
+**proposal 人话序约定**:每份 `proposal.md` SHALL 以 `> **人话序**` 起始的 blockquote 开场
+(~200–300 字,四要素:现象→根因→改什么→怎么验证),先写人话再展开规格。**人工闸门**:维护者
+只读人话序 + `tasks.md` SHALL 能复述本 change 在解决什么、改什么、如何验证;做不到 = 未就绪。
+机器可检子集(人话序存在性 / 术语黑名单 / 英文原子密度)由 `tools/check_plain_language.py`
+代理(存在性 fail-loud 退出码 2;黑名单与密度 WARN 退出码 0,仅扫人类面文件)。
 
 ### R4 — 改名/解耦后的路径规约
 
@@ -192,7 +211,7 @@ flowchart LR
   (双端:claude PreToolUse + opencode `.ts` 插件;同一守卫不改;`/mgh-init`+`/mgh-sast`+`/mgh-sra`+`/mgh-srr` #1 违例=微脚本内省
   + 越权 `*.py`/`.ps1`/`.ts`/… + 越树写 / init 树内根污染 / **越树读**(`Read`/`Glob`/`Grep` + Bash 直接 `rg`/`grep`/`find`/… 越出 `MGH_TARGET` 子树;读侧是写侧越树判定的同形扩展,target 缺失降级、`pattern` 不解析;扇出 `targets[].file` 物化绝对路径,承 `harden-mgh-read-confinement`)+ **写/删/重定向侧越树拦截**(Bash 写动词 `New-Item`/`Set-Content`/`tee`/`mkdir`/`Copy-Item`/`Move-Item`/… + 破坏性删 `Remove-Item`/`del`/`rm`/`rmdir` + `>`/`>>` 重定向 + `py -c` 写形态(`write(`/`makedirs`/`shutil.copy`/`shutil.rmtree`/…) 的越树目标 → fail-loud;init/ut-init 树内写亦须落受信子树 P1;工具面 claude `MultiEdit`/`NotebookEdit` + opencode `apply_patch`(patchText 标记提取为 glue)入写侧越树判定;删侧 recipe 标不可逆;承 `harden-mgh-write-confinement`,读侧三层不动);五运行域 `MGH_{INIT,SAST,SRA,SRR,UT_INIT}_ACTIVE`)。**激活 = env 或磁盘哨兵(最优锚点起有界向上发现)**
   ——守卫激活当且仅当 `MGH_*_ACTIVE=1` env **或** 锚到盘根链上任一级 `<dir>/<run-root>/.active` 哨兵存在;锚 = hook payload `cwd`(claude)?? 守卫进程 cwd(opencode),向上 walk ≤16 级/盘根,每级查哨兵;哨兵 JSON
-  `{domain,target,out_roots[],v}` 由编排器 step 0 经 `Bash` 写、run 完成/干净停止移除(契约 `core/contracts/hooks/runtime-enforcement.md`)。
+  `{domain,target,out_roots[],v}` init/ut-init 域由 `write_runconfig.py` **确定性副作用** co-write(非编排器 `printf`;脚本一跑哨兵必在)+ `resume_state.py --check` 存在性校验(进行中缺哨兵 = 守卫休眠 = 退出码 2 + re-arm recipe)+ `--rearm-sentinel` 确定性重写(据 `run_config.target`);其它域由编排器 step 0 经 `Bash` 写;run 完成/干净停止移除(契约 `core/contracts/hooks/runtime-enforcement.md`)。**读侧叶源码拦截**:`Read` 已安装 `mgh-core/scripts/` 下叶脚本源码(脚本扩展名 ∧ `mgh-core/scripts` 路径段双条件)→ 退出码 2 + recipe(报错看 stderr,NEVER Read 叶子源码)——「叶脚本只读」的读侧对偶,治「拉叶源码进上下文 debug」的 token 膨胀;目标项目自身 `.py` 与非脚本产物不误伤(承 `harden-mgh-init-deterministic-enforcement`)。
   **可靠性边界(opencode)由哨兵关闭**:opencode 插件进程**不继承** mid-session bash 导出的 env(`shell.ts::shellEnv` 只读
   `process.env` 不回写)——env-only 激活在 opencode 上整 run 休眠;**磁盘哨兵绕开该边界**,经磁盘对 opencode 插件进程可见,
   使脚本只读 / 受信子树守卫双端可靠激活。哨兵携 `target`(取自 Python leaf stdout,Windows 原生;**NEVER** bash `pwd` 的 MSYS

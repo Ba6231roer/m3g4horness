@@ -4,6 +4,8 @@ description: Discover the test conventions a project actually uses (framework / 
 
 # /mgh-ut-init — discover existing test conventions → agent rules
 
+> 人类读者:通俗说明见 `docs/man/mgh-ut-init.md`。
+
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / Agent / Read / Write / Edit)把流水线**跑出来**,而非写成代码——确定性逻辑已在 `classify_tests.py` / `list_test_groups.py` / `assemble_test_rules.py` / `validate_test_rules.py` / `derive_mutators.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,也不要另写 `.py` 去包装或重实现。opencode 下 rules tier 每 category 直写**详述文件**(`docs/test-conventions/<cat>.md`,独立 H1 文档),`assemble_test_rules.py` 扫该目录建 `AGENTS.md` 简洁**惰性索引块**(按需加载,见步骤 5)。
 
 > **运行域 + hook**:`install.sh` 向本仓 `.opencode/plugins/` 注入 `tool.execute.before`

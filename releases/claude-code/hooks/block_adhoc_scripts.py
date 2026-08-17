@@ -66,6 +66,16 @@ Blocks the real-world failure shapes —
       INTERRUPT the run (soft failure). Now a fail-loud exit 2 + read-side recipe (D4: a
       Glob/Grep with no `path` and a cwd outside the target tree is the cwd-drift leak).
       target absent => degrade to pass (NEVER a hard read block when none was pinned).
+  (f2) Leaf-script source read: a `Read` whose resolved file_path bears a script extension
+      AND lives under an installed `mgh-core/scripts/` path segment (both
+      `.claude/mgh-core/scripts/` and `.opencode/mgh-core/scripts/` layouts) — the read-side
+      peer of "leaf scripts read-only": write-side already blocks MODIFYING leaf scripts;
+      this closes the remaining context-bloat path where the orchestrator pulls a leaf `.py
+      (200-900 lines ≈ 3-10K tokens) into context to "debug" a --check failure, accelerating
+      compaction and inviting reasoning about internals. fail-loud exit 2 + stderr recipe
+      ("report errors from stderr, NEVER Read leaf script source"). The target project's
+      own `.py`/`.java`/… source and non-script artifacts (`.json`/`.md`) are NOT blocked;
+      the `mgh-core/scripts` path segment is the discriminator, NOT the extension alone.
   (g) Bash file-search escape route: a `Bash` command invoking a file-search verb
       (rg/ripgrep/grep/egrep/fgrep/findstr/find/fd/ag/ack as a leading token of the command
       or of a sub-command after `;`/`|`/`&&`/`||`) with an out-of-tree scope (any explicit
@@ -328,6 +338,26 @@ def _read_out_of_tree(tool_input, target, cwd):
         return not Path(anchor).resolve().is_relative_to(target)
     except (OSError, ValueError):
         return False
+
+
+def _is_leaf_script_read(tool_input) -> bool:
+    """True iff this is a `Read` of an installed mgh-core leaf script's SOURCE: the resolved
+    file_path bears a script extension AND its path contains a `mgh-core/scripts` path
+    segment (matches both `.claude/mgh-core/scripts/…` and `.opencode/mgh-core/scripts/…`
+    install layouts — host-neutral, no hardcoded prefix). The target project's own `.py`
+    (e.g. `src/auth/PermGuard.py`, a vendored `tools/helper.py`) does NOT carry the segment
+    and passes; non-script artifacts (`.json`/`.md` prompts) pass on extension alone."""
+    fp = (tool_input.get("file_path") or "").strip()
+    if not fp or not fp.lower().endswith(_SCRIPT_EXTS):
+        return False
+    try:
+        parts = Path(fp).resolve().parts
+    except (OSError, ValueError):
+        return False
+    for i in range(len(parts) - 1):
+        if parts[i] == "mgh-core" and parts[i + 1] == "scripts":
+            return True
+    return False
 
 
 def _out_of_tree_file_search(command, target, cwd):
@@ -845,6 +875,21 @@ def main():
                         f"{_write_recipe(domain, target, 'write')}\n")
                     return 2
     elif tool in ("Read", "Glob", "Grep"):
+        # leaf-script source read block (f2): a Read pulling an installed mgh-core leaf
+        # script's source into context — the read-side peer of "leaf scripts read-only".
+        # Fires on the mgh-core/scripts path segment + script extension, independent of
+        # target resolution (works even in the degrade-no-target case).
+        if _is_leaf_script_read(ti):
+            sys.stderr.write(
+                f"blocked: Read of a leaf script source in {domain} run-domain: "
+                f"{(ti.get('file_path') or '').strip()}\n"
+                f"  Leaf scripts are read-only AND source-opaque at runtime: report errors "
+                f"from the script's stderr, NEVER Read the leaf script source (it bloats "
+                f"your context by 3-10K tokens per script and invites reasoning about "
+                f"internals). Structure questions -> describe_artifact.py --keys/--sample/"
+                f"--shape/--field; work-lists -> the list_* primitives; derived quantities "
+                f"-> the producer's stdout fields.\n")
+            return 2
         # read-side confinement, tool-abstraction layer (D1): a Read/Glob/Grep whose resolved
         # anchor (Read.file_path / Glob.path / Grep.path, defaulting to cwd) falls outside the
         # MGH_TARGET tree. The soft failure that interrupted runs (host permission prompt on a

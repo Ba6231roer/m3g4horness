@@ -76,7 +76,7 @@ codegraph 返回的 blast radius(谁依赖该控制 / 是否落在活请求路�
 - No prose outside the JSON. No pasted code > 3 lines.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 `input_path` 给定文件 + 其证据源/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
+- 读侧:`Read`(仅 `input_path` 给定文件 + 其证据源/slice)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - 脚本侧:仅 `chunk_sources.py`(且仅当切片运行时发现的大证据文件),**显式 `py` launcher + 编排器透传的绝对工具路径 verbatim 调用**——recipe:`py <绝对 chunk_sources.py> --in <big_file> --big-file-bytes <N> --line <L> --out <slice_dir>/<safe-stem>.slice.json`,再回读该确切绝对路径(`<safe-stem>` 取源文件 stem)。硬边界(`NEVER`):**NEVER** 用文件关联形态调用——`NEVER & "<绝对>.py"`、`NEVER` 裸 `"<绝对>.py"` 作命令体(win32 下 opencode 经 PowerShell 执行每条 Bash,会按 `.py` 文件关联解析为编辑器/弹窗 → 死锁;**必须** `py "<绝对>.py"`);裸名 `chunk_sources.py`、相对 `.opencode`/`.claude/mgh-core/scripts/…`(多层 install 下可解析到**别的**旧副本);`--out` 传目录(必须是文件路径 `<slice_dir>/<safe-stem>.slice.json`);相对 `--out`;cwd/Temp 派生路径;树外写。其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。

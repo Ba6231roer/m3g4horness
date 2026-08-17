@@ -35,7 +35,7 @@ per-capability drafts (a3 ran in isolated contexts and could not). You reconcile
 未硬界」(编排器据 `describe_artifact` 合法出口报聚合量)。分层归约留后续 change,本步为 P0「披露 + 回退」软边界。
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 `<drafts_dir>` 下 draft)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(仅 `<drafts_dir>` 下 draft)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。
 - `Write`/`Edit`:仅限 `<drafts_dir>` 下**既有** draft 文件(原地覆写)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;新增/删除 draft 文件;
   碰 `specs/`/`tasks.md`/记忆;**重算 `call_path` 或发起任何 codegraph 调用**(结构证据是 a3 的产出,a4 仅

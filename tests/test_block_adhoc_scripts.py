@@ -776,6 +776,205 @@ class TestBlockAdhocScriptsSrr(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class TestReadSideConfinement(unittest.TestCase):
+    """Read-side out-of-tree confinement (harden-mgh-read-confinement). The read side is the
+    peer of the write out-of-tree check (same MGH_TARGET precedence + is_relative_to
+    semantics), NOT a positive-allowlist check — any file inside the target tree is
+    readable. It turns the soft failure (cross-module read reaching the host permission
+    prompt and interrupting the run, e.g. a parent-repo submodule cwd) into a fail-loud
+    recipe. Covers both surfaces: the tool-abstraction layer (Read/Glob/Grep) and the Bash
+    file-search escape route (rg/grep/findstr/find/…). target absent => degrade to pass."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _read(self, payload, target):
+        """init run-domain with MGH_TARGET set; isolate sibling domain env. Returns (code,err)."""
+        key = _DOMAIN_ENV["init"]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != "init"]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = "1"
+        os.environ["MGH_TARGET"] = target
+        old_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(payload))
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.environ.pop(key, None) if old_active is None else os.environ.__setitem__(key, old_active)
+            os.environ.pop("MGH_TARGET", None) if old_target is None else os.environ.__setitem__("MGH_TARGET", old_target)
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+    def _read_no_target(self, payload, active="1"):
+        """init run-domain, MGH_TARGET unset (degrade-path baseline)."""
+        key = _DOMAIN_ENV["init"]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != "init"]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = active
+        os.environ.pop("MGH_TARGET", None)
+        old_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(payload))
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.environ.pop(key, None) if old_active is None else os.environ.__setitem__(key, old_active)
+            os.environ.pop("MGH_TARGET", None) if old_target is None else os.environ.__setitem__("MGH_TARGET", old_target)
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+    _PARENT = r"D:\parent"        # submodule layout: cwd/target = sonA, sibling = sonB
+    _SONA = r"D:\parent\sonA"
+    _SONB = r"D:\parent\sonB"
+
+    # --- tool-abstraction layer: Read ---
+    def test_read_parent_dir_file_blocked(self):
+        code, err = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": self._SONB + r"\src\Main.java"}}, self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+        self.assertIn("sibling", err)
+
+    def test_read_in_tree_file_passes(self):
+        code, _ = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": self._SONA + r"\src\auth\PermGuard.java"}}, self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_read_sonA_target_blocks_parent(self):
+        # target IS sonA (submodule cwd); reading the parent dir itself is the leak shape.
+        code, _ = self._read({"tool_name": "Read", "tool_input": {
+            "file_path": self._PARENT + r"\README.md"}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    # --- tool-abstraction layer: Glob / Grep ---
+    def test_glob_path_sibling_blocked(self):
+        code, _ = self._read({"tool_name": "Glob", "tool_input": {
+            "pattern": "**/*.java", "path": self._SONB}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_grep_no_path_cwd_outside_blocked(self):
+        # cwd defaults to a temp dir (outside sonA); Grep with no path -> cwd anchor -> block (D4).
+        code, err = self._read({"tool_name": "Grep", "tool_input": {
+            "pattern": "TokenInterceptor"}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_grep_path_repo_root_passes(self):
+        code, _ = self._read({"tool_name": "Grep", "tool_input": {
+            "pattern": "TokenInterceptor", "path": self._SONA}}, self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_glob_in_tree_path_passes(self):
+        code, _ = self._read({"tool_name": "Glob", "tool_input": {
+            "pattern": "**/*.java", "path": self._SONA + r"\src"}}, self._SONA)
+        self.assertEqual(code, 0)
+
+    # --- degrade + inactive ---
+    def test_read_degrades_without_target(self):
+        # active run-domain but MGH_TARGET unset AND no sentinel.target -> read side passes.
+        code, _ = self._read_no_target({"tool_name": "Read", "tool_input": {
+            "file_path": "D:/anywhere/x.java"}})
+        self.assertEqual(code, 0)
+
+    def test_inactive_session_passes_read(self):
+        code, _ = self._read_no_target({"tool_name": "Read", "tool_input": {
+            "file_path": self._SONB + r"\x.java"}}, active="")
+        self.assertEqual(code, 0)
+
+    # --- Bash file-search escape route (D9) ---
+    def test_bash_rg_out_of_tree_blocked(self):
+        code, err = self._read({"tool_name": "Bash", "tool_input": {
+            "command": f'rg "TokenInterceptor" {self._SONB}\\src'}}, self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("file search", err)
+
+    def test_bash_rg_cwd_outside_blocked(self):
+        # no explicit path -> cwd anchor; cwd is a temp dir outside sonA -> block (D4).
+        code, _ = self._read({"tool_name": "Bash", "tool_input": {
+            "command": 'rg "TokenInterceptor"'}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_bash_rg_in_tree_passes(self):
+        code, _ = self._read({"tool_name": "Bash", "tool_input": {
+            "command": f'rg "TokenInterceptor" {self._SONA}\\src'}}, self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_bash_findstr_out_of_tree_blocked(self):
+        code, _ = self._read({"tool_name": "Bash", "tool_input": {
+            "command": f'findstr /S "x" {self._SONB}\\*'}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_bash_find_out_of_tree_blocked(self):
+        code, _ = self._read({"tool_name": "Bash", "tool_input": {
+            "command": f'find {self._SONB} -name "*.java"'}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_bash_grep_out_of_tree_blocked(self):
+        code, _ = self._read({"tool_name": "Bash", "tool_input": {
+            "command": f'grep -r "x" {self._SONB}'}}, self._SONA)
+        self.assertEqual(code, 2)
+
+    # --- operand-vs-arg: a non-search-verb command with a path arg does NOT trip D9 ---
+    def test_bash_non_search_verb_with_path_arg_passes(self):
+        code, _ = self._read({"tool_name": "Bash", "tool_input": {
+            "command": f'py "discover.py" --in "{self._SONA}\\src\\X.java"'}}, self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_bash_file_search_inactive_passes(self):
+        code, _ = self._read_no_target({"tool_name": "Bash", "tool_input": {
+            "command": f'rg "x" {self._SONB}'}}, active="")
+        self.assertEqual(code, 0)
+
+    # --- cross-domain: read side fires in every run-domain (sast shown) ---
+    def test_sast_read_out_of_tree_blocked(self):
+        key = _DOMAIN_ENV["sast"]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != "sast"]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = "1"
+        os.environ["MGH_TARGET"] = self._SONA
+        old_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(
+            {"tool_name": "Read", "tool_input": {"file_path": self._SONB + r"\x.java"}}))
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.environ.pop(key, None) if old_active is None else os.environ.__setitem__(key, old_active)
+            os.environ.pop("MGH_TARGET", None) if old_target is None else os.environ.__setitem__("MGH_TARGET", old_target)
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        self.assertEqual(code, 2)
+        self.assertIn("mgh-sast", err.getvalue())
+
+    # --- opencode reliability boundary: read side activates via disk sentinel ---
+    def test_sentinel_target_drives_read_block(self):
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": self._SONB + r"\x.java"}},
+            "init", {"domain": "mgh-init", "target": self._SONA, "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+
+    def test_sentinel_no_target_read_degrades(self):
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": self._SONB + r"\x.java"}},
+            "init", {"domain": "mgh-init", "target": "", "out_roots": [], "v": 1})
+        self.assertEqual(code, 0)
+
+
 class TestBlockAdhocScriptsFileAssoc(unittest.TestCase):
     """Bash execution of a script-extension file via the shell's file association is blocked
     in every run-domain (defense-in-depth; the primary fix is the stage-prompt `py <abs>`
@@ -877,6 +1076,311 @@ class TestBlockAdhocScriptsFileAssoc(unittest.TestCase):
         code, err = self._bash(r'& "D:\proj\chunk_sources.py" --in x', domain="sast")
         self.assertEqual(code, 2)
         self.assertIn("mgh-sast", err)
+
+
+class TestWriteSideConfinement(unittest.TestCase):
+    """Write/delete/redirect/tool-face confinement (harden-mgh-write-confinement) — the mutation
+    surface's deterministic closure, symmetric to the read side. Three surfaces, one detection
+    mode (verb set / tool id + absolute-path token scan + is_relative_to(target) + cwd anchor):
+      - Bash write/delete verbs (New-Item/Set-Content/mkdir/Copy-Item/Move-Item/tee/Remove-Item/…)
+        invoked directly in Bash to bypass the native Write/Edit tool's confinement (W1/W3);
+      - non-temp out-of-tree `>`/`>>` redirect (W2);
+      - the tool face: claude MultiEdit/NotebookEdit (T2/T3) + opencode apply_patch (T1).
+    Plus P1 (init/ut-init in-tree Bash write must land in a sanctioned subtree — root pollution)
+    and L1 (rule-a relabel: `py -c` write shape with an out-of-tree path => write recipe, NOT
+    introspection). target absent => degrade to pass; inactive session => silent pass."""
+
+    def setUp(self):
+        self.m = _load()
+
+    _PARENT = r"D:\parent"
+    _SONA = r"D:\parent\sonA"
+    _SONB = r"D:\parent\sonB"
+    _OUT = r"D:\out"
+
+    def _bash(self, cmd, domain="init", target=None, cwd=None, active="1"):
+        """Run a Bash payload in a run-domain with MGH_TARGET pinned (+ sibling-domain env
+        isolated). target=None simulates the degrade path; cwd=None => a fresh temp dir outside
+        sonA (for the D4 cwd-drift assertions). Returns (code, stderr)."""
+        key = _DOMAIN_ENV[domain]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != domain]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = active
+        if target is None:
+            os.environ.pop("MGH_TARGET", None)
+        else:
+            os.environ["MGH_TARGET"] = target
+        cwd_tmp = cwd or tempfile.mkdtemp(prefix="mgh_wcwd_")
+        old_cwd, old_stdin = os.getcwd(), sys.stdin
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            os.chdir(cwd_tmp)
+            sys.stdin = io.StringIO(json.dumps(
+                {"tool_name": "Bash", "tool_input": {"command": cmd}}))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.chdir(old_cwd)
+            os.environ.pop(key, None) if old_active is None else os.environ.__setitem__(key, old_active)
+            os.environ.pop("MGH_TARGET", None) if old_target is None else os.environ.__setitem__("MGH_TARGET", old_target)
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+    def _tool(self, payload, domain="init", target=None):
+        key = _DOMAIN_ENV[domain]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != domain]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = "1"
+        os.environ["MGH_TARGET"] = target
+        old_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps(payload))
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.environ.pop(key, None) if old_active is None else os.environ.__setitem__(key, old_active)
+            os.environ.pop("MGH_TARGET", None) if old_target is None else os.environ.__setitem__("MGH_TARGET", old_target)
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+    # --- W1: Bash write verbs out-of-tree -> block ---
+    def test_block_set_content_out_of_tree(self):
+        code, err = self._bash(f'Set-Content {self._OUT}\\f.json "x"', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
+
+    def test_block_new_item_out_of_tree(self):
+        code, _ = self._bash(f'New-Item -ItemType File -Path {self._OUT}\\f.json -Force',
+                             target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_mkdir_out_of_tree(self):
+        code, _ = self._bash(f'mkdir {self._OUT}\\d', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_out_file_out_of_tree(self):
+        code, _ = self._bash(f'"x" | Out-File {self._OUT}\\f.json', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_tee_out_of_tree(self):
+        code, _ = self._bash(f'echo x | tee {self._OUT}\\f.json', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_add_content_out_of_tree(self):
+        code, _ = self._bash(f'Add-Content {self._OUT}\\f.json "x"', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_copy_item_dest_out_of_tree(self):
+        # Copy-Item: source in-tree is fine; the DESTINATION (LAST abs token) is out-of-tree -> block.
+        code, _ = self._bash(f'Copy-Item {self._SONA}\\x.java {self._OUT}\\', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_copy_item_dest_out_of_tree_even_if_source_out(self):
+        code, _ = self._bash(f'Copy-Item {self._SONB}\\x.java {self._OUT}\\y.java',
+                             target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_copy_item_in_tree_dest_passes(self):
+        # destination in a sanctioned subtree (init allowlist) -> passes.
+        code, _ = self._bash(f'Copy-Item {self._SONA}\\x.java {self._SONA}\\.mgh-init\\y.java',
+                             target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_block_set_content_cwd_outside_d4(self):
+        # no explicit path -> destination defaults to cwd; cwd is a temp dir outside sonA (D4).
+        code, err = self._bash('Set-Content evil.txt "x"', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
+
+    def test_in_tree_sanctioned_set_content_passes(self):
+        code, _ = self._bash(f'Set-Content {self._SONA}\\.mgh-init\\report\\out.json "x"',
+                             target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_non_write_verb_with_path_arg_passes(self):
+        # `py … --out x.json` is NOT a write verb (the path is a --flag arg) -> NOT a write-verb hit.
+        code, _ = self._bash(f'py discover.py --out {self._SONA}\\.mgh-init\\x.json',
+                             target=self._SONA)
+        self.assertEqual(code, 0)
+
+    # --- W3: destructive delete verbs out-of-tree -> block (delete-side recipe) ---
+    def test_block_remove_item_sibling(self):
+        code, err = self._bash(f'Remove-Item {self._SONB} -Recurse -Force', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree delete", err)
+        self.assertIn("irreversible", err.lower())  # delete-side recipe calls out irreversibility
+        self.assertIn("sibling", err)
+
+    def test_block_rm_rf_out_of_tree(self):
+        code, err = self._bash(f'rm -rf {self._OUT}', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree delete", err)
+
+    def test_block_rmdir_out_of_tree(self):
+        code, _ = self._bash(f'rmdir {self._OUT}\\d', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_pyc_shutil_rmtree_out_of_tree(self):
+        # interpreter-indirect delete (rule-a relabel): shutil.rmtree + out-of-tree path -> delete.
+        code, err = self._bash('py -c "import shutil; shutil.rmtree(\'D:/out\')"',
+                               target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree delete", err)
+
+    # --- W2: non-temp out-of-tree redirect -> block ---
+    def test_block_redirect_out_of_tree(self):
+        code, err = self._bash(f'echo x > {self._OUT}\\f.json', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree redirect", err)
+
+    def test_block_append_redirect_out_of_tree(self):
+        code, _ = self._bash(f'echo x >> {self._OUT}\\f.json', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    def test_block_redirect_in_tree_root_p1(self):
+        # in-tree but at the target root, outside the sanctioned subtrees -> init allowlist blocks.
+        code, err = self._bash(f'echo x > {self._SONA}\\evil.txt', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)
+
+    def test_redirect_sanctioned_subtree_passes(self):
+        code, _ = self._bash(f'echo x > {self._SONA}\\.mgh-init\\report\\out.json',
+                             target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_redirect_temp_readback_still_blocked(self):
+        # the retained temp-I/O rule (temp write + read-back) fires independent of the redirect rule.
+        code, _ = self._bash(r'py x.py > /tmp/x.json; cat /tmp/x.json', target=self._SONA)
+        self.assertEqual(code, 2)
+
+    # --- P1: in-tree Bash write confined to sanctioned subtrees (init/ut-init) ---
+    def test_block_set_content_in_tree_root_pollution(self):
+        code, err = self._bash(f'Set-Content {self._SONA}\\evil.txt "x"', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)
+
+    def test_set_content_sanctioned_subtree_passes(self):
+        code, _ = self._bash(f'Set-Content {self._SONA}\\.mgh-init\\report\\out.json "x"',
+                             target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_sast_in_tree_bash_write_passes(self):
+        # sast has NO positive allowlist (only the out-of-tree check) -> in-tree write passes.
+        code, _ = self._bash(f'Set-Content {self._SONA}\\src\\notes.txt "x"',
+                             domain="sast", target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_sast_out_of_tree_bash_write_blocked(self):
+        code, _ = self._bash(f'Set-Content {self._OUT}\\f.json "x"',
+                             domain="sast", target=self._SONA)
+        self.assertEqual(code, 2)
+
+    # --- T2/T3: claude MultiEdit / NotebookEdit enter the write-confinement branch ---
+    def test_multiedit_out_of_tree_blocked(self):
+        # init domain: out-of-tree falls outside every sanctioned subtree -> allowlist message.
+        code, err = self._tool({"tool_name": "MultiEdit", "tool_input": {
+            "file_path": self._OUT + r"\f.json"}}, target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)
+
+    def test_multiedit_sast_out_of_tree_blocked(self):
+        # sast domain (no allowlist): out-of-tree -> the MGH_TARGET tree message.
+        code, err = self._tool({"tool_name": "MultiEdit", "tool_input": {
+            "file_path": self._OUT + r"\f.json"}}, domain="sast", target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("MGH_TARGET tree", err)
+
+    def test_notebookedit_out_of_tree_blocked(self):
+        code, err = self._tool({"tool_name": "NotebookEdit", "tool_input": {
+            "notebook_path": self._OUT + r"\nb.ipynb"}}, target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)
+
+    def test_notebookedit_not_script_ext_in_tree_root_blocked_only_by_tree(self):
+        # .ipynb is NOT a script-ext (artifact); in-tree root for init hits the allowlist, NOT the
+        # script-ext block — proves .ipynb is confined by tree location only, not by extension.
+        code, err = self._tool({"tool_name": "NotebookEdit", "tool_input": {
+            "notebook_path": self._SONA + r"\nb.ipynb"}}, target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)            # allowlist hit (not script-ext)
+        self.assertNotIn("Write/Edit of a script", err)           # NOT the script-ext block
+
+    def test_multiedit_in_tree_sanctioned_passes(self):
+        code, _ = self._tool({"tool_name": "MultiEdit", "tool_input": {
+            "file_path": self._SONA + r"\.claude\rules\auth.md"}}, target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_notebookedit_in_tree_sanctioned_passes(self):
+        code, _ = self._tool({"tool_name": "NotebookEdit", "tool_input": {
+            "notebook_path": self._SONA + r"\.mgh-init\nb.ipynb"}}, target=self._SONA)
+        self.assertEqual(code, 0)
+
+    # --- T1: ApplyPatch (opencode) confined path-by-path ---
+    def test_applypatch_out_of_tree_add_blocked(self):
+        code, err = self._tool({"tool_name": "ApplyPatch", "tool_input": {
+            "paths": [self._OUT + r"\evil.ps1"], "operations": ["add"]}}, target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("ApplyPatch", err)
+
+    def test_applypatch_out_of_tree_delete_delete_wording(self):
+        code, err = self._tool({"tool_name": "ApplyPatch", "tool_input": {
+            "paths": [self._SONB + r"\x.java"], "operations": ["delete"]}}, target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("irreversible", err.lower())  # delete operation => delete-side wording
+
+    def test_applypatch_in_tree_sanctioned_passes(self):
+        code, _ = self._tool({"tool_name": "ApplyPatch", "tool_input": {
+            "paths": [self._SONA + r"\.mgh-init\x.json"], "operations": ["add"]}},
+            target=self._SONA)
+        self.assertEqual(code, 0)
+
+    def test_applypatch_any_path_out_of_tree_blocked(self):
+        # ANY path in the patch out-of-tree => block (even if another is in-tree).
+        code, _ = self._tool({"tool_name": "ApplyPatch", "tool_input": {
+            "paths": [self._SONA + r"\.mgh-init\a.json", self._OUT + r"\b.json"],
+            "operations": ["add", "add"]}}, target=self._SONA)
+        self.assertEqual(code, 2)
+
+    # --- L1: rule-a relabel (py -c write shape => write recipe, NOT introspection) ---
+    def test_pyc_write_out_of_tree_write_recipe(self):
+        code, err = self._bash('py -c "open(\'D:/out/f\',\'w\').write(\'x\')"', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
+        self.assertNotIn("introspection", err)    # write recipe, NOT the introspection recipe
+
+    def test_pyc_makedirs_out_of_tree_blocked(self):
+        # pure out-of-tree write (no introspection token at all) -> now caught (was a hole).
+        code, err = self._bash('py -c "import os; os.makedirs(\'D:/out/d\')"', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
+
+    def test_pyc_introspection_still_introspection_recipe(self):
+        # legit introspection (read .json) still surfaces the introspection recipe (unchanged).
+        code, err = self._bash('py -c "import json; json.load(open(\'x.json\'))"', target=self._SONA)
+        self.assertEqual(code, 2)
+        self.assertIn("introspection", err)
+
+    # --- degrade + inactive ---
+    def test_write_degrades_without_target(self):
+        # active run-domain but MGH_TARGET unset -> write side degrades to pass.
+        code, _ = self._bash(f'Set-Content {self._OUT}\\f.json "x"', target=None)
+        self.assertEqual(code, 0)
+
+    def test_inactive_session_passes_write(self):
+        code, _ = self._bash(f'Set-Content {self._OUT}\\f.json "x"',
+                             target=self._SONA, active="")
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

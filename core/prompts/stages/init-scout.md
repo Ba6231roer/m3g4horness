@@ -31,7 +31,8 @@ Your job: read the code the regex skipped and find the security controls it miss
   THAT exact absolute path. **NEVER** a relative `--out`; **NEVER** a cwd / system-temp
   path (e.g. opencode `…\Temp\opencode\`); **NEVER** out-of-tree — your process cwd is not
   assumed and may be a temp dir, so only the verbatim `slice_dir` keeps slices in-tree.
-- The repo root (so you can Read / Glob / Grep).
+- The repo root (your Glob/Grep `path` anchor; read only inside it — NEVER the parent or
+  sibling modules; the hook enforces this deterministically).
 - `regex_known[]`: controls the regex already found (names/files). Do not re-report these.
 - `checkpoint_path` (absolute, given VERBATIM by the orchestrator) — the exact file you
   MUST write your checkpoint to.
@@ -39,14 +40,19 @@ Your job: read the code the regex skipped and find the security controls it miss
 
 ## Task
 For each target, **adaptively** decide whether it holds a security control the regex
-missed. Use **Read / Glob / Grep freely**; scripts sanctioned-list only (`chunk_sources.py`
-for `needs_slice`); **NEVER `Write .py` / `py -c` / `python -c`**. There is NO fixed
-search vocabulary:
+missed. Scripts sanctioned-list only (`chunk_sources.py` for `needs_slice`);
+**NEVER `Write .py` / `py -c` / `python -c`**. There is NO fixed search vocabulary:
 - Read the file (or its slice, if in `needs_slice`).
 - Glob the surrounding package / Grep for sibling usage to confirm it is actually a
   shared control (high `fan_in`) vs dead code.
 - Invent your own search terms based on what you see (this is the whole point — the
   regex could not, you can).
+
+## 读侧有界(recipe)
+**只读本批 `input_path` / `targets[]` 的文件 + 其 slice;Glob/Grep 的 `path`(及 Bash 搜索命令的路径
+参数)SHALL 锚 repo 根**——NEVER 读 repo 根上层(如 `…\parent\`)、NEVER 读同级兄弟模块(`…\parent\sonB\`)。
+Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 越出 repo 根亦同禁(走 Bash 也会被 hook 拦)。运行域 hook
+确定性兜底越界读(命中即 fail-loud,不弹权限询问)——所以请显式给 `path`(锚 repo 根),不要依赖 cwd。
 
 For every confirmed control, emit a Candidate-subset anchor:
 ```json
@@ -97,7 +103,7 @@ codegraph 调用)。
 - No prose outside the JSON. No pasted code > 3 lines.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(先读 `input_path`;再读本 batch 的 target 文件/slice)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
+- 读侧:`Read`(先读 `input_path`;再读本 batch 的 target 文件/slice)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - 脚本侧:仅 `chunk_sources.py`(且仅当切片 `needs_slice[]` 大文件),**显式 `py` launcher + 编排器透传的绝对工具路径 verbatim 调用**——recipe:`py <绝对 chunk_sources.py> --in <big_file> --big-file-bytes <N> --line <L> --out <slice_dir>/<safe-stem>.slice.json`,再回读该确切绝对路径(`<safe-stem>` 取源文件 stem)。硬边界(`NEVER`):**NEVER** 用文件关联形态调用——`NEVER & "<绝对>.py"`、`NEVER` 裸 `"<绝对>.py"` 作命令体(win32 下 opencode 经 PowerShell 执行每条 Bash,会按 `.py` 文件关联解析为编辑器/弹窗 → 死锁;**必须** `py "<绝对>.py"`);裸名 `chunk_sources.py`、相对 `.opencode`/`.claude/mgh-core/scripts/…`(多层 install 下可解析到**别的**旧副本);`--out` 传目录(必须是 `<slice_dir>/<safe-stem>.slice.json` 文件路径,leaf 脚本 `--check` 会 fail-loud);相对 `--out`;cwd/Temp 派生路径;树外写。其余确定性脚本由**编排器**调用,不在本层。
 - `Write`/`Edit`:仅限本 stage 产物文件(`checkpoints/scout/<batch_id>.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入 batch 为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。

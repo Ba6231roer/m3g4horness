@@ -23,18 +23,75 @@
 
 import { fileURLToPath } from "node:url"
 
-// opencode tool ids are lowercase; only these three mirror Claude's Bash|Write|Edit matcher
-// (D7 parity — do NOT run the guard on every read/grep/glob, which would over-trigger).
-const HANDLED = new Set(["bash", "write", "edit"])
+// opencode tool ids are lowercase; these mirror Claude's Bash|Write|Edit|Read|Glob|Grep
+// matcher. read/glob/grep are now handled so the guard's read-side out-of-tree confinement
+// (peer of the write side) decides on both platforms. apply_patch is opencode's multi-file
+// mutating tool (add/update/delete/move); its file paths live inside a `patchText` blob, which
+// normalize() extracts into paths[] (glue-only field extraction — the guard decides). A DIRECT
+// `rg`/`grep`/… in Bash routes through the `bash` tool (handled above) and the guard's Bash
+// file-search rule — it does NOT need a HANDLED entry here (only the native read/glob/grep
+// TOOLS do).
+const HANDLED = new Set(["bash", "write", "edit", "read", "glob", "grep", "apply_patch"])
+
+// apply_patch `patchText` marker lines (opencode packages/core/src/patch.ts:35-51):
+//   *** Add File: <path>      *** Update File: <path>      *** Delete File: <path>
+//   *** Move to: <path>
+// Captures every path; the operation (add/update/delete/move) rides in a parallel operations[]
+// so the guard can surface the delete wording. GLUE ONLY — no confinement decision here.
+const PATCH_MARKER_RX = /\*\*\* (?:Add|Update|Delete) File: (.+?)$|\*\*\* Move to: (.+?)$/gm
 
 // opencode args (camelCase) -> Claude tool_input (snake_case) the guard expects:
-//   bash  -> { command }            (guard reads tool_input.command)
-//   write -> { filePath -> file_path }   (guard reads tool_input.file_path)
-//   edit  -> { filePath -> file_path }
+//   bash        -> { command }                 (guard reads tool_input.command)
+//   write/edit  -> { filePath -> file_path }   (guard reads tool_input.file_path)
+//   read        -> { filePath -> file_path }
+//   glob        -> { pattern, path }
+//   grep        -> { pattern, path, glob/include }
+//   apply_patch -> { paths[], operations[] }   (extracted from args.patchText markers)
+// Defense-in-depth (D9): opencode's tool schema field for the path is `path`, not `filePath`
+// (packages/core/src/tool/{edit,write,read}.ts); relying solely on camelCase `filePath` would
+// yield an empty path if opencode ever passes schema-validated args. The fallback chain reads
+// `filePath ?? file_path ?? path` (zero behavior change for the current camelCase-emitting LLM).
+// grep's source field is schema-validated `include`; fall back to `glob` for the current shape.
 function normalize(tool: string, args: Record<string, unknown> | undefined) {
   if (tool === "bash") return { tool_name: "Bash", tool_input: { command: args?.command ?? "" } }
-  const fp = (args?.filePath as string) ?? (args?.file_path as string) ?? ""
-  return { tool_name: tool === "write" ? "Write" : "Edit", tool_input: { file_path: fp } }
+  if (tool === "glob") return {
+    tool_name: "Glob",
+    tool_input: { pattern: (args?.pattern as string) ?? "", path: (args?.path as string) ?? "" },
+  }
+  if (tool === "grep") return {
+    tool_name: "Grep",
+    tool_input: {
+      pattern: (args?.pattern as string) ?? "",
+      path: (args?.path as string) ?? "",
+      glob: (args?.include as string) ?? (args?.glob as string) ?? "",
+    },
+  }
+  if (tool === "apply_patch") {
+    // Extract every marker path from the patchText blob into paths[] (parallel operations[]).
+    // GLUE ONLY: no out-of-tree / extension / sanctioned-subtree decision — that is the guard's.
+    const patchText = (args?.patchText as string) ?? ""
+    const paths: string[] = []
+    const operations: string[] = []
+    let m: RegExpExecArray | null
+    PATCH_MARKER_RX.lastIndex = 0
+    while ((m = PATCH_MARKER_RX.exec(patchText)) !== null) {
+      const raw = (m[1] ?? m[2] ?? "").trim()
+      if (raw) {
+        paths.push(raw)
+        // the marker verb decides the operation label (delete => delete wording downstream)
+        const line = patchText.slice(Math.max(0, m.index), m.index + 20).toLowerCase()
+        if (line.includes("delete file")) operations.push("delete")
+        else if (line.includes("move to")) operations.push("move")
+        else if (line.includes("update file")) operations.push("update")
+        else operations.push("add")
+      }
+    }
+    return { tool_name: "ApplyPatch", tool_input: { paths, operations } }
+  }
+  // write / edit / read all carry a file path under filePath/file_path/path.
+  const fp = (args?.filePath as string) ?? (args?.file_path as string) ?? (args?.path as string) ?? ""
+  const name = tool === "read" ? "Read" : tool === "write" ? "Write" : "Edit"
+  return { tool_name: name, tool_input: { file_path: fp } }
 }
 
 function guardPath(): string {

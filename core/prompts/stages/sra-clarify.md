@@ -73,7 +73,7 @@ codegraph `⚠️ pending` 点名的文件)回退 `Read`/`Glob`/`Grep`。**主�
 `boundaries[]` + 报告披露「聚合未硬界」。分层归约(逐组归约)留后续 change,本步为 P0「披露 + 回退」软边界。
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 input 给定 `change_context` / 维度目录)/ `Glob` / `Grep` 自由。当 `codegraph=on` 时,
+- 读侧:`Read`(仅 input 给定 `change_context` / 维度目录)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。当 `codegraph=on` 时,
   外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;
   `codegraph=off` 时不发起 codegraph 调用。
 - `Write`:仅限 `clarify_path` 给定的**绝对** 路径(`clarifications.json`)。

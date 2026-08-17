@@ -38,7 +38,7 @@ S3). If after a genuine attempt you agree it is not a control, emit nothing for 
 - No canonical / competing judgment. No prose outside JSON.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 audit 目标文件及其 caller)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(仅 audit 目标文件及其 caller)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。
 - 脚本侧:仅 `chunk_sources.py`(且仅当需切片大文件),**显式 `py` launcher + 编排器透传的绝对路径 verbatim 调用**(`py "<绝对>.py" --in … --out <slice_dir>/<safe-stem>.slice.json`);**NEVER** 文件关联形态(`& "<绝对>.py"` / 裸 `"<绝对>.py"`,win32 下死锁);**NEVER** `--out` 传目录。其余确定性脚本由**编排器**调用。
 - `Write`/`Edit`:仅限本 stage 产物文件(`checkpoints/scout/audit.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生。

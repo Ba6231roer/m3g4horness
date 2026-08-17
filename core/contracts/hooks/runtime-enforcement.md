@@ -72,6 +72,28 @@ target was pinned).
    `clusters.json` / `controls_candidates.json` / `scout_plan.json` / `controls_inventory.json`
    / `s3_chunks.json` / `s5_filtered.json` / `scope_manifest.json` / `change_context.json`)
    → exit 2 (request-context-budget defense-in-depth; structural fix = `list_* --materialize`).
+5. **Write/delete-side out-of-tree interception (Bash + tool face)** — the read-side's symmetric
+   closure for the mutation surface. `MGH_TARGET` precedence + `is_relative_to(target)` semantics
+   identical to (3) and the read side; target absent ⇒ degrade to pass. Regex-over-observed-shape
+   (does NOT claim exhaustive coverage of pipes/aliases/env-injected paths, PowerShell `.NET`
+   static methods, `robocopy`/`fsutil` — same stance as temp-I/O / file-assoc / read-side Bash
+   file-search).
+
+   | Surface | Verb / shape | Destination judged | Blocked when |
+   |---|---|---|---|
+   | Bash write verb | `New-Item`/`ni`, `Set-Content`/`sc`, `Add-Content`/`ac`, `Out-File`, `tee`, `mkdir`/`md`, `Copy-Item`/`cpi`/`cp`/`copy`/`xcopy`, `Move-Item`/`mi`/`mv`, `rename`/`Rename-Item` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any out-of-tree absolute-path token; Copy/Move/xcopy = LAST token (destination) | destination resolves outside `MGH_TARGET` tree, OR no explicit path + cwd outside the target tree |
+   | Bash delete verb | `Remove-Item`/`ri`, `del`, `erase`, `rm`, `rmdir`/`rd` (leading token) | any out-of-tree absolute-path token | outside `MGH_TARGET` tree, OR no path + cwd outside the target tree → **delete-side recipe** (irreversible; NEVER sibling modules) |
+   | Bash redirect | `>` / `>>` to any target (generalizes the temp-only redirect) | the redirect target | resolves outside `MGH_TARGET` tree (temp targets still caught by the retained temp-I/O rule) |
+   | In-tree Bash write (P1) | write verb / redirect destination INSIDE `MGH_TARGET` | the destination | `mgh-init`/`mgh-ut-init`: outside a sanctioned subtree (root pollution `Set-Content <target>\evil.txt`) — mirrors the Write/Edit tool-layer allowlist. sast/sra/srr: pass (no allowlist) |
+   | Rule-a relabel (L1) | `py -c` WRITE/DELETE shape (`write(`/`makedirs`/`shutil.copy`/`shutil.move`/`shutil.rmtree`/`os.replace`/`os.rename`/`os.remove`/`os.unlink`/`write_text`/`write_bytes`) | any out-of-tree absolute path | outside `MGH_TARGET` tree → write/delete recipe (NOT introspection); pure in-tree `py -c` writes governed by the tool layer |
+   | Tool face | claude `MultiEdit`/`NotebookEdit` (`file_path` / `notebook_path`) enter the write-confinement branch like `Write`/`Edit` | the path | outside tree / blocked script-ext / (init/ut-init) non-sanctioned subtree. `.ipynb` is NOT a script-ext (artifact) |
+   | Tool face | opencode `apply_patch` (`paths[]` extracted from `patchText` `*** (Add\|Update\|Delete) File:` / `*** Move to:` markers by the `.ts` shim; delete op → delete wording) | each path | ANY path outside tree / blocked script-ext / non-sanctioned subtree |
+
+   A hit → exit 2 + stderr **write-side recipe** (points at producer stdout `checkpoint_path` /
+   `rule_path` / `draft_path` absolute paths; NEVER Bash `Set-Content`/`New-Item`/`tee`/`>` /
+   `apply_patch`/`MultiEdit`/`NotebookEdit` outside the tree). A delete hit additionally calls
+   out irreversibility ("NEVER `Remove-Item`/`del`/`rm`/`rmtree` outside the target tree,
+   including sibling modules").
 
 ### `mgh-init` sanctioned subtrees (positive allowlist)
 
@@ -98,6 +120,39 @@ fifth run-domain and the second rules-writing command.
 
 A hit → exit 2 + stderr recipe pointing at `list_*` / `describe_artifact` / producer stdout
 `checkpoint_path` / `rule_path` / `draft_path`.
+
+## Runtime read discipline (active guard)
+
+The read side is the **peer** of the write discipline — same `MGH_TARGET` precedence
+(env > sentinel.`target` > degrade), same `Path.resolve().is_relative_to(target)` semantics,
+NOT a positive-allowlist check (any file inside the target tree is readable; the goal is
+"stay in the working project", not "stay in a sanctioned subtree"). It replaces the soft
+failure (a cross-module read reaching the host **permission prompt and interrupting the
+run**) with a fail-loud recipe. `MGH_TARGET` absent => the read check degrades to pass
+(NEVER a hard read block when no target was pinned; the script-ext write block / `py -c` /
+temp-I/O / file-assoc blocks still fire).
+
+| Layer | Tool / shape | Anchor | Blocked when |
+|---|---|---|---|
+| Tool abstraction | `Read` | `file_path` | resolved `file_path` outside the target tree |
+| Tool abstraction | `Glob` / `Grep` | `path` (default = cwd) | resolved `path` outside; `path` absent + cwd outside (cwd-drift leak) |
+| Tool abstraction | — | `pattern` / `glob` | **NOT parsed** (the `path` anchor is authoritative; conservative vs false positives) |
+| Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside, OR no abs path + cwd outside |
+
+A hit → exit 2 + stderr **read-side recipe** (points at "read only this batch's `input_path`/
+`targets[]`; anchor `Glob`/`Grep` (and `rg`/`grep`/… in Bash) at the repo root; NEVER read
+the parent dir / sibling modules"). Regex-over-observed-shape: pipes/aliases/env-injected
+paths in the Bash file-search form are NOT guaranteed (same stance as the temp-I/O and
+file-association rules); a `--flag <path>` argument on a non-search verb does NOT trip.
+
+### Read-side path materialization (scout / T1 fan-out)
+
+`list_scout_batches.py` / `list_clusters.py` materialize each fan-out unit's file paths
+(`targets[].file` / `evidence_files[]` / `usage_sites[]` / candidate `file`) **ABSOLUTE**
+(resolved against the plan's `repo`), keeping the original as `repo_relative`. A subagent
+thus resolves the same file under any cwd AND stays inside the target tree (so the read
+check passes it) — closing the non-subjective out-of-tree read path (fan-out output paths
+are already absolute for the write side; this extends that absolutization to the read side).
 
 ## Cross-references
 

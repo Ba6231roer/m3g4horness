@@ -126,8 +126,9 @@ codegraph;NEVER 对 codegraph 已返回源码的同一文件再 `Read`(那会让
 声明;冲突时代码为准。推荐措辞标注「据已记业务事实」,非断言为代码真相。
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 `input_path` 给定路径——本 cap 完整输入 / 维度目录)/ `Glob` / `Grep` 自由(可读
-  目标项目源码以核验锚点真实)。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI
+- 读侧:`Read`(仅 `input_path` 给定路径——本 cap 完整输入 / 维度目录)/ `Glob` / `Grep` ——`path`
+  SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接
+  `rg`/`grep`/`findstr`/`find`/… 同禁越界(可读目标项目源码以核验锚点真实)。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI
   `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - `Write`:仅限 `draft_path` 给定的**绝对**路径。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**整份 `Read`/`cat`

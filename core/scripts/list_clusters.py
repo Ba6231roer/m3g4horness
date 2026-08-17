@@ -85,6 +85,51 @@ DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — aligns with --big-file-bytes 
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
 
 
+def _abs_file(raw, repo_path):
+    """Materialize a file path ABSOLUTE against the repo root (read-side path-confinement
+    parity with list_scout_batches). discover_controls emits `evidence_files[]` /
+    `usage_sites[]` / candidate `file` repo-relative, so a T1 subagent whose cwd drifted
+    (opencode system-temp cwd, or a parent-repo submodule cwd) could resolve a relative
+    path to the wrong tree. Returns the ABSOLUTE path string (original kept by the caller
+    under `repo_relative`); passes `raw` through unchanged when it is non-str / empty /
+    already absolute / repo unavailable / unresolvable."""
+    if not isinstance(raw, str) or not raw or repo_path is None:
+        return raw
+    if Path(raw).is_absolute():
+        return raw
+    try:
+        return str((repo_path / raw).resolve())
+    except (OSError, ValueError):
+        return raw
+
+
+def _absolutize_paths(obj, repo_path):
+    """Walk a materialized input record (cluster header + candidate hits) and make every
+    file path ABSOLUTE (resolved against the repo root), preserving the original value as
+    `repo_relative`. Operates on a shallow copy; returns the copy."""
+    if not isinstance(obj, dict) or repo_path is None:
+        return obj
+    out = dict(obj)
+    for key in ("evidence_files", "usage_sites"):
+        if isinstance(out.get(key), list):
+            out[key] = [_abs_file(p, repo_path) for p in out[key]]
+    # candidate hits carry a `file` field (repo-relative like discover_controls candidates).
+    if isinstance(out.get("candidates"), list):
+        new_cands = []
+        for c in out["candidates"]:
+            if isinstance(c, dict) and isinstance(c.get("file"), str):
+                nc = dict(c)
+                af = _abs_file(c.get("file"), repo_path)
+                if af is not None:
+                    nc["file"] = af
+                    nc["repo_relative"] = c.get("file")
+                new_cands.append(nc)
+            else:
+                new_cands.append(c)
+        out["candidates"] = new_cands
+    return out
+
+
 def _parse_bytes(label: str, raw) -> int:
     """Non-negative integer byte budget; exit 2 on misuse (R5.3b)."""
     try:
@@ -201,11 +246,15 @@ def _cluster_header(cluster: dict) -> dict:
 
 
 def _resolve_units(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
-                   inputs_dir: Path):
+                   inputs_dir: Path, repo_path=None):
     """Materialize one cluster into ≥1 bounded units. Returns list of
     (unit_id, input_path, bytes, oversize). Whole cluster if ≤ budget; else sharded by
-    candidate-hit groups into `<cid>::shard-<n>` (each ≤ budget). Idempotent overwrite."""
-    full = dict(_cluster_header(cluster), candidates=hits)
+    candidate-hit groups into `<cid>::shard-<n>` (each ≤ budget). Idempotent overwrite.
+
+    Every file path in the materialized input (evidence_files[] / usage_sites[] / candidate
+    `file`) is made ABSOLUTE against `repo_path` (read-side confinement: a T1 subagent
+    resolves the same file under any cwd and stays inside the MGH_TARGET tree)."""
+    full = _absolutize_paths(dict(_cluster_header(cluster), candidates=hits), repo_path)
     if _byte_len(full) <= max_unit_bytes or not hits:
         return [_write_unit(inputs_dir, cid, full)]
     # oversize: shard candidate hits greedily; header repeats per shard (small).
@@ -215,13 +264,13 @@ def _resolve_units(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
     for h in hits:
         hb = _byte_len(h)
         if cur and cur_b + hb > max_unit_bytes:
-            shards.append((n, dict(header, candidates=cur)))
+            shards.append((n, _absolutize_paths(dict(header, candidates=cur), repo_path)))
             n += 1
             cur, cur_b = [], header_bytes
         cur.append(h)
         cur_b += hb
     if cur:
-        shards.append((n, dict(header, candidates=cur)))
+        shards.append((n, _absolutize_paths(dict(header, candidates=cur), repo_path)))
     units = []
     for sn, inp in shards:
         uid = f"{cid}::shard-{sn}"
@@ -414,8 +463,11 @@ def main():
         emitted = False
         if materialize:
             hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
+            repo_path = Path(wrapper["repo"]) if isinstance(wrapper.get("repo"), str) \
+                and wrapper["repo"] else None
             for uid, ipath, nbytes in _resolve_units(cid, cluster, hits,
-                                                     args.max_unit_bytes, inputs_dir):
+                                                     args.max_unit_bytes, inputs_dir,
+                                                     repo_path):
                 if uid in done:
                     continue
                 if uid in failed:  # shard-level terminal failure (skip, not retried)

@@ -15,7 +15,7 @@ Two invariants:
 
 Run: py tests/test_opencode_hook_parity.py
 """
-import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, re, sys, tempfile, unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -75,16 +75,54 @@ def _load_guard(path: Path):
 
 # The shim's normalization map (releases/opencode/plugins/block_adhoc_scripts.ts :: normalize),
 # mirrored here as the contract under test. opencode args are camelCase; Claude tool_input is
-# snake_case. Tool ids are lowercase (bash/write/edit); other tools (read/grep/...) are NOT
-# handled by the shim (D7 tool-scope parity with Bash|Write|Edit).
-HANDLED = {"bash", "write", "edit"}
+# snake_case. Tool ids are lowercase; bash/write/edit/read/glob/grep are handled (read-side
+# out-of-tree confinement decides on both platforms) PLUS apply_patch (opencode's multi-file
+# mutating tool, whose patchText markers normalize extracts into paths[]). A direct `rg`/`grep`/
+# … in Bash routes through the `bash` tool + the guard's Bash file-search rule (no separate
+# HANDLED entry).
+HANDLED = {"bash", "write", "edit", "read", "glob", "grep", "apply_patch"}
+# apply_patch marker lines (opencode packages/core/src/patch.ts:35-51). GLUE ONLY — the test
+# mirror extracts paths[]/operations[] exactly as the shim does (no confinement decision here).
+_PATCH_MARKER_RX = re.compile(
+    r'\*\*\* (?:Add|Update|Delete) File: (.+?)$|\*\*\* Move to: (.+?)$', re.MULTILINE)
+
+
+def _normalize_apply_patch(patch_text: str):
+    paths, operations = [], []
+    for m in _PATCH_MARKER_RX.finditer(patch_text):
+        raw = (m.group(1) or m.group(2) or "").strip()
+        if raw:
+            paths.append(raw)
+            line = patch_text[max(0, m.start()):m.start() + 20].lower()
+            if "delete file" in line:
+                operations.append("delete")
+            elif "move to" in line:
+                operations.append("move")
+            elif "update file" in line:
+                operations.append("update")
+            else:
+                operations.append("add")
+    return {"tool_name": "ApplyPatch", "tool_input": {"paths": paths, "operations": operations}}
 
 
 def normalize(tool: str, args: dict):
+    a = args or {}
     if tool == "bash":
-        return {"tool_name": "Bash", "tool_input": {"command": (args or {}).get("command", "")}}
-    fp = (args or {}).get("filePath") or (args or {}).get("file_path") or ""
-    return {"tool_name": "Write" if tool == "write" else "Edit", "tool_input": {"file_path": fp}}
+        return {"tool_name": "Bash", "tool_input": {"command": a.get("command", "")}}
+    if tool == "glob":
+        return {"tool_name": "Glob", "tool_input": {"pattern": a.get("pattern", ""),
+                                                    "path": a.get("path", "")}}
+    if tool == "grep":
+        # grep source field: schema-validated `include`, falls back to `glob`.
+        return {"tool_name": "Grep", "tool_input": {"pattern": a.get("pattern", ""),
+                                                    "path": a.get("path", ""),
+                                                    "glob": a.get("include") or a.get("glob", "")}}
+    if tool == "apply_patch":
+        return _normalize_apply_patch(a.get("patchText", ""))
+    # write/edit/read: filePath ?? file_path ?? path (path is the opencode schema field).
+    fp = a.get("filePath") or a.get("file_path") or a.get("path") or ""
+    name = "Read" if tool == "read" else "Write" if tool == "write" else "Edit"
+    return {"tool_name": name, "tool_input": {"file_path": fp}}
 
 
 def _run_guard(mod, payload, domain_env, target=None):
@@ -161,11 +199,61 @@ class TestNormalizationParity(unittest.TestCase):
         code, _ = self._oc("write", {"filePath": f"{target}/.mgh-init/checkpoints/x.json"}, target=target)
         self.assertEqual(code, 0)
 
-    # --- D7 tool-scope: only bash/write/edit are handled; read/grep are NOT normalized ---
-    def test_only_bash_write_edit_handled(self):
-        self.assertEqual(HANDLED, {"bash", "write", "edit"})
-        self.assertNotIn("read", HANDLED)
-        self.assertNotIn("grep", HANDLED)
+    # --- tool-scope: bash/write/edit/read/glob/grep/apply_patch are handled ---
+    def test_bash_write_edit_read_glob_grep_handled(self):
+        self.assertEqual(HANDLED, {"bash", "write", "edit", "read", "glob", "grep", "apply_patch"})
+        # normalize covers the read-side tools (camelCase -> snake_case the guard expects).
+        self.assertEqual(
+            normalize("read", {"filePath": "D:/x.java"}),
+            {"tool_name": "Read", "tool_input": {"file_path": "D:/x.java"}})
+        self.assertEqual(
+            normalize("glob", {"pattern": "**/*.java", "path": "D:/repo"}),
+            {"tool_name": "Glob", "tool_input": {"pattern": "**/*.java", "path": "D:/repo"}})
+        self.assertEqual(
+            normalize("grep", {"pattern": "Foo", "path": "D:/repo", "glob": "*.java"}),
+            {"tool_name": "Grep", "tool_input": {"pattern": "Foo", "path": "D:/repo", "glob": "*.java"}})
+
+    # --- apply_patch handled: HANDLED includes apply_patch; normalize extracts patchText markers ---
+    def test_apply_patch_handled_and_normalized(self):
+        self.assertIn("apply_patch", HANDLED)
+        # patchText marker extraction -> paths[]/operations[] (glue-only; no confinement decision).
+        self.assertEqual(
+            normalize("apply_patch", {"patchText":
+                "*** Add File: D:/out/evil.ps1\n*** Delete File: D:/parent/sonB/y.java\n"
+                "*** Move to: D:/a/z.md"}),
+            {"tool_name": "ApplyPatch", "tool_input": {
+                "paths": ["D:/out/evil.ps1", "D:/parent/sonB/y.java", "D:/a/z.md"],
+                "operations": ["add", "delete", "move"]}})
+
+    # --- read-side confinement parity: normalized opencode read/glob/grep/bash-rg reach the
+    #     SAME guard decision the claude side gets (harden-mgh-read-confinement) ---
+    def test_read_out_of_tree_blocked(self):
+        code, err = self._oc("read", {"filePath": r"D:\parent\sonB\x.java"},
+                             target=r"D:\parent\sonA")
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+
+    def test_read_in_tree_passes(self):
+        code, _ = self._oc("read", {"filePath": r"D:\parent\sonA\src\A.java"},
+                           target=r"D:\parent\sonA")
+        self.assertEqual(code, 0)
+
+    def test_glob_out_of_tree_blocked(self):
+        code, _ = self._oc("glob", {"pattern": "**/*.java", "path": r"D:\parent\sonB"},
+                           target=r"D:\parent\sonA")
+        self.assertEqual(code, 2)
+
+    def test_grep_in_tree_passes(self):
+        code, _ = self._oc("grep", {"pattern": "x", "path": r"D:\parent\sonA", "glob": "*.java"},
+                           target=r"D:\parent\sonA")
+        self.assertEqual(code, 0)
+
+    def test_bash_rg_out_of_tree_blocked(self):
+        # a direct `rg` in Bash routes through the bash tool + the guard's Bash file-search
+        # rule (D9) — same decision as the claude side; no separate HANDLED entry needed.
+        code, _ = self._oc("bash", {"command": r'rg "x" D:\parent\sonB\src'},
+                           target=r"D:\parent\sonA")
+        self.assertEqual(code, 2)
 
     # --- outside run-domain: pass silently (mirrors claude) ---
     def test_inactive_passes_silently(self):
@@ -264,6 +352,51 @@ class TestNormalizationParity(unittest.TestCase):
                                  domain_env="MGH_UT_INIT_ACTIVE", target=target)
             self.assertEqual(code, 0, f"ut-init sanctioned write blocked: {rel}\n{err}")
 
+    # --- apply_patch parity: shim extracts patchText markers -> guard decides identically ---
+    def test_apply_patch_out_of_tree_add_blocked(self):
+        # patchText with an out-of-tree add -> shim extracts paths[] -> guard blocks (init
+        # allowlist, .ps1 is also a script-ext). Same decision the claude side would render.
+        code, err = self._oc("apply_patch",
+            {"patchText": "*** Add File: D:/out/evil.ps1\nsome content"},
+            target=r"D:\parent\sonA")
+        self.assertEqual(code, 2)
+        self.assertIn("ApplyPatch", err)
+
+    def test_apply_patch_out_of_tree_delete_delete_wording(self):
+        code, err = self._oc("apply_patch",
+            {"patchText": "*** Delete File: D:/parent/sonB/y.java"},
+            target=r"D:\parent\sonA")
+        self.assertEqual(code, 2)
+        self.assertIn("irreversible", err.lower())   # delete op => delete-side wording
+
+    def test_apply_patch_in_tree_sanctioned_passes(self):
+        target = tempfile.mkdtemp(prefix="mgh_ap_op_")
+        code, _ = self._oc("apply_patch",
+            {"patchText": f"*** Add File: {target}/.mgh-init/x.json\nx"},
+            target=target)
+        self.assertEqual(code, 0)
+
+    # --- arg-name defense-in-depth: schema-validated `path` arg still confines (D9) ---
+    def test_write_path_arg_out_of_tree_blocked(self):
+        # opencode schema field is `path` (not filePath); the fallback chain resolves it -> the
+        # out-of-tree write is still confined (rather than silently passing on an empty filePath).
+        target = tempfile.mkdtemp(prefix="mgh_path_")
+        code, err = self._oc("write", {"path": "D:/xxxraw.json"}, target=target)
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)
+
+    def test_read_path_arg_out_of_tree_blocked(self):
+        # read side: a `path` arg (schema-validated) resolves and is confined.
+        code, _ = self._oc("read", {"path": r"D:\parent\sonB\x.java"},
+                           target=r"D:\parent\sonA")
+        self.assertEqual(code, 2)
+
+    def test_grep_include_arg_normalized(self):
+        # grep source field: schema `include` falls back to `glob` — normalize maps include.
+        self.assertEqual(
+            normalize("grep", {"pattern": "x", "path": "D:/repo", "include": "*.java"}),
+            {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "D:/repo", "glob": "*.java"}})
+
 
 class TestGuardByteParity(unittest.TestCase):
     """§4.4 — opencode guard twin MUST be byte-identical to the claude canonical (single logic)."""
@@ -278,17 +411,27 @@ class TestGuardByteParity(unittest.TestCase):
         text = SHIM.read_text(encoding="utf-8")
         # the shim MUST NOT reimplement guard decision logic (glue only — single decision source).
         # Forbidden tokens track the current guard internals: sentinel + script-ext set +
-        # init allowlist + activation/out-of-tree/introspection + temp-dir I/O detection.
+        # init allowlist + activation/out-of-tree/introspection + temp-dir I/O detection +
+        # read-side confinement + Bash file-search detection + write/delete-side confinement
+        # (mutation verbs / redirect / py -c write tokens) + ApplyPatch guard-side branching.
         for forbidden in ("_INTRO_TOKENS", "_PYC_RX", "_SCRIPT_EXTS", "_read_sentinel",
                           "_resolve_domain", "_allowlist_write_blocked", "_is_out_of_tree",
                           "_ALLOWLIST_SUBTREES", "out_roots", "_detect_temp_io", "_TEMP_WRITE_RX",
-                          "_is_file_assoc_script_exec", "_CMD_BODY_EXT_RX", "_LAUNCHER_PREFIXES"):
+                          "_is_file_assoc_script_exec", "_CMD_BODY_EXT_RX", "_LAUNCHER_PREFIXES",
+                          "_read_out_of_tree", "_out_of_tree_file_search", "_FILE_SEARCH_VERBS",
+                          "_FILE_SEARCH_VERB_RX", "_ABS_PATH_TOKEN_RX", "_read_recipe",
+                          "is_relative_to",
+                          "_WRITE_VERBS", "_DELETE_VERBS", "_MUTATION_VERB_RX",
+                          "_out_of_tree_mutation", "_REDIRECT_RX", "_PYC_WRITE_TOKENS",
+                          "_write_recipe", "_COPY_MOVE_DEST_VERBS",
+                          "_is_temp_redirect_target", "_redirect_in_sanctioned"):
             self.assertNotIn(forbidden, text, f"shim reimplements guard logic ({forbidden}) — not glue-only")
 
     def test_both_guards_embed_new_sentinel_logic(self):
         """Byte-identity must be of the NEW guard, not a stale twin: both canonical and opencode
         guard carry the sentinel-activation + script-ext-set + init-allowlist + temp-dir I/O
-        detection logic."""
+        detection logic + write/delete-side confinement (mutation verbs / redirect / py -c write
+        tokens / ApplyPatch)."""
         for guard in (CC_GUARD, OC_GUARD):
             text = guard.read_text(encoding="utf-8")
             for marker in ("_read_sentinel", "_resolve_domain", "_SCRIPT_EXTS",
@@ -296,7 +439,12 @@ class TestGuardByteParity(unittest.TestCase):
                            ".active", "_detect_temp_io", "_TEMP_WRITE_RX", "_temp_path_rx",
                            "MGH_UT_INIT_ACTIVE", ".mgh-ut-init", "test_groups.json",
                            "_is_file_assoc_script_exec", "_CMD_BODY_EXT_RX",
-                           "_LAUNCHER_PREFIXES", "_CALL_OP_RX"):
+                           "_LAUNCHER_PREFIXES", "_CALL_OP_RX",
+                           "_read_out_of_tree", "_out_of_tree_file_search", "_FILE_SEARCH_VERBS",
+                           "_FILE_SEARCH_VERB_RX", "_ABS_PATH_TOKEN_RX", "_read_recipe",
+                           "_WRITE_VERBS", "_DELETE_VERBS", "_MUTATION_VERB_RX",
+                           "_out_of_tree_mutation", "_REDIRECT_RX", "_PYC_WRITE_TOKENS",
+                           "_write_recipe", "ApplyPatch"):
                 self.assertIn(marker, text, f"{guard.name} missing new-logic marker {marker}")
 
     def test_ts_not_in_zero_dep_scan_set(self):
@@ -322,6 +470,19 @@ class TestGuardByteParity(unittest.TestCase):
             "new Blob([stdin])", text,
             "shim must feed stdin as new Blob([stdin]); a bare string stdin throws in opencode's "
             "bundled Bun and silently disables the guard (the D7 root cause)")
+
+    def test_shim_handles_apply_patch_and_path_fallback(self):
+        """Source-form assertion that the shim feeds apply_patch (HANDLED + normalize marker
+        extraction) and uses the `path`/`include` arg-name fallback chains (D9 defense-in-depth).
+        These mirror the normalize() contract above; asserting the source form catches drift
+        between the test mirror and the actual shim (which CI cannot exercise at runtime)."""
+        text = SHIM.read_text(encoding="utf-8")
+        self.assertIn('"apply_patch"', text)              # HANDLED set includes apply_patch
+        self.assertIn("PATCH_MARKER_RX", text)            # marker extraction present
+        self.assertIn("ApplyPatch", text)                 # emits tool_name ApplyPatch
+        # arg-name fallback chains (path for write/edit/read; include for grep)
+        self.assertIn("args?.path", text)
+        self.assertIn("args?.include", text)
 
 
 if __name__ == "__main__":

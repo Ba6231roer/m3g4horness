@@ -80,7 +80,7 @@ Favor high-`confidence` rules as the primary content; list `weak_dominated` conv
   leak; target-project anchors (`src/test/.../UserServiceTest.java::UserServiceTest.t`) are fine.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(先读 `input_path`;仅本 category 的规则条目)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(先读 `input_path`;仅本 category 的规则条目)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。
 - 脚本侧:无(本层产规则文本);确定性脚本(`assemble_test_rules.py`)由**编排器**调用。
 - `Write`/`Edit`:仅限本 stage 产物(claude:`.claude/rules/test-<cat>.md`;opencode:`<rules-dir>/<cat>.md` 详述文件)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**禁**直写 `AGENTS.md`/受管块哨兵。**输入产物为终态**——NEVER 用代码变换/重派生。

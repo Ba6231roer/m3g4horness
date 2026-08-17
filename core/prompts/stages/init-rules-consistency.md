@@ -34,7 +34,7 @@ over budget, not hard-bounded" in `init_manifest.json::boundaries[]` + `report.m
 **P0 = disclose + fallback**; do NOT silently skip rule files to fit a budget.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(规则文件)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(规则文件)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。
 - 脚本侧:无(本层只做语义校订);确定性脚本由**编排器**调用。
 - `Write`/`Edit`:仅限规则文件本身(claude:`.claude/rules/security-*.md`;opencode:`<rules-dir>/<cat>.md` 详述文件)+ checkpoint。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生;**禁**装配 `AGENTS.md`/改受管块哨兵(`assemble_rules.py` 的职责)。

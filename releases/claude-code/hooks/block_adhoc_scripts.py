@@ -47,11 +47,44 @@ Blocks the real-world failure shapes —
       blocks the shell tool and deadlocks the run. Canonical `py "<abs script>"` /
       `python` / `bash` / `pwsh -File` pass (explicit interpreter -> no file association);
       a script path that is only a `--flag <path>` argument is NOT blocked.
+  (f) Read-side out-of-tree: Read/Glob/Grep whose resolved anchor (Read.file_path /
+      Glob.path / Grep.path, defaulting to cwd when `path` is absent) falls OUTSIDE the
+      resolved MGH_TARGET tree. The submodule leak shape: a reader subagent (cwd = a parent
+      repo's submodule, e.g. D:\\parent\\sonA) Read/Glob/Grep the parent dir D:\\parent\\ or
+      a sibling module D:\\parent\\sonB\\, which used to reach the host permission prompt and
+      INTERRUPT the run (soft failure). Now a fail-loud exit 2 + read-side recipe (D4: a
+      Glob/Grep with no `path` and a cwd outside the target tree is the cwd-drift leak).
+      target absent => degrade to pass (NEVER a hard read block when none was pinned).
+  (g) Bash file-search escape route: a `Bash` command invoking a file-search verb
+      (rg/ripgrep/grep/egrep/fgrep/findstr/find/fd/ag/ack as a leading token of the command
+      or of a sub-command after `;`/`|`/`&&`/`||`) with an out-of-tree scope (any explicit
+      absolute-path argument resolving outside the target tree, OR no explicit path and the
+      cwd outside the target tree). Closes the bypass where the model invokes rg/grep/…
+      directly in Bash instead of the native Grep/grep tool (whose `path` anchor is already
+      confined by (f)). Regex-over-observed-shape; pipes/aliases/env-injected paths not
+      guaranteed (same stance as (d)/(e)); a `--flag <path>` argument on a non-search verb
+      does NOT trip.
+  (h) Bash write/delete-verb escape route + redirect (write side): a `Bash` command invoking a
+      write verb (New-Item/Set-Content/Add-Content/Out-File/tee/mkdir/Copy-Item/Move-Item/…)
+      or a destructive DELETE verb (Remove-Item/del/rm/rmdir/…) directly in Bash, OR a `>`/`>>`
+      redirect, whose destination resolves OUTSIDE the MGH_TARGET tree — closes the bypass where
+      the model invokes a file-write/delete verb directly in Bash instead of the native
+      Write/Edit tool (whose target is already confined by (c)). For mgh-init AND mgh-ut-init the
+      destination SHALL ADDITIONALLY land inside a sanctioned subtree (positive allowlist, P1) —
+      an in-tree root-pollution write (`Set-Content <target>\\evil.txt`) fails loud too. A delete
+      hit surfaces a delete-side recipe (deletion is irreversible; NEVER delete sibling modules).
+      Rule-a relabel: a `py -c` WRITE shape (`write(`/`makedirs`/`shutil.copy`/`shutil.rmtree`/…)
+      with an out-of-tree path is labelled write/delete (NOT introspection) so the recipe matches.
+  (i) Tool-abstraction write face: claude `MultiEdit`/`NotebookEdit` enter the write-confinement
+      branch like Write/Edit; opencode `apply_patch` (paths[] extracted from `patchText` markers by
+      the .ts shim, glue-only) is confined path-by-path. An out-of-tree / blocked-script-ext /
+      non-sanctioned-subtree path on either => fail-loud + write-side recipe (delete wording for
+      apply_patch delete operations). `.ipynb` is NOT a script extension (artifact, not runtime).
 On a hit: exit 2 (Claude Code blocks the call) + stderr recipe pointing at the sanctioned
 primitives (list_* --materialize input_path / describe_artifact / producer stdout).
 
 Claude Code feeds the tool call as JSON on stdin:
-  {"tool_name":"Bash|Write|Edit", "tool_input":{"command"|"file_path": ...}, ...}
+  {"tool_name":"Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep", "tool_input":{...}, ...}
 
 Zero runtime deps (Python >=3.10 stdlib: json/os/pathlib/re/sys). Idempotent, stateless,
 no TTY.
@@ -78,12 +111,65 @@ _DOMAINS = (
 _PYC_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9]*\s+-c\b')
 # Introspection / re-derivation signals (FD1 real failure shape).
 _INTRO_TOKENS = ("import json", "open(", "load(", ".json")
+# Write/delete shapes inside a `py -c` body that are NOT introspection (the prior _INTRO_TOKENS
+# `open(`/`load(`/`.json` falsely labelled `py -c "open(..,'w').write('x')"` as introspection,
+# surfacing the wrong recipe). On a `py -c` hit with an out-of-tree absolute path, presence of
+# one of these => write/delete shape => write-side recipe (rule-a relabel, L1/D8). `open(` is
+# intentionally NOT here (ambiguous: `json.load(open('D:/out/x.json'))` is a read) — a bare
+# `open('D:/out/f','w')` still blocks via the introspection rule's `open(` token.
+_PYC_WRITE_TOKENS = ("makedirs", "mkdir", "write(", "write_text", "write_bytes",
+                     "shutil.copy", "shutil.move", "shutil.rmtree", "os.replace",
+                     "os.rename", "os.remove", "os.unlink")
 
 # Script extensions blocked at runtime (leaf scripts read-only; .ts covers the opencode plugin
 # glue -- its install-time write happens while the guard is inactive). .json/.md are NOT here
 # (legit artifacts); their *location* is governed by the write-confinement rule.
 _SCRIPT_EXTS = (".py", ".ps1", ".sh", ".bash", ".zsh", ".bat", ".cmd",
                 ".ts", ".js", ".mjs", ".cjs")
+
+# File-search verbs a model can invoke DIRECTLY in Bash to bypass the native Grep/grep tool's
+# `path` confinement (the read-side tool-abstraction rule covers Read/Glob/Grep; this closes
+# the `Bash: rg … <out-of-tree path>` escape route — opencode ships ripgrep, `rg` is on PATH).
+# Detection is regex-over-observed-shape: we match the verb as the FIRST token of the command
+# or of a sub-command following a shell delimiter (`;`/`|`/`&&`/`||`) — NOT a substring of any
+# token, so `grep` inside a longer word never trips. Does NOT claim exhaustive coverage of
+# every search form (pipes/aliases/env-injected paths are not guaranteed).
+_FILE_SEARCH_VERBS = ("rg", "ripgrep", "grep", "egrep", "fgrep", "findstr", "find",
+                      "fd", "ag", "ack")
+# A leading file-search verb (start/delimiter-bound) as the FIRST token of a simple command.
+# group(1) = the verb; delimiters match the clause-isolation set used by the file-association
+# rule so `; rg …` / `| rg …` sub-commands also trip.
+_FILE_SEARCH_VERB_RX = re.compile(
+    r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_FILE_SEARCH_VERBS) + r')\b',
+    re.IGNORECASE)
+# An explicit absolute-path token in a Bash command: Windows drive-letter `C:\…`/`C:/…`,
+# POSIX `/…`, or UNC `\\…`. Matches the path body up to a shell delimiter (`;`/`&`/`|`/space/
+# quote); used to scan a file-search command's path arguments for an out-of-tree anchor.
+_ABS_PATH_TOKEN_RX = re.compile(
+    r'(?:[A-Za-z]:[\\/][^\s;"\'&|]*|\\\\[^\s;"\'&|]*|/[^\s;"\'&|]*)')
+
+# Write verbs a model can invoke DIRECTLY in Bash to bypass the native Write/Edit tool's
+# confinement (the write-side tool-abstraction rule covers Write/Edit/MultiEdit/NotebookEdit;
+# this closes the `Bash: Set-Content … <out-of-tree path>` escape route). Detection mirrors
+# _FILE_SEARCH_VERB_RX: the verb as the FIRST token of the command or of a sub-command after
+# `;`/`|`/`&&`/`||`, NOT a substring of any token (`\b`-anchored, so `cp` inside a longer word
+# never trips). Regex-over-observed-shape; does NOT claim exhaustive coverage (pipes/aliases/
+# env-injected paths, PowerShell `.NET` static methods, robocopy/fsutil are not guaranteed —
+# same stance as the other Bash rules).
+_WRITE_VERBS = ("new-item", "ni", "set-content", "sc", "add-content", "ac", "out-file",
+                "tee", "mkdir", "md", "copy-item", "cpi", "cp", "copy", "xcopy",
+                "move-item", "mi", "mv", "rename", "rename-item")
+# Destructive delete verbs are a SEPARATE set so the recipe can call out irreversibility.
+_DELETE_VERBS = ("remove-item", "ri", "del", "erase", "rm", "rmdir", "rd")
+# Copy/Move/xcopy are multi-source verbs whose DESTINATION is the LAST absolute-path token
+# (source tokens may legitimately live in-tree); all other write/delete verbs are single-path
+# (ANY out-of-tree absolute-path token => hit).
+_COPY_MOVE_DEST_VERBS = ("copy-item", "cpi", "cp", "copy", "xcopy", "move-item", "mi", "mv")
+# A leading write/delete verb (start/delimiter-bound). group(1) = the verb (capture preserves
+# case; .lower()'d on lookup against the lowercased tuples above).
+_MUTATION_VERB_RX = re.compile(
+    r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_WRITE_VERBS + _DELETE_VERBS) + r')\b',
+    re.IGNORECASE)
 
 # Per-domain sanctioned work-list primitives (the recipe points the agent at the right
 # one). describe_artifact.py + producer stdout are shared across domains.
@@ -147,6 +233,11 @@ _TEMP_WRITE_RX = re.compile(
     re.IGNORECASE)
 # A temp read-back verb (Get-Content/gc = pwsh, cat = sh, type = cmd/pwsh alias).
 _TEMP_READ_RX = re.compile(r'(?:Get-Content|gc|cat|type)\b', re.IGNORECASE)
+# A `>` / `>>` redirect to ANY path (generalizes _TEMP_WRITE_RX, which only matched known
+# temp-dir prefixes). Captures the redirect target (stops at a shell delimiter). Used to block
+# non-temp out-of-tree redirects (`echo x > D:\out\f.json`) the temp-only rule did not match.
+# The retained _detect_temp_io defense (temp write + read-back) stays independent of this rule.
+_REDIRECT_RX = re.compile(r'>>?\s*"?' + r"'?" + r'([^\s;"\'&|]+)')
 
 # Per-domain sanctioned write subtrees (positive allowlist) for the rules-writing commands;
 # sentinel out_roots[] extends this for customized --out / --rules-dir absolute roots.
@@ -175,11 +266,196 @@ def _recipe(domain: str) -> str:
     )
 
 
+def _read_recipe(domain: str, target) -> str:
+    """Read-side out-of-tree recipe (peer of _recipe; shared by the tool-abstraction rule
+    Read/Glob/Grep and the Bash file-search rule rg/grep/find/…). Read side has NO positive
+    allowlist (only 'stay inside the target tree'); the recipe points at the batch input +
+    repo-root-anchored search, never at the parent dir / sibling modules."""
+    tgt = target if target is not None else "<not pinned — resolve MGH_TARGET>"
+    return (
+        f"  target tree = {tgt}\n"
+        f"  Read/Glob/Grep (and Bash rg/grep/find/findstr/…) MUST stay inside the target "
+        f"tree (your cwd's working project). Read only this batch's input_path / targets[]; "
+        f"for sibling-package confirmation use Glob/Grep (or `rg`/`grep` in Bash) with an "
+        f"EXPLICIT `path` anchored at the repo root. NEVER read the parent dir, NEVER read "
+        f"sibling modules, NEVER anchor a search at a path outside the target tree."
+    )
+
+
+def _read_out_of_tree(tool_input, target, cwd):
+    """True iff a Read/Glob/Grep call's resolved anchor falls OUTSIDE the resolved MGH_TARGET
+    tree. Read takes `file_path`; Glob/Grep take the `path` anchor (defaulting to cwd when
+    absent — D4). Same Path.resolve().is_relative_to(target) semantics as the write side
+    (_is_out_of_tree), NOT a positive-allowlist check — any file inside the target tree is
+    readable. Returns False (pass) when target is None (degrade), the path is empty, or
+    either side will not resolve."""
+    if target is None:
+        return False
+    # Read: single file_path.
+    fp = (tool_input.get("file_path") or tool_input.get("path") or "")
+    if fp:
+        try:
+            return not Path(fp).resolve().is_relative_to(target)
+        except (OSError, ValueError):
+            return False
+    # Glob/Grep: the `path` anchor is the authoritative scope (the `pattern`/`glob` field is
+    # NOT parsed for traversal — conservative against false positives on legit patterns). When
+    # `path` is absent the anchor defaults to the guard's cwd (D4 cwd-as-anchor): a cwd that
+    # drifted outside the target tree (submodule cwd = parent) is exactly the leak shape.
+    anchor = (tool_input.get("path") or "").strip()
+    if not anchor:
+        try:
+            return not cwd.is_relative_to(target)
+        except (OSError, ValueError):
+            return False
+    try:
+        return not Path(anchor).resolve().is_relative_to(target)
+    except (OSError, ValueError):
+        return False
+
+
+def _out_of_tree_file_search(command, target, cwd):
+    """True iff a Bash command invokes a file-search verb (rg/grep/findstr/find/fd/ag/ack,
+    as the FIRST token of the command or a sub-command after `;`/`|`/`&&`/`||`) with an
+    out-of-tree scope. On a verb hit: scan every explicit absolute-path token (Windows
+    drive-letter / POSIX / UNC) in the command — ANY one resolving outside the target tree
+    => True. No explicit absolute path => the search root defaults to cwd (D4): block iff cwd
+    is outside the target tree. Returns False (pass) when target is None (degrade), no
+    file-search verb leads any simple command, or no path resolves. Regex-over-observed-shape:
+    does NOT parse which token is pattern vs path (syntax varies), does NOT claim exhaustive
+    coverage of pipes/aliases/env-injected paths (same stance as temp-I/O / file-assoc rules).
+    """
+    if target is None or not _FILE_SEARCH_VERB_RX.search(command):
+        return False
+    abs_tokens = _ABS_PATH_TOKEN_RX.findall(command)
+    for tok in abs_tokens:
+        try:
+            if not Path(tok).resolve().is_relative_to(target):
+                return True
+        except (OSError, ValueError):
+            continue
+    # No explicit absolute-path token at all -> the search root defaults to cwd: a cwd that
+    # drifted outside the target tree is the leak shape (D4). If ANY absolute-path argument
+    # was present (all in-tree), the search root is that path, NOT cwd -> pass.
+    if abs_tokens:
+        return False
+    try:
+        return not cwd.is_relative_to(target)
+    except (OSError, ValueError):
+        return False
+
+
 def _is_introspect_py_c(cmd: str) -> bool:
     if not _PYC_RX.search(cmd):
         return False
     low = cmd.lower()
     return any(tok in low for tok in _INTRO_TOKENS)
+
+
+def _out_of_tree_mutation(command: str, target, cwd):
+    """Decide a Bash write/delete-verb (or `py -c` write shape) for write confinement.
+
+    Returns a tuple (kind, dest, oot):
+      - kind  : "write" / "delete" / None  (None => no mutation verb / `py -c` write hit)
+      - dest  : the offending destination token string (an absolute path, or "<cwd>" for the
+                cwd-drift leak), or "" when kind is None
+      - oot   : True iff dest resolves OUTSIDE the target tree (the W1/W3/D4 shape). False when
+                kind is set but the destination is IN the target tree (the P1/D5 in-tree root-
+                pollution shape, only enforced for init/ut-init by the caller).
+
+    Mirror of _out_of_tree_file_search, applied to write/delete verbs (_WRITE_VERBS /
+    _DELETE_VERBS) instead of search verbs. On a verb hit, scan every explicit absolute-path
+    token; for single-path verbs the FIRST out-of-tree token => hit, otherwise the FIRST in-tree
+    token is the destination (for P1); for Copy/Move/xcopy the LAST token (= destination) is
+    judged. No explicit absolute path => the destination defaults to cwd (D4): a cwd outside the
+    target tree => oot hit (dest="<cwd>"); a cwd inside => in-tree (dest="<cwd>", oot=False) so
+    the caller can still run the init/ut-init P1 check.
+
+    Returns (None, "", False) when target is None (degrade — NEVER use cwd as a hard block target
+    when none was pinned), no mutation verb leads any simple command, or no path resolves.
+
+    NOTE: the init/ut-init in-tree sanctioned-subtree check (P1/D5) is applied by the caller on
+    a (kind set, oot False) result — it needs domain + out_roots + subtrees (mirror of how the
+    Write/Edit tool layer works).
+    """
+    if target is None:
+        return None, "", False   # degrade-pass (NEVER use cwd as a hard block target when none pinned)
+    m = _MUTATION_VERB_RX.search(command)
+    if m:
+        verb = m.group(1).lower()
+        kind = "delete" if verb in _DELETE_VERBS else "write"
+        abs_tokens = _ABS_PATH_TOKEN_RX.findall(command)
+        if verb in _COPY_MOVE_DEST_VERBS:
+            # destination = LAST absolute-path token; sources may legitimately be in-tree.
+            if abs_tokens:
+                dest = abs_tokens[-1]
+                try:
+                    return kind, dest, not Path(dest).resolve().is_relative_to(target)
+                except (OSError, ValueError):
+                    return None, "", False
+            # no explicit path -> destination defaults to cwd
+            try:
+                in_tree = cwd.is_relative_to(target)
+            except (OSError, ValueError):
+                return None, "", False
+            return kind, "<cwd>", not in_tree
+        # single-path write/delete verb: judge the destination. If ANY token is out-of-tree, that
+        # is the hit (W1/W3); otherwise the FIRST in-tree token is the destination for P1.
+        for tok in abs_tokens:
+            try:
+                if not Path(tok).resolve().is_relative_to(target):
+                    return kind, tok, True   # out-of-tree hit
+            except (OSError, ValueError):
+                continue
+        if abs_tokens:
+            # every token in-tree -> first token is the destination, caller runs P1 on it
+            return kind, abs_tokens[0], False
+        # no explicit path -> destination defaults to cwd
+        try:
+            in_tree = cwd.is_relative_to(target)
+        except (OSError, ValueError):
+            return None, "", False
+        return kind, "<cwd>", not in_tree
+    # rule-a relabel (L1/D8): a `py -c` write/delete shape (shutil.rmtree / write / makedirs / …)
+    # with an out-of-tree absolute path => write/delete recipe (NOT the introspection recipe).
+    # shutil.rmtree + os.remove/unlink => delete; the rest => write. Only fires when the
+    # command carries an out-of-tree absolute path AND a write token; pure in-tree `py -c` writes
+    # are governed by the tool layer (the orchestrator does not Bash-write via `py -c` legitimately).
+    if _PYC_RX.search(command):
+        low = command.lower()
+        if any(tok in low for tok in _PYC_WRITE_TOKENS):
+            is_del = any(t in low for t in ("rmtree", "os.remove", "os.unlink"))
+            kind = "delete" if is_del else "write"
+            for tok in _ABS_PATH_TOKEN_RX.findall(command):
+                try:
+                    if not Path(tok).resolve().is_relative_to(target):
+                        return kind, tok, True
+                except (OSError, ValueError):
+                    continue
+    return None, "", False
+
+
+def _write_recipe(domain: str, target, kind: str) -> str:
+    """Write/delete out-of-tree recipe (peer of _read_recipe; shared by the tool-abstraction
+    rule MultiEdit/NotebookEdit/ApplyPatch and the Bash write/delete/redirect rules). Writes
+    point at the producer stdout absolute paths; deletes additionally call out irreversibility.
+    target None => degrade (the caller already gated on a real target)."""
+    tgt = target if target is not None else "<not pinned — resolve MGH_TARGET>"
+    base = (
+        f"  target tree = {tgt}\n"
+        f"  Writes/Moves/Copies MUST land inside the target tree (your cwd's working project). "
+        f"Use the producer's stdout path verbatim (checkpoint_path / rule_path / draft_path — "
+        f"already absolute, inside <target>/.mgh-init | .claude/rules | docs/security-controls | "
+        f".mgh-ut-init | docs/test-conventions, or a sentinel out_root). NEVER Bash "
+        f"Set-Content / New-Item / tee / > redirect outside the tree; NEVER apply_patch / "
+        f"MultiEdit / NotebookEdit outside the tree.")
+    if kind == "delete":
+        base += (
+            "\n  Deletion is IRREVERSIBLE (no artifact is produced; the action cannot be rolled "
+            "back). NEVER Remove-Item / del / rm / rmtree outside the target tree, including "
+            "sibling modules — use a sanctioned primitive for whatever you intended instead.")
+    return base
+
 
 
 def _is_whole_aggregate_read(cmd: str, domain: str) -> bool:
@@ -359,6 +635,41 @@ def _is_out_of_tree(path: str, target) -> bool:
         return False
 
 
+def _is_temp_redirect_target(target: str) -> bool:
+    """True iff a redirect target points at a known temp dir prefix ($env:TEMP / %TEMP% / /tmp /
+    $TMPDIR) — these are handled by the retained _detect_temp_io defense, so the generalized
+    redirect rule skips them (avoids double-flagging with the wrong recipe)."""
+    return bool(_TEMP_WRITE_RX.search(">" + target))
+
+
+def _redirect_in_sanctioned(target: str, domain, project_target, out_roots) -> bool:
+    """For init/ut-init: True iff the redirect/mutation target lands inside a sanctioned
+    subtree (P1/D5), reusing the same allowlist the Write/Edit tool layer uses. Returns True
+    (pass / in-sanctioned) when the domain has no allowlist (sast/sra/srr — they only get the
+    out-of-tree check), when project_target is None, the path is empty, or either side will not
+    resolve. NOTE: returns True for in-sanctioned AND for degradable/no-allowlist cases; the
+    caller already applied the out-of-tree check, so True here means 'OK to proceed'."""
+    subtrees = _ALLOWLIST_SUBTREES.get(domain)
+    if subtrees is None:
+        return True
+    return not _allowlist_write_blocked(target, project_target, out_roots, subtrees)
+
+
+def _emit_bash_write_block(domain, cmd, kind, dest, target, out_roots):
+    r"""Emit the stderr block for a Bash write/delete-verb (or `py -c` write shape) out-of-tree
+    hit. kind = "write" | "delete". Handles the in-tree-but-not-sanctioned (P1/D5) case for
+    init/ut-init too: a mutation verb destination inside the target root but outside a sanctioned
+    subtree (root pollution: `Set-Content <target>\evil.txt`) fails loud, mirroring the
+    Write/Edit tool layer. dest="<cwd>" => the cwd-drift leak (D4), reported as such."""
+    location = dest if dest and dest != "<cwd>" else "<cwd> (outside the target tree)"
+    sys.stderr.write(
+        f"blocked: out-of-tree {kind} in {domain} run-domain: `{cmd}`\n"
+        f"  destination = {location}\n"
+        f"  The Write/Edit tool's confinement is bypassed by invoking a write/delete verb "
+        f"(Set-Content / New-Item / Remove-Item / tee / …) directly in Bash with an "
+        f"out-of-tree destination.\n{_write_recipe(domain, target, kind)}\n")
+
+
 def main():
     cwd = Path.cwd()
     domain, sentinel = _resolve_domain(cwd)
@@ -377,6 +688,35 @@ def main():
 
     if tool == "Bash":
         cmd = (ti.get("command") or "")
+        # rule-a relabel (L1/D8): a `py -c` WRITE/DELETE shape with an out-of-tree path is
+        # checked BEFORE the introspection rule. The prior _INTRO_TOKENS `open(`/`load(`/`.json`
+        # falsely labelled `py -c "open('D:/out/f','w').write('x')"` as introspection, surfacing
+        # the wrong (introspection) recipe. Now: write token + out-of-tree absolute path =>
+        # write-side recipe. Order matters: this gate precedes _is_introspect_py_c so the write
+        # shape wins when both a write token and an introspection token are present. Target
+        # absent => _out_of_tree_mutation returns pass (degrade, same as every side).
+        mut_kind, mut_dest, mut_oot = _out_of_tree_mutation(cmd, target, cwd)
+        if mut_kind in ("write", "delete"):
+            # out-of-tree (W1/W3/D4): always block. in-tree (P1/D5): block only for init/ut-init
+            # when the destination is NOT inside a sanctioned subtree (root pollution). sast/sra/
+            # srr have no allowlist, so an in-tree mutation destination passes (mirror of the
+            # Write/Edit tool layer). dest="<cwd>" + in-tree => cwd is the run root, a sanctioned
+            # location only when cwd itself is under a sanctioned subtree; treat "<cwd>" as
+            # root-level for the P1 check (root pollution is the threat model).
+            if mut_oot:
+                _emit_bash_write_block(domain, cmd, mut_kind, mut_dest, target, out_roots)
+                return 2
+            if domain in _ALLOWLIST_SUBTREES:
+                p1_dest = cwd if mut_dest == "<cwd>" else mut_dest
+                if not _redirect_in_sanctioned(p1_dest, domain, target, out_roots):
+                    sys.stderr.write(
+                        f"blocked: in-tree {mut_kind} outside the sanctioned "
+                        f"{_SUBTREE_LABELS.get(domain, domain)} subtrees in {domain} "
+                        f"run-domain: `{cmd}`\n"
+                        f"  The Write/Edit tool's positive allowlist is bypassed by invoking a "
+                        f"write/delete verb directly in Bash (root pollution).\n"
+                        f"{_write_recipe(domain, target, mut_kind)}\n")
+                    return 2
         if _is_introspect_py_c(cmd):
             sys.stderr.write(
                 f"blocked: ad-hoc `py -c` introspection in {domain} run-domain.\n  {_recipe(domain)}\n")
@@ -414,8 +754,64 @@ def main():
                 f"\"<abs>.py\" command body.\n"
                 f"  {_recipe(domain)}\n")
             return 2
-    elif tool in ("Write", "Edit"):
-        path = (ti.get("file_path") or ti.get("path") or "")
+        # read-side confinement, Bash escape route (D9): a file-search verb (rg/grep/findstr/
+        # find/fd/ag/ack) invoked DIRECTLY in Bash bypasses the native Grep/grep tool's `path`
+        # confinement. Block when its search scope (any explicit absolute-path argument OR the
+        # implicit cwd anchor) is outside the MGH_TARGET tree. Operand-vs-arg: a command with
+        # no file-search verb as a leading token (e.g. `py … --in x.java`) does NOT enter here.
+        if _out_of_tree_file_search(cmd, target, cwd):
+            sys.stderr.write(
+                f"blocked: out-of-tree file search in {domain} run-domain: `{cmd}`\n"
+                f"  The native Grep/grep tool's `path` confinement is bypassed by invoking a "
+                f"file-search binary (rg/grep/findstr/find/…) directly in Bash with an "
+                f"out-of-tree scope.\n{_read_recipe(domain, target)}\n")
+            return 2
+        # write confinement, Bash escape route (W2/D3): a `>`/`>>` redirect whose target resolves
+        # OUTSIDE the MGH_TARGET tree (generalizes _TEMP_WRITE_RX, which matched only temp-dir
+        # prefixes). The retained temp-I/O rule above is an independent defense (temp write +
+        # read-back); this catches the non-temp out-of-tree redirect `echo x > D:\out\f.json`.
+        # temp targets are still caught first by _detect_temp_io; here any remaining out-of-tree
+        # redirect target fails loud. target absent => degrade (the resolve skips).
+        if target is not None:
+            for rm in _REDIRECT_RX.finditer(cmd):
+                rdest = rm.group(1).strip('"\'')
+                if not rdest or _is_temp_redirect_target(rdest):
+                    continue
+                if _is_out_of_tree(rdest, target):
+                    if _redirect_in_sanctioned(rdest, domain, target, out_roots):
+                        continue
+                    sys.stderr.write(
+                        f"blocked: out-of-tree redirect in {domain} run-domain: `{cmd}`\n"
+                        f"  The Write/Edit tool's confinement is bypassed by a `>`/`>>` redirect "
+                        f"to a path outside the target tree.\n"
+                        f"{_write_recipe(domain, target, 'write')}\n")
+                    return 2
+                # in-tree redirect: init/ut-init ALSO require the target inside a sanctioned
+                # subtree (P1/D5) — root pollution (`echo x > <target>\evil.txt`) fails loud.
+                if domain in _ALLOWLIST_SUBTREES and not _redirect_in_sanctioned(
+                        rdest, domain, target, out_roots):
+                    sys.stderr.write(
+                        f"blocked: in-tree redirect outside the sanctioned "
+                        f"{_SUBTREE_LABELS.get(domain, domain)} subtrees in {domain} "
+                        f"run-domain: `{cmd}`\n"
+                        f"{_write_recipe(domain, target, 'write')}\n")
+                    return 2
+    elif tool in ("Read", "Glob", "Grep"):
+        # read-side confinement, tool-abstraction layer (D1): a Read/Glob/Grep whose resolved
+        # anchor (Read.file_path / Glob.path / Grep.path, defaulting to cwd) falls outside the
+        # MGH_TARGET tree. The soft failure that interrupted runs (host permission prompt on a
+        # cross-module read) becomes a fail-loud recipe. target absent => degrade to pass
+        # (NEVER use cwd as a hard read block target when none was pinned).
+        if _read_out_of_tree(ti, target, cwd):
+            sys.stderr.write(
+                f"blocked: read outside the MGH_TARGET tree in {domain} run-domain.\n"
+                f"  {_read_recipe(domain, target)}\n")
+            return 2
+    elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        # path extraction: Write/Edit/MultiEdit carry file_path; NotebookEdit carries
+        # notebook_path (.ipynb is an artifact, NOT a runtime script — it is NOT in _SCRIPT_EXTS;
+        # NotebookEdit is confined by tree location only, same as Write/Edit).
+        path = (ti.get("file_path") or ti.get("notebook_path") or ti.get("path") or "")
         if _is_blocked_script_write(path):
             sys.stderr.write(
                 f"blocked: Write/Edit of a script (leaf scripts read-only) in {domain} "
@@ -441,6 +837,39 @@ def main():
                 f"  the output path MUST be the verbatim `checkpoint_path`/`rule_path`/"
                 f"`draft_path` from the producer stdout (already absolute, under the target tree).\n")
             return 2
+    elif tool == "ApplyPatch":
+        # opencode multi-file mutating tool (add/update/delete/move); the .ts shim extracts every
+        # `*** (Add|Update|Delete|Move to) File: <path>` marker into paths[] with a parallel
+        # operations[] (glue only — single decision source). Each path is confined like Write/Edit:
+        # script-ext block (add/update) + out-of-tree check + init/ut-init sanctioned-subtree
+        # allowlist. delete operations surface the delete-side wording. ANY path hit => fail-loud.
+        paths = ti.get("paths") or []
+        ops = ti.get("operations") or []
+        if isinstance(paths, list):
+            for i, path in enumerate(paths):
+                if not isinstance(path, str) or not path:
+                    continue
+                op = ops[i] if isinstance(ops, list) and i < len(ops) else ""
+                kind = "delete" if op == "delete" else "write"
+                if _is_blocked_script_write(path):
+                    sys.stderr.write(
+                        f"blocked: ApplyPatch add/update of a script (leaf scripts read-only) "
+                        f"in {domain} run-domain: {path}\n  {_recipe(domain)}\n")
+                    return 2
+                if domain in _ALLOWLIST_SUBTREES:
+                    if _allowlist_write_blocked(path, target, out_roots,
+                                                _ALLOWLIST_SUBTREES[domain]):
+                        sys.stderr.write(
+                            f"blocked: ApplyPatch outside the sanctioned "
+                            f"{_SUBTREE_LABELS.get(domain, domain)} subtrees in {domain} "
+                            f"run-domain: {path}\n"
+                            f"{_write_recipe(domain, target, kind)}\n")
+                        return 2
+                elif _is_out_of_tree(path, target):
+                    sys.stderr.write(
+                        f"blocked: ApplyPatch outside the MGH_TARGET tree in {domain} "
+                        f"run-domain: {path}\n{_write_recipe(domain, target, kind)}\n")
+                    return 2
     return 0
 
 

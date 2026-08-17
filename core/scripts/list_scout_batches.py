@@ -15,6 +15,10 @@ subagent reads its own bounded file (NEVER the whole `scout_plan.json`). Batches
 plan unit (not sharded); oversize batches are flagged and their big files stay in
 `needs_slice[]` (sliced by `init-scout` via `chunk_sources`).
 
+`targets[].file` (and `needs_slice[]`) are materialized ABSOLUTE (resolved against the
+plan's `repo`), with the original repo-relative value kept as `targets[].repo_relative` —
+so a subagent resolves the same file under any cwd and stays inside the MGH_TARGET tree.
+
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
@@ -137,14 +141,57 @@ def _failed_ids(checkpoints_dir: Path):
     return failed
 
 
-def _write_batch_input(inputs_dir: Path, batch_id: str, batch: dict):
+def _write_batch_input(inputs_dir: Path, batch_id: str, batch: dict, repo):
     """Write `<dir>/<batch_id>.input.json` (full targets[] + needs_slice[]); idempotent.
-    Returns (abs input_path, file bytes)."""
+    Returns (abs input_path, file bytes).
+
+    Each `targets[].file` is materialized as an ABSOLUTE path (resolved against `repo`),
+    with the original repo-relative value preserved as `repo_relative`. discover_controls
+    emits `file` repo-relative, so a subagent process whose cwd drifted (e.g. opencode
+    system-temp cwd, or a parent-repo submodule cwd) could resolve a relative `file` to the
+    wrong tree. An absolute `file` resolves identically under any cwd AND stays inside the
+    MGH_TARGET tree (so the read-side hook passes it) — closing the non-subjective out-of-
+    tree read path (R5.3(b) fan-out path absolutization, extended to the read side).
+    `needs_slice[]` entries (repo-relative file paths) are absolutized the same way."""
     inputs_dir.mkdir(parents=True, exist_ok=True)
+    repo_path = Path(repo) if repo else None
+
+    def _abs_file(raw):
+        if not isinstance(raw, str) or not raw:
+            return raw, raw
+        # already absolute -> keep as-is; repo_relative = the original string (best effort).
+        if Path(raw).is_absolute():
+            return raw, raw
+        if repo_path is None:
+            return raw, raw
+        try:
+            return str((repo_path / raw).resolve()), raw
+        except (OSError, ValueError):
+            return raw, raw
+
+    abs_targets = []
+    for t in batch.get("targets", []):
+        if not isinstance(t, dict):
+            abs_targets.append(t)
+            continue
+        nt = dict(t)
+        af, rr = _abs_file(t.get("file"))
+        if af is not None:
+            nt["file"] = af
+            if rr is not None:
+                nt["repo_relative"] = rr
+        abs_targets.append(nt)
+    abs_needs_slice = []
+    for nf in batch.get("needs_slice", []):
+        if not isinstance(nf, str):
+            abs_needs_slice.append(nf)
+            continue
+        af, _ = _abs_file(nf)
+        abs_needs_slice.append(af if af is not None else nf)
     inp = {
         "batch_id": batch_id,
-        "targets": batch.get("targets", []),
-        "needs_slice": batch.get("needs_slice", []),
+        "targets": abs_targets,
+        "needs_slice": abs_needs_slice,
         "bytes": batch.get("bytes", 0),
     }
     path = (inputs_dir / f"{_safe_name(batch_id)}.input.json").resolve()
@@ -232,7 +279,7 @@ def main():
         fm = str(base.with_name(base.name + ".failed"))
         slice_dir = str((init_dir / "slices" / "scout" / _safe_name(bid)).resolve())
         if materialize:
-            ipath, _ = _write_batch_input(inputs_dir, bid, batch)
+            ipath, _ = _write_batch_input(inputs_dir, bid, batch, wrapper.get("repo"))
             nbytes = int(batch.get("bytes", 0))
             oversize = nbytes > args.max_unit_bytes
             if oversize:

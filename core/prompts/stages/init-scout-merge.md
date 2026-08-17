@@ -41,7 +41,7 @@ fallback**; layered reduction is a later change. Do NOT silently drop records to
 - No raw code in output; anchors only. No prose outside JSON.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 input 给定记录)/ `Glob` / `Grep` 自由。
+- 读侧:`Read`(仅 input 给定记录)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。
 - 脚本侧:无(本层只处理结构化记录);确定性脚本由**编排器**调用。
 - `Write`/`Edit`:仅限本 stage 产物文件(`scout_candidates.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。

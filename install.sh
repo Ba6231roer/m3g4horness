@@ -89,7 +89,7 @@ cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 _missing=()
 for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules \
          list_clusters list_scout_batches list_rule_jobs list_steps describe_artifact validate_inventory validate_t1_records \
-         discipline_core \
+         discipline_core fanout_runner \
          prepare_augment merge_augment merge_memory ingest_requirements render_report \
          list_chunks list_verify_jobs prefilter dedup emit_sarif \
          classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \
@@ -100,7 +100,26 @@ if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, /mgh-srr, or /mgh-ut-init may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/list_steps/describe_artifact/validate_inventory + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps"
+  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/t1/t3) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps"
+fi
+
+# 4a) Fan-out tier payload self-check (fail-soft per R5.8): the tier-aware
+#     dispatcher reads per-tier task templates, and opencode installs address
+#     the fanout agent clones (mode: primary) by name at spawn time — a missing
+#     file breaks that tier's dispatch at runtime. Warn only; CI enforces.
+_fanout_missing=()
+for t in scout-task t1-task t3-task; do
+  [[ -f "$DEST/mgh-core/prompts/fragments/fanout/$t.md" ]] || _fanout_missing+=("prompts/fragments/fanout/$t.md")
+done
+if [[ "$PLATFORM" == "opencode" ]]; then
+  for a in init-scout-fanout init-induct-fanout init-rulewriter-fanout; do
+    [[ -f "$DEST/agent/$a.md" ]] || _fanout_missing+=("agent/$a.md")
+  done
+fi
+if (( ${#_fanout_missing[@]} )); then
+  echo "⚠ self-check (non-blocking): missing fan-out tier payload: ${_fanout_missing[*]}" >&2
+else
+  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,t1,t3}-task.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout,init-induct,init-rulewriter}-fanout.md" )"
 fi
 
 # 4b) Distribution-purity self-check (R5.10; fail-soft per R5.8): shipped md MUST be

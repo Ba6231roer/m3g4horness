@@ -54,7 +54,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 
 | script inventory | subagent inventory |
 |---|---|
-| `discover_controls` · `chunk_sources`(大文件切片)· `describe_artifact`(瞄结构合法出口)· `list_clusters`/`list_scout_batches`/`list_rule_jobs`(fan-out 枚举)· `plan_scout`/`merge_scout` · `validate_inventory`(T2 边界)· `validate_t1_records`(T1→T2 闸门)· `assemble_rules`(opencode: 扫 `<rules-dir>/*.md` 建 `AGENTS.md` 惰性索引 + `--check` 纯净 lint)· `resume_state`/`write_runconfig`/`plan_aggregate` | `init-survey`(opt)· `init-resolve`(opt,codegraph-gated)· `init-induct`(T1)· `init-synthesis`(T2)· `init-rulewriter`(T3)· `init-rules-consistency`(T4,opt)· `init-scout`/`init-scout-merge`/`init-scout-audit`(scout) |
+| `discover_controls` · `chunk_sources`(大文件切片)· `describe_artifact`(瞄结构合法出口)· `list_clusters`/`list_scout_batches`/`list_rule_jobs`(fan-out 枚举)· `fanout_runner`(scout/t1/t3 波次派发 dispatcher,`--tier`)· `plan_scout`/`merge_scout` · `validate_inventory`(T2 边界)· `validate_t1_records`(T1→T2 闸门)· `assemble_rules`(opencode: 扫 `<rules-dir>/*.md` 建 `AGENTS.md` 惰性索引 + `--check` 纯净 lint)· `resume_state`/`write_runconfig`/`plan_aggregate` | `init-survey`(opt)· `init-resolve`(opt,codegraph-gated)· `init-induct`(T1)· `init-synthesis`(T2)· `init-rulewriter`(T3)· `init-rules-consistency`(T4,opt)· `init-scout`/`init-scout-merge`/`init-scout-audit`(scout) |
 
 - 绝对脚本路径由 `list_steps.py` 运行时给(stage 流内调用行即契约面);**非平凡复用**:`expand_scope.py`(discover 复用)、`merge_scout.py` 复用 `discover_controls.form_clusters`(簇形成语义无漂移)。
 - 每 stage 产物经产出者 `--check` 校验(`discover_controls`/`plan_scout`/`merge_scout`/`validate_inventory`/`validate_t1_records`/`assemble_rules`)。

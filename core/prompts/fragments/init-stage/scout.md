@@ -13,7 +13,14 @@
         [--batch-bytes .. --batch-cap .. --budget ..]
      · 批数涌现 = ceil(Σtarget_bytes / --scout-batch-bytes);按包内聚切批,每批字节≤预算且文件数≤cap。派生量 `regex_known_count` 在 stdout / `scout_plan.json` 顶层。
      · 校验:`py .claude/mgh-core/scripts/plan_scout.py --check <target>/.mgh-init/scout_plan.json`(batches 非空除非 0 target、每批 bytes≤预算、needs_slice 仅含超批文件;退出码 2 → 回退)。
-     [scout_plan.json::batches[]] → list_scout_batches.py --materialize → [stdout slim pending[](每项 `input_path`/`oversize`/`needs_slice`/`checkpoint_path`/`done_marker`/`slice_dir`)](禁手挖 `scout_plan`)
+     [scout_plan.json::batches[]] → fanout_runner.py(内部消费 list_scout_batches --materialize)→ [波次 spawn + ack + marker,零 LLM 回合]
+     · **主路径(dispatcher,一次 Bash + 重派)**:带 per-call `timeout` 跑
+       py .claude/mgh-core/scripts/fanout_runner.py --scout-plan <target>/.mgh-init/scout_plan.json --checkpoints <target>/.mgh-init/checkpoints/scout --inputs-dir <target>/.mgh-init/inputs/scout --time-budget-ms <宿主 per-call timeout × 0.8,如 opencode 900000ms 宿主 → 720000;claude Bash 上限 600000ms → 480000>
+       · `--time-budget-ms` MUST < 宿主 per-call `timeout`(留 ≥20% 收敛余量;软时限先于宿主硬杀触发,重派才轮轮干净早退而非硬杀循环);三级超时不变式见 `fanout_runner.py --help`。
+       · stdout 摘要 `partial:true`(软时限早退)→ **重派同一命令**(重派传 per-call `timeout` > `--time-budget-ms`)直至 `partial:false`;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息(固定模板 + 逐字填充在脚本内完成)。
+       · 退出码 2(宿主 CLI 不可用)→ stderr 带 recipe → 走下方**手派路径**(行为与引入 dispatcher 前逐字一致)。
+       · **宿主外手动直跑(大仓长跑逃生门)**:人可自己开终端直跑同一 dispatcher 命令(无宿主超时钳制、stderr 逐波进度直读、进度 sidecar `<target>/.mgh-init/fanout_progress.scout.json` 照写),跑完回会话 `/mgh-init --resume` 接续(磁盘 marker 是唯一真相源,两侧天然互斥)。
+     · **手派路径(回退)**:list_scout_batches 枚举 + 编排器逐波 spawn——
      py .claude/mgh-core/scripts/list_scout_batches.py --scout-plan <target>/.mgh-init/scout_plan.json --checkpoints <target>/.mgh-init/checkpoints/scout --materialize <target>/.mgh-init/inputs/scout
      按 `offset`/`effective_limit` 翻页(单页 > `--orch-budget-bytes` 时 `shrunk:true`;NEVER wrapper `.py`);per batch in page `pending[]`(**每批一个隔离 subagent 上下文**;`--resume` 跳过已 `.done`/`.failed`):
        - spawn init-scout(透传 `input_path` + checkpoint_path + done_marker + failed_marker + slice_dir + `<list_steps script_abs 派生的绝对 chunk_sources 路径>`;subagent 读 `input_path`,needs_slice 文件写 `<绝对 chunk_sources> --in <big_file> --big-file-bytes <N> --line <L> --out <slice_dir>/<safe-stem>.slice.json` 并回读该确切路径,**绝不**整文件喂 LLM)→ 成功则恰好写 `checkpoint_path`(绝对) + touch `done_marker`;失败回 `failed <原因>` ack → 编排器写 `failed_marker`、不重试不阻断(见 orchestrator-discipline fragment「fan-out 单元 `failed` ack`)

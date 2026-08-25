@@ -99,8 +99,8 @@ _STEPS = [
     {
         "step": "scout",
         "kind": "bash",
-        "script_name": "list_scout_batches.py",
-        "cli_args": "--scout-plan <init-dir>/scout_plan.json --checkpoints <init-dir>/checkpoints/scout --materialize <init-dir>/inputs/scout",
+        "script_name": "fanout_runner.py",
+        "cli_args": "--scout-plan <init-dir>/scout_plan.json --checkpoints <init-dir>/checkpoints/scout --inputs-dir <init-dir>/inputs/scout",
         "input": {"artifact": "scout_plan.json", "shape": "{batches[]"},
                   "output": {"artifact": "scout_candidates.json", "shape": "{candidates[],source}",
                              "path_pattern": "<init-dir>/scout_candidates.json"},
@@ -117,8 +117,8 @@ _STEPS = [
     {
         "step": "t1",
         "kind": "bash",
-        "script_name": "list_clusters.py",
-        "cli_args": "--clusters <init-dir>/clusters.json --checkpoints <init-dir>/checkpoints/t1 --candidates <init-dir>/controls_candidates.json --materialize <init-dir>/inputs/t1",
+        "script_name": "fanout_runner.py",
+        "cli_args": "--tier t1 --clusters <init-dir>/clusters.json --candidates <init-dir>/controls_candidates.json --checkpoints <init-dir>/checkpoints/t1 --inputs-dir <init-dir>/inputs/t1",
         "input": {"artifact": "clusters.json", "shape": "{repo,clusters[]}"},
         "output": {"artifact": "checkpoints/t1/*.json", "shape": "[checkpoint per cluster]",
                    "path_pattern": "<init-dir>/checkpoints/t1/<cluster_id>.json"},
@@ -135,8 +135,8 @@ _STEPS = [
     {
         "step": "t3",
         "kind": "bash",
-        "script_name": "list_rule_jobs.py",
-        "cli_args": "--inventory <init-dir>/controls_inventory.json --format <fmt> --checkpoints <init-dir>/checkpoints/t3 --target <target> --rules-dir <rules-dir> --materialize <init-dir>/inputs/t3",
+        "script_name": "fanout_runner.py",
+        "cli_args": "--tier t3 --inventory <init-dir>/controls_inventory.json --format <fmt> --rules-dir <rules-dir> --target <target> --checkpoints <init-dir>/checkpoints/t3 --inputs-dir <init-dir>/inputs/t3",
         "input": {"artifact": "controls_inventory.json", "shape": "{controls[]}"},
         "output": {"artifact": "checkpoints/t3/*.<fmt>.json", "shape": "[checkpoint per category]",
                    "path_pattern": "<init-dir>/checkpoints/t3/<category>.<fmt>.json"},

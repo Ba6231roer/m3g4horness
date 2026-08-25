@@ -25,8 +25,10 @@ CLI contract (`--help` is the contract surface, R5.1):
        [--max-unit-bytes B] [--orch-budget-bytes B]
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
-  {"total": N, "done": M, "failed": F, "pending": [<RuleJobLite>, ...], "format": "...",
-   "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
+  {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<RuleJobLite>, ...],
+   "format": "...", "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
+  - repo        = ABSOLUTE target root (resolve()d --target; the fanout dispatcher
+                 anchors its tree checks + subprocess cwd on it)
   - pending[] item: {category, format, rule_path, done_marker, failed_marker, input_path, bytes, oversize}
   - failed     = #confirmed-failed categories (`.failed` marker; terminal, excluded from
                  pending, NOT retried on --resume; done+failed+pending = total). Crash with
@@ -160,7 +162,8 @@ def main():
     ap.add_argument("--checkpoints",
                     help="T3 checkpoint dir (default: <inventory>/../checkpoints/t3)")
     ap.add_argument("--target", default=".",
-                    help="target project root for rule_path (default .)")
+                    help="target project root for rule_path (default .); resolve()d "
+                         "absolute also emitted as stdout top-level `repo` anchor")
     ap.add_argument("--rules-dir",
                     help="opencode rules detail dir (default <target>/docs/security-controls); "
                          "opencode rule_path = <abs target>/<rules-dir>/<cat>.md "
@@ -263,6 +266,7 @@ def main():
     page = all_units[args.offset: args.offset + max(0, req_limit)]
     page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)
     result = {
+        "repo": target_abs,
         "total": total,
         "done": done_count,
         "failed": failed_count,

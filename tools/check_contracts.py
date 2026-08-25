@@ -103,6 +103,22 @@ SRA_SHELL_REQUIRED_FLAGS = ["--max-aggregate-bytes"]
 # fenced example is trimmed — --help IS the interface the agent learns from.
 RESUME_SCRIPT = ROOT / "core" / "scripts" / "resume_state.py"
 RESUME_REQUIRED_FLAGS = ["--target", "--init-dir", "--run-root", "--check"]
+# /mgh-init tier-aware wave dispatcher flags that MUST appear in fanout_runner.py --help
+# (fanout-dispatch adoption, scout + t1 + t3; R5.1 contract surface). Asserted directly
+# so the contract holds even if a shell's fenced example is trimmed — --help IS the interface.
+FANOUT_RUNNER_SCRIPT = ROOT / "core" / "scripts" / "fanout_runner.py"
+FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candidates",
+                                "--inventory", "--format", "--rules-dir", "--target",
+                                "--checkpoints", "--inputs-dir", "--host",
+                                "--wave", "--time-budget-ms", "--call-timeout-s", "--resume",
+                                "--pending-file", "--purge-audit", "--dry-run", "--template"]
+# Per-tier task-message templates the dispatcher reads (fanout-dispatch tier adoption);
+# existence asserted so a trimmed mirror cannot silently break dispatch.
+FANOUT_TEMPLATES = [
+    ROOT / "core" / "prompts" / "fragments" / "fanout" / "scout-task.md",
+    ROOT / "core" / "prompts" / "fragments" / "fanout" / "t1-task.md",
+    ROOT / "core" / "prompts" / "fragments" / "fanout" / "t3-task.md",
+]
 PLAN_AGG_SCRIPT = ROOT / "core" / "scripts" / "plan_aggregate.py"
 PLAN_AGG_REQUIRED_FLAGS = ["--node", "--init-dir", "--budget", "--materialize",
                            "--offset", "--limit", "--orch-budget-bytes"]
@@ -308,7 +324,8 @@ def main():
     # script's --help (re-entrance + hard-budget gate; R5.1 contract surface).
     for script, req_flags in ((RESUME_SCRIPT, RESUME_REQUIRED_FLAGS),
                               (PLAN_AGG_SCRIPT, PLAN_AGG_REQUIRED_FLAGS),
-                              (WRITE_RUNCONFIG_SCRIPT, WRITE_RUNCONFIG_REQUIRED_FLAGS)):
+                              (WRITE_RUNCONFIG_SCRIPT, WRITE_RUNCONFIG_REQUIRED_FLAGS),
+                              (FANOUT_RUNNER_SCRIPT, FANOUT_RUNNER_REQUIRED_FLAGS)):
         if not script.is_file():
             failures.append(f"script not found: {script}")
             continue
@@ -319,6 +336,11 @@ def main():
         for flag in req_flags:
             if flag not in declared:
                 failures.append(f"{script.name}: --help missing required {flag!r}")
+
+    # fanout_runner per-tier task templates MUST exist (tier-aware dispatch reads them).
+    for template in FANOUT_TEMPLATES:
+        if not template.is_file():
+            failures.append(f"fanout task template not found: {template}")
 
     # /mgh-ut-init shells must advertise the shell-level request-context-budget + format flag.
     for shell in UT_INIT_SHELLS:

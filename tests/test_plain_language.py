@@ -54,7 +54,7 @@ class TestPlainLanguage(unittest.TestCase):
         d = json.loads(r.stdout)
         self.assertEqual(d["missing_preambles"], [])
         self.assertEqual(d["warnings"], [])
-        self.assertGreaterEqual(d["scanned"], 12)   # 6 proposals + 5 man + glossary
+        self.assertGreaterEqual(d["scanned"], 11)   # 5 proposals + 5 man + glossary
         # the doctrine change itself must carry the preamble WITHOUT allowlist
         self.assertGreaterEqual(d["allowlisted"], 1)
 

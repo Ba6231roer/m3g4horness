@@ -197,7 +197,11 @@ class TestNewScriptsStandalone(unittest.TestCase):
         r = self._run(SCRIPTS / "list_rule_jobs.py", "--inventory", str(inv),
                       "--format", "opencode")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout)["total"], 1)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["total"], 1)
+        # stdout top-level `repo` anchor (resolved --target abs; fanout-dispatch D3)
+        self.assertTrue(out["repo"])
+        self.assertEqual(out["repo"], str(self.cwd.resolve()))
 
     # --- re-entrant resume + aggregate-sharding leaves (context-resilience) ---
 

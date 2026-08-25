@@ -16,6 +16,135 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — `/mgh-init` fan-out dispatcher generalized to all tiers (scout + t1 + t3)
+
+- `fanout_runner.py` is now **tier-aware**: `--tier scout|t1|t3` (default scout — the
+  existing scout call shape `--scout-plan/--checkpoints/--inputs-dir` is unchanged).
+  All tier variation lives in a single `TIERS` mapping table (enumeration script +
+  forwarded flags, task template, placeholder set, anchor-tree path fields, fanout
+  agent name, marker `tier` value); the wave loop, ack state machine, three-level
+  timeout invariant, sidecar, and audit copies are shared with zero per-tier branches.
+  t1 requires `--clusters`/`--candidates`; t3 requires `--inventory`/`--format`/
+  `--rules-dir`/`--target` (closed-set validation: missing flags → exit 2).
+- **T1 scout-gate pass-through**: when `list_clusters.py` refuses with exit 2
+  (`scout-incomplete-gate`), the dispatcher exits 2 and forwards its stderr recipe
+  verbatim (finish the scout tier first) — a gate refusal is never swallowed into a
+  generic error / crash re-dispatch loop.
+- **T3 `repo` anchor**: `list_rule_jobs.py` stdout now carries top-level `repo`
+  (resolved absolute `--target`, same shape as `list_clusters`) — the precondition
+  for the dispatcher's anchor-tree checks and subprocess cwd on the t3 tier.
+- **New task templates** `core/prompts/fragments/fanout/t1-task.md` / `t3-task.md`
+  (same shape as `scout-task.md`: input-field declarations + stage-prompt load
+  instruction only, zero behavior-rule duplication; t3 placeholder set uses
+  `rule_path`, no checkpoint/slice fields).
+- **opencode fanout agent clones** `init-induct-fanout.md` / `init-rulewriter-fanout.md`
+  (`mode: primary`, verbatim clone of the stage agent + fanout annotation — the
+  spike-verified headless-spawn path); claude side stays inline-JSON parameterized.
+- **t1/t3 fragments are dispatcher-first** (`init-stage/t1.md`/`t3.md`): main path =
+  one `Bash` `fanout_runner.py --tier …` with `--time-budget-ms` wiring +
+  `partial:true` re-dispatch; exit 2 → manual-dispatch fallback preserved verbatim;
+  T1→T2 validate gate and t3 assemble steps untouched. `list_steps.py` t1/t3
+  invocations now point at the dispatcher; `discipline_core.py` t1/t3 recipes carry
+  the soft-deadline re-dispatch discipline (per-call `timeout` > `--time-budget-ms`).
+- **BREAKING (run-state file rename, one-time)**: the progress sidecar is now
+  `fanout_progress.<tier>.json` per tier (scout: `fanout_progress.json` →
+  `fanout_progress.scout.json`). Interleaved long runs (resume) would otherwise
+  overwrite a single shared file with fake backwards progress. Old-name leftovers
+  are harmless (run-state disclosure, not a contract artifact; not read by
+  resume/init_manifest); install does not clean them. Man page + fragments updated.
+- Contract lint asserts the new flags (`--tier`/`--clusters`/`--candidates`/
+  `--inventory`/`--format`/`--rules-dir`/`--target`) + the three tier templates'
+  existence; `install.sh` self-check covers the fanout tier payload (templates +
+  opencode fanout agent clones).
+
+### Changed — `/mgh-init` scout dispatcher long-run timeout calibration + progress visibility
+
+- First large-repo live resume (900-batch scale, opencode host) exposed: the scout
+  fragment's dispatcher call line never passed `--time-budget-ms`, so one `Bash` call
+  ran 15 minutes with zero visible output and got hard-killed by the host shell
+  per-call timeout (900s) — then the orchestrator's marker-based self-healing
+  re-dispatched it into a kill/re-dispatch loop (each kill losing in-flight waves),
+  with no way for a human to tell "slow" from "hung".
+- **Timeout invariant, documented and wired** (`core/scripts/fanout_runner.py`):
+  `call-timeout-s × drain headroom < time-budget-ms < host per-call timeout`
+  (≥20% headroom per level). `--call-timeout-s` default 1800→**7200** — one batch =
+  one full LLM subagent run on a slow intranet endpoint (minutes-level observed), so
+  ~4× headroom; better-slow-than-killed: a killed batch leaves no marker, stays
+  pending, and re-dispatching wastes a whole run. `--time-budget-ms` help now carries
+  the recommendation (host per-call timeout × 0.8; opencode 900000ms host → 720000,
+  claude Bash 600000ms cap → 480000). The soft deadline deterministically fires
+  BEFORE the host hard kill (stop starting waves → drain in-flight → exit 0 +
+  `partial:true`), turning every re-dispatch into a clean early-exit instead of a
+  hard kill. Deliberately NO runtime cross-validation of the two flags (budget <
+  call-timeout at worst delays exit by one call-timeout; still clean, still
+  resumable — a hard check would manufacture fake failures under legal combos).
+- **Progress sidecar (human-facing, zero orchestrator involvement)**: the dispatcher
+  atomically writes `<init-dir>/fanout_progress.json` (stdlib tempfile + os.replace)
+  after every wave and on every exit, with `{ts, host, total, done, failed, pending,
+  wave, waves_run, wave_done_avg_s, eta_batches, state}`, `state ∈ {running,
+  exited-partial, exited-clean}`. Watch it from a second terminal
+  (`Get-Content -Wait`); `done` not moving for minutes with `state:running` = the
+  hang signal for a HUMAN to act on. Counts derive from the same snapshot as the
+  stdout summary (unit test asserts they agree); write failures warn on stderr and
+  never break the run. The orchestrator and any agent NEVER read it (not a truth
+  source; `resume_state.py`/`init_manifest.json` neither read nor validate it).
+- **Out-of-host manual takeover (escape hatch, documented)**: dispatcher and
+  orchestrator share the disk markers as the only truth source (naturally
+  mutexed), so for large-repo long runs a human may run the same dispatcher
+  command directly in a terminal (no host timeout clamp, per-wave stderr readable,
+  sidecar still written), then `/mgh-init --resume` back in the session.
+- Wiring: `core/prompts/fragments/init-stage/scout.md` call line now exemplifies
+  `--time-budget-ms` + the MUST-be-below-host-timeout invariant + the manual-run
+  exit; `core/scripts/discipline_core.py` `scout-fanout-dispatcher` recipe gains
+  the re-dispatch timeout discipline (per-call `timeout` > `--time-budget-ms`);
+  `docs/man/mgh-init.md` risk section explains long-run visibility in plain
+  language. Tests: `tests/test_fanout_runner.py` grows default-value/invariant-doc
+  assertions, sidecar existence/state/count-agreement cases, and fragment/recipe
+  timeout-relation doc assertions. No disk schema change; zero new runtime deps.
+
+### Added — `/mgh-init` scout wave dispatcher (`fanout_runner.py`, zero-LLM fan-out)
+
+- The scout tier's wave loop (take pending → spawn N subagents → collect acks → page)
+  moves out of orchestrator LLM turns into a deterministic stdlib leaf script
+  `core/scripts/fanout_runner.py`. The orchestrator makes ONE `Bash` call (+ re-dispatch
+  the same command while `partial:true`); inside, the script consumes
+  `list_scout_batches.py --materialize` stdout, builds each subagent's task message from
+  a FIXED template + verbatim field substitution, spawns host-CLI subprocesses in waves
+  (`--wave`, default 5; ThreadPool + per-call timeout), parses bounded acks
+  (`ok`/`oversize`/`failed`), and re-derives pending from disk markers after each wave.
+  Task-message path-spelling failures (format drift / drive-root drift / underscore-name
+  hallucination) become impossible by construction; wave boundaries cost zero LLM turns
+  (~1–3K tokens/wave saved on large repos).
+- Host spawn mapping (spike-verified on both hosts): opencode →
+  `opencode run --agent init-scout-fanout "<task>"` (new `mode: primary` hidden twin of
+  init-scout — `opencode run` refuses `mode: subagent` primaries and silently falls back
+  to the default agent); claude → `claude -p "<task>" --agents <inline JSON>
+  --allowedTools …` (stdin redirected). Host detection: `--host` explicit > opencode in
+  PATH > claude in PATH; neither → exit 2 + fallback recipe and the orchestrator falls
+  back to the existing per-wave manual dispatch (behavior unchanged, kept verbatim in the
+  scout fragment as the fallback path).
+- New task-message template `core/prompts/fragments/fanout/scout-task.md` (input fields +
+  stage-prompt load instruction only; zero behavior-rule duplication — behavior stays in
+  `stages/init-scout.md`). Per-spawn audit copies land at
+  `<inputs-dir>/<batch_id>.task.md`; `--purge-audit --dry-run` lists them (list-only
+  CLI surface; deletion via host shell after review).
+- Dispatcher-side path-drift interception: every path field is `Path.resolve()`-anchored
+  against `repo` BEFORE spawn; out-of-tree → that unit gets a `.failed` marker
+  (reason=path-drift) and is never spawned (deterministic dual of the reader-side
+  poisoned-input rejection). `.done`/`.failed` marker semantics, `--resume` idempotence,
+  soft `--time-budget-ms` early-exit (`partial:true`, exit 0), and stdout-JSON /
+  stderr-diagnostics split all follow the existing leaf-script contracts (R5.3/R5.4).
+- Affected: `core/scripts/fanout_runner.py` (new) + `list_steps.py` (scout step now
+  points at the dispatcher invocation) + `discipline_core.py` (scout gains a
+  dispatcher-first path recipe); `core/prompts/fragments/fanout/scout-task.md` (new) +
+  `fragments/init-stage/scout.md` (dispatcher-first dispatch section; manual path kept
+  as fallback) + `stages/init-scout.md` + mirrored `releases/{claude-code/agents,
+  opencode/agent}/init-scout.md` (source-of-fields wording: dispatcher path);
+  `releases/opencode/agent/init-scout-fanout.md` (new); both `mgh-init.md` shells
+  (component table row); `install.sh` self-check list + `tools/check_contracts.py`
+  (fanout_runner flag assertions); `tests/test_fanout_runner.py` (new). Zero new runtime
+  deps (stdlib subprocess/concurrent.futures); no on-disk schema change.
+
 ### Added — plain-language doctrine (audience declaration + human-facing assets)
 
 - R3 now declares an **audience** for every artifact (human / agent / dual): human-facing

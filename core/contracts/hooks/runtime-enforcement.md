@@ -31,12 +31,22 @@ the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 {"domain": "mgh-init", "target": "<abs target>", "out_roots": ["<abs>..."], "v": 1}
 ```
 
+Optional field (absent by default; absence preserves the shape byte-for-byte):
+
+```json
+{"domain": "mgh-sdr", "target": "<abs target>", "out_roots": [], "read_roots": ["<abs external repo>"], "v": 1}
+```
+
 | Field | Purpose |
 |---|---|
-| `domain` | `mgh-init` / `mgh-sast` / `mgh-sra` / `mgh-srr` / `mgh-ut-init` (advisory; discovery is by path) |
+| `domain` | `mgh-init` / `mgh-sast` / `mgh-sra` / `mgh-srr` / `mgh-ut-init` / `mgh-sdr` (advisory; discovery is by path) |
 | `target` | abs project root (Windows-native; **MUST** come from a Python leaf-script stdout — `describe_artifact --field repo` / `prepare_augment`/`ingest_requirements` stdout `project_root` / `write_runconfig` stdout `target` — never bash `pwd`, which emits MSYS `/c/...` that pathlib mis-resolves on Windows) |
 | `out_roots[]` | abs roots for customized `--out` / `--rules-dir` (init & ut-init; honors custom output locations without over-blocking) |
+| `read_roots[]` | **optional** abs external READ-ONLY roots (sdr: confirmed external repos the launcher/sdr_context actually searched). Tool-face read side (`Read`/`Glob`/`Grep`) only; write side and Bash search verbs NEVER honored (judged against `MGH_TARGET` alone). **read_roots 最小化纪律**: declare only roots actually searched in this run — NEVER a user-supplied catch-all / drive root. Fail-closed: a declared root must exist and be a directory at judgment time; a missing root grants zero. |
 | `v` | schema version |
+
+`out_roots[]` (write-side allowlist extension, init/ut-init) and `read_roots[]` (read-side-only
+extension, any domain) are independent fields with disjoint effects.
 
 ### Per-domain run-root (sentinel location, discovered on the anchor chain)
 
@@ -46,6 +56,7 @@ the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
 | `mgh-sast` | `MGH_SAST_ACTIVE` | `security-scan` | `<dir>/security-scan/.active` |
 | `mgh-sra` | `MGH_SRA_ACTIVE` | `.mgh-sra` | `<dir>/.mgh-sra/.active` |
 | `mgh-srr` | `MGH_SRR_ACTIVE` | `.mgh-srr` | `<dir>/.mgh-srr/.active` |
+| `mgh-sdr` | `MGH_SDR_ACTIVE` | `.mgh-sdr` | `<dir>/.mgh-sdr/.active` |
 | `mgh-ut-init` | `MGH_UT_INIT_ACTIVE` | `.mgh-ut-init` | `<dir>/.mgh-ut-init/.active` |
 
 `<dir>` runs over the anchor-to-drive-root chain (anchor itself first, then each ancestor,
@@ -165,17 +176,18 @@ temp-I/O / file-assoc blocks still fire).
 
 | Layer | Tool / shape | Anchor | Blocked when |
 |---|---|---|---|
-| Tool abstraction | `Read` | `file_path` | resolved `file_path` outside the target tree |
-| Tool abstraction | `Read` (leaf-source rule) | `file_path` | script extension ∧ `mgh-core/scripts` path segment (installed leaf script source — the read-side peer of "leaf scripts read-only"; target-project `.py` and non-script artifacts pass; fires even in the degrade-no-target case) |
-| Tool abstraction | `Glob` / `Grep` | `path` (default = cwd) | resolved `path` outside; `path` absent + cwd outside (cwd-drift leak) |
+| Tool abstraction | `Read` | `file_path` | resolved `file_path` outside the target tree **and** outside every declared `read_roots[]` root (a root must exist + be a dir at judgment time, else grants zero) |
+| Tool abstraction | `Read` (leaf-source rule) | `file_path` | script extension ∧ `mgh-core/scripts` path segment (installed leaf script source — the read-side peer of "leaf scripts read-only"; target-project `.py` and non-script artifacts pass; fires even in the degrade-no-target case). NEVER relaxed by `read_roots[]` |
+| Tool abstraction | `Glob` / `Grep` | `path` (default = cwd) | resolved `path` outside the target tree **and** outside every declared `read_roots[]` root; `path` absent + cwd outside both (cwd-drift leak) |
 | Tool abstraction | — | `pattern` / `glob` | **NOT parsed** (the `path` anchor is authoritative; conservative vs false positives) |
-| Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside, OR no abs path + cwd outside |
+| Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside, OR no abs path + cwd outside — **never relaxed by `read_roots[]`** (external roots are tool-face-read-only by design) |
 | Path resolution | `..` chain (e.g. `<target>\aa\bb\cc\..\..\..\..\xxxx` folding to a drive root) | the resolved path | `Path.resolve()` folds `..` segments; a chain that climbs out of the tree resolves outside and is blocked (the reported D-root permission-prompt interrupt shape) |
 | Path resolution | hallucinated out-of-tree prefix (an underscore dir name regenerated as a separator pair, e.g. `acme_wing` → `acme\wing`) | the resolved path | resolves outside the tree and is blocked by the same out-of-tree judgment — no directory-name semantics are attempted |
 
 A hit → exit 2 + stderr **read-side recipe** (points at "read only this batch's `input_path`/
 `targets[]`; anchor `Glob`/`Grep` (and `rg`/`grep`/… in Bash) at the repo root; NEVER read
-the parent dir / sibling modules"). Regex-over-observed-shape: pipes/aliases/env-injected
+the parent dir / sibling modules"; when the sentinel declares `read_roots[]` the recipe adds
+"declared roots are not a wildcard"). Regex-over-observed-shape: pipes/aliases/env-injected
 paths in the Bash file-search form are NOT guaranteed (same stance as the temp-I/O and
 file-association rules); a `--flag <path>` argument on a non-search verb does NOT trip.
 

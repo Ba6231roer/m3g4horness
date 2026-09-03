@@ -35,6 +35,8 @@ DEFAULT_SHELLS = [
     ROOT / "releases" / "opencode" / "command" / "mgh-srr.md",
     ROOT / "releases" / "claude-code" / "commands" / "mgh-ut-init.md",
     ROOT / "releases" / "opencode" / "command" / "mgh-ut-init.md",
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-sdr.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-sdr.md",
 ]
 # mgh-sast shells and the shell-level (non-script) flags their flag table MUST advertise
 # (--controls is the shell's own flag, not a *.py flag, so the bash-block extractor below
@@ -109,6 +111,7 @@ RESUME_REQUIRED_FLAGS = ["--target", "--init-dir", "--run-root", "--check"]
 FANOUT_RUNNER_SCRIPT = ROOT / "core" / "scripts" / "fanout_runner.py"
 FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candidates",
                                 "--inventory", "--format", "--rules-dir", "--target",
+                                "--repo", "--base", "--branch",
                                 "--checkpoints", "--inputs-dir", "--host",
                                 "--wave", "--time-budget-ms", "--call-timeout-s",
                                 "--stall-waves", "--resume",
@@ -120,7 +123,24 @@ FANOUT_TEMPLATES = [
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "scout-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t1-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t3-task.md",
+    ROOT / "core" / "prompts" / "fragments" / "fanout" / "sdr-task.md",
 ]
+# /mgh-sdr deterministic leaf flags that MUST appear in each script's --help (R5.1
+# contract surface). Asserted directly so the contract holds even if a shell's fenced
+# example is trimmed — --help IS the interface the agent learns from.
+DIFF_GROUP_SCRIPT = ROOT / "core" / "scripts" / "diff_group.py"
+DIFF_GROUP_REQUIRED_FLAGS = ["--repo", "--base", "--branch", "--checkpoints",
+                             "--materialize", "--max-standalone-bytes", "--offset",
+                             "--limit", "--resume", "--check"]
+SDR_CONTEXT_SCRIPT = ROOT / "core" / "scripts" / "sdr_context.py"
+SDR_CONTEXT_REQUIRED_FLAGS = ["--repo", "--run-dir", "--base", "--branch", "--dimensions",
+                              "--baseline-budget-bytes", "--external-budget-bytes",
+                              "--read-root", "--check"]
+RENDER_SDR_SCRIPT = ROOT / "core" / "scripts" / "render_sdr_report.py"
+RENDER_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--out-dir", "--check"]
+SDR_LAUNCH_SCRIPT = ROOT / "core" / "scripts" / "mgh_sdr_launch.py"
+SDR_LAUNCH_REQUIRED_FLAGS = ["--repo", "--branch", "--base", "--host", "--dimensions",
+                             "--multi-branch", "--read-root", "--dry-run"]
 PLAN_AGG_SCRIPT = ROOT / "core" / "scripts" / "plan_aggregate.py"
 PLAN_AGG_REQUIRED_FLAGS = ["--node", "--init-dir", "--budget", "--materialize",
                            "--offset", "--limit", "--orch-budget-bytes"]
@@ -343,6 +363,22 @@ def main():
     for template in FANOUT_TEMPLATES:
         if not template.is_file():
             failures.append(f"fanout task template not found: {template}")
+
+    # /mgh-sdr leaf flags MUST be declared in each script's --help (R5.1 contract surface).
+    for script, req_flags in ((DIFF_GROUP_SCRIPT, DIFF_GROUP_REQUIRED_FLAGS),
+                              (SDR_CONTEXT_SCRIPT, SDR_CONTEXT_REQUIRED_FLAGS),
+                              (RENDER_SDR_SCRIPT, RENDER_SDR_REQUIRED_FLAGS),
+                              (SDR_LAUNCH_SCRIPT, SDR_LAUNCH_REQUIRED_FLAGS)):
+        if not script.is_file():
+            failures.append(f"script not found: {script}")
+            continue
+        declared = declared_flags(script)
+        if declared is None:
+            failures.append(f"{script.name}: `--help` failed")
+            continue
+        for flag in req_flags:
+            if flag not in declared:
+                failures.append(f"{script.name}: --help missing required {flag!r}")
 
     # /mgh-ut-init shells must advertise the shell-level request-context-budget + format flag.
     for shell in UT_INIT_SHELLS:

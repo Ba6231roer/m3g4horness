@@ -17,6 +17,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,7 @@ TEMPLATES = {
     "scout": FANOUT_DIR / "scout-task.md",
     "t1": FANOUT_DIR / "t1-task.md",
     "t3": FANOUT_DIR / "t3-task.md",
+    "sdr": FANOUT_DIR / "sdr-task.md",
 }
 
 
@@ -923,6 +925,119 @@ class TestAgentCloneParity(unittest.TestCase):
             self.assertIn("## Input (from dispatcher)", text, fanout)
             for f in fields:
                 self.assertIn(f, text, f"{fanout}:{f}")
+
+
+class TestSdrTier(unittest.TestCase):
+    """sdr tier (add-mgh-sdr): TIERS row drives the shared wave machine unchanged —
+    template fill + closed placeholder set, path-drift interception, --pending-file
+    dispatch of the sdr listing shape (unit_id/kind/route + draft_path markers)."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_sdr_test")
+        self.tmp = Path(tempfile.gettempdir()) / f"mgh_fanout_sdr_{id(self)}"
+        repo = self.tmp / "repo"
+        run_dir = repo / ".mgh-sdr" / "runs" / "t1"
+        (run_dir / "markers").mkdir(parents=True, exist_ok=True)
+        (run_dir / "slices").mkdir(parents=True, exist_ok=True)
+        (run_dir / "grouping.json").write_text("{}", encoding="utf-8")
+        self.repo = repo
+        self.run_dir = run_dir
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _sdr_unit(self, uid="UserController___user_detail", kind="interface",
+                  route="/user/detail") -> dict:
+        return {
+            "unit_id": uid, "kind": kind, "route": route,
+            "input_path": str(self.run_dir / "slices" / f"{uid}.slice.md"),
+            "draft_path": str(self.run_dir / "drafts" / f"{uid}.json"),
+            "done_marker": str(self.run_dir / "markers" / f"{uid}.done"),
+            "failed_marker": str(self.run_dir / "markers" / f"{uid}.failed"),
+            "baseline_path": str(self.run_dir / "baseline.md"),
+            "external_dir": str(self.run_dir / "external"),
+            "unit_bytes": 100,
+        }
+
+    def _listing(self, units, done=0, failed=0):
+        return {"repo": str(self.repo), "base": "master", "branch": "feature-pay",
+                "empty": False, "total": len(units) + done + failed,
+                "done": done, "failed": failed,
+                "counts": {"interface": len(units), "standalone": 0},
+                "pending": units}
+
+    def _write_listing(self, listing) -> Path:
+        p = self.run_dir / "pending_test.json"
+        p.write_text(json.dumps(listing), encoding="utf-8")
+        return p
+
+    def _run_cli(self, listing_path: Path, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--tier", "sdr",
+             "--repo", str(self.repo), "--base", "master",
+             "--checkpoints", str(self.run_dir / "markers"),
+             "--inputs-dir", str(self.run_dir / "slices"),
+             "--pending-file", str(listing_path), *extra],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    def test_template_fill_sdr(self):
+        unit = self._sdr_unit()
+        msg = self.fr._fill_template(self.fr.TIERS["sdr"],
+                                     TEMPLATES["sdr"].read_text(encoding="utf-8"),
+                                     unit, str(self.repo), "off")
+        self.assertIn("UserController___user_detail", msg)
+        self.assertIn("kind: interface", msg)
+        self.assertIn("/user/detail", msg)
+        self.assertIn(str(unit["input_path"]), msg)
+        self.assertIn(str(unit["draft_path"]), msg)
+        self.assertIn(str(unit["baseline_path"]), msg)
+        self.assertIn("codegraph=off", msg)
+        self.assertNotIn("{{", msg)
+
+    def test_template_placeholder_set_closed(self):
+        # every {{...}} placeholder in the template is in the TIERS["sdr"] set
+        import re
+        text = TEMPLATES["sdr"].read_text(encoding="utf-8")
+        used = set(re.findall(r"\{\{(\w+)\}\}", text))
+        declared = set(self.fr.TIERS["sdr"]["placeholders"])
+        self.assertEqual(used, declared,
+                         f"template placeholders {sorted(used)} != TIERS set "
+                         f"{sorted(declared)}")
+
+    def test_sdr_path_drift_intercepted(self):
+        bad = self._sdr_unit()
+        bad["draft_path"] = str(Path(self.tmp) / "outside" / "draft.json")
+        reason = self.fr._anchor_check(self.fr.TIERS["sdr"], bad, self.repo)
+        self.assertIsNotNone(reason)
+        self.assertIn("draft_path", reason)
+        # baseline_path/external_dir are NOT path_fields (read-side info, not write
+        # anchors): drift there does not fail the anchor check
+        odd = self._sdr_unit()
+        odd["external_dir"] = "Z:/elsewhere"
+        self.assertIsNone(self.fr._anchor_check(self.fr.TIERS["sdr"], odd, self.repo))
+
+    def test_pending_file_dispatch_sdr_shape(self):
+        units = [self._sdr_unit("uA", "interface", "/user/detail"),
+                 self._sdr_unit("uB", "standalone", "")]
+        for u in units:
+            Path(u["input_path"]).write_text("slice", encoding="utf-8")
+        r = self._run_cli(self._write_listing(self._listing(units)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        self.assertEqual(d["tier"], "sdr")
+        self.assertEqual(d["total"], 2)
+        # audit copies filled (test hook = fill without spawn)
+        for u in units:
+            audit = self.run_dir / "slices" / f"{u['unit_id']}.task.md"
+            self.assertTrue(audit.is_file(), audit)
+            self.assertNotIn("{{", audit.read_text(encoding="utf-8"))
+
+    def test_sdr_codegraph_signal_off_in_dispatcher(self):
+        # the sdr tier derives codegraph=off in the dispatcher (the shell decides the
+        # real signal); this is the documented divergence from init tiers
+        self.assertEqual(self.fr._codegraph_signal(self.run_dir / "grouping.json", "sdr"),
+                         "off")
 
 
 if __name__ == "__main__":

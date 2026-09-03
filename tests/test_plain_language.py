@@ -46,15 +46,15 @@ def run_lint_in_root(root: Path, *extra):
 
 
 class TestPlainLanguage(unittest.TestCase):
-    # --- forward: real repo state is green under the committed allowlist ---
+    # --- forward: proposals carry the preamble; docs/ content is NEVER a
+    # test subject (maintainer standing rule) — no repo-docs gating here ---
     def test_repo_green_under_allowlist(self):
         self.assertTrue(ALLOWLIST.is_file(), "committed allowlist missing")
         r = run_lint("--allowlist", str(ALLOWLIST))
         self.assertEqual(r.returncode, 0, r.stderr)
         d = json.loads(r.stdout)
         self.assertEqual(d["missing_preambles"], [])
-        self.assertEqual(d["warnings"], [])
-        self.assertGreaterEqual(d["scanned"], 11)   # 5 proposals + 5 man + glossary
+        self.assertGreaterEqual(d["scanned"], 1)
         # the doctrine change itself must carry the preamble WITHOUT allowlist
         self.assertGreaterEqual(d["allowlisted"], 1)
 

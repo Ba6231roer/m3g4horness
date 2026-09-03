@@ -132,6 +132,33 @@ class TestZeroRuntimeDeps(unittest.TestCase):
             self.assertTrue((SCRIPTS / f"{s}.py").is_file(),
                             f"{s}.py missing — not covered by the zero-dep scan")
 
+    def test_new_sdr_scripts_are_scanned(self):
+        # add-mgh-sdr: four new stdlib-only scripts (diff_group / sdr_context /
+        # render_sdr_report / mgh_sdr_launch — the launcher ships with install too).
+        # sdr_context sibling-imports sensitive_catalog (stdlib-or-sibling allowed).
+        # The general stdlib/sibling test above proves no third-party import; this also
+        # asserts NO network module sneaks into the read/retrieval path.
+        net_modules = {"socket", "http", "urllib", "urllib2", "http.client",
+                       "requests", "ftplib", "telnetlib", "smtplib", "asyncio",
+                       "ssl", "xmlrpc"}
+        offenders = []
+        for s in ("diff_group", "sdr_context", "render_sdr_report", "mgh_sdr_launch"):
+            py = SCRIPTS / f"{s}.py"
+            self.assertTrue(py.is_file(),
+                            f"{s}.py missing — not covered by the zero-dep scan")
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [n.name.split(".")[0] for n in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                    names = [node.module.split(".")[0]]
+                for top in names:
+                    if top in net_modules:
+                        offenders.append(f"{py.name}: import {top}")
+        self.assertFalse(offenders, "network module imported in sdr scripts:\n  " +
+                         "\n  ".join(offenders))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

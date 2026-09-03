@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 block_adhoc_scripts — PreToolUse hook enforcing /mgh-init + /mgh-sast + /mgh-sra + /mgh-srr
-+ /mgh-ut-init orchestrator discipline (R5.2 at runtime, R5.7 deliverable). Single decision
-source for both claude (PreToolUse) and opencode (.ts plugin); the .ts shim is glue-only.
++ /mgh-ut-init + /mgh-sdr orchestrator discipline (R5.2 at runtime, R5.7 deliverable). Single
+decision source for both claude (PreToolUse) and opencode (.ts plugin); the .ts shim is glue-only.
 
 Activation = env OR disk sentinel (closes the opencode "plugin process does not inherit
 mid-session bash-exported env -> guard dormant for a whole run" reliability boundary).
 Active inside a mgh run-domain when EITHER (a) env MGH_INIT_ACTIVE=1 / MGH_SAST_ACTIVE=1 /
-MGH_SRA_ACTIVE=1 / MGH_SRR_ACTIVE=1 / MGH_UT_INIT_ACTIVE=1 is set, OR (b) a disk sentinel
-.active exists at <dir>/<run-root>/.active for ANY dir on the anchor-to-drive-root chain,
-where run-root is the domain's run dir (init->.mgh-init, sast->security-scan, sra->.mgh-sra,
-srr->.mgh-srr, ut-init->.mgh-ut-init). The anchor is the BEST available cwd signal: the
+MGH_SRA_ACTIVE=1 / MGH_SRR_ACTIVE=1 / MGH_UT_INIT_ACTIVE=1 / MGH_SDR_ACTIVE=1 is set, OR (b)
+a disk sentinel .active exists at <dir>/<run-root>/.active for ANY dir on the
+anchor-to-drive-root chain, where run-root is the domain's run dir (init->.mgh-init,
+sast->security-scan, sra->.mgh-sra, srr->.mgh-srr, ut-init->.mgh-ut-init, sdr->.mgh-sdr). The anchor is the BEST available cwd signal: the
 `cwd` field of the hook's stdin payload when present (claude PreToolUse carries the
 session/tool cwd — the context that issued the tool call), falling back to the guard
 process's own cwd (opencode plugin process). Sentinel discovery walks UPWARD from the
@@ -21,8 +21,10 @@ ANY depth still discovers the sentinel at <target>/<run-root>/.active (the prior
 lookup missed it -> guard dormant -> whole read/write side silently degraded). An anchor
 entirely outside the target tree (e.g. an opencode server started elsewhere) does NOT hit
 -> correct dormancy (documented residual boundary; the guard NEVER scans the drive). The
-sentinel is JSON {"domain","target","out_roots[]","v":1},
-written by the orchestrator at step 0 via Bash and removed on completion/clean-stop.
+sentinel is JSON {"domain","target","out_roots[]","v":1}, optionally with
+"read_roots[]" (abs external read-only roots; sdr declares confirmed external repos there),
+written by the orchestrator at step 0 via Bash (init/ut-init: co-written by write_runconfig.py;
+sdr: written by the launcher) and removed on completion/clean-stop.
 Outside all run-domains (neither env nor sentinel on the whole walked chain): exit 0
 silently (zero day-to-day noise).
 Contract: core/contracts/hooks/runtime-enforcement.md.
@@ -66,6 +68,13 @@ Blocks the real-world failure shapes —
       INTERRUPT the run (soft failure). Now a fail-loud exit 2 + read-side recipe (D4: a
       Glob/Grep with no `path` and a cwd outside the target tree is the cwd-drift leak).
       target absent => degrade to pass (NEVER a hard read block when none was pinned).
+      read_roots[] exception (declarative, tool-face read-only): when the sentinel carries
+      read_roots[], a tool-face read anchor inside ANY declared root that exists and is a
+      directory AT JUDGMENT TIME passes (fail-closed: a non-existent declared root grants
+      nothing). This relaxation covers ONLY the tool-abstraction read layer below — the Bash
+      file-search confinement, the write side (all layers), and the leaf-source block keep
+      judging against MGH_TARGET alone; an external read root NEVER becomes writable or
+      Bash-searchable.
   (f2) Leaf-script source read: a `Read` whose resolved file_path bears a script extension
       AND lives under an installed `mgh-core/scripts/` path segment (both
       `.claude/mgh-core/scripts/` and `.opencode/mgh-core/scripts/` layouts) — the read-side
@@ -119,11 +128,12 @@ from pathlib import Path
 
 # Per-domain run-domain env flag + run-root (where the .active sentinel lives, discovered
 # on the anchor-to-drive-root chain). Precedence order when more than one is active (rare):
-# sast > sra > srr > init.
+# sast > sra > srr > sdr > init.
 _DOMAINS = (
     ("mgh-sast", "MGH_SAST_ACTIVE", "security-scan"),
     ("mgh-sra", "MGH_SRA_ACTIVE", ".mgh-sra"),
     ("mgh-srr", "MGH_SRR_ACTIVE", ".mgh-srr"),
+    ("mgh-sdr", "MGH_SDR_ACTIVE", ".mgh-sdr"),
     ("mgh-init", "MGH_INIT_ACTIVE", ".mgh-init"),
     ("mgh-ut-init", "MGH_UT_INIT_ACTIVE", ".mgh-ut-init"),
 )
@@ -204,6 +214,7 @@ _WORKLIST = {
     "mgh-sast": "list_chunks.py / list_verify_jobs.py",
     "mgh-sra": "prepare_augment.py / merge_augment.py / merge_memory.py",
     "mgh-srr": "ingest_requirements.py / render_report.py / merge_memory.py",
+    "mgh-sdr": "diff_group.py --materialize / render_sdr_report.py stdout",
     "mgh-ut-init": "list_test_groups.py",
 }
 
@@ -216,6 +227,7 @@ _AGGREGATES = {
     "mgh-sast": ("s3_chunks.json", "s5_filtered.json", "scope_manifest.json"),
     "mgh-sra": ("change_context.json",),
     "mgh-srr": ("change_context.json",),
+    "mgh-sdr": ("sdr_manifest.json",),
     "mgh-ut-init": ("test_groups.json", "test_rules_inventory.json"),
 }
 # A shell read verb (start/delimiter-bound) — cat/head/tail (sh), type (cmd), Get-Content/gc
@@ -281,7 +293,7 @@ _SUBTREE_LABELS = {"mgh-init": "init", "mgh-ut-init": "ut-init"}
 def _recipe(domain: str) -> str:
     return (
         f"{domain} orchestrator discipline (R5.2): use a sanctioned primitive —\n"
-        f"  - work-list   -> {_WORKLIST[domain]}\n"
+        f"  - work-list   -> {_WORKLIST.get(domain, 'the producer script --materialize stdout')}\n"
         "  - whole multi-unit aggregate -> list_* --materialize pending[].input_path "
         "(subagent reads its own bounded file) or describe_artifact.py --keys/--field\n"
         "  - structure   -> describe_artifact.py --keys/--sample/--shape/--field\n"
@@ -292,12 +304,19 @@ def _recipe(domain: str) -> str:
     )
 
 
-def _read_recipe(domain: str, target) -> str:
+def _read_recipe(domain: str, target, read_roots=()) -> str:
     """Read-side out-of-tree recipe (peer of _recipe; shared by the tool-abstraction rule
     Read/Glob/Grep and the Bash file-search rule rg/grep/find/…). Read side has NO positive
-    allowlist (only 'stay inside the target tree'); the recipe points at the batch input +
-    repo-root-anchored search, never at the parent dir / sibling modules."""
+    allowlist (only 'stay inside the target tree' + sentinel-declared read_roots[] external
+    roots); the recipe points at the batch input + repo-root-anchored search, never at the
+    parent dir / sibling modules. Declared read roots are not a wildcard: a blocked path was
+    outside BOTH the target tree and every declared root."""
     tgt = target if target is not None else "<not pinned — resolve MGH_TARGET>"
+    roots_note = ""
+    if read_roots:
+        roots_note = (
+            "\n  declared read_roots[] cover ONLY their listed roots (tool-face read-only; "
+            "this path is outside all of them). NEVER treat them as a wildcard prefix.")
     return (
         f"  target tree = {tgt}\n"
         f"  Read/Glob/Grep (and Bash rg/grep/find/findstr/…) MUST stay inside the target "
@@ -305,25 +324,33 @@ def _read_recipe(domain: str, target) -> str:
         f"for sibling-package confirmation use Glob/Grep (or `rg`/`grep` in Bash) with an "
         f"EXPLICIT `path` anchored at the repo root. NEVER read the parent dir, NEVER read "
         f"sibling modules, NEVER anchor a search at a path outside the target tree."
+        f"{roots_note}"
     )
 
 
-def _read_out_of_tree(tool_input, target, cwd):
+def _read_out_of_tree(tool_input, target, cwd, read_roots=()):
     """True iff a Read/Glob/Grep call's resolved anchor falls OUTSIDE the resolved MGH_TARGET
-    tree. Read takes `file_path`; Glob/Grep take the `path` anchor (defaulting to cwd when
-    absent — D4). Same Path.resolve().is_relative_to(target) semantics as the write side
-    (_is_out_of_tree), NOT a positive-allowlist check — any file inside the target tree is
-    readable. Returns False (pass) when target is None (degrade), the path is empty, or
-    either side will not resolve."""
+    tree — unless the anchor falls inside a declared read_roots[] root (sentinel read-only
+    external-root allowance; sdr external repos). Read takes `file_path`; Glob/Grep take the
+    `path` anchor (defaulting to cwd when absent — D4). Same Path.resolve().is_relative_to
+    semantics as the write side (_is_out_of_tree), NOT a positive-allowlist check — any file
+    inside the target tree is readable. A declared read root passes the TOOL-FACE read only
+    when the root exists and is a directory AT JUDGMENT TIME (fail-closed: a non-existent
+    declared root grants nothing). Bash search verbs / the write side NEVER consult
+    read_roots (they keep judging against MGH_TARGET alone). Returns False (pass) when target
+    is None (degrade), the path is empty, or either side will not resolve."""
     if target is None:
         return False
     # Read: single file_path.
     fp = (tool_input.get("file_path") or tool_input.get("path") or "")
     if fp:
         try:
-            return not Path(fp).resolve().is_relative_to(target)
+            r = Path(fp).resolve()
         except (OSError, ValueError):
             return False
+        if r.is_relative_to(target):
+            return False
+        return not _in_read_root(r, read_roots)
     # Glob/Grep: the `path` anchor is the authoritative scope (the `pattern`/`glob` field is
     # NOT parsed for traversal — conservative against false positives on legit patterns). When
     # `path` is absent the anchor defaults to the guard's cwd (D4 cwd-as-anchor): a cwd that
@@ -331,13 +358,37 @@ def _read_out_of_tree(tool_input, target, cwd):
     anchor = (tool_input.get("path") or "").strip()
     if not anchor:
         try:
-            return not cwd.is_relative_to(target)
+            if cwd.is_relative_to(target):
+                return False
+            return not _in_read_root(cwd, read_roots)
         except (OSError, ValueError):
             return False
     try:
-        return not Path(anchor).resolve().is_relative_to(target)
+        r = Path(anchor).resolve()
     except (OSError, ValueError):
         return False
+    if r.is_relative_to(target):
+        return False
+    return not _in_read_root(r, read_roots)
+
+
+def _in_read_root(resolved, read_roots) -> bool:
+    """True iff an already-resolved path falls inside ANY declared read_roots[] root that
+    exists and is a directory at judgment time (fail-closed containment: the same
+    `is_relative_to` semantics as the MGH_TARGET judgment; a missing/non-dir root grants
+    zero). read_roots entries that do not resolve are skipped (never a crash)."""
+    for root in (read_roots or ()):
+        if not isinstance(root, str) or not root.strip():
+            continue
+        r = _safe_resolve(root.strip())
+        if r is None or not r.is_dir():
+            continue
+        try:
+            if resolved.is_relative_to(r):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 def _is_leaf_script_read(tool_input) -> bool:
@@ -761,6 +812,9 @@ def main():
     out_roots = (sentinel or {}).get("out_roots") or []
     if not isinstance(out_roots, list):
         out_roots = []
+    read_roots = (sentinel or {}).get("read_roots") or []
+    if not isinstance(read_roots, list):
+        read_roots = []
     tool = payload.get("tool_name", "")
     ti = payload.get("tool_input") or {}
 
@@ -894,11 +948,14 @@ def main():
         # anchor (Read.file_path / Glob.path / Grep.path, defaulting to cwd) falls outside the
         # MGH_TARGET tree. The soft failure that interrupted runs (host permission prompt on a
         # cross-module read) becomes a fail-loud recipe. target absent => degrade to pass
-        # (NEVER use cwd as a hard read block target when none was pinned).
-        if _read_out_of_tree(ti, target, cwd):
+        # (NEVER use cwd as a hard read block target when none was pinned). Sentinel
+        # read_roots[] grants a TOOL-FACE read-only allowance inside declared external roots
+        # (fail-closed: root must exist + be a dir); every other layer (Bash search verbs,
+        # writes, leaf-source block) keeps judging against MGH_TARGET alone.
+        if _read_out_of_tree(ti, target, cwd, read_roots):
             sys.stderr.write(
                 f"blocked: read outside the MGH_TARGET tree in {domain} run-domain.\n"
-                f"  {_read_recipe(domain, target)}\n")
+                f"  {_read_recipe(domain, target, read_roots)}\n")
             return 2
     elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         # path extraction: Write/Edit/MultiEdit carry file_path; NotebookEdit carries

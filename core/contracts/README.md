@@ -56,3 +56,11 @@ Critical 9.0–10.0 · High 7.0–8.9 · Medium 4.0–6.9 · Low 0.1–3.9 · In
 |---|---|---|
 | `sra/augmentation.md` | sra 增补 I/O | `change_context.json` / draft(`gaps[]`+`security_requirements[]`+`security_tasks[]`)/ `sra_manifest.json` + 各 producer `--check` |
 | `sra/business-context.md` | 项目级业务记忆 | `business_context.json`(`roles[]`/`domains[]`/`sensitive_fields[]`/`interface_authz[]`/`clarifications[]`)+ `clarification` shape + `merge_memory` 幂等累积 |
+
+## sdr 流水线契约
+
+`/mgh-sdr`(需求分支 diff 的安全设计复核)的确定性叶脚本 I/O 契约:
+
+| File | Scope | Shape |
+|---|---|---|
+| `sdr/pipeline.md` | diff 采集分组 / 基线投影 + 外部仓受控检索 / 汇总渲染 | run 目录布局、`diff_group.py`/`sdr_context.py`/`render_sdr_report.py` I/O、draft findings schema、`pending[]` 字段、报告/manifest 结构 |

@@ -15,6 +15,7 @@ opencode)的**安全工作流工具族**,所有命令共享前缀 `mgh-`。
 | `/mgh-init` | ✅ 可用    | 发现存量安全控制 → 生成 Agent rules。隔离优先三层流水线(确定性发现 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ claude/opencode rules(二选一,结构不混)。详见 `openspec/changes/add-mgh-init/`。 |
 | `/mgh-sra`  | ✅ 可用    | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-sra/`。 |
 | `/mgh-srr` | ✅ 可用    | **无 openspec** 的自由文本需求(word/txt/md/excel/透传)安全评审。端口-适配器:确定性 intake 适配器(`ingest_requirements.py`)产出 sra 同 shape 上下文 → **逐字复用 sra 中间引擎**(clarify/augment/consistency 零新增提示词)→ 确定性 render 适配器(`render_report.py`)产**普通报告 + 台账**(NEVER 触 openspec)。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底;与 sra 共享 `business_context.json`。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-srr/`。 |
+| `/mgh-sdr` | ✅ 可用    | **需求分支代码 diff 的存量安全设计符合性复核**(merge 前关卡)。`git diff base..branch` → 接口维度注解启发式分组 + standalone 簇(`diff_group.py`)→ 存量设计基线投影 + 外部前端仓主流程受控检索(`sdr_context.py`,结论物化 + 哨兵 `read_roots[]`)→ fan-out 6 维度复核(垂直/横向/其他权限、SQL 注入、敏感信息、输入校验;`fanout_runner --tier sdr`)→ 项目根中文报告(`render_sdr_report.py`)。launcher `mgh_sdr_launch.py` 一条命令拉起(外部仓检索在 launcher 进程,宿主会话零权限打断);敏感目录缺省回退默认模板(与 sra/srr 显式分歧)。详见 `openspec/changes/add-mgh-sdr/`。 |
 | `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑设计强耦合安全测试案例。                              |
 
 > TODO 命令目前仅为**空骨架**,功能定义见仓库根 [`task.260630.md`](task.260630.md)。`/mgh-sra` 与 `/mgh-srr` 产出的项目级 `business_context.json`(`roles[]`/`interface_authz[]`/`sensitive_fields[]`)为未来 `/mgh-blst` 预留消费口。
@@ -304,6 +305,7 @@ py tools/extract_prompts.py --out ./core/prompts
   `docs/security-controls/<cat>.md` 详述文件;opencode 无路径作用域,按需加载是**语义性**的
   (索引块指令驱动,非路径自动触发)——**非确定性可测**:agent 若跳过对应 Read 可能漏掉可复用
   控制。claude 侧 `paths:` 路径作用域为确定性触发(已天然 lazy)。
+- `/mgh-sdr` 的发现是 **LLM 候选,非确认漏洞**;接口分组是**注解启发式**(Spring/JAX-RS/Servlet 常用注解),漏分组接口退入独立变更单元(粒度粗、覆盖不丢),非 java web 项目整体退化为 standalone 模式;外部仓结论是**检索时点快照**(不保证前端分支同步);基线经字节预算投影(低优先级细节可能未全量投影);敏感目录来源为 project 或 default-template 回退(目录外字段仅按回退规则识别)。
 
 ## 可参考项目
 本项目部分实现方式、实现理念、工具使用可参考如下已拉取到本地的项目代码仓

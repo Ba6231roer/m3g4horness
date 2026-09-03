@@ -307,6 +307,30 @@ TIERS = {
         "uses_codegraph": False,
         "uses_chunk_sources": False,
     },
+    "sdr": {
+        "list_script": "diff_group.py",
+        "list_args": lambda a: ["--repo", a.repo,
+                                "--base", a.base,
+                                "--branch", a.branch or "",
+                                "--checkpoints", a.checkpoints,
+                                "--materialize", a.inputs_dir],
+        "required_args": ("repo", "base", "checkpoints", "inputs_dir"),
+        "plan_arg": "repo",
+        # plan_path = the repo root: `grouping.json` lives at <run-dir>/grouping.json =
+        # <checkpoints>/../grouping.json, so the sidecar + liveness home (plan_path.parent)
+        # is the run dir — same <init-dir>/ neighbor semantics as the init tiers.
+        "template_rel": Path("prompts") / "fragments" / "fanout" / "sdr-task.md",
+        "path_fields": ("input_path", "draft_path", "done_marker", "failed_marker"),
+        "placeholders": ("input_path", "draft_path", "done_marker", "failed_marker",
+                         "unit_id", "kind", "route", "repo", "codegraph",
+                         "baseline_path", "external_dir"),
+        "id_field": "unit_id",
+        "agent": "sdr-review-fanout",
+        "agent_desc": "mgh-sdr per-unit design review (fanout dispatch, primary)",
+        "agent_tools": "Read Glob Grep Bash Write",
+        "uses_codegraph": True,
+        "uses_chunk_sources": False,
+    },
 }
 
 
@@ -344,9 +368,15 @@ def _load_template(tier: dict, template_arg: str | None) -> str:
         sys.exit(1)
 
 
-def _codegraph_signal(plan_path: Path) -> str:
+def _codegraph_signal(plan_path: Path, tier_key: str = "") -> str:
     """Derive `codegraph=on|off` from run_config.json (no_codegraph flag),
-    sibling of the tier plan artifact. Missing/unparseable → off (legacy)."""
+    sibling of the tier plan artifact. Missing/unparseable → off (legacy).
+    sdr tier: the plan artifact is <run-dir>/grouping.json (no run_config.json in an
+    sdr run dir) → always off here; the sdr orchestrator shell decides the signal
+    (repo .codegraph/ + PATH detection, D8) and the launcher/shell pass it via the
+    grouping-side run config when that lands — until then sdr = off in the dispatcher."""
+    if tier_key == "sdr":
+        return "off"
     rc = plan_path.parent / "run_config.json"
     try:
         cfg = json.loads(rc.read_text(encoding="utf-8"))
@@ -891,13 +921,14 @@ def _purge_audit(inputs_dir: Path, dry_run: bool) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="deterministic tier-aware wave dispatcher for /mgh-init "
-                    "fan-out (scout/t1/t3; zero LLM turns; fixed template + "
+        description="deterministic tier-aware wave dispatcher for /mgh-init + /mgh-sdr "
+                    "fan-out (tiers: scout/t1/t3/sdr; zero LLM turns; fixed template + "
                     "verbatim fields; host-CLI spawn)")
-    ap.add_argument("--tier", choices=["scout", "t1", "t3"], default="scout",
+    ap.add_argument("--tier", choices=["scout", "t1", "t3", "sdr"], default="scout",
                     help="fan-out tier (default scout). Selects the enumeration "
                          "script, task template, placeholder set, and fanout agent; "
-                         "scout call shape (--scout-plan etc.) is unchanged")
+                         "scout call shape (--scout-plan etc.) is unchanged. sdr tier: "
+                         "diff_group.py --repo/--base/--branch/--checkpoints/--materialize")
     # scout artifacts (scout tier)
     ap.add_argument("--scout-plan",
                     help="path to scout_plan.json (scout tier; forwarded to "
@@ -919,6 +950,15 @@ def main() -> int:
                     help="opencode rules detail dir (t3 tier; rule_path base)")
     ap.add_argument("--target", default=".",
                     help="target project root (t3 tier; rule_path base, default .)")
+    # sdr tier artifacts (forwarded to diff_group.py)
+    ap.add_argument("--repo",
+                    help="absolute target git repo root (sdr tier; forwarded to "
+                         "diff_group + the tree anchor)")
+    ap.add_argument("--base", default="master",
+                    help="base ref (sdr tier; default master; forwarded to diff_group)")
+    ap.add_argument("--branch", default="",
+                    help="branch ref (sdr tier; default: current branch, resolved by "
+                         "diff_group; forwarded verbatim)")
     # shared
     ap.add_argument("--checkpoints", required=True,
                     help="tier checkpoint dir (markers; forwarded to the tier's "
@@ -1029,6 +1069,11 @@ def main() -> int:
     plan_path = Path(getattr(args, tier["plan_arg"]))
     checkpoints = Path(args.checkpoints)
     inputs_dir = Path(args.inputs_dir)
+    # sdr: plan_arg = repo (a DIRECTORY anchor); the actual plan artifact is the run dir's
+    # grouping.json (<checkpoints>/../grouping.json). liveness/sidecar home (plan_path.parent)
+    # = the run dir — same <init-dir>/ neighbor semantics as the init tiers.
+    if tier["list_script"] == "diff_group.py":
+        plan_path = (checkpoints.parent / "grouping.json").resolve()
     if not plan_path.is_file():
         _eprint(f"error: {tier['plan_arg'].replace('_', '-')} artifact not found: "
                 f"{plan_path}")
@@ -1072,7 +1117,7 @@ def main() -> int:
         return 1
 
     template = _load_template(tier, args.template)
-    codegraph = _codegraph_signal(plan_path)
+    codegraph = _codegraph_signal(plan_path, args.tier)
     total = int(listing.get("total", 0))
     done0 = int(listing.get("done", 0))
     failed0 = int(listing.get("failed", 0))

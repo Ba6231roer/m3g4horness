@@ -14,6 +14,7 @@ HOOK = HERE.parent / "releases" / "claude-code" / "hooks" / "block_adhoc_scripts
 
 _DOMAIN_ENV = {"init": "MGH_INIT_ACTIVE", "sast": "MGH_SAST_ACTIVE",
                "sra": "MGH_SRA_ACTIVE", "srr": "MGH_SRR_ACTIVE",
+               "sdr": "MGH_SDR_ACTIVE",
                "ut-init": "MGH_UT_INIT_ACTIVE"}
 
 
@@ -50,9 +51,9 @@ def _run_hook(mod, payload, domain="init", active="1"):
 
 
 _RUN_ROOTS = {"init": ".mgh-init", "sast": "security-scan", "sra": ".mgh-sra",
-              "srr": ".mgh-srr", "ut-init": ".mgh-ut-init"}
+              "srr": ".mgh-srr", "sdr": ".mgh-sdr", "ut-init": ".mgh-ut-init"}
 _DOMAIN_KEYS = ("MGH_INIT_ACTIVE", "MGH_SAST_ACTIVE", "MGH_SRA_ACTIVE", "MGH_SRR_ACTIVE",
-                "MGH_UT_INIT_ACTIVE")
+                "MGH_SDR_ACTIVE", "MGH_UT_INIT_ACTIVE")
 
 
 def _run_with_sentinel(mod, payload, domain, sentinel_dict, mgh_target_env=None):
@@ -973,6 +974,118 @@ class TestReadSideConfinement(unittest.TestCase):
             {"tool_name": "Read", "tool_input": {"file_path": self._SONB + r"\x.java"}},
             "init", {"domain": "mgh-init", "target": "", "out_roots": [], "v": 1})
         self.assertEqual(code, 0)
+
+
+class TestSentinelReadRoots(unittest.TestCase):
+    """Sentinel read_roots[] (add-mgh-sdr): declared external roots grant TOOL-FACE
+    read-only access (Read/Glob/Grep) when active via disk sentinel. Every other layer
+    keeps judging against MGH_TARGET alone: Bash file-search verbs, the write side (tool
+    + Bash verb + redirect), and the leaf-source block are never relaxed. Fail-closed:
+    a declared root must exist and be a directory at judgment time (a missing root
+    grants zero). Absent read_roots = byte-for-byte legacy behavior."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _setup_trees(self):
+        target = tempfile.mkdtemp(prefix="mgh_sdr_tgt_")
+        front = tempfile.mkdtemp(prefix="mgh_sdr_front_")
+        other = tempfile.mkdtemp(prefix="mgh_sdr_other_")
+        Path(front, "src", "api").mkdir(parents=True, exist_ok=True)
+        Path(front, "src", "api", "pay.js").write_text("// front", encoding="utf-8")
+        Path(other, "x.js").write_text("// other", encoding="utf-8")
+        return Path(target), Path(front), Path(other)
+
+    def _sentinel(self, target, front, missing=False):
+        roots = [str(front)]
+        if missing:
+            roots = [str(Path(front.parent, "gone_front"))]
+        return {"domain": "mgh-sdr", "target": str(target),
+                "out_roots": [], "read_roots": roots, "v": 1}
+
+    def test_declared_root_read_passes(self):
+        target, front, _ = self._setup_trees()
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(Path(front, "src", "api", "pay.js"))}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 0, err)
+
+    def test_undeclared_sibling_read_blocked(self):
+        target, front, other = self._setup_trees()
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(Path(other, "x.js"))}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 2)
+        self.assertIn("target tree", err)
+
+    def test_glob_declared_root_passes(self):
+        target, front, _ = self._setup_trees()
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Glob", "tool_input": {"pattern": "*.js", "path": str(front)}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 0)
+
+    def test_grep_undeclared_blocked(self):
+        target, front, other = self._setup_trees()
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": str(other)}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 2)
+
+    def test_write_into_declared_root_still_blocked(self):
+        # non-script artifact: the out-of-tree write rule (not the script-ext rule) must fire —
+        # read_roots[] never grants write access even for .json/.md artifacts.
+        target, front, _ = self._setup_trees()
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Write", "tool_input": {"file_path": str(Path(front, "notes.json"))}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 2)
+        self.assertIn("MGH_TARGET tree", err)
+
+    def test_bash_rg_declared_root_still_blocked(self):
+        target, front, _ = self._setup_trees()
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Bash", "tool_input": {"command": f"rg pattern {front}\\src"}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 2)
+
+    def test_bash_write_declared_root_still_blocked(self):
+        target, front, _ = self._setup_trees()
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Bash", "tool_input": {"command": f"Set-Content {front}\\evil.txt x"}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 2)
+
+    def test_no_read_roots_byte_identical_legacy(self):
+        # a legacy sentinel without read_roots: out-of-tree read blocked as before,
+        # no parse error, in-tree read passes.
+        target, front, _ = self._setup_trees()
+        legacy = {"domain": "mgh-srr", "target": str(target), "out_roots": [], "v": 1}
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(Path(front, "x.js"))}},
+            "srr", legacy)
+        self.assertEqual(code, 2)
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(Path(target, "a.json"))}},
+            "srr", legacy)
+        self.assertEqual(code, 0)
+
+    def test_nonexistent_declared_root_grants_zero(self):
+        target, front, other = self._setup_trees()
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(Path(front, "src", "api", "pay.js"))}},
+            "sdr", self._sentinel(target, front, missing=True))
+        self.assertEqual(code, 2)
+
+    def test_sdr_run_root_sentinel_discovered(self):
+        # the .mgh-sdr run-root is a first-class discovery location: a sentinel placed at
+        # <target>/.mgh-sdr/.active activates the guard for a subdirectory-anchored call.
+        target, front, other = self._setup_trees()
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(Path(other, "x.js"))}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 2)
+        self.assertIn("mgh-sdr", err)
 
 
 class TestLeafScriptReadBlock(unittest.TestCase):

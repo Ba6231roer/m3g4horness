@@ -43,7 +43,9 @@ def _wb(path: Path, raw: bytes):
 
 
 def _conforming(cluster_id="authorization::Sec::ab12cd34", **over):
-    rec = {"cluster_id": cluster_id, "name": "spring-method-security",
+    rec = {"cluster_id": cluster_id,
+           "unit": over.pop("unit", cluster_id),   # identity double-cover: unit == cluster_id
+           "name": "spring-method-security",
            "category": "authorization", "kind": "auth",
            "evidence": ["src/Sec.java:Sec:check"], "entry_points": ["src/Sec.java"],
            "confidence": 0.8}
@@ -123,7 +125,9 @@ class TestCheckShape(unittest.TestCase):
             _w(self.cp / fn, rec)
         code, out, _ = self._check()
         self.assertEqual(code, 2)
-        self.assertEqual(len(json.loads(out)["violations"]), len(cases))
+        # each case yields its evidence violation + (these raw fixtures carry no
+        # `unit` and no marker →) the missing-unit violation
+        self.assertEqual(len(json.loads(out)["violations"]), 2 * len(cases))
 
     def test_category_kind_enum_and_mapping_rejected(self):  # 2.4
         _w(self.cp / "badcat.json", _conforming(cluster_id="x::a::1",
@@ -173,6 +177,70 @@ class TestCheckShape(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertTrue(any("malformed JSON" in v["issue"]
                             for v in data["violations"]))
+
+
+class TestUnitDoubleCover(unittest.TestCase):
+    """`unit` field (identity double-cover, fix-mgh-init-done-marker-identity):
+    new-form record with unit passes; unit != cluster_id → violation; no unit +
+    forward marker exists → WARNING (historical form, 无需处理); no unit + no
+    marker → violation (new record MUST carry it)."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_t1_unit_"))
+        self.cp = self.d / "t1"
+        self.cp.mkdir()
+
+    def _check(self):
+        return _run(["--check", "--checkpoints", str(self.cp)])
+
+    def test_new_form_record_with_unit_passes(self):
+        _w(self.cp / "new.json", _conforming(cluster_id="crypto::N::1",
+                                             unit="crypto::N::1"))
+        code, out, _ = self._check()
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["warnings"], [])
+        self.assertIn("warnings", data)                   # field恒在 (shape stable)
+
+    def test_shard_unit_matches_cluster_id_passes(self):
+        # shard unit: cluster_id AND unit both carry the `::shard-<n>` form.
+        cid = "crypto::S::2::shard-0"
+        _w(self.cp / "shard.json", _conforming(cluster_id=cid))
+        code, out, _ = self._check()
+        self.assertEqual(code, 0)
+
+    def test_unit_mismatch_cluster_id_is_violation(self):
+        _w(self.cp / "drift.json", _conforming(cluster_id="crypto::D::3",
+                                               unit="crypto::OTHER::9"))
+        code, out, _ = self._check()
+        self.assertEqual(code, 2)
+        issues = {v["issue"] for v in json.loads(out)["violations"]}
+        self.assertTrue(any("unit" in i and "!= cluster_id" in i for i in issues), issues)
+
+    def test_missing_unit_without_marker_is_violation(self):
+        _w(self.cp / "fresh.json", _conforming(cluster_id="crypto::F::4", unit=None))
+        code, out, _ = self._check()
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("missing/empty unit" in v["issue"] for v in violations))
+        self.assertEqual(json.loads(out)["warnings"], [])
+
+    def test_missing_unit_with_marker_is_warning_not_violation(self):
+        # historical form: pre-fix record (no unit) whose forward marker exists →
+        # warning only, exit 0 (done judgment is forward marker-path; `unit` not
+        # load-bearing; re-spawning would re-burn finished work — unacceptable).
+        cid = "crypto::H::5"
+        _w(self.cp / f"{cid.replace('::', '__')}.json",
+           _conforming(cluster_id=cid, unit=None))
+        (self.cp / f"{cid.replace('::', '__')}.json.done").write_text("", encoding="utf-8")
+        code, out, _ = self._check()
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["warnings"]), 1)
+        self.assertIn("historical", data["warnings"][0]["issue"])
+        self.assertIn("no action needed", data["warnings"][0]["issue"])
 
 
 class TestBomAdvisory(unittest.TestCase):

@@ -96,6 +96,7 @@ _DISCIPLINE = {
             "NEVER 手挖 scout_plan.json",
             "NEVER 写 wrapper .py 循环",
             "NEVER 二次聚合 / 重切批(终态)",
+            "NEVER 重跑 `merge_scout.py` fold-in(`controls_candidates.json::provenance.scout_merged` 已设时;重跑非幂等——同文件重跑把 `scout_merged` 归零,漂移文件重跑重复追加候选/簇)",
         ],
     },
     # step 3c — init-resolve (optional, codegraph-gated; non-fatal + bounded).

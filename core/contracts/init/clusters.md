@@ -34,7 +34,7 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
 
 | field | type | note |
 |---|---|---|
-| `cluster_id` | str | `{category}::{anchor\|pattern}::{sha8}`;确定性 T1 隔离/resume 单元 |
+| `cluster_id` | str | `{category}::{anchor\|pattern}::{sha8}`;**总长 ≤ 160**:超预算时截显示槽位(保目录头 + 文件名尾 + 槽位 hash)、保留 sha8 判别尾;`home==file`(路径被塞进类名槽位)时显示槽位去重;短 id 逐字不变 |
 | `category` | enum | init 8(见 `inventory.md`) |
 | `kind` | enum | 6(`auth`\|`input-validation`\|`sandbox`\|`aslr`\|`cfi`\|`other`);`category→kind` 归一见 `inventory.md` |
 | `shape` | enum | `centralized`(util/filter/config/interceptor 定义,按 anchor 归簇)\| `distributed`(注解跨文件散落,按 `category::pattern` 归簇) |
@@ -54,6 +54,12 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
   `init-induct` **读自己的 `input_path`**。slim 待办壳(`--materialize` 下)剔除 `evidence_files[]`/
   `usage_sites[]`/候选命中,改携 `input_path`/`bytes`/`oversize`;超 `--max-unit-bytes` 的簇切
   `<cluster_id>::shard-<n>` 子单元。编排器 NEVER 整份读 `clusters.json`(见 `request-context-budget`)。
+- **单簇物化写失败隔离**:某簇 `_resolve_units` 抛 `OSError`(磁盘写错、不可写 id 等)时,
+  `list_clusters.py --materialize` 为该簇写 `.failed` 终态 marker(body `{unit,reason,tier}`,
+  文件名经 stem 截长可写)+ stderr 报原因 + stdout `failed` 计数 +1 + **批次继续物化其余簇,
+  退出码仍 0**——NEVER 因单簇失败整批 abort;若 `.failed` marker 亦写不进(运行目录系统级损坏)→
+  退出码 2 fail-loud。
 - **文件名为存储编码,非身份**:`cluster_id`(及 shard id)含 `::`,是 NTFS 的 Alternate-Data-Stream
-  分隔符 → 文件名分量经 `_safe_name`(`/`、`\`、`:` → `_`)消毒后方可写;canonical `cluster_id`(含
-  `::`)原样保留为 slim envelope 的 `cluster_id` 字段、物化输入记录内、检查点记录的 `unit` 字段。
+  分隔符 → 文件名分量经 `_safe_name` 消毒(`/`、`\`、`:` → `_`)且 **stem 截长(≤ 200,保尾判别段)**
+  后方可写;canonical `cluster_id`(含 `::`)原样保留为 slim envelope 的 `cluster_id` 字段、物化输入
+  记录内、检查点记录的 `unit` 字段。

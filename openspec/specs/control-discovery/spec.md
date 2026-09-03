@@ -463,6 +463,13 @@ SHALL 走 implementation-intention 句式声明的合法出口:工作清单 → 
 MUST NOT 携带 `entry_points`(`entry_points` 在 candidate 上,仅 distributed shape 被 set)。
 该结构 SHALL 在 `core/contracts/init/clusters.md` 落定为唯一 I/O 契约。
 
+`cluster_id` SHALL 长度有界(总长 ≤ 160 字符):当显示部分(含 home/file 路径槽位)超预算时,系统 SHALL
+对显示槽位做截断(路径保留目录头 + 文件名尾 + 槽位 hash 判别),使总长不超界;但尾部 `::{sha8}` 判别段
+SHALL 始终对**未截断的完整 key** 计算并保留——同一输入下任何簇的 sha8 判别尾与引入长度约束前**逐字相同**,
+长度本就在界内的短 id 其完整 `cluster_id` 亦逐字不变。当 `home == file`(路径被塞进类名槽位)时,系统
+SHALL 去重显示槽位(同一路径不重复出现两次)。长度上界保证所有以 `cluster_id` 派生的文件名
+(input/checkpoint/`done`/`failed`/`slice_dir`)落在 NTFS 255 字符单分量上限内可写。
+
 #### Scenario: clusters.json is a wrapper dict, not a bare list
 - **WHEN** `discover_controls.py` 写出 `clusters.json`
 - **THEN** 顶层为对象 `{repo, clusters, truncated}`;簇列表在 `clusters` 键下,对顶层 `len()` 得 3 而非簇数
@@ -474,6 +481,14 @@ MUST NOT 携带 `entry_points`(`entry_points` 在 candidate 上,仅 distributed 
 #### Scenario: Contract file exists as single source of truth
 - **WHEN** 检查 `core/contracts/`
 - **THEN** 存在 `init/clusters.md`,逐字段描述包装结构与 Cluster 记录,与 `candidates.md`/`inventory.md` 并列
+
+#### Scenario: overlong path-in-class-slot cluster_id is bounded
+- **WHEN** 一条 centralized 候选的 anchor 无 class/method,`home` 回退为完整文件路径且与 `file` 相同(路径被塞进类名槽位),未截断 id 将达 267 字符
+- **THEN** `form_clusters` 产出的 `cluster_id` 总长 ≤ 160;显示槽位保留路径目录头 + 文件名尾(同一路径不重复出现两次);尾部 `::{sha8}` 与对**未截断完整 key** 算得的值相同(判别身份不变)
+
+#### Scenario: short cluster_ids are byte-identical after the bound
+- **WHEN** 一条簇的 `category`/`home`/`file` 拼接后总长本就在 160 内(普通项目常见形态)
+- **THEN** 其 `cluster_id` 与引入长度约束前**逐字相同**(截断仅作用于超长 id)
 
 ### Requirement: Deterministic cluster enumeration for T1 fan-out
 
@@ -491,6 +506,13 @@ JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`
 子单元或标 `oversize`)。当某页序列化字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报
 `effective_limit`+`shrunk:true`。脚本的 `--help` 即其 CLI 契约(承 R5.1)。簇数权威真相源 =
 `discover_controls.py` stdout `clusters` 字段 或 `list_clusters.py` stdout `total`。
+
+`--materialize` 写入的 input 文件名 stem SHALL 受长度上限约束(见「Fan-out checkpoint paths are
+deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出的超长 id)都能写出文件。
+**单簇物化写失败 MUST 隔离**:某簇 `_resolve_units` 抛 `OSError`(含磁盘写错、legacy 超长 id 之外的
+不可写情形)时,系统 SHALL 为该簇写 `.failed` 终态 marker(body `{unit,reason,tier}`;文件名经 stem
+截长后可写),stderr 报原因、stdout `failed` 计数 +1、**批次继续物化其余簇,退出码仍 `0`**——NEVER
+因单簇失败整批 abort。若 `.failed` marker 亦写不进(运行目录系统级损坏)→ 退出码 `2` fail-loud。
 
 #### Scenario: Orchestrator enumerates clusters via the leaf script
 - **WHEN** 编排器进入 T1 fan-out(步骤 4)
@@ -523,6 +545,16 @@ JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`
 - **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
 - **THEN** `list_clusters.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`(stderr 告警),
   编排器据 `offset`/`effective_limit` 翻页
+
+#### Scenario: input filename stem is length-capped for overlong cluster_id
+- **WHEN** 一条 legacy `cluster_id` 超过文件名 stem 上限(如 267 字符,旧版 discover 产出、未经上游长度约束)
+- **THEN** `--materialize` 写出 `<inputs>/<safe(id)>.input.json`,其文件名 stem 被截到 ≤ 上限(保留尾部判别段),
+  文件成功创建;envelope `cluster_id` 字段仍为完整 canonical id
+
+#### Scenario: one unmaterializable cluster does not abort the batch
+- **WHEN** `clusters.json` 含一条物化写失败(`OSError`)的簇,`--materialize` 枚举它
+- **THEN** 该簇被写 `.failed` 终态 marker(文件名可写)、stderr 报原因、stdout `failed` 计数 +1,
+  **其余簇照常物化**,退出码 `0`;若 `.failed` 亦写不进 → 退出码 `2` fail-loud,不静默丢簇
 
 ### Requirement: init-survey is optional, advisory, and non-fatal
 
@@ -899,8 +931,8 @@ The orchestrator SHALL record any non-default `--out` / `--rules-dir` resolved a
 每个 stage 产物的产出者 SHALL 暴露 `--check`(或独立 validator),编排器跑完一步、进下一步前 MUST
 运行之;失败 MUST fail-loud(退出码 2)并回退重跑(泛化既有 `assemble_rules.py --check` 范式,承
 openspec validate-at-boundary,FD7)。覆盖:`discover_controls.py --check`(candidates/clusters wrapper
-+ 每条 `source` + cluster_id 唯一)、`plan_scout.py --check`(batches 非空除非 0 target、每批 bytes≤
-budget、needs_slice 仅含超批文件)、`merge_scout.py --check`(每条 `source:"scout"` + `file:line` +
++ 每条 `source` + cluster_id 唯一 **+ cluster_id 长度 ≤ 160**)、`plan_scout.py --check`(batches 非空除非
+0 target、每批 bytes≤ budget、needs_slice 仅含超批文件)、`merge_scout.py --check`(每条 `source:"scout"` + `file:line` +
 **每条 `category` 非空** + **破损 JSON(无法 parse)亦属边界失败、退出码 2** + 给 `JSONDecodeError` 的
 `lineno/colno/msg` 与错位附近字节窗诊断)、`validate_inventory.py`(vvah design_controls 兼容 + evidence
 锚点 + category→kind 归一)、既有 `assemble_rules.py --check`(rules 纯净性)。
@@ -928,6 +960,11 @@ budget、needs_slice 仅含超批文件)、`merge_scout.py --check`(每条 `sour
 #### Scenario: Inventory validated against design_controls schema
 - **WHEN** T2 产出 `controls_inventory.json`
 - **THEN** `validate_inventory.py`(或 T2 后 check)断言 vvah 兼容字段 + 每条 evidence 锚点 + category→kind 归一,失败退出码 2
+
+#### Scenario: discover --check rejects an overlong cluster_id
+- **WHEN** `clusters.json` 的某条 `cluster_id` 超 160 字符(producer 回归)
+- **THEN** `discover_controls.py --check` 退出码 2,violations 报该簇 index 与「cluster_id 超长」issue,
+  编排器在 discover 后、T1 前被闸门拦下
 
 ### Requirement: Subagent sanctioned-tools allowlist
 
@@ -960,9 +997,11 @@ SHALL 额外包含 `checkpoint_path`(待写产物文件的**绝对路径**)与 `
 
 `checkpoint_path` / `done_marker` 的**文件名分量** SHALL 经文件系统消毒(复用 `_safe_name`:`/`、`\`、`:`
 → `_`),使含 `::`(NTFS Alternate-Data-Stream 分隔符)或 `/` 的 `cluster_id` / shard id 派生的文件名在
-Windows NTFS 上可写(否则 `write_text` 报 `OSError [Errno 22]`)。canonical 单元 id(含 `::`)SHALL 原样
+Windows NTFS 上可写(否则 `write_text` 报 `OSError [Errno 22]`)。除字符消毒外,`_safe_name` SHALL **兼做
+stem 长度截断**:文件名 stem 超上限(200 字符)时,SHALL 截断但**保留尾部 ~60 字符判别段**(含 sha8 尾),
+使超长 id 派生的文件名**亦**可写、且两个不同 id 在磁盘上**不碰撞**。canonical 单元 id(含 `::`)SHALL 原样
 保留为 slim envelope 的 `cluster_id` 字段与检查点记录内的 `unit` 字段——**只有文件名被编码,身份不变**;
-done 检测读记录内 `unit` 字段、不依赖文件名,故消毒不影响 resume 匹配。
+done 检测读记录内 `unit` 字段、不依赖文件名,故消毒与截断均不影响 resume 匹配。
 
 编排器 SHALL 把 `list_*` stdout 中的 `checkpoint_path` / `done_marker` **逐字透传**进对应 subagent 的 task 输入,
 MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径,也 MUST NOT 用 `py -c` 算路径。
@@ -992,6 +1031,12 @@ MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径
   (可经 `write_text` 写下、不报 Errno 22);该项 envelope `cluster_id` 字段仍为**原始**含 `::` 的 canonical id;
   subagent 写入的检查点记录内 `unit` 字段为该 canonical id;`_done_ids` 据此 `unit` 字段正确判终态
 
+#### Scenario: Checkpoint filename is length-capped for overlong cluster_id
+- **WHEN** `list_clusters.py` 对一条 legacy `cluster_id` 达 267 字符的待跑单元产出 `pending[]`,宿主为 Windows
+- **THEN** 该项 `checkpoint_path`/`done_marker`/`failed_marker` 的文件名分量被截到 ≤ 200(保尾判别段),
+  文件名可写、不与其它 id 碰撞;envelope `cluster_id` 仍为原始 canonical id;`_done_ids` 读记录 `unit`
+  字段判终态,不受文件名截断影响
+
 #### Scenario: Orchestrator passes path verbatim, never interpolates
 - **WHEN** 编排器取得 scout / T1 的 `pending[]` 并起 subagent
 - **THEN** subagent task 输入里的输出路径**逐字等于** `list_*` stdout 的 `checkpoint_path`,
@@ -1009,7 +1054,7 @@ MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径
 #### Scenario: Existing on-disk artifact schema unchanged
 - **WHEN** 本变更生效后审阅 `checkpoints/scout/<safe(batch_id)>.json` 与 `checkpoints/t1/<safe(cluster_id)>.json`
 - **THEN** 其磁盘**内容** schema 与变更前一致(记录内 `unit` = canonical id、`status`、`out`、`bytes` 等);
-  文件名经 `_safe_name` 消毒;`checkpoint_path`/`done_marker` 仅存在于 `list_*` stdout,不写入产物文件内容
+  文件名经 `_safe_name` 消毒(含 stem 长度截断);`checkpoint_path`/`done_marker` 仅存在于 `list_*` stdout,不写入产物文件内容
 
 ### Requirement: Scout candidate JSON robustness at the merge boundary
 

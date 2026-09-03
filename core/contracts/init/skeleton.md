@@ -31,6 +31,7 @@ A `FileSkeleton`:
   "method_sigs": ["check", "enforce", "isAllowed"],
   "fan_in": 47,
   "bytes": 12345,
+  "big": false,
   "regex_hit": false
 }
 ```
@@ -45,6 +46,7 @@ A `FileSkeleton`:
 | `method_sigs[]` | [name] | 复用 `JAVA_DEF`/`DEF_CALL` 的定义名(len>2) |
 | `fan_in` | int | reverse 调用图上该文件被多少文件调用(scout 的「共享控制」信号) |
 | `bytes` | int | 文件字节数;scout 按此做**字节预算**分批 |
+| `big` | bool | 文件字节 > `--big-file-bytes`;与候选 `big_file` 同源,discover stdout `big_files` 统计据此 |
 | `regex_hit` | bool | 是否被 i1 regex 命中(命中者已产候选,scout 不重复扫) |
 
 - **无损**:抽取不做任何「是否控制」判断;`regex_hit=false` 的文件**仍出现**在此(对 scout 可见)。

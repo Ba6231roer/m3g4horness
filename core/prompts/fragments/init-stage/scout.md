@@ -16,9 +16,11 @@
      [scout_plan.json::batches[]] → fanout_runner.py(内部消费 list_scout_batches --materialize)→ [波次 spawn + ack + marker,零 LLM 回合]
      · **主路径(dispatcher,一次 Bash + 重派)**:带 per-call `timeout` 跑
        py .claude/mgh-core/scripts/fanout_runner.py --scout-plan <target>/.mgh-init/scout_plan.json --checkpoints <target>/.mgh-init/checkpoints/scout --inputs-dir <target>/.mgh-init/inputs/scout --time-budget-ms <宿主 per-call timeout × 0.8,如 opencode 900000ms 宿主 → 720000;claude Bash 上限 600000ms → 480000>
+       · **派发前孤儿清理(每次 fanout 派发前,MUST)**:上一次运行可能被宿主硬杀、留下仍在烧 token 的孤儿 runner/子进程。先 `py .claude/mgh-core/scripts/fanout_runner.py --kill-stale --dry-run --checkpoints <本 tier checkpoints 目录>` 审将杀 PID → `killed` 非空则去掉 `--dry-run` 真杀;`killed:[]` 幂等跳过。stderr 心跳行(`[fanout_runner <tier>] +HH:MM:SS wave=<k> unit=<id> <event> done=<d>/<total>`)为实时进度,opencode TUI / claude Bash 结果实时可见。
        · `--time-budget-ms` MUST < 宿主 per-call `timeout`(留 ≥20% 收敛余量;软时限先于宿主硬杀触发,重派才轮轮干净早退而非硬杀循环);三级超时不变式见 `fanout_runner.py --help`。
        · stdout 摘要 `partial:true`(软时限早退)→ **重派同一命令**(重派传 per-call `timeout` > `--time-budget-ms`)直至 `partial:false`;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息(固定模板 + 逐字填充在脚本内完成)。
-       · 退出码 2(宿主 CLI 不可用)→ stderr 带 recipe → 走下方**手派路径**(行为与引入 dispatcher 前逐字一致)。
+       · **零推进熔断**:连续 N 波(默认 2,`--stall-waves`)`done+failed` 零推进且 pending 非空 → **退出码 2** + stdout `stalled:true` + `stalled_pending[]` → **停止重派**、跑 `py .claude/mgh-core/scripts/resume_state.py --target <target> --check` 诊断;诊断清楚后 `--resume` 续跑。NEVER 熔断后继续盲目重派。
+       · 退出码 2(宿主 CLI 不可用)→ stderr 带 recipe → 走下方**手派路径**(行为与引入 dispatcher 前逐字一致);退出码 2 + `STALLED` 心跳 = 零推进熔断 → 上行 recipe。
        · **宿主外手动直跑(大仓长跑逃生门)**:人可自己开终端直跑同一 dispatcher 命令(无宿主超时钳制、stderr 逐波进度直读、进度 sidecar `<target>/.mgh-init/fanout_progress.scout.json` 照写),跑完回会话 `/mgh-init --resume` 接续(磁盘 marker 是唯一真相源,两侧天然互斥)。
      · **手派路径(回退)**:list_scout_batches 枚举 + 编排器逐波 spawn——
      py .claude/mgh-core/scripts/list_scout_batches.py --scout-plan <target>/.mgh-init/scout_plan.json --checkpoints <target>/.mgh-init/checkpoints/scout --materialize <target>/.mgh-init/inputs/scout

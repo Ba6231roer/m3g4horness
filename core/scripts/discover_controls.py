@@ -336,6 +336,7 @@ def build_skeleton(files_data, reverse, cand_files):
             "method_sigs": fd.get("method_sigs", []),
             "fan_in": len(reverse.get(rel, ())) if reverse else 0,
             "bytes": fd.get("bytes", 0),
+            "big": fd.get("big", False),
             "regex_hit": rel in cand_files,
         })
     return out
@@ -680,8 +681,41 @@ def resolve_seed(repo: Path, scope: str | None, include_dotfiles: bool = False,
     return None, "full-repo"
 
 
+MAX_CLUSTER_ID_CHARS = 160  # NTFS 255 单分量上限;为 ::shard-<n>(≤11) + 后缀(≤11) 留足余量
+
+
 def _sha(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
+
+
+def _bound_slot(s: str, cap: int) -> str:
+    """Bound a display slot to `cap` chars: keep directory head + filename tail, with a
+    slot-internal 8-hex hash for display disambiguation. Real uniqueness stays the full-key
+    sha8 tail + checkpoint `unit` field, so slot-hash collisions are display-only."""
+    if len(s) <= cap:
+        return s
+    if cap < 12:
+        return _sha(s)[:cap]
+    keep = cap - 10                              # two '~' + 8 hex = 10 overhead
+    half = keep // 2
+    return f"{s[:half]}~{_sha(s)[:8]}~{s[-(keep - half):]}"
+
+
+def _bounded_cluster_id(key: str, slot_a: str, slot_b: str) -> str:
+    """cluster_id with a total-length bound (MAX_CLUSTER_ID_CHARS). sha8 is ALWAYS computed
+    over the FULL untruncated key (discriminant identity byte-identical to the legacy
+    `f'{key}::{_sha(key)}'`); short ids are returned verbatim (unchanged); over-budget ids
+    truncate the display slots — deduping when `slot_a == slot_b` (the path-stuffed-into-the
+    -class-slot shape) — while keeping the sha8 tail."""
+    sha8 = _sha(key)
+    budget = MAX_CLUSTER_ID_CHARS - len(sha8) - 2          # reserve "::{sha8}"
+    if len(key) <= budget:
+        return f"{key}::{sha8}"                            # short id → byte-identical
+    category = key.split("::", 1)[0]
+    if slot_a == slot_b:                                   # duplicate slot → dedup display
+        return f"{category}::{_bound_slot(slot_a, budget - len(category) - 2)}::{sha8}"
+    cap = (budget - len(category) - 4) // 2                # minus two "::"
+    return f"{category}::{_bound_slot(slot_a, cap)}::{_bound_slot(slot_b, cap)}::{sha8}"
 
 
 def form_clusters(candidates, reverse, framework_files, seed_files, sample: int):
@@ -718,7 +752,13 @@ def form_clusters(candidates, reverse, framework_files, seed_files, sample: int)
             for i in idxs:
                 extra |= set(reverse.get(candidates[i]["file"], set()))
             usage_sites = sorted(set(evidence_files) | set(sorted(extra)[:sample]))
-        cluster_id = f'{key}::{_sha(key)}'
+        if shape == "centralized":
+            # home falls back to the full file path when anchor has no class/method; the
+            # bounded id dedups that duplicated display slot + caps the total length.
+            home = head["anchor"].get("class") or head["anchor"].get("method") or head["file"]
+            cluster_id = _bounded_cluster_id(key, home, head["file"])
+        else:
+            cluster_id = f'{key}::{_sha(key)}'
         for i in idxs:
             candidates[i]["cluster_id"] = cluster_id
             if shape == "distributed":
@@ -738,7 +778,7 @@ def form_clusters(candidates, reverse, framework_files, seed_files, sample: int)
 def _run_check(outdir: Path):
     """R5.9 boundary check: validate an existing out-dir's products without scanning.
     Asserts controls_candidates.json + clusters.json wrappers, every candidate carries a
-    `source`, and cluster_id uniqueness. Returns exit 0 ok / 2 violation."""
+    `source`, and cluster_id uniqueness + length bound. Returns exit 0 ok / 2 violation."""
     violations = []
     cand_path = outdir / "controls_candidates.json"
     cl_path = outdir / "clusters.json"
@@ -802,6 +842,10 @@ def _run_check(outdir: Path):
         elif cid in seen_ids:
             violations.append({"file": "clusters.json", "index": i,
                                "issue": f"duplicate cluster_id {cid}"})
+        elif len(str(cid)) > MAX_CLUSTER_ID_CHARS:
+            violations.append({"file": "clusters.json", "index": i,
+                               "issue": f"cluster_id too long: {len(str(cid))} > "
+                                        f"{MAX_CLUSTER_ID_CHARS}"})
         else:
             seen_ids.add(cid)
 

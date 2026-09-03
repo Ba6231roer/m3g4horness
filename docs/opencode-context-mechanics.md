@@ -214,3 +214,34 @@ R5.6 的 5,000 tok 壳上限**仍成立**,但**根据是**:
 > 数据点(2026-08-12 核实):`mgh-init` 壳(claude 2,916 mid / 91 行;opencode 2,853 mid / 84 行,落地 `harden-mgh-init-shell-budget` 后);
 > `orchestrator-discipline` 2,466 mid / 54 行;`init-stage-flow` 4,769 mid / 130 行(磁盘合计 ~10.1K,非运行时足迹,见 budget-analysis §1.2)。
 > 行号引用 opencode 源;token/行引用本仓 `tools/measure_prompts.py`。
+
+---
+
+## 8. Bash stderr → TUI 实时尾部(fanout 心跳可见性的机制根据)
+
+> 2026-09-01 核实,opencode **1.18.18**(源 `C:/DEV/opencode`)。`improve-mgh-init-fanout-lifecycle`
+> change 回源码确认:长跑确定性脚本(如 `fanout_runner.py`)往 **stderr** 打单行心跳即可让
+> opencode TUI 实时刷新,零插件/协议改动。
+
+机制链(opencode 1.18.18):
+
+| 环节 | 位置 | 事实 |
+| --- | --- | --- |
+| 流合并 | `packages/opencode/src/tool/shell.ts:484-531` | `handle.all = Stream.merge(stdout, stderr)`(合并点在 `packages/core/src/cross-spawn-spawner.ts:264`),每 chunk 更新 `metadata.output` |
+| 滑动尾窗 | `shell.ts:27,220-223,498` | `MAX_METADATA_LENGTH = 30_000` chars;`preview(last + chunk)` 只保留尾部,超窗截前 |
+| 落盘 | `shell.ts:504-521` | 全量流经 `outputPath` 落盘截断机制兜底(超窗部分不丢,可回查) |
+| TUI 渲染 | `packages/tui/src/routes/session/index.tsx:2054-2110` | `Shell` 组件 running 态(`isRunning()`)= spinner + `output()` 直接 text 渲染 `metadata.output`,collapse 到 ~10 行尾部 |
+
+推论(mgh-* 可操作结论):
+
+- running 态 Bash 的输出区 = **stdout+stderr 合并流的实时滑动尾部**——stderr 与 stdout 同权可见,
+  「stderr 静默 → TUI 只转圈」的根因是**脚本本身不打行**,不是宿主不渲染。
+- 心跳行成本估算:每行 <120 bytes;800 单元 × 3 行 ≈ 300KB stderr,远超 30K 尾窗的部分由
+  outputPath 落盘兜底;行率 = 单元终结率(分钟级/单元),无需节流。
+- claude 侧无 running 流式渲染(claude Bash 终态才可见),stderr 进 Bash 结果文本——收益 = 结果里
+  完整时间线,非实时。两宿主差异披露于 `fanout_runner.py --help` 心跳段。
+
+**复核清单追加**(改本文件前必跑):
+- [ ] `MAX_METADATA_LENGTH` 仍在 `shell.ts:27`(数值 30_000)。
+- [ ] `handle.all` merge 仍在 `shell.ts:484-531` / `cross-spawn-spawner.ts:264`。
+- [ ] `Shell` 组件 running 渲染仍在 `session/index.tsx:2054-2110`。

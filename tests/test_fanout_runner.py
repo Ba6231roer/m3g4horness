@@ -11,7 +11,9 @@ sidecar per-tier naming, marker body tier values, spawn command per tier.
 The spawn surface uses the --pending-file test hook (no real host-CLI
 invocation).
 """
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -491,6 +493,130 @@ class TestTierCli(unittest.TestCase):
                          "fanout_progress.scout.json").read_text(encoding="utf-8"))
         self.assertEqual(sc["state"], "exited-partial")
         self.assertEqual(sc["pending"], out["pending"])
+
+
+class TestStallCircuitBreaker(unittest.TestCase):
+    """Zero-progress convergence circuit breaker (--stall-waves, default 2):
+    N consecutive fully-joined waves with equal done+failed snapshots and pending
+    non-empty → exit 2 + stdout stalled:true + stalled_pending[] (per unit marker
+    existence); an advancing wave resets the window. Exercises the REAL list
+    invocation via an absolute-path stub enumerator (pathlib join semantics keep
+    absolute list_script) + --dry-run (no spawn) — the frozen --pending-file hook
+    is single-pass and cannot produce two zero-progress waves."""
+
+    def setUp(self):
+        import tempfile
+        self.fr = _load("fanout_runner_stall")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_stall_"))
+        self.repo = self.tmp / "repo"
+        self.init = self.repo / ".mgh-init"
+        (self.init / "checkpoints" / "scout").mkdir(parents=True, exist_ok=True)
+        (self.init / "inputs" / "scout").mkdir(parents=True, exist_ok=True)
+        (self.init / "scout_plan.json").write_text("{}", encoding="utf-8")
+        self.units = [_unit(self.tmp, f"scout-{i:03d}") for i in range(1, 3)]
+        for u in self.units:
+            Path(u["input_path"]).write_text("{}", encoding="utf-8")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_stub(self, mode: str) -> Path:
+        """Stub enumerator: 'stuck' returns the SAME pending forever (zero progress
+        every wave); 'advance' returns pending on call 1, then empty with done=N
+        (wave 2 advances)."""
+        listing = {"repo": str(self.repo), "total": len(self.units),
+                   "done": 0, "failed": 0, "pending": self.units}
+        counter = self.tmp / "stub_calls.txt"
+        counter.write_text("0", encoding="utf-8")
+        stub = self.tmp / "stub_enumerator.py"
+        body = f"""
+import json, sys
+from pathlib import Path
+MODE = {mode!r}
+LISTING = json.loads({json.dumps(listing)!r})
+COUNTER = Path({str(counter)!r})
+if MODE == 'stuck':
+    print(json.dumps(LISTING))
+else:
+    n = int(COUNTER.read_text()) + 1
+    COUNTER.write_text(str(n))
+    if n <= 1:
+        print(json.dumps(LISTING))
+    else:
+        pending = LISTING['pending']
+        print(json.dumps({{'repo': LISTING['repo'], 'total': LISTING['total'],
+                           'done': len(pending), 'failed': 0, 'pending': []}}))
+"""
+        stub.write_text(body, encoding="utf-8")
+        return stub
+
+    def _run_main(self, stub: Path, *extra):
+        self.fr.TIERS["scout"]["list_script"] = str(stub)  # absolute → join keeps it
+        argv = ["fanout_runner.py",
+                "--scout-plan", str(self.init / "scout_plan.json"),
+                "--checkpoints", str(self.init / "checkpoints" / "scout"),
+                "--inputs-dir", str(self.init / "inputs" / "scout"),
+                "--host", "claude", "--wave", "1", "--dry-run", *extra]
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.fr.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def test_stalls_after_two_zero_progress_waves(self):
+        stub = self._write_stub("stuck")
+        code, out, err = self._run_main(stub)
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertTrue(data["stalled"])
+        self.assertEqual(data["waves_run"], 2)            # default window = 2
+        self.assertEqual(data["pending"], 2)
+        self.assertEqual(len(data["stalled_pending"]), 2)
+        entry = data["stalled_pending"][0]
+        self.assertEqual(entry["id"], "scout-001")
+        self.assertFalse(entry["done_marker_exists"])     # diagnostic: disk truth
+        self.assertFalse(entry["failed_marker_exists"])
+        self.assertIn("STALLED", err)
+        self.assertIn("resume_state", err)                # diagnosis recipe on stderr
+        self.assertIn("stalled_pending", err)
+
+    def test_one_zero_progress_wave_then_progress_does_not_trip(self):
+        # wave 1 zero-progress arms the window; wave 2's enumeration advances (units
+        # terminal) → breaker resets → clean exit 0, no stalled fields.
+        stub = self._write_stub("advance")
+        code, out, err = self._run_main(stub)
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertFalse(data["stalled"])
+        self.assertNotIn("stalled_pending", data)
+        self.assertEqual(data["pending"], 0)
+
+    def test_stall_waves_flag_widens_window(self):
+        # --stall-waves 3 with a stuck enumerator: 2 zero-progress waves must NOT trip
+        # (window = 3)... the run keeps dispatching; the stub never empties so the wave
+        # budget is bounded by the breaker at 3 — tripping at wave 3 proves the wider
+        # window (2 waves alone would have stopped at waves_run == 2).
+        stub = self._write_stub("stuck")
+        code, out, err = self._run_main(stub, "--stall-waves", "3")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["waves_run"], 3)
+
+    def test_stall_waves_validation_and_help(self):
+        stub = self._write_stub("stuck")
+        code, _, _ = self._run_main(stub, "--stall-waves", "0")
+        self.assertEqual(code, 2)
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("--stall-waves", r.stdout)
+        flat = " ".join(r.stdout.split())
+        self.assertIn("ZERO done+failed progress", flat)
+        self.assertIn("resume_state.py --check", flat)
+        self.assertEqual(self.fr.DEFAULT_STALL_WAVES, 2)
 
 
 class TestListGatePassthrough(unittest.TestCase):

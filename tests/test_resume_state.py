@@ -24,6 +24,14 @@ def _load(name):
 
 RS = _load("resume_state")
 WC = _load("write_runconfig")
+IT = _load("init_tier")
+LC = _load("list_clusters")
+
+
+def _enc(unit_id: str) -> str:
+    """Shared filename encoding (init_tier.safe_unit_filename) — markers on disk are
+    named by the ENCODED id; the forward judgment recomputes the same encoding."""
+    return IT.safe_unit_filename(unit_id)
 
 
 class _State:
@@ -121,9 +129,10 @@ class TestResumeState(unittest.TestCase):
             {"cluster_id": "auth::X::aa", "category": "authorization", "kind": "auth"},
             {"cluster_id": "crypto::Y::bb", "category": "crypto", "kind": "other"}],
             "truncated": False})
-        # one of two t1 units done
-        s.write_json("checkpoints/t1/auth_X_aa.json", {"unit": "auth::X::aa"})
-        s.touch("checkpoints/t1/auth_X_aa.json.done")
+        # one of two t1 units done (marker at the ENCODED id path — what the
+        # subagent actually writes via the verbatim checkpoint_path)
+        s.write_json(f"checkpoints/t1/{_enc('auth::X::aa')}.json", {"unit": "auth::X::aa"})
+        s.touch(f"checkpoints/t1/{_enc('auth::X::aa')}.json.done")
         st = s.state()
         self.assertEqual(st["step"], "t1")
         self.assertEqual(st["tiers"]["t1"], {"done": 1, "failed": 0, "total": 2})
@@ -230,9 +239,9 @@ class TestResumeState(unittest.TestCase):
         s = self._base_t1([
             {"cluster_id": "auth::X::aa", "category": "authorization", "kind": "auth"},
             {"cluster_id": "crypto::Y::bb", "category": "crypto", "kind": "other"}])
-        s.write_json("checkpoints/t1/auth_X_aa.json", {"unit": "auth::X::aa"})
-        s.touch("checkpoints/t1/auth_X_aa.json.done")
-        s.write_json("checkpoints/t1/crypto_Y_bb.json.failed",
+        s.write_json(f"checkpoints/t1/{_enc('auth::X::aa')}.json", {"unit": "auth::X::aa"})
+        s.touch(f"checkpoints/t1/{_enc('auth::X::aa')}.json.done")
+        s.write_json(f"checkpoints/t1/{_enc('crypto::Y::bb')}.json.failed",
                      {"unit": "crypto::Y::bb", "reason": "parse error", "tier": "t1"})
         st = s.state()
         self.assertEqual(st["tiers"]["t1"], {"done": 1, "failed": 1, "total": 2})
@@ -243,10 +252,11 @@ class TestResumeState(unittest.TestCase):
 
     def test_failed_marker_without_record_body_still_counted(self):
         # .failed with NO sibling record body (subagent failed before writing record):
-        # body `unit` is authoritative → still counted; --check must NOT flag it.
+        # the marker at the ENCODED path is the terminal credential (touch-only form);
+        # forward judgment counts it; --check must NOT flag it.
         s = self._base_t1([
             {"cluster_id": "crypto::Y::bb", "category": "crypto", "kind": "other"}])
-        s.write_json("checkpoints/t1/crypto_Y_bb.json.failed",
+        s.write_json(f"checkpoints/t1/{_enc('crypto::Y::bb')}.json.failed",
                      {"unit": "crypto::Y::bb", "reason": "crash before record", "tier": "t1"})
         st = s.state()
         self.assertEqual(st["tiers"]["t1"], {"done": 0, "failed": 1, "total": 1})
@@ -259,9 +269,9 @@ class TestResumeState(unittest.TestCase):
         # one unit carrying BOTH .done and .failed → ambiguous terminal → exit 2
         s = self._base_t1([
             {"cluster_id": "auth::X::aa", "category": "authorization", "kind": "auth"}])
-        s.write_json("checkpoints/t1/auth_X_aa.json", {"unit": "auth::X::aa"})
-        s.touch("checkpoints/t1/auth_X_aa.json.done")
-        s.write_json("checkpoints/t1/auth_X_aa.json.failed",
+        s.write_json(f"checkpoints/t1/{_enc('auth::X::aa')}.json", {"unit": "auth::X::aa"})
+        s.touch(f"checkpoints/t1/{_enc('auth::X::aa')}.json.done")
+        s.write_json(f"checkpoints/t1/{_enc('auth::X::aa')}.json.failed",
                      {"unit": "auth::X::aa", "reason": "late ack", "tier": "t1"})
         code, out, _ = s.main("--check")
         self.assertEqual(code, 2)
@@ -275,7 +285,7 @@ class TestResumeState(unittest.TestCase):
             {"cluster_id": f"c{i}::x::{i:02d}", "category": "crypto", "kind": "other"}
             for i in range(4)])
         for i in range(3):  # 3 of 4 failed; 1 still pending → tier NOT complete
-            s.write_json(f"checkpoints/t1/c{i}__x__{i:02d}.json.failed",
+            s.write_json(f"checkpoints/t1/{_enc(f'c{i}::x::{i:02d}')}.json.failed",
                          {"unit": f"c{i}::x::{i:02d}", "reason": "r", "tier": "t1"})
         st = s.state()
         self.assertEqual(st["tiers"]["t1"]["failed"], 3)
@@ -345,7 +355,106 @@ class TestResumeState(unittest.TestCase):
         self.assertEqual(json.loads(out)["step"], "t2")         # read .mgh-init, not bogus dir
 
 
-# ---- scout-tier gate / stale-credential + D4 scout consistency (fix-mgh-init-scout-stranding) ----
+# ---- forward-caliber counts + judgment-vs-disk --check (fix-mgh-init-done-marker-identity) ----
+
+
+class TestForwardCaliberAndCheck(unittest.TestCase):
+    """tiers.t1/tiers.scout done = FORWARD marker-path computation (shared caliber
+    with list_clusters/list_scout_batches); --check: judged-pending-but-marker-name-
+    on-disk = violation (locked via the check() function on a synthetic divergence);
+    orphan marker = advisory note; touch-only `.done` (no record body) is NOT a
+    violation; the caliber disclosure exists in --help."""
+
+    def test_t1_overlong_id_done_counted_by_forward_judgment(self):
+        # THE stranded-run shape: an overlong cluster_id with an existing encoded
+        # `.json` + `.json.done` (record body WITHOUT `unit`) → resume_state counts
+        # it done via the same forward predicate as list_clusters.
+        s = _State(no_scout=True)
+        cid = "auth::" + "deep/" * 40 + "X::" + "a" * 40   # >200 chars → encoded ≠ plain-sanitized id
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": cid, "category": "authorization", "kind": "auth"}],
+            "truncated": False})
+        enc = IT.safe_unit_filename(cid)
+        self.assertNotEqual(enc, cid.replace(":", "_").replace("/", "_"))  # truncated
+        s.write_json(f"checkpoints/t1/{enc}.json", {"cluster_id": cid})
+        s.touch(f"checkpoints/t1/{enc}.json.done")
+        st = s.state()
+        self.assertEqual(st["step"], "t2")                 # done+failed=1 >= 1 → past t1
+        self.assertEqual(st["tiers"]["t1"], {"done": 1, "failed": 0, "total": 1})
+
+    def test_check_judged_pending_but_marker_name_on_disk_is_violation(self):
+        # the violation branch needs "canonical unit judged pending + a file with its
+        # marker name on disk" — on a live disk that is a race, so exercise check()'s
+        # detection deterministically by planting the divergence BEFORE the call:
+        # clusters.json carries id X; X's .done name exists as a file; judgment must
+        # see done → to force pending-vs-disk divergence we point check() at a state
+        # whose plan id set contains a SECOND id Y whose marker name Y.done exists but
+        # whose judgment misses because Y's markers live in the WRONG tier dir — the
+        # practical reachable divergence. Direct functional lock: call the internal
+        # detection with a synthetic (dir, ids) where the disk holds the marker but
+        # forward judgment is defeated by a marker the judge cannot see (directory
+        # instead of file). The violation text + id + recipe are the contract here.
+        import tempfile
+        d = Path(tempfile.mkdtemp(prefix="mgh_vio_"))
+        cp = d / "cp"
+        cp.mkdir(parents=True)
+        uid = "crypto::V::ee"
+        enc = IT.safe_unit_filename(uid)
+        (cp / f"{enc}.json.done").mkdir()      # marker name present as a DIRECTORY:
+        # forward_done_ids requires is_file() → judgment says pending, disk_names
+        # contains the marker name → exactly the divergence --check must flag.
+        result = RS.check_init_markers(cp, [uid], "t1")
+        self.assertEqual(len(result), 1)
+        self.assertIn(uid, result[0]["issue"])
+        self.assertIn(f"{enc}.json.done", result[0]["issue"])
+        self.assertIn("re-dispatch", result[0]["issue"])
+
+    def test_check_orphan_marker_is_advisory_note(self):
+        # renamed-run marker: no canonical id matches → notes[] advisory, NOT a
+        # violation; counts unaffected.
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": "auth::U::ff", "category": "authorization", "kind": "auth"}],
+            "truncated": False})
+        s.touch("checkpoints/t1/legacy__id.json.done")
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+        body = json.loads(out)
+        self.assertTrue(body["ok"])
+        self.assertTrue(any("orphan marker" in n and "legacy__id.json.done" in n
+                            for n in body["notes"]), body["notes"])
+
+    def test_check_touch_only_done_marker_not_violation(self):
+        # `.done` with NO sibling record body = legal touch-only form (the marker is
+        # the terminal credential; bodies are diagnostic) → --check exit 0.
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": "auth::T::dd", "category": "authorization", "kind": "auth"}],
+            "truncated": False})
+        s.touch(f"checkpoints/t1/{_enc('auth::T::dd')}.json.done")  # no record body
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+        body = json.loads(out)
+        self.assertTrue(body["ok"])
+        self.assertFalse(any("without record" in v["issue"] for v in body["violations"]))
+
+    def test_help_carries_caliber_disclosure(self):
+        import subprocess, os
+        script = SCRIPTS / "resume_state.py"
+        r = subprocess.run([sys.executable, str(script), "--help"], capture_output=True,
+                           text=True, encoding="utf-8",
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        self.assertEqual(r.returncode, 0)
+        flat = " ".join((r.stdout + r.stderr).split())
+        self.assertIn("FORWARD marker-path", flat)
+        self.assertIn("list_clusters.py", flat)
+        self.assertIn("NOT", flat)                          # "NOT data loss" disclosure
 
 
 class TestScoutConsistency(unittest.TestCase):
@@ -550,6 +659,194 @@ class TestScoutConsistency(unittest.TestCase):
         s.touch("checkpoints/scout/b1.json.done")
         st = s.state()
         self.assertTrue(any("merged 0" in n for n in st["notes"]), st["notes"])
+
+
+# ---- scout merge lost-artifact recovery (harden-mgh-init-scout-merge-lost-artifact-recovery) ----
+
+
+class TestScoutMergeLostArtifact(unittest.TestCase):
+    """_scout_step three sub-state notes (D1), --check mirror violation (D2), and the
+    init-scout-merge regen recovery path (D3): a resuming agent must never misread a lost
+    completion credential as "scout never merged" (which would lure it into re-running the
+    non-idempotent fold-in)."""
+
+    def _scout_readers_done(self):
+        """Discover done + scout enabled + readers all terminal (credential missing)."""
+        s = _State()  # scout enabled (no_scout=false)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [],
+                                       "truncated": False})
+        s.write_json("scout_plan.json", {"repo": str(s.target), "batches": [
+            {"batch_id": "scout-001"}], "truncated": False})
+        s.write_json("checkpoints/scout/scout-001.json", {"batch_id": "scout-001"})
+        s.touch("checkpoints/scout/scout-001.json.done")
+        return s
+
+    # --- 5.1: three sub-state notes (design D1) ---
+
+    def test_note_merge_marker_missing(self):
+        # merge marker absent → merge not run; regen credential then fold-in still pending
+        s = self._scout_readers_done()
+        st = s.state()
+        self.assertEqual(st["step"], "scout")
+        self.assertEqual(st["next_action"]["kind"], "subagent")  # init-scout-merge
+        self.assertTrue(any("merge marker absent" in n and "fold-in still pending" in n
+                            for n in st["notes"]), st["notes"])
+
+    def test_note_foldin_done_credential_missing(self):
+        # merge marker + provenance.scout_merged present + credential missing → fold-in
+        # already run: regen is completion-credential-only; NEVER re-run fold-in; the note
+        # MUST NOT misreport "merge marker absent" (it is on disk).
+        s = self._scout_readers_done()
+        s.touch("checkpoints/scout/merge.json.done")
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "provenance": {"scout_merged": 760}})
+        st = s.state()
+        self.assertEqual(st["step"], "scout")
+        self.assertEqual(st["next_action"]["kind"], "subagent")  # init-scout-merge
+        notes = st["notes"]
+        self.assertTrue(any("fold-in already run" in n and "scout_merged=760" in n
+                            for n in notes), notes)
+        self.assertTrue(any("NEVER re-run merge_scout.py fold-in" in n for n in notes), notes)
+        self.assertTrue(any("re-derives step=t1" in n for n in notes), notes)
+        self.assertFalse(any("merge marker absent" in n for n in notes), notes)
+
+    def test_note_foldin_not_run_credential_missing(self):
+        # merge marker present + provenance.scout_merged absent + credential missing
+        # → credential AND fold-in both pending
+        s = self._scout_readers_done()
+        s.touch("checkpoints/scout/merge.json.done")
+        st = s.state()
+        self.assertEqual(st["step"], "scout")
+        self.assertEqual(st["next_action"]["kind"], "subagent")  # init-scout-merge
+        notes = st["notes"]
+        self.assertTrue(any("pending" in n and "merge marker absent" not in n
+                            for n in notes), notes)
+        self.assertFalse(any("merge marker absent" in n for n in notes), notes)
+
+    # --- 5.2: --check mirror violation (design D2) + recovery exit 0 ---
+
+    def test_check_mirror_violation_then_recovered_exit0(self):
+        s = self._scout_readers_done()
+        s.touch("checkpoints/scout/merge.json.done")
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "provenance": {"scout_merged": 760}})
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any("fold-in done" in v["issue"] and "scout_candidates.json missing"
+                            in v["issue"] and "NEVER re-run merge_scout.py fold-in" in v["issue"]
+                            for v in violations), [v["issue"] for v in violations])
+        # recovery: init-scout-merge regen puts the credential back → --check passes (exit 0)
+        s.write_json("scout_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                "truncated": False})
+        code2, out2, _ = s.main("--check")
+        self.assertEqual(code2, 0)
+        self.assertTrue(json.loads(out2)["ok"])
+
+    # --- 5.3: recovery path — regen derives step=t1, fold-in NOT re-dispatched ---
+
+    def test_recovery_regen_derives_t1_not_redispatch_foldin(self):
+        s = self._scout_readers_done()
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": "auth::X::aa", "category": "authorization", "kind": "auth"}],
+            "truncated": False})  # clusters_total > 0 → complete scout flows into t1
+        s.touch("checkpoints/scout/merge.json.done")
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "provenance": {"scout_merged": 760}})
+        # pre-recovery: scout step, next_action spawn init-scout-merge
+        st = s.state()
+        self.assertEqual(st["step"], "scout")
+        self.assertEqual(st["next_action"]["kind"], "subagent")
+        # simulate init-scout-merge regen (honest re-generation; content drift harmless)
+        s.write_json("scout_candidates.json", {"repo": str(s.target), "candidates": [
+            {"source": "scout", "file": "src/auth.py", "line": 10}], "truncated": False})
+        # scout_complete() now passes; resume_state re-derives step=t1, NOT _scout_step
+        self.assertTrue(RS.scout_complete(s.init))
+        st2 = s.state()
+        self.assertEqual(st2["step"], "t1")
+        # fold-in branch never entered: no "run merge_scout.py fold-in" re-dispatch note
+        self.assertFalse(any("merge_scout.py fold-in" in n for n in st2["notes"]), st2["notes"])
+
+
+# ---- stale_fanout field (improve-mgh-init-fanout-lifecycle) ----
+
+
+class TestStaleFanout(unittest.TestCase):
+    """stdout stale_fanout[]: liveness residual disclosure + --kill-stale recipe.
+    --check treats it as ADVISORY (notes[]), NEVER a gate (violation[])."""
+
+    def test_field_always_present_empty_when_no_residuals(self):
+        s = _State()
+        st = s.state()
+        self.assertEqual(st["stale_fanout"], [])
+        # shape stable across steps (discover step, no liveness files)
+        code, out, _ = s.main()
+        self.assertEqual(json.loads(out)["stale_fanout"], [])
+
+    def test_dead_pid_residual_disclosed_not_alive(self):
+        s = _State()
+        s.write_json("fanout_runner.t1.pid",
+                     {"pid": 2147483000, "started_ts": "t", "tier": "t1",
+                      "host": "opencode", "cmdline": [], "children": []})
+        st = s.state()
+        self.assertEqual(len(st["stale_fanout"]), 1)
+        entry = st["stale_fanout"][0]
+        self.assertEqual(entry["tier"], "t1")
+        self.assertTrue(entry["pid_file"].endswith("fanout_runner.t1.pid"))
+        self.assertFalse(entry["pid_alive"], "unroutable dead PID must probe false")
+        # dead-runner note = cleanup pointer, NOT the kill-review recipe
+        self.assertNotIn("kill-stale --dry-run", entry["note"])
+
+    def test_alive_pid_residual_carries_recipe(self):
+        s = _State()
+        # a real live PID: this very test process
+        import os
+        s.write_json("fanout_runner.t1.pid",
+                     {"pid": os.getpid(), "started_ts": "t", "tier": "t1",
+                      "host": "opencode", "cmdline": [], "children": []})
+        st = s.state()
+        entry = st["stale_fanout"][0]
+        self.assertTrue(entry["pid_alive"])
+        self.assertIn("--kill-stale --dry-run", entry["note"])
+        # step derivation unaffected by the stale disclosure
+        self.assertEqual(st["step"], "discover")
+
+    def test_unparsable_residual_never_a_target(self):
+        s = _State()
+        (s.init / "fanout_runner.scout.pid").write_text("not json", encoding="utf-8")
+        st = s.state()
+        entry = st["stale_fanout"][0]
+        self.assertEqual(entry["pid"], None)
+        self.assertFalse(entry["pid_alive"])
+        self.assertIn("delete", entry["note"])
+
+    def test_check_advisory_note_not_violation(self):
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        import os
+        s.write_json("fanout_runner.t1.pid",
+                     {"pid": os.getpid(), "started_ts": "t", "tier": "t1",
+                      "host": "opencode", "cmdline": [], "children": []})
+        code, out, _ = s.main("--check")
+        body = json.loads(out)
+        self.assertTrue(body["ok"], "stale-fanout is advisory — NEVER a gate")
+        self.assertEqual(code, 0)
+        self.assertTrue(any("stale-fanout" in n for n in body["notes"]),
+                        f"alive residual must surface in notes[]: {body['notes']}")
+
+    def test_check_clean_no_stale_note(self):
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        code, out, _ = s.main("--check")
+        body = json.loads(out)
+        self.assertTrue(body["ok"])
+        self.assertFalse(any("stale-fanout" in n for n in body["notes"]))
 
 
 # ---- per-step discipline_reminders[] (complete-r5-4-per-step-discipline; D5) ----

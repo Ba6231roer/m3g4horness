@@ -15,10 +15,11 @@ which **reads its own `input_path`**; the orchestrator only passes the path verb
 `<命令输出目录>/inputs/<tier>/<unit>.input.json`(绝对路径,落运行域树内,幂等覆盖,`--resume`
 复用)。**文件名为存储编码,非身份**:含 `::`(NTFS Alternate-Data-Stream 分隔符,写即 errno 22)
 的 unit id —— 即 T1 `cluster_id` 与 `<cid>::shard-<n>` —— 其 input 文件名 + `checkpoint_path`/
-`done_marker` 文件名分量经 `_safe_name`(`/`、`\`、`:` → `_`)消毒;canonical unit id(含 `::`)
-原样保留为 envelope `cluster_id` 字段 + 物化记录 + 检查点记录 `unit` 字段(done 检测读 `unit` 字段、
-不依赖文件名 → resume 不受影响)。`batch_id`(`scout-NNN`)/ `category` 为纯标识、不含 `::`,消毒为
-no-op。各命令的 `<命令输出目录>` + `<tier>`:
+`done_marker` 文件名分量经 `_safe_name` 消毒(**字符消毒** `/`、`\`、`:` → `_` **+ stem 长度截断**
+≤ 200、保尾 ~60 字符判别段,使任何超长/legacy id 派生的文件名亦可写、两 id 磁盘不碰撞);canonical
+unit id(含 `::`)原样保留为 envelope `cluster_id` 字段 + 物化记录 + 检查点记录 `unit` 字段(done
+检测读 `unit` 字段、不依赖文件名 → resume 不受影响)。`batch_id`(`scout-NNN`)/ `category` 为纯标识、
+不含 `::`,消毒为 no-op。各命令的 `<命令输出目录>` + `<tier>`:
 
 | 命令 | 输出目录 | tier / unit | 物化者 |
 |---|---|---|---|

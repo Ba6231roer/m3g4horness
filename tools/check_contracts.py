@@ -110,8 +110,10 @@ FANOUT_RUNNER_SCRIPT = ROOT / "core" / "scripts" / "fanout_runner.py"
 FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candidates",
                                 "--inventory", "--format", "--rules-dir", "--target",
                                 "--checkpoints", "--inputs-dir", "--host",
-                                "--wave", "--time-budget-ms", "--call-timeout-s", "--resume",
-                                "--pending-file", "--purge-audit", "--dry-run", "--template"]
+                                "--wave", "--time-budget-ms", "--call-timeout-s",
+                                "--stall-waves", "--resume",
+                                "--kill-stale", "--pending-file", "--purge-audit",
+                                "--dry-run", "--template"]
 # Per-tier task-message templates the dispatcher reads (fanout-dispatch tier adoption);
 # existence asserted so a trimmed mirror cannot silently break dispatch.
 FANOUT_TEMPLATES = [

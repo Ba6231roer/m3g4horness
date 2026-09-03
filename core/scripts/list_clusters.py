@@ -25,6 +25,11 @@ is written to `<dir>/<unit>.input.json`; `pending[]` becomes a SLIM envelope car
 `usage_sites[]`/hits sink into the input file). The orchestrator passes `input_path`
 verbatim; the T1 subagent reads its own bounded file (NEVER the whole `clusters.json`).
 Oversize clusters (> `--max-unit-bytes`) are sharded into `<cluster_id>::shard-<n>` units.
+The input filename stem is length-capped (`_safe_name`, ≤ 200 chars keeping a ~60-char
+discriminant tail) so ANY cluster_id — including legacy overlong ids from pre-bound discover
+runs — yields a writable file. A single cluster whose materialization write fails is ISOLATED:
+its `.failed` terminal marker is written + `failed` count +1 + the batch continues (exit 0);
+a `.failed` marker that also cannot be written → exit 2 fail-loud (systemic run-dir damage).
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 
@@ -37,11 +42,23 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<ClusterLite>, ...],
    "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
   - total       = len(clusters[])             (the REAL count, not len(wrapper))
-  - done        = #clusters fully complete (whole-cluster .done, or all shards .done)
-  - failed      = #whole-cluster confirmed-failed units (`.failed` marker; terminal,
-                  excluded from pending, NOT retried on --resume; done+failed+pending
-                  = total for the non-sharded case). Crash with no `failed` ack leaves
-                  no marker → unit stays pending (crash ≠ confirmed failure).
+  - done        = #canonical units whose `.done` marker exists (FORWARD marker-path
+                  computation: encode `<safe(unit_id)>.json.done` with the same
+                  `_safe_name` the write side uses, `is_file()` = terminal. NEVER a
+                  record-body field read / filename-stem reverse lookup — an overlong
+                  id's truncated stem ≠ its canonical id, and the old glob+stem
+                  fallback permanently misjudged such finished units as pending →
+                  infinite re-dispatch. Record-body identity fields are diagnostic
+                  only, never load-bearing.)
+  - failed      = #canonical units confirmed-failed (`.failed` marker exists; terminal,
+                  excluded from pending, NOT retried on --resume; same forward
+                  computation). Covers both orchestrator-acked failures AND a
+                  per-cluster materialize write failure (`--materialize` isolates it:
+                  `.failed` marker + count +1 + batch continues, never aborts).
+                  Crash with no `failed` ack leaves no marker → unit stays pending
+                  (crash ≠ confirmed failure). Orphan markers on disk (encoded
+                  filename maps to no canonical unit id) are stderr-warned and enter
+                  NO count.
   - pending[]   = slim work items on the current page; each item (WITH --materialize):
       {cluster_id, category, kind, shape, candidate_count,
        input_path, checkpoint_path, done_marker, failed_marker, bytes, oversize, slice_dir}
@@ -49,8 +66,8 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - input_path     = ABSOLUTE per-unit input file (subagent reads this; ≤ --max-unit-bytes).
   - checkpoint_path = ABSOLUTE path the T1 subagent MUST write its checkpoint to
                       (<resolved --checkpoints>/<safe(unit)>.json; `safe` = `_safe_name`,
-                      `/` `\` `:` → `_`); passed verbatim by the orchestrator so the
-                      subagent NEVER assembles/interpolates a path.
+                      `/` `\` `:` → `_` AND stem length-capped ≤ 200); passed verbatim by
+                      the orchestrator so the subagent NEVER assembles/interpolates a path.
   - done_marker     = ABSOLUTE `.done` marker path (<checkpoint_path>.done) to touch on success.
   - failed_marker   = ABSOLUTE `.failed` marker path (<checkpoint_path>.failed); the
                       orchestrator writes it (body {unit,reason,tier}) on a `failed` ack —
@@ -79,10 +96,13 @@ from pathlib import Path
 # cwd / host-agent invocation (direct `py`/`python`) — R5.3a.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from init_tier import scout_complete  # noqa: E402
+from init_tier import (scout_complete, safe_unit_filename, forward_marker_paths,
+                       forward_done_ids, forward_failed_ids, orphan_markers,
+                       MAX_UNIT_FILENAME_STEM)  # noqa: E402
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — aligns with --big-file-bytes 200KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
+MAX_UNIT_FILENAME_STEM = 200           # alias of init_tier.MAX_UNIT_FILENAME_STEM (single source)
 
 
 def _abs_file(raw, repo_path):
@@ -152,62 +172,27 @@ def _byte_len(obj) -> int:
     return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
 
-def _done_ids(checkpoints_dir: Path):
-    """Return the set of completed unit ids by reading each checkpoint record's
-    `unit` field (robust to filename sanitization of cluster_id, which may contain
-    `::` and `/`). Marker = `<id>.json.done`; record = `<id>.json` (sibling).
-    Covers both whole-cluster ids and `<cid>::shard-<n>` shard ids."""
-    done = set()
-    if not checkpoints_dir.is_dir():
-        return done
-    for marker in sorted(checkpoints_dir.glob("*.json.done")):
-        record = marker.with_suffix("")  # strip trailing ".done" → <id>.json
-        unit = None
-        if record.is_file():
-            try:
-                unit = json.loads(record.read_text(encoding="utf-8")).get("unit")
-            except (OSError, ValueError):
-                unit = None
-        if not unit:
-            # fallback: derive from filename stem (best-effort); warn on stderr
-            unit = record.stem  # <id>
-            print(f"warn: could not read unit from {record.name}; using stem {unit!r}",
-                  file=sys.stderr)
-        done.add(unit)
-    return done
+def _done_ids(checkpoints_dir: Path, canonical_ids):
+    """Set of completed canonical unit ids — FORWARD marker-path computation
+    (identity-immune): for each canonical id, encode the exact marker filename with
+    the SAME `_safe_name` the materialization write side uses, `is_file()` = done.
+    NEVER re-derives identity from a record-body field or a filename stem (an
+    overlong id's truncated stem ≠ canonical id — the old glob+stem fallback
+    misjudged such units as forever-pending and re-dispatched finished work
+    forever; record-body fields may drift/be absent and are not load-bearing).
+
+    Covers whole-cluster ids and `<cid>::shard-<n>` shard ids alike (both are
+    members of `canonical_ids`)."""
+    return forward_done_ids(checkpoints_dir, canonical_ids)
 
 
-def _failed_ids(checkpoints_dir: Path):
-    """Return the set of TERMINAL-FAILED unit ids (confirmed failure; excluded from
-    `pending` and NOT retried on `--resume`). Marker = `<id>.json.failed` (sibling of
-    `.done`); the orchestrator writes its body `{unit,reason,tier}` on a `failed` ack —
-    `unit` is the canonical id, read here in-body so a failure that produced NO sibling
-    record body is still matched (unlike `.done`, which is an empty touched marker that
-    forces `_done_ids` to read the sibling record; `.failed` carries its unit in-body).
-    Resolution: body `unit` → sibling record `unit` → filename-stem fallback. A crash
-    with no `failed` ack leaves no marker → the unit stays `pending` and IS retried
-    (crash ≠ confirmed terminal failure)."""
-    failed = set()
-    if not checkpoints_dir.is_dir():
-        return failed
-    for marker in sorted(checkpoints_dir.glob("*.json.failed")):
-        record = marker.with_suffix("")  # strip ".failed" → <id>.json (sibling)
-        unit = None
-        try:
-            body = json.loads(marker.read_text(encoding="utf-8"))
-            if isinstance(body, dict):
-                unit = body.get("unit") or None
-        except (OSError, ValueError):
-            unit = None
-        if not unit and record.is_file():  # fall back to the sibling record's `unit`
-            try:
-                unit = json.loads(record.read_text(encoding="utf-8")).get("unit") or None
-            except (OSError, ValueError):
-                unit = None
-        if not unit:
-            unit = record.stem  # sanitized filename; best-effort (no body + no record)
-        failed.add(unit)
-    return failed
+def _failed_ids(checkpoints_dir: Path, canonical_ids):
+    """Set of TERMINAL-FAILED canonical unit ids (confirmed failure; excluded from
+    `pending` and NOT retried on `--resume`) — same forward computation as
+    `_done_ids`: marker 存在即终态, identity NEVER from record body or stem.
+    A crash with no `failed` ack leaves no marker → the unit stays `pending` and
+    IS retried (crash ≠ confirmed terminal failure)."""
+    return forward_failed_ids(checkpoints_dir, canonical_ids)
 
 
 def _load_candidates(path):
@@ -235,8 +220,17 @@ def _safe_name(unit_id: str) -> str:
     """Filesystem-safe encoding of a unit_id for an INPUT filename. cluster_ids (and
     `<cid>::shard-<n>` ids) contain `::`, which is NTFS's Alternate-Data-Stream separator
     (write fails with errno 22 on Windows). The canonical unit_id stays as the envelope
-    identity + checkpoint `unit` field; only the input FILENAME is encoded."""
-    return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    identity + checkpoint `unit` field; only the input FILENAME is encoded.
+
+    ALSO caps the filename stem length (MAX_UNIT_FILENAME_STEM): beyond it the stem is
+    truncated keeping the head + a ~60-char discriminant tail (contains the full-key sha8)
+    so ANY cluster_id — including legacy overlong ids from pre-bound discover runs — yields
+    a writable filename, and two distinct ids do not collide on disk (distinct sha8 tails
+    differ). Short ids are returned unchanged.
+
+    Alias of `init_tier.safe_unit_filename` (single encoding source shared with the
+    forward done/failed predicates — judgment and materialization never diverge)."""
+    return safe_unit_filename(unit_id)
 
 
 def _cluster_header(cluster: dict) -> dict:
@@ -248,6 +242,49 @@ def _cluster_header(cluster: dict) -> dict:
         "evidence_files": cluster.get("evidence_files", []),
         "usage_sites": cluster.get("usage_sites", []),
     }
+
+
+def collect_canonical_ids(clusters, cands, max_unit_bytes: int, repo_root):
+    """The canonical unit-id set for the T1 tier — the identity truth source the
+    forward done/failed judgment walks: every whole-cluster id + every oversize
+    `<cid>::shard-<n>` derivation (shard plan shared with `_resolve_units`, so the
+    id set judgment uses is by construction the id set materialization can write).
+    Single shared entry point: resume_state imports THIS (count caliber and
+    enumeration pending[] semantics agree by construction — NEVER a second copy)."""
+    ids = []
+    for cluster in clusters or []:
+        if not isinstance(cluster, dict) or not cluster.get("cluster_id"):
+            continue
+        cid = cluster["cluster_id"]
+        ids.append(cid)
+        hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
+        ids.extend(uid for uid, _ in
+                   _shard_plan(cid, cluster, hits, max_unit_bytes, repo_root))
+    return ids
+
+
+def _shard_plan(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
+                repo_path=None):
+    """Single source of the sharding decision: greedy candidate-hit grouping under
+    the byte budget. Returns the list of (unit_id, absolutized input body) for the
+    shards — [] when the cluster fits whole (the caller then uses `cid` itself).
+    Both the canonical-id collector and `_resolve_units` consume THIS plan, so the
+    id set the forward done/failed judgment walks is by construction the id set
+    materialization can write."""
+    header = _cluster_header(cluster)
+    header_bytes = _byte_len(header)
+    shards, cur, cur_b, n = [], [], header_bytes, 0
+    for h in hits:
+        hb = _byte_len(h)
+        if cur and cur_b + hb > max_unit_bytes:
+            shards.append((n, _absolutize_paths(dict(header, candidates=cur), repo_path)))
+            n += 1
+            cur, cur_b = [], header_bytes
+        cur.append(h)
+        cur_b += hb
+    if cur:
+        shards.append((n, _absolutize_paths(dict(header, candidates=cur), repo_path)))
+    return [(f"{cid}::shard-{sn}", inp) for sn, inp in shards]
 
 
 def _resolve_units(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
@@ -262,24 +299,10 @@ def _resolve_units(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
     full = _absolutize_paths(dict(_cluster_header(cluster), candidates=hits), repo_path)
     if _byte_len(full) <= max_unit_bytes or not hits:
         return [_write_unit(inputs_dir, cid, full)]
-    # oversize: shard candidate hits greedily; header repeats per shard (small).
-    header = _cluster_header(cluster)
-    header_bytes = _byte_len(header)
-    shards, cur, cur_b, n = [], [], header_bytes, 0
-    for h in hits:
-        hb = _byte_len(h)
-        if cur and cur_b + hb > max_unit_bytes:
-            shards.append((n, _absolutize_paths(dict(header, candidates=cur), repo_path)))
-            n += 1
-            cur, cur_b = [], header_bytes
-        cur.append(h)
-        cur_b += hb
-    if cur:
-        shards.append((n, _absolutize_paths(dict(header, candidates=cur), repo_path)))
-    units = []
-    for sn, inp in shards:
-        uid = f"{cid}::shard-{sn}"
-        units.append(_write_unit(inputs_dir, uid, inp))
+    # oversize: shard candidate hits greedily (plan shared with the canonical-id
+    # collector — judgment and materialization cannot drift).
+    shards = _shard_plan(cid, cluster, hits, max_unit_bytes, repo_path)
+    units = [_write_unit(inputs_dir, uid, inp) for uid, inp in shards]
     print(f"warn: cluster {cid} oversize ({_byte_len(full)}B > {max_unit_bytes}B) → "
           f"{len(units)} shard(s)", file=sys.stderr)
     return units
@@ -299,13 +322,10 @@ def _write_unit(inputs_dir: Path, unit_id: str, inp: dict):
 def _paths(checkpoints_dir: Path, unit_id: str):
     # Filename component is `_safe_name`-encoded (same as input filenames): cluster_ids /
     # shard ids carry `::` (NTFS Alternate-Data-Stream separator → write fails with
-    # errno 22 on Windows). The canonical unit_id stays as envelope `cluster_id` + the
-    # checkpoint record's `unit` field; only the FILENAME is encoded (done detection reads
-    # the record's `unit` field, not the filename → resume matching unaffected).
-    base = (checkpoints_dir / f"{_safe_name(unit_id)}.json")
-    return (str(base),
-            str(base.with_name(base.name + ".done")),
-            str(base.with_name(base.name + ".failed")))
+    # errno 22 on Windows) and overlong ids are stem-capped. Alias of the shared
+    # `init_tier.forward_marker_paths` — the paths stdout advertises are byte-identical
+    # to what the forward done/failed judgment recomputes (single source, never drift).
+    return forward_marker_paths(checkpoints_dir, unit_id)
 
 
 def _slice_dir(checkpoints_dir: Path, unit_id: str) -> str:
@@ -381,7 +401,10 @@ def main():
                     help="controls_candidates.json (for --materialize hit lookup)")
     ap.add_argument("--materialize", metavar="<inputs-dir>",
                     help="write each cluster's complete input to <dir>/<unit>.input.json "
-                         "(slim envelope + input_path/bytes/oversize; backward-compat lite shell if omitted)")
+                         "(slim envelope + input_path/bytes/oversize; backward-compat lite "
+                         "shell if omitted). Filename stem length-capped (<=200, overlong "
+                         "ids writable); a per-cluster write failure -> .failed terminal "
+                         "marker + batch continues (never aborts)")
     ap.add_argument("--offset", type=int, default=0, help="page offset (default 0)")
     ap.add_argument("--limit", type=int, default=None,
                     help="max items per page (default: all pending)")
@@ -447,11 +470,34 @@ def main():
                                  ensure_ascii=False))
                 return 2
 
-    done = _done_ids(checkpoints_dir)
-    failed = _failed_ids(checkpoints_dir)
+    # canonical unit-id set (identity truth source): whole clusters + oversize
+    # `<cid>::shard-<n>` derivations (same `_shard_plan` the materializer splits
+    # with — the two sides cannot drift). Done/failed judgment = forward
+    # marker-path computation over THIS set (init_tier.forward_*); never a
+    # glob+stem reverse lookup (an overlong id's truncated stem ≠ canonical id →
+    # the old fallback misjudged finished units as forever-pending → infinite
+    # re-dispatch).
     materialize = bool(args.materialize)
     cands = _load_candidates(args.candidates) if materialize else {}
     inputs_dir = Path(args.materialize).resolve() if materialize else None
+    try:
+        repo_root = Path(wrapper["repo"]).resolve() \
+            if isinstance(wrapper.get("repo"), str) and wrapper["repo"] else None
+    except (OSError, ValueError):
+        repo_root = None
+    canonical_ids = collect_canonical_ids(clusters, cands, args.max_unit_bytes,
+                                          repo_root) if materialize else \
+        [c.get("cluster_id") for c in clusters
+         if isinstance(c, dict) and c.get("cluster_id")]
+
+    done = _done_ids(checkpoints_dir, canonical_ids)
+    failed = _failed_ids(checkpoints_dir, canonical_ids)
+    # orphan audit (fail-soft): markers whose encoded filename maps to no
+    # canonical unit id (renamed/legacy run products) — stderr warn only, they
+    # NEVER enter done/failed/pending.
+    for name in orphan_markers(checkpoints_dir, canonical_ids):
+        print(f"warn: orphan marker (no canonical unit id matches; audit only, "
+              f"not counted): {name}", file=sys.stderr)
 
     all_units = []          # full slim work-list (pre-page)
     clusters_with_pending = 0
@@ -469,13 +515,30 @@ def main():
         if materialize:
             hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
             try:
-                repo_path = Path(wrapper["repo"]).resolve() \
-                    if isinstance(wrapper.get("repo"), str) and wrapper["repo"] else None
-            except (OSError, ValueError):
-                repo_path = None
-            for uid, ipath, nbytes in _resolve_units(cid, cluster, hits,
-                                                     args.max_unit_bytes, inputs_dir,
-                                                     repo_path):
+                units = list(_resolve_units(cid, cluster, hits,
+                                            args.max_unit_bytes, inputs_dir, repo_root))
+            except OSError as e:
+                # Single-cluster materialize-failure isolation: write the `.failed` terminal
+                # marker (filename stem-capped → writable even for overlong ids), count the
+                # failure, keep materializing the rest — NEVER abort the whole batch on one
+                # bad cluster. If the `.failed` marker itself cannot be written → systemic
+                # run-dir damage → exit 2 fail-loud (R5.3b / R5.9).
+                print(f"error: cluster {cid} materialize failed: {e}", file=sys.stderr)
+                failed_path = _paths(checkpoints_dir, cid)[2]
+                try:
+                    # checkpoints dir may not exist yet (first cluster failing before any
+                    # checkpoint write) — a missing dir is NOT systemic damage, so create it.
+                    Path(failed_path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(failed_path).write_text(json.dumps(
+                        {"unit": cid, "reason": f"materialize failed: {e}", "tier": "t1"},
+                        ensure_ascii=False), encoding="utf-8")
+                except OSError:
+                    print(f"error: cannot write failed marker for {cid} — systemic "
+                          f"run-dir failure", file=sys.stderr)
+                    return 2
+                clusters_failed += 1
+                continue
+            for uid, ipath, nbytes in units:
                 if uid in done:
                     continue
                 if uid in failed:  # shard-level terminal failure (skip, not retried)

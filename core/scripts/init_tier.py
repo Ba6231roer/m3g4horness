@@ -22,6 +22,94 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+# Filename stem cap shared by every unit-filename encoding point (single source):
+# NTFS 255 − ".input.json"(11) → worst stem 200 → 211 ≤ 255. Enumeration scripts
+# (list_clusters/list_scout_batches) encode checkpoint/input filenames with it; the
+# done/failed forward predicates below decode NOTHING — they recompute the same
+# encoding forward, so judgment survives any truncation (see fix-mgh-init-done-marker-identity).
+MAX_UNIT_FILENAME_STEM = 200
+
+
+def safe_unit_filename(unit_id: str) -> str:
+    """Filesystem-safe encoding of a unit_id for an INPUT/CHECKPOINT filename.
+
+    Unit ids carry `::` (NTFS Alternate-Data-Stream separator → write fails with
+    errno 22 on Windows) and may exceed the stem cap: beyond MAX_UNIT_FILENAME_STEM
+    the stem is truncated keeping the head + a ~60-char discriminant tail so ANY id
+    yields a writable filename and two distinct ids do not collide (distinct tails
+    differ). Short ids are returned unchanged (sanitize-only).
+
+    Single source of the encoding: enumeration scripts alias their `_safe_name`
+    here, and the forward done/failed predicates recompute it — judgment and
+    materialization therefore share ONE function (never diverge)."""
+    s = unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    if len(s) <= MAX_UNIT_FILENAME_STEM:
+        return s
+    head = s[: MAX_UNIT_FILENAME_STEM - 60]                 # 140
+    tail = s[-(MAX_UNIT_FILENAME_STEM - len(head) - 1):]    # 59
+    return head + "~" + tail                                # 140 + 1 + 59 = 200
+
+
+def forward_marker_paths(checkpoints_dir: Path, unit_id: str) -> tuple:
+    """(checkpoint_path, done_marker, failed_marker) for one canonical unit id,
+    FORWARD-computed with the same encoding that materialization writes
+    (`safe_unit_filename`). The single judgment primitive: marker 存在即终态,
+    NEVER 反查记录体字段或文件名 stem."""
+    base = checkpoints_dir / f"{safe_unit_filename(unit_id)}.json"
+    return (str(base),
+            str(base.with_name(base.name + ".done")),
+            str(base.with_name(base.name + ".failed")))
+
+
+def forward_done_ids(checkpoints_dir: Path, canonical_ids) -> set:
+    """Canonical unit ids whose `.done` marker exists (forward marker-path
+    computation; identity-immune to filename truncation and record-body drift)."""
+    done = set()
+    if not checkpoints_dir.is_dir():
+        return done
+    for uid in canonical_ids:
+        if Path(forward_marker_paths(checkpoints_dir, uid)[1]).is_file():
+            done.add(uid)
+    return done
+
+
+def forward_failed_ids(checkpoints_dir: Path, canonical_ids) -> set:
+    """Canonical unit ids whose `.failed` marker exists (terminal, NOT retried
+    on --resume; forward computation, same source as forward_done_ids)."""
+    failed = set()
+    if not checkpoints_dir.is_dir():
+        return failed
+    for uid in canonical_ids:
+        if Path(forward_marker_paths(checkpoints_dir, uid)[2]).is_file():
+            failed.add(uid)
+    return failed
+
+
+def orphan_markers(checkpoints_dir: Path, canonical_ids, exclude=()) -> list:
+    """Marker files on disk whose encoded filename corresponds to NO canonical
+    unit id (renamed/legacy run products). Fail-soft audit input: the caller
+    warns on stderr / lists in advisory notes — orphans NEVER enter any
+    done/failed/pending set. `exclude` skips tier-level markers by stem or name
+    (scout: ("merge.json", "audit.json"))."""
+    if not checkpoints_dir.is_dir():
+        return []
+    expected = set()
+    for uid in canonical_ids:
+        base = safe_unit_filename(uid) + ".json"
+        expected.add(base + ".done")
+        expected.add(base + ".failed")
+    out = []
+    for m in sorted(checkpoints_dir.iterdir()):
+        if not m.is_file():
+            continue
+        name = m.name
+        if not (name.endswith(".json.done") or name.endswith(".json.failed")):
+            continue
+        if name in expected or m.stem in exclude or name in exclude:
+            continue
+        out.append(name)
+    return out
+
 # Canonical 8 categories + category→kind map (single source of truth; was duplicated
 # in validate_inventory.KIND / discover_controls.KIND — drift there was a real bug).
 KIND = {

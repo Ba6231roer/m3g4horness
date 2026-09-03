@@ -17,6 +17,7 @@ root-level `controls[]` instead of root-level fields) is silently dropped.
 | field | type | note |
 |---|---|---|
 | `cluster_id` | str | non-empty; canonical cluster id |
+| `unit` | str | **identity double-cover**: non-empty; = the canonical unit id (whole cluster = `cluster_id`; shard = `<cluster_id>::shard-<n>`, same value as `cluster_id` in that record). `unit != cluster_id` = violation. **NOT load-bearing for done/failed judgment** (that is forward marker-path computation, see `cluster-enumeration.md`) — it makes glob reverse-lookup / cross-tool diagnosis recover the right identity without filename-stem inference. Historical pre-`unit` records whose forward marker exists → `--check` **warning** only (历史形态,无需处理); no `unit` + no marker → violation (new records MUST carry it). |
 | `name` | str | non-empty kebab slug |
 | `category` | enum | canonical 8 (`init_tier.INIT_CATEGORIES`) |
 | `kind` | enum | vvah 6: `auth`\|`input-validation`\|`sandbox`\|`aslr`\|`cfi`\|`other` |
@@ -54,8 +55,10 @@ py validate_t1_records.py --checkpoints <checkpoints/t1-dir> [--check | --strip-
 `--check` stdout (single JSON; stderr = diagnostics):
 ```json
 {"check":"t1","ok":bool,"records":N,"bom":[<abs files with a leading BOM>],
+ "warnings":[{"file":<abs>, "cluster_id":<str|null>, "issue":<str>}],
  "violations":[{"file":<abs>, "cluster_id":<str|null>, "issue":<str>}]}
 ```
+`warnings[]` 恒在(空列表兜底),当前唯一来源 = 历史形态缺 `unit`(见上表)。
 - exit `0` = ok (incl. empty dir: `ok:true, records:0` — "did T1 run?" is
   `resume_state`'s concern, not this validator's);
 - exit `1` = `--checkpoints` dir missing;

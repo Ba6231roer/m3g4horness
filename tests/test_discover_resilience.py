@@ -86,6 +86,29 @@ class TestDiscoverContract(unittest.TestCase):
         self.assertFalse(summ["partial"])
 
 
+class TestBigFilesStat(unittest.TestCase):
+    def test_big_files_counts_skeleton_and_field_present(self):
+        # Regression: build_skeleton() once dropped the `big` field (index_files had it
+        # internally), so main()'s big_files read skeleton.json::files[].big always saw 0
+        # on a full run — the fallback (candidate dedup) only ever fired when skeleton was
+        # missing. Fix: skeleton now carries `big`; big_files must count all big sources.
+        repo = Path(tempfile.mkdtemp(prefix="mgh_big_"))
+        a = repo / "src" / "a" / "A.java"
+        a.parent.mkdir(parents=True, exist_ok=True)
+        a.write_text(JAVA.replace("{pkg}", "a"), encoding="utf-8")        # ~340 B, not big
+        b = repo / "src" / "b" / "B.java"
+        b.parent.mkdir(parents=True, exist_ok=True)
+        b.write_text(JAVA.replace("{pkg}", "b") + "\n// pad\n" * 300, encoding="utf-8")  # > 1 KB
+        out = Path(tempfile.mkdtemp(prefix="mgh_big_out_"))
+        rc, s, err = _run(repo, out, "--big-file-bytes", "1000")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(s["big_files"], 1, f"big_files must count skeleton, got {s}")
+        sk = json.loads((out / "skeleton.json").read_text(encoding="utf-8"))
+        by_file = {f["file"]: f for f in sk["files"]}
+        self.assertTrue(by_file["src/b/B.java"]["big"], "padded file must be flagged big")
+        self.assertFalse(by_file["src/a/A.java"]["big"])
+
+
 class TestCallgraphCache(unittest.TestCase):
     def test_cache_hit_second_run_and_equivalence(self):
         repo = _repo(5, "cache")

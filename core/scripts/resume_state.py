@@ -73,6 +73,35 @@ torn down; the guard SHOULD be dormant). `--rearm-sentinel` deterministically re
 sentinel from the persisted run_config (target + rules_dir/out-derived out_roots) — the
 `/mgh-init --resume` first step MAY invoke it after compaction or a clean stop removed it.
 
+stale_fanout (resolve-path stdout, additive field — base shape unchanged): scan of
+`<init-dir>/fanout_runner.*.pid` liveness files left by fanout_runner runs (one per
+tier; a hard-killed runner leaves its file behind). Each entry
+{tier, pid_file, pid, pid_alive, note}; `pid_alive` = OS process-table probe. Any
+`pid_alive:true` → `note` carries the `--kill-stale --dry-run` recipe (the
+`/mgh-init --resume` orchestrator FIRST kills stale orphan trees, then continues —
+double-running a unit burns tokens and races on the same checkpoint). No liveness
+files → `stale_fanout: []` (field always present, shape stable). A resume-derived
+value, NOT persisted; `--check` discloses alive residuals in notes[] as ADVISORY
+only — NEVER a gate (orphan-pending is a legal re-dispatchable state).
+
+Count semantics (why `tiers.<tier>.done` can differ from the file count you see in
+`checkpoints/<tier>/` — NOT data loss, three different measures):
+  1. THIS SCRIPT's done = canonical unit ids judged done by FORWARD marker-path
+     computation (encode `<safe(unit_id)>.json.done` with the same `_safe_name`
+     the write side uses; `is_file()` = terminal) — the SAME caliber as
+     `list_clusters.py`/`list_scout_batches.py` `pending[]` (shared predicate,
+     imported — not a copy): `pending` is always derivable as
+     `total - done - failed`. Identity NEVER from a record-body field or a
+     filename stem (an overlong id's truncated stem ≠ its canonical id — the old
+     glob+stem fallback permanently misjudged such finished units as pending).
+  2. `ls checkpoints/<tier>/` entry count = done markers + `.failed` markers +
+     `<id>.json` record bodies (+ shard siblings) + orphan markers (disk markers
+     whose encoded filename maps to no canonical unit id; listed as --check
+     notes[], counted NOWHERE) — every artifact, no dedup.
+The two measures differ exactly by `.failed` markers, record bodies, shard
+siblings, and orphans — not data loss. Example: t1 done=472 vs 491 directory
+entries = 472 done + `.failed` markers + record bodies — no data loss.
+
 step ∈ not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done. The blocking
 sequence is discover→scout→t1→t2→t3→assemble→t4→done; survey/resolve are optional/non-fatal
 (surfaced in notes[], never gate progress). Each fan-out tier (scout/t1/t3) is "complete
@@ -94,6 +123,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -103,8 +133,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Shared deterministic predicates/constants (single source of truth): scout-tier
 # completion for the step derivation + stale-marker enumeration for --check /
-# --invalidate-stale.
-from init_tier import scout_complete, stale_marker_paths  # noqa: E402
+# --invalidate-stale + the FORWARD marker-path done/failed predicates (same source
+# as list_clusters/list_scout_batches — count caliber and enumeration pending[]
+# semantics agree by construction).
+from init_tier import (scout_complete, stale_marker_paths, forward_marker_paths,
+                       forward_done_ids, forward_failed_ids, orphan_markers)  # noqa: E402
+# The canonical T1 unit-id set is a SHARED producer (list_clusters owns it; resume_state
+# imports — never a second copy, else count caliber and enumeration pending[] drift).
+from list_clusters import collect_canonical_ids  # noqa: E402
 # Shared static per-step discipline table (single source of truth, D1): the
 # current step's gate shapes / path recipes / applicable NEVER subset, re-derived
 # after compaction so the "how to execute THIS step" survives head-summary loss.
@@ -198,13 +234,46 @@ def _marker_exists(*candidates: Path) -> bool:
     return any(p.is_file() for p in candidates)
 
 
+def check_init_markers(cp: Path, canonical_ids, label: str) -> list:
+    """Judgment-vs-disk divergence detection for one tier (shared by --check):
+    a canonical unit judged pending (forward marker path: no `.done`/`.failed`
+    FILE) but whose marker NAME exists in the checkpoints dir → enumeration and
+    disk truth have diverged (the deterministic signal of the identity-drift
+    defect class). Returns violation dicts (id + disk marker path + do-not-
+    re-dispatch recipe)."""
+    out = []
+    if not cp.is_dir():
+        return out
+    done = forward_done_ids(cp, canonical_ids)
+    failed = forward_failed_ids(cp, canonical_ids)
+    # any directory ENTRY with the marker name counts (a file is the normal
+    # marker form; a same-named directory is equally a disk-truth claim the
+    # forward judgment cannot read as terminal — both are divergence).
+    disk_names = {p.name for p in cp.iterdir()}
+    for uid in canonical_ids:
+        if uid in done or uid in failed:
+            continue
+        _cp_s, dm_s, fm_s = forward_marker_paths(cp, uid)
+        for marker_str in (dm_s, fm_s):
+            if Path(marker_str).name in disk_names:
+                out.append({"issue": f"{label} unit {uid!r} judged pending but its "
+                                     f"marker exists on disk ({Path(marker_str).name}) "
+                                     f"— enumeration vs disk truth diverged; do NOT "
+                                     f"re-dispatch this unit: inspect the marker "
+                                     f"(empty/touch = done form) and reconcile the "
+                                     f"enumeration identity (resume this run AFTER "
+                                     f"the fix)"})
+    return out
+
+
 def _both_marker_violations(cp: Path, label: str) -> list:
     """A unit carrying BOTH `<stem>.done` and `<stem>.failed` is an ambiguous terminal
     state (D5) — e.g. a subagent acked `failed` after already touching `.done`, or the
     orchestrator wrote `.failed` for a unit that later succeeded. Returns one violation
     dict per offending unit. A `.failed` whose sibling record body is absent is NOT a
     violation (failures may produce no record body); a `.done` without a record body is
-    handled by the existing orphan-record check."""
+    the LEGAL touch-only form (the marker is the terminal credential) — audited as an
+    orphan only when its encoded name maps to no canonical unit id."""
     out = []
     if not cp.is_dir():
         return out
@@ -253,6 +322,61 @@ def _scout_merged_value(candidates_path: Path):
 
 def _next(kind: str, desc: str, paths) -> dict:
     return {"kind": kind, "desc": desc, "absolute_paths": [str(p) for p in paths]}
+
+
+def _pid_alive(pid) -> bool:
+    """OS process-table liveness probe for a stale-fanout PID (best-effort;
+    probe failure = not alive — the residual file is disclosed either way).
+    Windows: `tasklist /fi "PID eq <pid>" /fo csv /nh` (a dead PID prints an
+    info line, no csv row); POSIX: /proc/<pid>."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            r = subprocess.run(
+                ["tasklist", "/fi", f"PID eq {pid}", "/fo", "csv", "/nh"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        for ln in (r.stdout or "").splitlines():
+            if ln.strip().startswith('"') and f'","{pid}",' in ln:
+                return True
+        return False
+    return Path(f"/proc/{pid}").exists()
+
+
+def _stale_fanout(init_dir: Path) -> list:
+    """Scan `<init-dir>/fanout_runner.*.pid` liveness residuals (hard-killed
+    fanout runners leave them behind). Entries {tier, pid_file, pid, pid_alive,
+    note}; any alive PID's note carries the --kill-stale --dry-run recipe.
+    Unparsable residuals are disclosed with pid=None (cleanup candidate, never
+    a kill target). [] when no residual files (field恒存在, shape stable)."""
+    recipe = ("orphan fanout detected — run `fanout_runner.py --kill-stale "
+              "--dry-run --checkpoints <tier-checkpoints-dir>` to review, then "
+              "re-run without --dry-run to kill the tree, BEFORE re-dispatching")
+    out = []
+    if not init_dir.is_dir():
+        return out
+    for pf in sorted(init_dir.glob("fanout_runner.*.pid")):
+        stem = pf.stem  # fanout_runner.<tier>
+        tier = stem.split(".", 1)[1] if "." in stem else "unknown"
+        try:
+            body = json.loads(pf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            out.append({"tier": tier, "pid_file": str(pf), "pid": None,
+                        "pid_alive": False,
+                        "note": f"unparsable liveness residual — safe to delete "
+                                f"{pf.name} (never a kill target)"})
+            continue
+        pid = body.get("pid") if isinstance(body, dict) else None
+        alive = _pid_alive(pid)
+        out.append({"tier": tier, "pid_file": str(pf), "pid": pid,
+                    "pid_alive": alive,
+                    "note": recipe if alive else
+                    "residual liveness file (runner exited) — `--kill-stale` "
+                    "removes it; no live process to kill"})
+    return out
 
 
 # Per-step stage-flow fragment dir: `<mgh-core>/prompts/fragments/init-stage/`.
@@ -332,25 +456,43 @@ def resolve(init_dir: Path):
     scout_total = 0
     scout_done_count = 0
     scout_failed_count = 0
+    scout_ids: list = []
     if not no_scout and scout_plan.is_file():
         sp, err = _load_json(scout_plan)
         if not err and isinstance(sp, dict) and isinstance(sp.get("batches"), list):
             scout_total = len(sp["batches"])
+            scout_ids = [b.get("batch_id") for b in sp["batches"]
+                         if isinstance(b, dict) and b.get("batch_id")]
     if not no_scout:
-        # exclude merge.json/audit.json (tier-level markers, not reader batches)
-        scout_done_count = _count_markers(scout_cp, "*.json.done",
-                                          exclude=("merge.json", "audit.json"))
-        scout_failed_count = _count_markers(scout_cp, "*.json.failed",
-                                            exclude=("merge.json", "audit.json"))
+        # done = canonical batch ids judged by FORWARD marker-path computation
+        # (same source as list_scout_batches; the bare-glob count differed from
+        # the enumerator's pending[] semantics — shard/orphan blind spots).
+        scout_done_count = len(forward_done_ids(scout_cp, scout_ids))
+        scout_failed_count = len(forward_failed_ids(scout_cp, scout_ids))
     scout_terminal_count = scout_done_count + scout_failed_count  # gates scout tier (D3)
 
     clusters_total = 0
+    t1_ids: list = []
     if clusters_p.is_file():
         cl, err = _load_json(clusters_p)
         if not err and isinstance(cl, dict) and isinstance(cl.get("clusters"), list):
             clusters_total = len(cl["clusters"])
-    t1_done_count = _count_markers(t1_cp, "*.json.done")
-    t1_failed_count = _count_markers(t1_cp, "*.json.failed")
+            # SHARED canonical-id collector (whole clusters; cands empty → shard
+            # derivations need none here — shard markers are counted inside the
+            # same list_clusters caliber when their cluster's shards exist, and
+            # `total` counts CLUSTERS, matching the enumerator's total).
+            t1_ids = [c.get("cluster_id") for c in cl["clusters"]
+                      if isinstance(c, dict) and c.get("cluster_id")]
+    # t1 done/failed = forward marker-path computation over the SHARED canonical id
+    # set (whole clusters + `::shard-<n>` derivations via list_clusters's collector —
+    # an overlong id judged by its truncated-stem glob was the infinite-re-dispatch
+    # defect; the caliber is list_clusters's by import, not by copy).
+    if clusters_p.is_file():
+        cl, err = _load_json(clusters_p)
+        if not err and isinstance(cl, dict) and isinstance(cl.get("clusters"), list):
+            t1_ids = collect_canonical_ids(cl["clusters"], {}, 0, None)
+    t1_done_count = len(forward_done_ids(t1_cp, t1_ids))
+    t1_failed_count = len(forward_failed_ids(t1_cp, t1_ids))
 
     t3_total = 0
     if inventory.is_file():
@@ -481,6 +623,7 @@ def resolve(init_dir: Path):
     state = {
         "target": target, "format": fmt, "step": step, "resumable": resumable,
         "tiers": tiers, "next_action": nxt, "notes": notes,
+        "stale_fanout": _stale_fanout(init_dir),
         "discipline_reminders": get_discipline(step),
         "stage_flow_files": _stage_flow_files(step),
     }
@@ -509,9 +652,38 @@ def _scout_step(init_dir, scout_plan, scout_candidates, candidates, clusters_p,
                               "list_scout_batches.py --materialize",
                               [scout_plan, scout_cp])
     # all reader batches done
-    if not (scout_candidates.is_file() and _scout_merge_done(init_dir)):
-        notes.append("scout: all reader batches .done but scout_candidates.json / merge marker "
-                     "absent — MUST run init-scout-merge (NEVER skip to T1 / merge_scout.py).")
+    if not scout_candidates.is_file():
+        # completion credential lost — recover via init-scout-merge (the UNIQUE recovery
+        # path, design D1/D3). The note MUST split the merge/fold-in sub-states so a
+        # resuming agent never misreads "credential missing" as "scout never merged"
+        # (which would lure it into re-running the non-idempotent fold-in).
+        merged = _scout_merged_value(candidates)
+        if not _scout_merge_done(init_dir):
+            notes.append("scout: all reader batches .done but merge marker absent — merge "
+                         "not run; regen scout_candidates.json via init-scout-merge, then "
+                         "fold-in still pending (NEVER skip to T1 / merge_scout.py).")
+        elif merged is not None:
+            notes.append(f"scout: fold-in already run (scout_merged={merged}); regen "
+                         "scout_candidates.json via init-scout-merge serves ONLY as the "
+                         "completion credential (no downstream consumption, LLM drift "
+                         "harmless); NEVER re-run merge_scout.py fold-in; after regen, "
+                         "resume_state re-derives step=t1.")
+        else:
+            notes.append("scout: all reader batches .done, merge marker present but fold-in "
+                         "not run — credential AND fold-in both pending; regen "
+                         "scout_candidates.json via init-scout-merge, then fold-in still "
+                         "pending.")
+        return "scout", _next("subagent",
+                              "spawn init-scout-merge (all scout batch records, no raw code) "
+                              "-> scout_candidates.json",
+                              [scout_cp, scout_candidates,
+                               init_dir / "checkpoints" / "scout" / "merge.json.done"])
+    if not _scout_merge_done(init_dir):
+        # credential present but merge marker absent — merge never ran; do NOT fold-in a
+        # never-merged credential (init-scout-merge regenerates credential + marker).
+        notes.append("scout: scout_candidates.json present but merge marker absent — merge "
+                     "not run; run init-scout-merge to (re)generate credential + marker "
+                     "(NEVER run merge_scout.py fold-in before the merge).")
         return "scout", _next("subagent",
                               "spawn init-scout-merge (all scout batch records, no raw code) "
                               "-> scout_candidates.json",
@@ -555,12 +727,35 @@ def check(init_dir: Path) -> dict:
     # scout_candidates without merge marker
     if scout_candidates.is_file() and not _scout_merge_done(init_dir):
         violations.append({"issue": "scout_candidates.json present but scout merge marker absent"})
-    # orphan t1 .done (marker without sibling record)
-    if t1_cp.is_dir():
-        for m in sorted(t1_cp.glob("*.json.done")):
-            rec = m.with_suffix("")  # strip .done -> <id>.json
-            if not rec.is_file():
-                violations.append({"issue": f"t1 .done marker without record: {m.name}"})
+    # orphan markers (fail-soft advisory): disk markers whose encoded filename maps to
+    # no canonical unit id (legacy/renamed run products). touch-only is a LEGAL form —
+    # a `.done` marker with no sibling record body is NOT a violation (the marker is
+    # the terminal credential; the body is diagnostic). Orphans never enter counts.
+    scout_ids: list = []
+    if not no_scout:
+        sp, sp_err = _load_json(init_dir / "scout_plan.json")
+        if not sp_err and isinstance(sp, dict) and isinstance(sp.get("batches"), list):
+            scout_ids = [b.get("batch_id") for b in sp["batches"]
+                         if isinstance(b, dict) and b.get("batch_id")]
+    t1_ids: list = []
+    if clusters_p.is_file():
+        cl, cl_err = _load_json(clusters_p)
+        if not cl_err and isinstance(cl, dict) and isinstance(cl.get("clusters"), list):
+            from list_clusters import collect_canonical_ids as _ccids
+            t1_ids = _ccids(cl["clusters"], {}, 0, None)
+    for cp, ids, label in ((scout_cp, scout_ids, "scout"),
+                           (t1_cp, t1_ids, "t1")):
+        for name in orphan_markers(cp, ids,
+                                   exclude=("merge.json", "audit.json") if label == "scout"
+                                   else ()):
+            notes.append(f"{label}: orphan marker (no canonical unit id matches; audit "
+                         f"only, not counted): {name} (advisory)")
+    # judgment-vs-disk mismatch (violation): a canonical unit judged pending (forward
+    # marker path says no marker FILE) BUT the checkpoints dir contains a file whose
+    # encoded name IS that unit's marker path — enumeration and disk truth have
+    # diverged (the deterministic signal of the identity-drift defect class).
+    for cp, ids, label in ((scout_cp, scout_ids, "scout"), (t1_cp, t1_ids, "t1")):
+        violations.extend(check_init_markers(cp, ids, label))
     # ambiguous terminal: a unit carrying BOTH .done and .failed (D5) — scout reader batches,
     # t1 clusters, t3 categories. (merge.json/audit.json have no .failed sibling in practice.)
     for cp, label in ((scout_cp, "scout"), (t1_cp, "t1"), (t3_cp, "t3")):
@@ -581,6 +776,14 @@ def check(init_dir: Path) -> dict:
                                         "read-only / subtree confinement disabled on opencode); "
                                         "re-arm: `resume_state.py --rearm-sentinel` (or re-run "
                                         "write_runconfig.py), NEVER silently continue"})
+    # stale-fanout advisory (NOT a gate, design D6): an alive liveness residual
+    # means a fanout runner (or its host-CLI children) may still be running —
+    # disclosed in notes[] so the resuming orchestrator kills stale trees first.
+    for sf in _stale_fanout(init_dir):
+        if sf.get("pid_alive"):
+            notes.append(f"stale-fanout: {sf['pid_file']} pid={sf['pid']} alive "
+                         f"(tier {sf['tier']}); {sf['note']} (advisory, NOT a gate)")
+
     # --- scout consistency + stale-credential checks (scout enabled only) ---
     if not no_scout:
         sp, sp_err = _load_json(init_dir / "scout_plan.json")
@@ -589,6 +792,17 @@ def check(init_dir: Path) -> dict:
             batches = len(sp["batches"])
         terminal = (_count_markers(scout_cp, "*.json.done", exclude=("merge.json", "audit.json"))
                     + _count_markers(scout_cp, "*.json.failed", exclude=("merge.json", "audit.json")))
+        # mirror violation (design D2): merge marker + fold-in BOTH present but the
+        # completion credential was lost — recovering agent MUST regenerate honestly via
+        # init-scout-merge; NEVER re-run the non-idempotent fold-in (re-run zeroes
+        # provenance.scout_merged / double-appends candidates). Mirror of the existing
+        # "scout_candidates present but merge marker absent" violation below.
+        if _scout_merge_done(init_dir) and _foldin_done(candidates) \
+                and not scout_candidates.is_file():
+            violations.append({"issue": "checkpoints/scout/merge.json.done + fold-in done "
+                                        "but scout_candidates.json missing — regen via "
+                                        "init-scout-merge (honest re-generation, unique "
+                                        "recovery path); NEVER re-run merge_scout.py fold-in"})
         # stale credentials: scout incomplete but downstream aggregate .done exist
         # (they were produced from regex-only input — resume must not trust them).
         if not scout_complete(init_dir):
@@ -614,7 +828,13 @@ def check(init_dir: Path) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="derive /mgh-init current step + next action purely from disk (re-entrant)")
+        description="derive /mgh-init current step + next action purely from disk (re-entrant)",
+        epilog="Count semantics: tiers.<tier>.done = canonical unit ids judged done "
+               "by FORWARD marker-path computation (same predicate as "
+               "list_clusters.py / list_scout_batches.py pending[] — shared, not "
+               "copied). It can differ from the checkpoints/<tier>/ entry count "
+               "(done + .failed + record bodies + orphans) — a difference is NOT "
+               "data loss. See this file's docstring for the full measure table.")
     ap.add_argument("--target", default=".", help="target project root (default .)")
     ap.add_argument("--init-dir",
                     help="explicit run dir (full path; highest priority, overrides --run-root)")

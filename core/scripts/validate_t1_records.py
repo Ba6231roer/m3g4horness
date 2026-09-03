@@ -24,6 +24,11 @@ strip keeps direct/manual --check robust.
 
 Asserts (root-level object, one record per cluster):
   - cluster_id (non-empty string), name (non-empty string);
+  - unit (identity double-cover): non-empty string; `unit != cluster_id` in the
+    same record = violation. A record with NO `unit` whose forward marker
+    (same `safe_unit_filename` encoding as the write side) already exists =
+    HISTORICAL pre-fix form → warning only (marker judgment unaffected); NO
+    `unit` + no marker = violation (new records MUST carry it);
   - category ∈ canonical 8 (init_tier.INIT_CATEGORIES);
   - kind ∈ vvah 6-enum (auth|sandbox|input-validation|aslr|cfi|other);
   - category→kind matches the deterministic normalization map (init_tier.KIND);
@@ -37,7 +42,9 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/sys/pathlib).
 CLI contract (`--help` is the contract surface):
   py validate_t1_records.py --checkpoints <t1-checkpoints-dir> [--check | --strip-bom]
 
-stdout (--check):  {"check":"t1","ok":bool,"records":N,"bom":[files],"violations":[{"file","cluster_id","issue"}]}
+stdout (--check):  {"check":"t1","ok":bool,"records":N,"bom":[files],
+                    "warnings":[{file,cluster_id,issue}],
+                    "violations":[{"file","cluster_id","issue"}]}
 stdout (--strip-bom): {"strip-bom":true,"records":N,"stripped":[files]}
 stderr = diagnostics. Exit codes: 0 ok · 1 checkpoints dir missing · 2 violation.
 """
@@ -52,8 +59,11 @@ from pathlib import Path
 # host-agent invocation (direct `py`/`python`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Canonical 8 categories + category->kind map (single source of truth: init_tier).
-from init_tier import KIND, INIT_CATEGORIES  # noqa: E402
+# Canonical 8 categories + category->kind map + the FORWARD marker-path encoding
+# (single source of truth: init_tier) — the historical-record discrimination
+# (no `unit` + forward marker exists = legal legacy form) reuses the same
+# encoding as the write side.
+from init_tier import KIND, INIT_CATEGORIES, safe_unit_filename  # noqa: E402
 
 VVAH_KINDS = {"auth", "sandbox", "input-validation", "aslr", "cfi", "other"}
 _BOM = b"\xef\xbb\xbf"
@@ -69,13 +79,22 @@ def _strip_bom_bytes(raw: bytes) -> tuple[bytes, bool]:
     return raw, False
 
 
-def _validate_record(rec):
-    """Assert contract shape. Returns (cluster_id_or_None, [issue strings]).
+def _validate_record(rec, unit_marker_exists: bool = False):
+    """Assert contract shape. Returns (cluster_id_or_None, [issue strings],
+    [warning strings]).
 
     Asserts structural load-bearing fields only; prose fields
-    (description/usage/gaps/protects) are NOT asserted (wide legal variance)."""
+    (description/usage/gaps/protects) are NOT asserted (wide legal variance).
+
+    `unit` field (identity double-cover): root-level `unit` = the canonical unit id
+    (whole cluster = cluster_id; shard = `<cluster_id>::shard-<n>`). Presence +
+    non-empty string asserted; `unit != cluster_id` in the same record = violation.
+    Historical-form discrimination (design D5): a record with NO `unit` whose
+    forward marker already exists = pre-fix legacy output, marker judgment is
+    unaffected → WARNING only (明示历史形态,无需处理); NO `unit` + no marker =
+    a NEW record missing the field → violation (re-spawn this unit)."""
     if not isinstance(rec, dict):
-        return None, ["record not a JSON object"]
+        return None, ["record not a JSON object"], []
     cid = rec.get("cluster_id")
     name = rec.get("name")
     cat = rec.get("category")
@@ -83,8 +102,10 @@ def _validate_record(rec):
     ev = rec.get("evidence")
     ep = rec.get("entry_points")
     conf = rec.get("confidence")
+    unit = rec.get("unit")
     cid_s = cid if isinstance(cid, str) and cid.strip() else None
     issues = []
+    warnings = []
     # Observed scout-cluster drift: evidence/anchor/confidence nested under
     # controls[n] instead of root-level. Defense-in-depth on the known signature;
     # the positive contract (root-level fields present) is the primary guard.
@@ -92,6 +113,20 @@ def _validate_record(rec):
         issues.append("nested controls[] drift")
     if not cid_s:
         issues.append("missing/empty cluster_id")
+    if unit is None or (isinstance(unit, str) and not unit.strip()):
+        # historical form vs new violation: marker already on disk = pre-fix legal
+        # output (judgment is forward marker-path, `unit` is not load-bearing).
+        if unit_marker_exists:
+            warnings.append("unit field missing (historical pre-unit record; forward "
+                            "marker judgment unaffected — no action needed)")
+        else:
+            issues.append("missing/empty unit field (root-level `unit` = the canonical "
+                          "unit id, required of new records)")
+    elif not isinstance(unit, str):
+        issues.append(f"unit must be a string (got {type(unit).__name__})")
+    elif cid_s and unit != cid:
+        issues.append(f"unit {unit!r} != cluster_id {cid!r} (same-record identity "
+                      f"drift; re-spawn this unit)")
     if not (isinstance(name, str) and name.strip()):
         issues.append("missing/empty name")
     if kind not in VVAH_KINDS:
@@ -110,11 +145,12 @@ def _validate_record(rec):
         issues.append("entry_points must be a list")
     if isinstance(conf, bool) or not isinstance(conf, (int, float)):
         issues.append("confidence must be a number")
-    return cid_s, issues
+    return cid_s, issues, warnings
 
 
 def _check(files, cp_dir: Path) -> int:
     violations = []
+    warnings = []
     bom = []
     for f in files:
         try:
@@ -133,15 +169,25 @@ def _check(files, cp_dir: Path) -> int:
             violations.append({"file": str(f), "cluster_id": None,
                                "issue": f"malformed JSON: {e}"})
             continue
-        cid, rec_issues = _validate_record(rec)
+        # forward marker existence (same encoding as the write side): a `.done`/
+        # `.failed` marker beside this record makes a missing `unit` field the
+        # HISTORICAL form (warning) instead of a violation.
+        stem = safe_unit_filename(f.stem)
+        unit_marker_exists = ((cp_dir / f"{stem}.json.done").is_file()
+                              or (cp_dir / f"{stem}.json.failed").is_file())
+        cid, rec_issues, rec_warnings = _validate_record(rec, unit_marker_exists)
         for issue in rec_issues:
             violations.append({"file": str(f), "cluster_id": cid, "issue": issue})
+        for w in rec_warnings:
+            warnings.append({"file": str(f), "cluster_id": cid, "issue": w})
     ok = not violations
     print(f"[validate_t1_records] {cp_dir}: records={len(files)}, "
-          f"bom={len(bom)}, {'OK' if ok else f'{len(violations)} violation(s)'}",
+          f"bom={len(bom)}, warnings={len(warnings)}, "
+          f"{'OK' if ok else f'{len(violations)} violation(s)'}",
           file=sys.stderr)
     print(json.dumps({"check": "t1", "ok": ok, "records": len(files),
-                      "bom": bom, "violations": violations}, ensure_ascii=False))
+                      "bom": bom, "warnings": warnings,
+                      "violations": violations}, ensure_ascii=False))
     return 0 if ok else 2
 
 

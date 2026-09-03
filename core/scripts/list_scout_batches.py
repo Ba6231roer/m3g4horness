@@ -37,6 +37,11 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - failed         = #confirmed-failed reader batches (`.failed` marker; terminal,
                      excluded from pending, NOT retried on --resume; done+failed+pending
                      = total). Crash with no `failed` ack → no marker → batch stays pending.
+  - done/failed judgment = FORWARD marker-path computation over the plan's canonical
+                     `batch_id` set (encode `<safe(batch_id)>.json.done|.failed` with the
+                     same `_safe_name` the write side uses; `is_file()` = terminal) —
+                     NEVER a record-body field read or filename-stem reverse lookup
+                     (identity-immune; orphan markers are stderr-warned, not counted).
   - input_path     = ABSOLUTE per-batch input file (subagent reads this).
   - checkpoint_path / done_marker / failed_marker = ABSOLUTE (verbatim, passed to
                      subagent; failed_marker body {unit,reason,tier} written by the
@@ -62,6 +67,9 @@ from pathlib import Path
 # sibling import, but the guard keeps it in the self-contained family (R5.3a).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from init_tier import (safe_unit_filename, forward_marker_paths, forward_done_ids,
+                       forward_failed_ids, orphan_markers)  # noqa: E402
+
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB
 
@@ -83,65 +91,30 @@ def _byte_len(obj) -> int:
 
 
 def _safe_name(unit_id: str) -> str:
-    """Filesystem-safe input filename (batch_id is clean `scout-NNN`, but guard anyway)."""
-    return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    """Filesystem-safe input filename (batch_id is clean `scout-NNN`, but guard anyway).
+    Alias of `init_tier.safe_unit_filename` — single encoding source shared with the
+    forward done/failed judgment (stem-capped for any future overlong batch id)."""
+    return safe_unit_filename(unit_id)
 
 
-def _done_ids(checkpoints_dir: Path):
-    """Completed batch_ids by reading each checkpoint record's `batch_id` field (robust);
-    marker = `<id>.json.done`, record = `<id>.json` (sibling)."""
-    done = set()
-    if not checkpoints_dir.is_dir():
-        return done
-    for marker in sorted(checkpoints_dir.glob("*.json.done")):
-        record = marker.with_suffix("")  # strip trailing ".done" -> <id>.json
-        bid = None
-        if record.is_file():
-            try:
-                bid = json.loads(record.read_text(encoding="utf-8")).get("batch_id")
-            except (OSError, ValueError):
-                bid = None
-        if not bid:
-            bid = record.stem  # <id>; fallback for missing/empty record
-            print(f"warn: could not read batch_id from {record.name}; using stem {bid!r}",
-                  file=sys.stderr)
-        done.add(bid)
-    return done
+def _done_ids(checkpoints_dir: Path, canonical_ids):
+    """Completed canonical batch_ids — FORWARD marker-path computation (identity-immune,
+    same shape as list_clusters): encode `<safe(batch_id)>.json.done` with the same
+    `_safe_name` the write side uses, `is_file()` = done. NEVER reads a record-body
+    `batch_id` field or a filename stem (today's alignment of record body and id is
+    coincidence, not structure — one truncation/drift and glob+stem misjudges forever)."""
+    return forward_done_ids(checkpoints_dir, canonical_ids)
 
 
-def _failed_ids(checkpoints_dir: Path):
-    """TERMINAL-FAILED batch_ids (confirmed failure; excluded from `pending`, NOT retried
-    on `--resume`). Marker = `<id>.json.failed` (sibling of `.done`); the orchestrator
-    writes its body `{unit,reason,tier}` on a `failed` ack — `unit` is the batch_id, read
-    in-body so a failure that produced no sibling record body is still matched (the
-    `.done` marker is empty so `_done_ids` reads the sibling record; `.failed` carries
-    its unit in-body). Body `unit` → sibling record `batch_id` → filename-stem fallback.
-    Excludes `merge.json.failed`/`audit.json.failed` (tier-level markers, not reader
-    batches). A crash with no `failed` ack leaves no marker → batch stays pending and IS
-    retried (crash ≠ confirmed terminal failure)."""
-    failed = set()
-    if not checkpoints_dir.is_dir():
-        return failed
-    for marker in sorted(checkpoints_dir.glob("*.json.failed")):
-        record = marker.with_suffix("")  # strip ".failed" → <id>.json (sibling)
-        if record.stem in ("merge", "audit"):  # tier-level markers, not reader batches
-            continue
-        bid = None
-        try:
-            body = json.loads(marker.read_text(encoding="utf-8"))
-            if isinstance(body, dict):
-                bid = body.get("unit") or None
-        except (OSError, ValueError):
-            bid = None
-        if not bid and record.is_file():  # fall back to the sibling record's `batch_id`
-            try:
-                bid = json.loads(record.read_text(encoding="utf-8")).get("batch_id") or None
-            except (OSError, ValueError):
-                bid = None
-        if not bid:
-            bid = record.stem  # sanitized filename; best-effort (no body + no record)
-        failed.add(bid)
-    return failed
+def _failed_ids(checkpoints_dir: Path, canonical_ids):
+    """TERMINAL-FAILED canonical batch_ids (confirmed failure; excluded from `pending`,
+    NOT retried on `--resume`) — forward computation, same source as `_done_ids`.
+    Tier-level `merge.json.failed`/`audit.json.failed` are not reader batches: they
+    never correspond to a canonical batch id, so the forward computation excludes them
+    by construction (they surface as orphan-audit warns instead). A crash with no
+    `failed` ack leaves no marker → batch stays pending and IS retried (crash ≠
+    confirmed terminal failure)."""
+    return forward_failed_ids(checkpoints_dir, canonical_ids)
 
 
 def _write_batch_input(inputs_dir: Path, batch_id: str, batch: dict, repo):
@@ -268,8 +241,17 @@ def main():
     # i.e. <target>/.mgh-init. Anchors slice outputs in-tree so a subagent process whose
     # cwd is a system temp dir (opencode) cannot drift slices out-of-tree.
     init_dir = checkpoints_dir.parent.parent
-    done = _done_ids(checkpoints_dir)
-    failed = _failed_ids(checkpoints_dir)
+    # canonical id set = scout_plan.batches[].batch_id (identity truth source); done/
+    # failed = forward marker-path computation over it; orphan markers (tier-level
+    # merge/audit markers excluded) warn + enter NO count (fail-soft).
+    canonical_ids = [b.get("batch_id") for b in batches
+                     if isinstance(b, dict) and b.get("batch_id")]
+    done = _done_ids(checkpoints_dir, canonical_ids)
+    failed = _failed_ids(checkpoints_dir, canonical_ids)
+    for name in orphan_markers(checkpoints_dir, canonical_ids,
+                               exclude=("merge.json", "audit.json")):
+        print(f"warn: orphan marker (no canonical batch id matches; audit only, "
+              f"not counted): {name}", file=sys.stderr)
     materialize = bool(args.materialize)
     inputs_dir = Path(args.materialize).resolve() if materialize else None
 

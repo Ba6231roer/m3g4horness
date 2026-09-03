@@ -56,3 +56,6 @@
 | 软时限(soft deadline) | 脚本自己设的「到点就不再发新波、等在飞的跑完、干净退出」的时间预算(`--time-budget-ms`)。必须早于宿主的硬超时触发,否则会被硬杀丢掉在飞的一波。 |
 | sidecar(伴生文件) | 主产物之外、给人看的辅助状态文件(如 `fanout_progress.json`):脚本边跑边更新,人开第二个终端盯着看;agent 不读它,坏了也不影响主流程。 |
 | 锚树校验(anchor-tree check) | 把路径 resolve 成绝对路径后检查它是否落在目标项目目录树之内,越界(如漂到盘符根)即拒绝。fan-out 派发器在 spawn 前做,守卫 hook 在运行时做。 |
+| centralized / distributed | `/mgh-init` 簇(`clusters.json::clusters[]`)的两种**归簇形态**。centralized = 控制定义在一处(一个 util / filter / config / interceptor 类),按**锚点** `category::anchor::file` 归簇,典型例子:`SecurityConfig` 里整套授权配置;distributed = 注解类控制跨文件散落,按 **token** `category::pattern` 归簇,典型例子:`@PreAuthorize` / `@Valid` 出现在很多文件里。`shape` 字段取值二者之一。 |
+| cluster_id | `/mgh-init` 每个簇(`clusters.json`)的**确定性单元标识**。组成形态:`{category}::{anchor}::{file}::{sha8}`(centralized 簇)或 `{category}::{pattern}::{sha8}`(distributed 簇),`sha8` = 完整 key 的 sha1 前 8 位 hex。用途:T1 的隔离/续跑单元名、检查点记录与扇出路径的基准。总长 ≤ 160 字符(超预算截显示槽位、保留 sha8 判别尾);含 `::`(NTFS 分隔符),落盘文件名须消毒。 |
+| wrapper 字典 | 顶层是一个 dict、真正的列表数据挂在某个键下的 JSON 形态(如 `{"repo": "...", "clusters": [...], "truncated": false}`)。对**顶层** `len()` 得到的是键的个数(上例 = 3),**不是**数据条数——数列表要读对应键(`clusters[]`)或读产出者 stdout 的计数字段。 |

@@ -37,8 +37,8 @@ stdout(结构化 JSON;stderr 仅诊断):
 | field | note |
 |---|---|
 | `total` | `len(clusters.json::clusters[])`(真簇数,非 wrapper key 数) |
-| `done` | `#已 done` 簇(`checkpoints/t1/<safe(cluster_id)>.json.done` 存在;按记录 `unit` 字段 robust 读取) |
-| `failed` | `#终态失败` 簇(`<safe(cluster_id)>.json.failed` 存在;**终态、排除出 pending、resume 不重试**)。crash 无 `failed` ack → 无 marker → 仍 `pending` → resume 重派(crash ≠ 确认失败) |
+| `done` | `#已 done` 单元(**正向 marker 路径计算**:canonical 单元 id 经 `_safe_name` 编码出 `<safe(unit)>.json.done`,`is_file()` 即终态;身份免疫——NEVER 读记录体字段、NEVER 文件名 stem 反推;整簇 + `::shard-<n>` 分片 id 同判) |
+| `failed` | `#终态失败` 单元(`<safe(unit)>.json.failed` 存在;同正向计算;**终态、排除出 pending、resume 不重试**)。crash 无 `failed` ack → 无 marker → 仍 `pending` → resume 重派(crash ≠ 确认失败)。孤儿 marker(编码文件名不对应任何 canonical 单元 id,改名/遗留 run 产物)stderr `warn: orphan marker …` 告警、**不进任何计数**(fail-soft) |
 | `pending[]` | 未 done **且** 未 failed 簇,文件序;每项 `{cluster_id,category,kind,shape,evidence_files[],candidate_count,checkpoint_path,done_marker,failed_marker,slice_dir}` |
 | `checkpoint_path` | **绝对**;由 `--checkpoints`(已 `resolve()`)拼 `<safe(cluster_id)>.json` 得出(`_safe_name` 消毒文件名分量)。编排器**逐字透传**给 T1 subagent,subagent **恰好写该绝对路径**(NEVER 自拼 `<target>/<cluster_id>`、NEVER 裸相对路径 `.mgh-init/...`、NEVER 写项目外)。 |
 | `done_marker` | **绝对**;`<checkpoint_path>.done`,subagent 成功写完产物后 touch 它。 |
@@ -54,3 +54,9 @@ stdout(结构化 JSON;stderr 仅诊断):
 > 重跑本脚本重派该簇,NEVER 带破损记录进 T2(T2 按契约字段直取会静默丢弃漂移记录)。
 退出码 `0/1/2`。`checkpoint_path`/`done_marker`/`failed_marker`/`slice_dir` **仅存在于本 stdout**,不写入磁盘产物
 (磁盘 `checkpoints/t1/<safe(cluster_id)>.json` schema 不变;记录内 `unit` = canonical cluster_id;切片落 `<slice_dir>` 下 ephemeral、随 `.mgh-init/` gitignore)。
+
+> **done/failed 判定身份免疫(承 request-context-budget 同名 requirement)**:判定唯一真相源 = 正向
+> marker 路径计算(与物化同源 `_safe_name`/`forward_marker_paths`,共享于 `init_tier`)。checkpoint
+> 记录体的身份字段(`cluster_id`/`unit`)一致与否**不影响判定**,仅作诊断与孤儿审计对照;记录体缺
+> `unit` 只进 `validate_t1_records --check` 的历史形态 warning(见
+> [`t1-record-schema.md`](t1-record-schema.md))。

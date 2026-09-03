@@ -46,6 +46,9 @@ shapes). Produce ONE structured control record:
 ```json
 {
   "cluster_id": "...",
+  "unit": "<EXACTLY the canonical unit id the orchestrator passed (the cluster_id
+           line of your task input; `::shard-<n>` form when this unit is a shard) —
+           identity double-cover, NEVER a different value>",
   "name": "<kebab slug, e.g. spring-method-security>",
   "category": "...", "kind": "auth|input-validation|sandbox|aslr|cfi|other",
   "description": "1–2 lines: what it is",
@@ -102,7 +105,7 @@ codegraph 返回的 blast radius(谁依赖该控制 / 是否落在活请求路�
 脚本名(`discover_controls.py`/`chunk_sources.py`/`plan_scout.py`/`merge_scout.py`/
 `list_clusters.py` 等)、流水线层级(`T1`/`T2`/`T3`/`scout` 作过程描述)、内部路径
 (`.mgh-init/`/`checkpoints/`)、「如何被发现或归纳」的过程描述。结构字段(`name`/`category`/
-`kind`/`cluster_id`/`confidence`/`evidence`/`source`)与目标项目锚点原样保留,不受此约束。
+`kind`/`cluster_id`/`unit`/`confidence`/`evidence`/`source`)与目标项目锚点原样保留,不受此约束。
 
 ## Output
 Write EXACTLY the absolute path given by the input field `checkpoint_path` (the record

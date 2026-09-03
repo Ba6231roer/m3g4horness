@@ -25,5 +25,10 @@ slice_dir (in-tree dir for runtime-discovered big-file slices): {{slice_dir}}
 chunk_sources (absolute tool script, invoke verbatim as `py "<path>"`): {{chunk_sources_abs}}
 codegraph signal: codegraph={{codegraph}}
 
+The checkpoint record you write MUST carry a root-level `unit` field whose value is
+EXACTLY the `cluster_id` line above (the canonical unit id, `::shard-<n>` form when
+this unit is a shard) — identity double-cover so the record is self-describing.
+NEVER invent a different value.
+
 Final reply = single bounded ack line only (`ok <checkpoint_path> <n>` /
 `failed <reason>`), per the stage prompt's Return-to-orchestrator section.

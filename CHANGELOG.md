@@ -16,6 +16,115 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — `/mgh-init` done-marker identity: forward marker-path judgment + dispatcher stall circuit breaker (0.1.35)
+
+Root cause of the observed infinite T1 re-dispatch (32 overlong-id clusters
+re-burned every wave, done=476/failed=5/pending=32 frozen): `_done_ids`/
+`_failed_ids` recovered unit identity from each checkpoint record's `unit`
+field (T1 records never carried one) with a filename-stem fallback — short ids
+aligned by luck, overlong ids truncate under `_safe_name` so stem ≠ canonical
+id → judged pending forever → `done+failed` never reached `total` → tier never
+completed, and the dispatcher had no zero-progress cut so the orchestrator
+re-dispatch loop burned the session budget.
+
+- `list_clusters.py` / `list_scout_batches.py`: done/failed judgment rewritten
+  to **forward marker-path computation** — walk the plan artifact's canonical
+  unit ids (clusters[].cluster_id + `::shard-<n>` derivations / batches[].
+  batch_id), encode the exact `.done`/`.failed` marker path with the SAME
+  `_safe_name` the write side uses, `is_file()` = terminal. Identity NEVER from
+  a record-body field or a filename stem. glob reverse lookup demoted to a
+  fail-soft **orphan audit** (stderr `warn: orphan marker …`, enters no count).
+  Encoding/judgment predicates are shared in `init_tier`
+  (`safe_unit_filename`/`forward_marker_paths`/`forward_done_ids`/
+  `forward_failed_ids`/`orphan_markers`) — single source, judgment and
+  materialization cannot drift. Sharding decision extracted to `_shard_plan` +
+  `collect_canonical_ids` so the canonical-id set and the materializer agree by
+  construction. Existing `.json`+`.json.done` artifacts stay valid — a stuck
+  run self-heals on the next `/mgh-init --resume` (no disk surgery).
+- `fanout_runner.py`: zero-progress **convergence circuit breaker** —
+  `--stall-waves` (default 2) consecutive fully-joined waves with equal
+  done+failed snapshots and pending non-empty → stop dispatching, **exit 2**,
+  stdout `stalled:true` + `stalled_pending[]` (per stuck unit: id + actual
+  on-disk `.done`/`.failed` marker existence), stderr diagnosis recipe (stop
+  re-dispatching; `resume_state.py --check`). A slow-but-advancing wave resets
+  the window; `partial:true`/clean paths unchanged.
+- `resume_state.py`: t1/scout tier done/failed counts now use the SAME forward
+  predicates (imported, not copied) — count caliber and enumerator `pending[]`
+  semantics agree by construction. `--check` additions: judged-pending-but-
+  marker-name-on-disk = violation (id + path + do-not-re-dispatch recipe);
+  orphan markers = advisory `notes[]`; touch-only `.done` (no record body) is a
+  legal form, no longer a violation. Caliber disclosure in `--help`/docstring.
+- `validate_t1_records.py`: T1 records now assert a root-level `unit` field
+  (identity double-cover): non-empty + `unit == cluster_id` (violation on
+  drift). Historical-form discrimination: no `unit` + forward marker exists =
+  **warning** (历史形态,无需处理); no `unit` + no marker = violation.
+  stdout gains a恒在 `warnings[]` field.
+- Templates/agents/contracts: `fanout/t1-task.md`, `stages/init-induct.md`,
+  both `init-induct` agent definitions carry the `unit` field instruction;
+  both `mgh-init` shells + `init-stage/t1.md`/`scout.md` fragments carry the
+  stall-breaker recipe and forward-judgment semantics; `cluster-enumeration`/
+  `scout-enumeration`/`resume-state`/`t1-record-schema` contracts synced.
+  `check_contracts.py` FANOUT_RUNNER_REQUIRED_FLAGS += `--stall-waves`.
+
+### Changed — `/mgh-init` fanout lifecycle hardening (liveness + `--kill-stale` orphan-tree cleanup + stderr heartbeat + count-semantics doc)
+
+- `fanout_runner.py` dispatch mode now writes an atomic liveness file
+  `<init-dir>/fanout_runner.<tier>.pid` (body `{pid, started_ts, tier, host, cmdline,
+  children[]}`; an orphan signal, NOT a lock) and removes it on any exit path
+  (try/finally); a hard kill leaves a residual that `--kill-stale` disambiguates.
+  Children spawn switched `subprocess.run` → `subprocess.Popen` (same capture/timeout
+  semantics) so in-flight host-CLI child PIDs are recorded in `children[]` per wave
+  and cleared at wave end.
+- New `fanout_runner.py --kill-stale [--dry-run]`: inspects liveness residuals and
+  kills what they record — form ① runner PID alive + cmdline matches `fanout_runner.py`
+  → whole-tree kill (Windows `taskkill /pid <pid> /T /F`; POSIX process group); form ②
+  runner dead/mismatched but a recorded `children[]` PID is alive + cmdline is the host
+  CLI → kill each such tree (covers "orchestrator+runner hard-killed together, LLM
+  children still burning tokens"). PID-reuse guard: cmdline double condition — mismatched
+  PIDs are NEVER killed (residual file removed only). Destructive-op guard: a real kill
+  with detected targets requires a prior `--dry-run` review (else exit 2 + recipe);
+  no stale → `killed: []` exit 0 (idempotent, tier-agnostic). stdout
+  `{"kill_stale": {"killed":[{pid,tier,kind}], "removed":[...], "none":bool}}`.
+- stderr heartbeat: the dispatch loop prints `[fanout_runner <tier>] +HH:MM:SS wave=<k>
+  unit=<id> <event> done=<d>/<total>` at every unit spawn / unit terminal status
+  (ok|failed|timeout|crash) / wave end — live progress in the opencode TUI (merged
+  stdout+stderr sliding tail, `docs/opencode-context-mechanics.md` §8) and in claude
+  Bash results. stdout contract unchanged (single final JSON line).
+- `resume_state.py` stdout gains additive `stale_fanout[]` (scan of
+  `fanout_runner.*.pid`: `{tier, pid_file, pid, pid_alive, note}`; any alive PID's note
+  carries the `--kill-stale --dry-run` recipe; `[]` when none — field always present).
+  `--check` discloses alive residuals in `notes[]` as ADVISORY, never a gate.
+- Count-semantics documentation (resume_state docstring + `--help` epilog): three
+  measures — resume_state pure `*.json.done` marker glob count / list_clusters
+  record-body unit dedup (shard-aware) / directory entry count (done + failed + record
+  bodies) — equal only with no shards and no orphan markers; a mismatch (e.g. 472 vs
+  491) is NOT data loss.
+- Orchestrator wiring: both `mgh-init` shells' resume recipe now reads
+  `stale_fanout[]` first (kill stale orphans before re-dispatch); the scout/t1/t3
+  stage fragments prefix every fanout dispatch with the `--kill-stale --dry-run` →
+  real-kill recipe. `tools/check_contracts.py` registers `--kill-stale`.
+
+### Changed — `/mgh-init` scout merge lost-artifact recovery (exact note + `--check` mirror violation + fold-in re-run anti-pattern + contract correction)
+
+- `resume_state.py` `_scout_step` now splits "all reader batches done but
+  `scout_candidates.json` missing" into three merge/fold-in sub-states with precise recovery
+  notes: merge marker absent → merge not run (regen credential then fold-in still pending);
+  merge marker + `provenance.scout_merged` present → fold-in already run (`scout_merged=N`),
+  regen serves ONLY as the completion credential (no downstream consumption, LLM drift
+  harmless), NEVER re-run `merge_scout.py` fold-in, after regen `resume_state` re-derives
+  `step=t1`; merge marker present + `scout_merged` absent → both credential and fold-in
+  pending. All three next_actions stay `init-scout-merge` (honest re-generation — the unique
+  recovery path); the note no longer misreports "merge marker absent" when the marker is on disk.
+- `resume_state.py --check` gains the **mirror violation**: `checkpoints/scout/merge.json.done`
+  + fold-in done + `scout_candidates.json` missing → exit 2 with a regen recipe (mirror of the
+  existing "credential present but merge marker absent"); recovery (credential back on disk)
+  → `--check` passes.
+- `discipline_core.py` scout step `nevers` gains the fold-in re-run anti-pattern (`NEVER`
+  re-run `merge_scout.py` fold-in when `provenance.scout_merged` is set — re-run is
+  non-idempotent: same-file re-run zeroes `scout_merged`, drifted-file re-run double-appends).
+- `core/contracts/init/resume-state.md` corrects the wrong "fold-in re-run idempotent/safe"
+  claim and documents the three sub-state notes + the `--check` mirror violation.
+
 ### Changed — `/mgh-init` fan-out dispatcher generalized to all tiers (scout + t1 + t3)
 
 - `fanout_runner.py` is now **tier-aware**: `--tier scout|t1|t3` (default scout — the

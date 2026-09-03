@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for cluster formation in discover_controls.py (D8/D12 isolation units)."""
-import importlib.util, sys, unittest, tempfile
+import hashlib, importlib.util, sys, unittest, tempfile
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent / "core" / "scripts"
@@ -33,6 +34,22 @@ def _safe(unit_id: str) -> str:
     `::` (NTFS ADS separator → errno 22); the canonical id stays as envelope `cluster_id`
     + record `unit`, only the FILENAME is encoded."""
     return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
+def _sha12(key: str) -> str:
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _file118(suffix: str) -> str:
+    """A 118-char repo-relative file path → category + 2×file + sha12 = 267-char id."""
+    return "pkg/" * 28 + suffix.ljust(6, "x")[:6]
+
+
+def _overlong_cid(file: str, category: str = "authorization") -> str:
+    """267-char cluster_id as if produced by an anchor-less centralized candidate
+    (home == file; the path is stuffed into the class-name slot)."""
+    key = f"{category}::{file}::{file}"
+    return f"{key}::{_sha12(key)}"
 
 
 class TestClusters(unittest.TestCase):
@@ -88,6 +105,35 @@ class TestClusters(unittest.TestCase):
                 if ep not in seed and ep not in out:
                     out.append(ep)
         self.assertIn("src/api/Ctl.java", out, "cross-module caller disclosed in out_of_scope")
+
+    # ---- cluster_id length bound (fix-mgh-init-cluster-id-length-ntfs, D1) ----
+
+    def test_overlong_path_in_class_slot_cluster_id_bounded(self):
+        # Anchor with NO class/method → `home` falls back to the full file path == `file`
+        # (path stuffed into the class-name slot). The unbounded id would be 515 chars; the
+        # bounded id MUST be ≤ 160, dedup the duplicated display slot (`::` × 2), and keep
+        # the sha8 computed over the FULL untruncated key (discriminant identity unchanged).
+        long_file = "src/" + "deep/" * 55 + "OverlongSecurityUtil.java"
+        cand = {"id": "C-1", "file": long_file, "category": "authorization",
+                "kind": "auth", "shape": "centralized", "anchor": {},
+                "line": 1, "source": "test"}
+        clusters = self.d.form_clusters([cand], {}, set(), None, 8)
+        cid = clusters[0]["cluster_id"]
+        key = f"authorization::{long_file}::{long_file}"
+        self.assertGreater(len(key), self.d.MAX_CLUSTER_ID_CHARS)   # display really over budget
+        self.assertLessEqual(len(cid), self.d.MAX_CLUSTER_ID_CHARS)
+        self.assertEqual(cid.count("::"), 2)                        # dedup: one slot, not two
+        self.assertTrue(cid.endswith(f"::{self.d._sha(key)}"))      # sha8 = hash of FULL key
+
+    def test_short_cluster_id_byte_identical_after_bound(self):
+        # Normal short id (class anchor + short path): cluster_id MUST be byte-identical to
+        # the legacy `f'{key}::{_sha(key)}'` — the bound only affects overlong ids.
+        cand = {"id": "C-1", "file": "src/SecCfg.java", "category": "authorization",
+                "kind": "auth", "shape": "centralized",
+                "anchor": {"class": "SecurityConfig"}, "line": 1, "source": "test"}
+        clusters = self.d.form_clusters([cand], {}, set(), None, 8)
+        key = "authorization::SecurityConfig::src/SecCfg.java"
+        self.assertEqual(clusters[0]["cluster_id"], f"{key}::{self.d._sha(key)}")
 
 
 # ---- list_clusters.py: deterministic T1 work-list (wrapper unwrap + resume) ----
@@ -296,6 +342,33 @@ class TestListClusters(unittest.TestCase):
             self.assertTrue(sd.is_absolute())
             self.assertNotIn(":", sd.name)            # '::' sanitized out of the filename
             self.assertEqual(sd.name, _safe(item["cluster_id"]))
+
+    # ---- _safe_name stem length truncation (fix-mgh-init-cluster-id-length-ntfs, D2) ----
+
+    def test_safe_name_truncates_overlong_id_keeps_tail(self):
+        # A 267-char id (legacy, pre-bound discover) → stem capped to exactly 200, keeping
+        # the sanitized head AND the ~60-char discriminant tail (contains the sha8 tail).
+        cid = _overlong_cid(_file118("U.java"))
+        self.assertEqual(len(cid), 267)
+        s = _safe(cid)                                          # sanitized (len unchanged)
+        stem = self.lc._safe_name(cid)
+        self.assertEqual(len(stem), self.lc.MAX_UNIT_FILENAME_STEM)
+        self.assertTrue(stem.startswith(s[: self.lc.MAX_UNIT_FILENAME_STEM - 60]))
+        self.assertTrue(stem.endswith(s[-59:]))                  # sha8-bearing tail preserved
+        self.assertIn("~", stem)
+
+    def test_safe_name_distinct_overlong_ids_do_not_collide(self):
+        # Two distinct overlong ids (differing file suffix → differing sha8 in the preserved
+        # tail) map to DIFFERENT stems — no on-disk filename collision.
+        cid_a = _overlong_cid(_file118("U.java"))
+        cid_b = _overlong_cid(_file118("V.java"))
+        self.assertNotEqual(self.lc._safe_name(cid_a), self.lc._safe_name(cid_b))
+
+    def test_safe_name_short_id_unchanged(self):
+        # Short ids (overwhelming majority) pass through the stem cap untouched.
+        cid = "authorization::SecCfg::ab12cd34"
+        self.assertEqual(self.lc._safe_name(cid), _safe(cid))
+        self.assertEqual(self.lc._safe_name(cid), "authorization__SecCfg__ab12cd34")
 
 
 # ---- list_clusters.py: per-unit materialization + paging (request-context-budget) ----
@@ -518,6 +591,218 @@ class TestListClustersMaterialize(unittest.TestCase):
             for k in ("input_path", "checkpoint_path", "done_marker", "failed_marker",
                       "bytes", "oversize"):
                 self.assertIn(k, item)
+
+    # ---- overlong cluster_id materialization (fix-mgh-init-cluster-id-length-ntfs, D2/D3) ----
+
+    def test_overlong_cluster_id_materialize_and_resume(self):
+        # A legacy 267-char cluster_id: --materialize MUST succeed (exit 0), write a
+        # stem-capped (≤ 200) input file, keep the FULL canonical id in the envelope + input
+        # record; marking done at the truncated-stem checkpoint path with `unit`=canonical →
+        # --resume skips it (identity is the record's `unit` field, not the filename).
+        cid = _overlong_cid(_file118("U.java"))
+        clusters = [{"cluster_id": cid, "category": "authorization", "kind": "auth",
+                     "shape": "centralized", "evidence_files": ["a.java"],
+                     "usage_sites": ["a.java"], "candidate_ids": ["C-1"]}]
+        p = self._write(clusters, _LC_CANDS[:1])
+        code, out, _ = self._run(p)
+        self.assertEqual(code, 0)
+        item = json.loads(out)["pending"][0]
+        self.assertEqual(item["cluster_id"], cid)                    # envelope keeps canonical
+        ipath = Path(item["input_path"])
+        self.assertTrue(ipath.is_file())
+        base = ipath.name[: -len(".input.json")]    # id-derived stem (before materialization suffix)
+        self.assertLessEqual(len(base), self.lc.MAX_UNIT_FILENAME_STEM)
+        inp = json.loads(ipath.read_text(encoding="utf-8"))
+        self.assertEqual(inp["cluster_id"], cid)                     # record keeps canonical
+        # resume: subagent writes the record at the verbatim (truncated-stem) path with
+        # unit=canonical, touches done_marker → skipped on the next listing
+        Path(item["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(item["checkpoint_path"]).write_text(json.dumps(
+            {"unit": cid, "status": "done", "out": "x", "bytes": 1}), encoding="utf-8")
+        Path(item["done_marker"]).write_text("", encoding="utf-8")
+        _, out2, _ = self._run(p)
+        data = json.loads(out2)
+        self.assertNotIn(cid, [it["cluster_id"] for it in data["pending"]])
+        self.assertEqual(data["done"], 1)
+
+    def test_materialize_oserror_isolated_to_failed_marker(self):
+        # A cluster whose materialization write fails (OSError) MUST NOT abort the batch:
+        # its `.failed` terminal marker is written (body unit=canonical), `failed` +1, and
+        # the remaining clusters still materialize; exit code stays 0.
+        bad = {"cluster_id": "bad::X::zz", "category": "authorization", "kind": "auth",
+               "shape": "centralized", "evidence_files": ["bad.java"],
+               "usage_sites": ["bad.java"], "candidate_ids": ["C-1"]}
+        good = dict(_LC_CLUSTERS[0])
+        p = self._write([bad, good], _LC_CANDS[:1])
+        real = self.lc._resolve_units
+
+        def _boom(cid, cluster, hits, max_unit_bytes, inputs_dir, repo_path):
+            if cid == "bad::X::zz":
+                raise OSError("boom: materialize failed")
+            return real(cid, cluster, hits, max_unit_bytes, inputs_dir, repo_path)
+
+        with mock.patch.object(self.lc, "_resolve_units", side_effect=_boom):
+            code, out, err = self._run(p)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        ids = [it["cluster_id"] for it in data["pending"]]
+        self.assertNotIn("bad::X::zz", ids)             # terminal → excluded from pending
+        self.assertIn("authorization::A::ab12", ids)    # good cluster still materialized
+        self.assertEqual(data["failed"], 1)
+        fm = self.cp / f"{_safe('bad::X::zz')}.json.failed"
+        self.assertTrue(fm.is_file())
+        body = json.loads(fm.read_text(encoding="utf-8"))
+        self.assertEqual(body["unit"], "bad::X::zz")    # canonical identity in the body
+        self.assertEqual(body["tier"], "t1")
+        self.assertIn("materialize failed", body["reason"])
+        self.assertIn("materialize failed", err)        # stderr reports the failure
+        good_item = next(it for it in data["pending"]
+                         if it["cluster_id"] == "authorization::A::ab12")
+        self.assertTrue(Path(good_item["input_path"]).is_file())
+
+
+# ---- forward marker-path done/failed judgment (fix-mgh-init-done-marker-identity) ----
+
+class TestForwardDoneJudgment(unittest.TestCase):
+    """done/failed 判定 = 正向 marker 路径计算(与物化同源编码),身份免疫:
+    判定 NEVER 依赖记录体字段或文件名 stem 反推;孤儿 marker 只告警不进计数。"""
+
+    def setUp(self):
+        self.lc = _load("list_clusters")
+        self.it = _load("init_tier")
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_fwd_"))
+        self.cp = self.d / "checkpoints" / "t1"
+
+    def _write(self, clusters):
+        p = self.d / "clusters.json"
+        p.write_text(json.dumps({"repo": str(self.d), "clusters": clusters,
+                                 "truncated": False}, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def _run(self, clusters_path, *extra):
+        argv = ["list_clusters.py", "--clusters", str(clusters_path),
+                "--checkpoints", str(self.cp)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.lc.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def test_roundtrip_overlong_id_done_without_unit_field(self):
+        # THE bug shape: ≥200-char cluster_id with an existing truncated-stem
+        # `<encoded>.json` + `<encoded>.json.done` whose record body carries NO `unit`
+        # field (the pre-fix producer never wrote one). Forward computation must judge
+        # it DONE — never the old glob+stem misjudgment (forever-pending → re-dispatch).
+        cid = _overlong_cid(_file118("U.java"))
+        p = self._write([{"cluster_id": cid, "category": "authorization", "kind": "auth",
+                          "shape": "centralized", "evidence_files": ["a.java"],
+                          "usage_sites": ["a.java"], "candidate_ids": []}])
+        self.cp.mkdir(parents=True, exist_ok=True)
+        enc = self.lc._safe_name(cid)
+        self.assertNotEqual(enc, _safe(cid))          # really truncated (stem ≠ canonical)
+        self.assertLessEqual(len(enc), self.lc.MAX_UNIT_FILENAME_STEM)
+        rec = self.cp / f"{enc}.json"
+        rec.write_text(json.dumps({"cluster_id": cid, "status": "done"}), encoding="utf-8")
+        rec.with_name(rec.name + ".done").write_text("", encoding="utf-8")
+        code, out, err = self._run(p)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["done"], 1)             # forward judgment: DONE
+        self.assertEqual(data["pending"], [])         # NOT re-dispatched
+        self.assertNotIn("could not read unit from", err)  # old warn path deleted
+
+    def test_roundtrip_overlong_id_failed_without_unit_field(self):
+        # same shape for the terminal-failure set: truncated-stem .failed marker → failed
+        cid = _overlong_cid(_file118("V.java"))
+        p = self._write([{"cluster_id": cid, "category": "crypto", "kind": "other",
+                          "shape": "centralized", "evidence_files": ["c.java"],
+                          "usage_sites": ["c.java"], "candidate_ids": []}])
+        self.cp.mkdir(parents=True, exist_ok=True)
+        enc = self.lc._safe_name(cid)
+        (self.cp / f"{enc}.json.failed").write_text(
+            json.dumps({"reason": "boom", "tier": "t1"}), encoding="utf-8")  # no `unit`
+        code, out, _ = self._run(p)
+        data = json.loads(out)
+        self.assertEqual(data["failed"], 1)           # forward judgment: terminal-failed
+        self.assertEqual(data["pending"], [])
+
+    def test_shard_id_forward_done(self):
+        # `<cid>::shard-<n>` units are canonical ids too: with --materialize, a shard
+        # done-marker at the encoded shard filename judges THAT shard done — it drops
+        # from pending while sibling shards stay.
+        cid = "big::Y::aa"
+        cands = [{"id": f"C-{i}", "file": "x", "line": i, "category": "crypto",
+                  "kind": "other", "snippet": "S" * 500} for i in range(1, 7)]
+        p = self._write([{"cluster_id": cid, "category": "crypto", "kind": "other",
+                          "shape": "centralized", "evidence_files": ["x.java"],
+                          "usage_sites": ["x.java"],
+                          "candidate_ids": [c["id"] for c in cands]}])
+        (self.d / "controls_candidates.json").write_text(
+            json.dumps({"candidates": cands}), encoding="utf-8")
+        inputs = self.d / "inputs" / "t1"
+        self.cp.mkdir(parents=True, exist_ok=True)
+        code, out, _ = self._run(p, "--candidates", str(self.d / "controls_candidates.json"),
+                                 "--materialize", str(inputs), "--max-unit-bytes", "2000")
+        self.assertEqual(code, 0)
+        first = json.loads(out)["pending"]
+        self.assertGreater(len(first), 1)                    # genuinely sharded
+        shard0 = first[0]
+        Path(shard0["done_marker"]).write_text("", encoding="utf-8")
+        code, out, _ = self._run(p, "--candidates", str(self.d / "controls_candidates.json"),
+                                 "--materialize", str(inputs), "--max-unit-bytes", "2000")
+        data = json.loads(out)
+        ids = [it["cluster_id"] for it in data["pending"]]
+        self.assertNotIn(shard0["cluster_id"], ids)          # shard-0 done → dropped
+        self.assertEqual(len(ids), len(first) - 1)           # siblings remain
+
+    def test_record_body_unit_field_never_load_bearing(self):
+        # A record body whose `unit` field DISAGREES with the canonical id must NOT flip
+        # the judgment either way: marker absent → pending (even though body says done).
+        cid = "auth::Z::bb"
+        p = self._write([{"cluster_id": cid, "category": "authorization", "kind": "auth",
+                          "shape": "centralized", "evidence_files": ["a.java"],
+                          "usage_sites": ["a.java"], "candidate_ids": []}])
+        self.cp.mkdir(parents=True, exist_ok=True)
+        (self.cp / f"{self.lc._safe_name(cid)}.json").write_text(
+            json.dumps({"unit": cid, "status": "done"}), encoding="utf-8")  # record, NO marker
+        code, out, _ = self._run(p)
+        data = json.loads(out)
+        self.assertEqual(data["done"], 0)             # no marker → pending (marker is the truth)
+        self.assertEqual(len(data["pending"]), 1)
+
+    def test_orphan_marker_warned_not_counted(self):
+        # a .done marker whose encoded filename maps to no canonical id (renamed run):
+        # stderr warn + NOT in done/failed/pending (fail-soft, never blocks).
+        p = self._write([{"cluster_id": "auth::W::cc", "category": "authorization",
+                          "kind": "auth", "shape": "centralized",
+                          "evidence_files": [], "usage_sites": [], "candidate_ids": []}])
+        self.cp.mkdir(parents=True, exist_ok=True)
+        (self.cp / "legacy__renamed__id.json.done").write_text("", encoding="utf-8")
+        code, out, err = self._run(p)
+        self.assertEqual(code, 0)                     # fail-soft
+        data = json.loads(out)
+        self.assertEqual(data["done"], 0)
+        self.assertEqual(len(data["pending"]), 1)
+        self.assertIn("orphan marker", err)
+        self.assertIn("legacy__renamed__id.json.done", err)
+
+    def test_forward_predicates_direct(self):
+        # shared init_tier predicates: round-trip encode → marker → done/failed sets;
+        # orphan list; tier-level markers excluded for scout.
+        ids = ["a::b::c", _overlong_cid(_file118("W.java"))]
+        self.cp.mkdir(parents=True, exist_ok=True)
+        Path(self.it.forward_marker_paths(self.cp, ids[0])[1]).write_text("", encoding="utf-8")
+        Path(self.it.forward_marker_paths(self.cp, ids[1])[2]).write_text("", encoding="utf-8")
+        self.assertEqual(self.it.forward_done_ids(self.cp, ids), {ids[0]})
+        self.assertEqual(self.it.forward_failed_ids(self.cp, ids), {ids[1]})
+        self.assertEqual(self.it.orphan_markers(self.cp, ids), [])
+        # scout exclusion shape: merge.json.done is tier-level, not an orphan
+        (self.cp / "merge.json.done").write_text("", encoding="utf-8")
+        self.assertEqual(self.it.orphan_markers(self.cp, ids, exclude=("merge.json",)), [])
 
 
 if __name__ == "__main__":

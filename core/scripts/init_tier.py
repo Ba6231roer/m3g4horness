@@ -107,6 +107,13 @@ def orphan_markers(checkpoints_dir: Path, canonical_ids, exclude=()) -> list:
             continue
         if name in expected or m.stem in exclude or name in exclude:
             continue
+        if name.startswith("pack__"):
+            # t1 packing pack-level terminal marker (pack::<category>::<sha8> encoded —
+            # pack ids are dispatch units, never members of the canonical cluster-id
+            # set, so they would otherwise audit as orphans on every --check). The
+            # canonical 8 categories never start with "pack", so the encoded prefix is
+            # unambiguous.
+            continue
         out.append(name)
     return out
 

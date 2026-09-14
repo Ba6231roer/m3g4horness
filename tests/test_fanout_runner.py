@@ -1504,5 +1504,91 @@ class TestSdrTier(unittest.TestCase):
                          "off")
 
 
+class TestT1PackedPendingZeroChange(unittest.TestCase):
+    """t1 packing adoption (pack id in the `cluster_id` field slot): the runner consumes
+    PACKED pending[] with ZERO changes — same placeholders, same anchor check, same ack
+    state machine (test hook = --pending-file, no enumerator invocation)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_pack_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _pack_unit(self, pid="pack::authorization::ab12cd34") -> dict:
+        # mirror the enumerator: cluster_id field carries the CANONICAL pack id, marker/
+        # input FILENAMES are `_safe_name`-sanitized (`::` -> `__`, NTFS ADS separator).
+        safe = pid.replace(":", "_")
+        return dict(_unit(self.tmp, pid, tier="t1"),
+                    input_path=str(self.tmp / "repo" / ".mgh-init" / "inputs" / "t1" / f"{safe}.input.json"),
+                    checkpoint_path=str(self.tmp / "repo" / ".mgh-init" / "checkpoints" / "t1" / f"{safe}.json"),
+                    done_marker=str(self.tmp / "repo" / ".mgh-init" / "checkpoints" / "t1" / f"{safe}.json.done"),
+                    failed_marker=str(self.tmp / "repo" / ".mgh-init" / "checkpoints" / "t1" / f"{safe}.json.failed"))
+
+    def _listing_file(self, units, done=0, failed=0):
+        _setup_repo(self.tmp, units, tier="t1")
+        p = self.tmp / "pending_t1_packed.json"
+        p.write_text(json.dumps(_listing(self.tmp, units, done, failed)),
+                     encoding="utf-8")
+        return p
+
+    def test_t1_pack_id_fills_template_cluster_id_slot(self):
+        fr = _load()
+        unit = self._pack_unit()
+        msg = fr._fill_template(fr.TIERS["t1"],
+                                TEMPLATES["t1"].read_text(encoding="utf-8"),
+                                unit, str(self.tmp / "repo"), "on")
+        self.assertNotIn("{{", msg)
+        self.assertIn("pack::authorization::ab12cd34", msg)   # pack id rides cluster_id
+        self.assertIn(unit["input_path"], msg)
+        self.assertIn(unit["checkpoint_path"], msg)
+        self.assertIn(unit["done_marker"], msg)
+
+    def test_t1_pack_placeholder_set_still_covers_template(self):
+        # the dual-form template introduced no new placeholders (zero runner change)
+        import re
+        cfg = _load().TIERS["t1"]
+        text = TEMPLATES["t1"].read_text(encoding="utf-8")
+        used = set(re.findall(r"\{\{(\w+)\}\}", text))
+        self.assertFalse(used - set(cfg["placeholders"]),
+                         f"unmapped placeholders: {used - set(cfg['placeholders'])}")
+
+    def test_t1_packed_pending_end_to_end_testhook(self):
+        # a packed listing flows through dispatch/audit/summary exactly like clusters
+        units = [self._pack_unit(),
+                 self._pack_unit("pack::crypto::deadbeef")]
+        lp = self._listing_file(units)
+        r = _run_cli_tier("t1", self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["tier"], "t1")
+        self.assertEqual(out["total"], 2)
+        self.assertEqual(out["pending"], 0)                   # both packs reached terminal
+        self.assertEqual(out["waves_run"], 2)                 # both packs dispatched
+        self.assertFalse(out["partial"])
+        for u in units:
+            audit = self.tmp / "repo" / ".mgh-init" / "inputs" / "t1" / \
+                f"{u['cluster_id'].replace(':', '_')}.task.md"
+            self.assertTrue(audit.is_file(), audit)           # audit copy per pack
+            body = audit.read_text(encoding="utf-8")
+            self.assertIn(u["cluster_id"], body)
+            self.assertNotIn("{{", body)
+
+    def test_t1_packed_pending_lazy_done_skip_and_failed_marker(self):
+        # pack-level markers keep working: done marker on disk -> unit skipped, never spawned
+        done_unit = self._pack_unit()
+        Path(done_unit["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(done_unit["done_marker"]).write_text("", encoding="utf-8")
+        pending_unit = self._pack_unit("pack::crypto::deadbeef")
+        lp = self._listing_file([done_unit, pending_unit], done=1)
+        r = _run_cli_tier("t1", self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["pending"], 0)
+        self.assertEqual(out["waves_run"], 1)                 # only the pending pack spawned
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

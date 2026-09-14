@@ -252,24 +252,34 @@ globs,vvah 兼容)、`gaps`、`confidence`。`category → kind` 归一 MUST 确
 
 ### Requirement: Isolated per-cluster induction with cross-cluster synthesis
 
-归纳 SHALL 按 **T1/T2 两层**执行(D12):T1 为**每个控制簇**扇出一个**独立 subagent 上下文**,
-仅读该簇文件集(大文件先分片)+ 候选元数据,产出结构化控制记录且**不得做 canonical 判定**
-(隔离单元看不到别簇);T2 为单一综合上下文,仅读全部 T1 的**结构化记录**(无原始码),
-完成跨模块聚类、canonical/role 选定(D8)、去重与命名归一。出 rules SHALL 按 **T3/T4 两层**:
-T3 每 category 一个独立上下文出草稿,T4 可选一致性 pass。**隔离单元边界 = checkpoint 单元
-边界**(同一边界同时服务质量与可恢复)。
+归纳 SHALL 按 **T1/T2 两层**执行(D12):T1 为**每个归纳单元**扇出一个**独立 subagent 上下文**
+——单元默认 = 单簇;启用确定性打包时 = **同 category 的一个确定性小簇包**,subagent 按任务模板
+**逐簇处理**:每簇独立产出一份结构化控制记录 + 独立 `.done` marker,跳过已有 marker 的成员。
+隔离单元 SHALL 仅读本单元文件集(包 = 合并 input;单簇大文件先分片)+ 候选元数据,产出结构化
+控制记录且**不得做 canonical 判定**(隔离单元看不到别簇/别包)。T2 为单一综合上下文,仅读全部
+T1 的**结构化记录**(无原始码,仍**每簇一份**、粒度与打包无关),完成跨模块聚类、canonical/role
+选定(D8)、去重与命名归一。出 rules SHALL 按 **T3/T4 两层**:T3 每 category 一个独立上下文出
+草稿,T4 可选一致性 pass。**恢复边界 = 簇级 checkpoint 边界**(包 crash 重派时逐成员跳过已完成);
+**上下文隔离边界 = 归纳单元边界**(包内成员同上下文,互不越界读别包)。
 
 #### Scenario: Each cluster induced in its own isolated context
-- **WHEN** 一个项目有 3 个独立控制簇(鉴权 filter、脱敏工具、加密工具)
+- **WHEN** 一个项目有 3 个独立控制簇(鉴权 filter、脱敏工具、加密工具)且未启用打包
 - **THEN** 产出 ≥3 个独立 T1 subagent 上下文,各自只读本簇文件,互不串扰
+
+#### Scenario: Packed unit induces members sequentially with per-cluster records
+- **WHEN** 打包开启,某包含同 category 的 4 个小簇
+- **THEN** 1 个独立 T1 subagent 上下文按序归纳 4 个簇,产出 **4 份独立结构化记录**(各带成员
+  cluster_id 的 `unit` 字段)+ 4 个独立 `.done` marker;跳过重派前已 done 的成员;记录粒度与
+  未打包时逐字段同形
 
 #### Scenario: Canonical decided in synthesis, not in isolated units
 - **WHEN** 两个模块各自被独立 T1 归纳出鉴权控制
 - **THEN** canonical/competing 判定发生在 T2 综合(可见两者);T1 记录中不含 canonical 判定
+  (打包单元内的成员记录同样不含)
 
 #### Scenario: Synthesis operates on structured records only
 - **WHEN** T2 综合运行
-- **THEN** 其输入为 T1 结构化 JSON 记录(无原始源码),上下文规模远小于任一 T1
+- **THEN** 其输入为 T1 结构化 JSON 记录(无原始源码,每簇一份,与打包无关),上下文规模远小于任一 T1
 
 ### Requirement: Disclose honesty boundaries in artifacts
 
@@ -507,12 +517,31 @@ JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`
 `effective_limit`+`shrunk:true`。脚本的 `--help` 即其 CLI 契约(承 R5.1)。簇数权威真相源 =
 `discover_controls.py` stdout `clusters` 字段 或 `list_clusters.py` stdout `total`。
 
+**确定性小簇打包(配额摊薄,opt-in)**:脚本 SHALL 另支持 `--pack-bytes B`(默认 `0` = 关闭,既有
+行为逐字节不变)与 `--pack-max N`(每包成员上限,默认 8)。`--pack-bytes > 0` 时,枚举单元从簇
+平移为**包**:同 category 内、单簇 `bytes` ≤ `--max-unit-bytes` 的簇(oversize 与 `::shard-<n>`
+子单元 SHALL NEVER 入包),按 `(bytes 升序, cluster_id 字典序)` 排序后贪心装包——加入下一簇会
+超过 `--pack-bytes` 或 `--pack-max` 即封包开新包。包 id SHALL 为
+`pack::<category>::<sha8(成员 cluster_id 排序拼接)前 8 位 hex>`:分区与 id 都 SHALL 是
+`clusters.json` + flag 取值的**纯函数**(同输入同包同 id,跨 run 稳定)。打包模式下 `pending[]`
+每项 SHALL 为包级 slim 壳——`cluster_id` 字段载**包 id**(下游派发器/ack 状态机零改动复用该
+字段位),`input_path` 载**合并 input 文件**(成员完整记录的数组,单文件一次读摊薄),并新增
+`members[]`:`{cluster_id, input_path, checkpoint_path, done_marker, bytes}`(成员级,全
+`Path.resolve()` 绝对,逐字透传)。`total` SHALL 为包数;stdout SHALL 另披露簇级计数
+`cluster_total`/`cluster_done`。**包 pending 判定 SHALL 从成员 marker 派生**:包 pending ⟺
+≥1 成员的 `.done` marker 不存在;成员级 `.done`/`.failed` marker 仍是唯一真相源与恢复粒度
+(crash 中断的包重派时,已完成成员由任务模板指示跳过)。`--pack-bytes 0`(或缺省)SHALL 走
+既有 per-cluster 路径,stdout 形态逐字节不变(无 `members[]`/`cluster_total` 新字段亦不出现在
+关闭路径)。
+
 `--materialize` 写入的 input 文件名 stem SHALL 受长度上限约束(见「Fan-out checkpoint paths are
 deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出的超长 id)都能写出文件。
+打包模式的合并 input 文件名 stem SHALL 同受该上限约束(包 id 含 `sha8` 判别尾,长度有界)。
 **单簇物化写失败 MUST 隔离**:某簇 `_resolve_units` 抛 `OSError`(含磁盘写错、legacy 超长 id 之外的
 不可写情形)时,系统 SHALL 为该簇写 `.failed` 终态 marker(body `{unit,reason,tier}`;文件名经 stem
 截长后可写),stderr 报原因、stdout `failed` 计数 +1、**批次继续物化其余簇,退出码仍 `0`**——NEVER
 因单簇失败整批 abort。若 `.failed` marker 亦写不进(运行目录系统级损坏)→ 退出码 `2` fail-loud。
+打包模式下物化失败的簇 SHALL 被排除出任何包(它已有终态 marker,不再是 pending)。
 
 #### Scenario: Orchestrator enumerates clusters via the leaf script
 - **WHEN** 编排器进入 T1 fan-out(步骤 4)
@@ -555,6 +584,26 @@ deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出
 - **WHEN** `clusters.json` 含一条物化写失败(`OSError`)的簇,`--materialize` 枚举它
 - **THEN** 该簇被写 `.failed` 终态 marker(文件名可写)、stderr 报原因、stdout `failed` 计数 +1,
   **其余簇照常物化**,退出码 `0`;若 `.failed` 亦写不进 → 退出码 `2` fail-loud,不静默丢簇
+
+#### Scenario: Packing partitions deterministically within one category
+- **WHEN** 同一 `clusters.json` 以相同 `--pack-bytes`/`--pack-max` 重复枚举两次(任意 cwd、任意运行目录)
+- **THEN** 两次产出的包集合逐字节一致:同成员集、同包 id(`pack::<category>::<sha8>`)、同合并
+  input 内容;任一成员 id/bytes 变化 → 受影响包的 id 随之变化(纯函数,无隐藏状态)
+
+#### Scenario: Packing never mixes categories nor admits oversize members
+- **WHEN** 打包开启,存在跨 category 的小簇与一条 oversize 簇
+- **THEN** 每个包的成员 category 唯一;oversize/`::shard-<n>` 单元以独立单元出现在 `pending[]`
+  (形态与关闭打包时一致),NEVER 成为任何包的成员
+
+#### Scenario: Pack pending derives from member markers, done members are excluded from work
+- **WHEN** 某包 4 个成员中 1 个已有 `.done` marker,包被重派
+- **THEN** 该包仍在 `pending[]`(≥1 成员缺 marker);任务模板指示 subagent 跳过已有 marker 的
+  成员,仅处理其余 3 个;全部成员 marker 就位后该包从 `pending[]` 消失,`cluster_done` +4
+
+#### Scenario: Packing off is byte-identical to the legacy path
+- **WHEN** 不传 `--pack-bytes`(或传 `0`)运行新旧两版 `list_clusters.py`
+- **THEN** stdout JSON 逐字段一致(不出现 `members[]`/`cluster_total`/`cluster_done`),包逻辑
+  零执行;`--pack-max` 单独传入而 `--pack-bytes` 为 0 时 SHALL 退出码 2 拒识(无效组合)
 
 ### Requirement: init-survey is optional, advisory, and non-fatal
 
@@ -1455,24 +1504,38 @@ shell 既有「P0 软边界:T2/merge/T4 聚合节点目前为披露 + `--scope`/
 上下文,承 "Isolated per-cluster induction with cross-cluster synthesis" / "Fan out scout across parallel isolated
 byte-bounded batches" 的既有 single-context 综合语义)。聚合输入 **>** 预算时,SHALL 自动触发**两段 map-reduce**:
 确定性叶脚本 `core/scripts/plan_aggregate.py` 把上一层记录(T2 按 `category` 分桶;scout-merge 按 batch 簇分桶)切成
-**每桶 ≤ `--max-aggregate-bytes`** 的有界 shard 并物化 per-shard 输入。**T2 map 阶段**SHALL 由确定性 dispatcher
+**每桶 ≤ `--max-aggregate-bytes`** 的有界 shard 并物化 per-shard 输入。**T2 单 category 记录自身 > 预算时,SHALL
+继续把该 category 确定性切分为多个 ≤ 预算的 part shard**(贪心整条打包,`shard_id = t2-<category>-part<N>`),
+「单桶超预算告警 + 照发」的旧兜底 SHALL 废除——任何派发给 partial-synthesis subagent 的 shard 输入 MUST ≤ 预算。
+**T2 map 阶段**SHALL 由确定性 dispatcher
 (`fanout_runner.py --tier t2`,见 `fanout-dispatch` 能力)波次驱动——为每 shard 一个 **partial-synthesis subagent**
 (`init-synthesis-fanout`,有界输入、回传有界 ack),产出 per-shard 摘要 checkpoint;scout-merge map 阶段仍由编排器
 逐 shard 手派(非目标,后续 change)。两 node 的 map 阶段完成后,由**单一 rollup subagent** 仅吞**各 shard 摘要**
-(有界)产出终态产物(`controls_inventory.json` / `scout_candidates.json`)。**每个大模型请求 SHALL ≤ 预算**。
+(有界)产出终态产物(`controls_inventory.json` / `scout_candidates.json`);rollup 的跨 shard 归并 SHALL 同时覆盖
+**同 category 跨 part** 与**跨 category** 的 canonical/competing 判定(同一组判定信号)。**每个大模型请求 SHALL ≤
+预算**。
 `plan_aggregate.py` SHALL 零依赖、自定位、utf-8、任意 cwd、stdout=JSON/stderr=诊断、退出码 `0/1/2`、`--help` 即契约
 (承 R5.1/R5.3),并复用既有 `list_*` 的 `--materialize`/`--offset`/`--limit`/`--orch-budget-bytes` 翻页语义。`--node t2`
 stdout SHALL 顶层补 `repo`(=`--init-dir` resolve 父目录)、marker 派生 `total`/`done`/`failed`,每 shard 补
 `failed_marker`,且 `pending[]` SHALL **排除**已有 `.done`/`.failed` marker 的 shard(使 dispatcher 波次重列 →
-pending 收缩收敛、零推进熔断信号 = marker 真值;`summary_paths`/`shards` 仍为全集供 rollup + 披露);使 dispatcher
-锚树校验与 `.failed` 终态可执行;`needs_reduce=false` 路径逐字不变。降级触发与 shard 数 SHALL 在
+pending 收缩收敛、零推进熔断信号 = marker 真值;`summary_paths`/`shards` 仍为全集供 rollup + 披露);map-reduce 路径的
+T2 shard 项 SHALL 另携带 `part_index`/`part_count`(part 切分披露)与 `slimmed`(原子瘦身披露);已派发 shard 不再出现
+`oversize:true`(字段保留、恒 false,stdout 兼容);使 dispatcher
+锚树校验与 `.failed` 终态可执行;`needs_reduce=false` 路径逐字不变。降级触发、shard 数、part 切分与瘦身痕迹 SHALL 在
 `init_manifest.json::boundaries[]` + `report.md` 披露(无静默溢出)。本要求在「超预算」时**取代**
 既有 single-context 综合条款;≤ 预算(常见小仓)时既有条款逐字生效。
 
+**原子超限兜底(单条记录 > 预算)**:part 贪心打包遇到单条 T1 记录自身超预算时,SHALL 在物化层做**确定性瘦身投影**
+——仅截断非判定关键字段(prose 字段与 `entry_points` 等;`evidence` 锚点不截),投影结果带显式 `_slimmed` 标记,
+被截字段与原始字节数 SHALL 记入该 shard 的 `slimmed` 披露;瘦身投影 SHALL 只作用于物化的 shard 输入,**NEVER**
+改写 `checkpoints/t1` 原件。瘦身后仍 > 预算(结构字段本身超限,病态记录)→ `plan_aggregate.py` SHALL 退出码 2
+fail-loud(报出记录文件与字节数),SHALL NOT 派发注定超限的单元。
+
 **T2 partial/rollup 提示词分态**:T2 的三态行为 SHALL 由三个 stage 提示词各司其职——`init-synthesis.md`(whole,
-单上下文,小仓路径,**逐字不变**)、`init-synthesis-partial.md`(per-shard 有界 partial,产结构化 shard 摘要,不跨
-shard 做 canonical/competing 判定)、`init-synthesis-rollup.md`(仅吞各 shard 摘要,跨 category canonical/competing
-归并 → 终态 inventory)。三态输出 schema 一致(`design_controls`-compatible),`validate_inventory.py --check` 对
+单上下文,小仓路径,**逐字不变**)、`init-synthesis-partial.md`(per-shard 有界 partial,产结构化 shard 摘要;shard
+可能是某 category 的一个 part,partial 不做任何跨 shard 判定)、`init-synthesis-rollup.md`(仅吞各 shard 摘要,跨
+shard——同 category 跨 part 与跨 category——canonical/competing 归并 → 终态 inventory)。三态输出 schema 一致
+(`design_controls`-compatible),`validate_inventory.py --check` 对
 map-reduce 产物同样适用。
 
 #### Scenario: Small repo keeps single-context synthesis unchanged
@@ -1483,16 +1546,38 @@ map-reduce 产物同样适用。
 #### Scenario: Large repo triggers automatic map-reduce sharding
 
 - **WHEN** 全部 T1 记录序列化字节 > `--max-aggregate-bytes`
-- **THEN** `plan_aggregate.py --node t2` 按 `category` 切成多个每桶 ≤ 预算的 shard,`fanout_runner.py --tier t2`
+- **THEN** `plan_aggregate.py --node t2` 按 `category` 切成多个每桶 ≤ 预算的 shard(单 category 超预算时继续切成
+  该 category 的多个 part),`fanout_runner.py --tier t2`
   波次驱动每个 shard 一个 `init-synthesis-fanout` partial-synthesis subagent(有界输入),再一个 rollup subagent
   仅吞各 shard 摘要;**每个大模型请求 ≤ 预算**
+
+#### Scenario: Oversize category splits into bounded parts
+
+- **WHEN** 某单个 category 的 T1 记录序列化字节 > 预算(如实测 400KB 的 authorization)
+- **THEN** `plan_aggregate.py --node t2` 将该 category 按 T1 记录确定性贪心打包切成多个 ≤ 预算的 part shard
+  (`t2-<category>-part<N>`,输入 envelope 带 `part_index`/`part_count`),每个 part 经同一 dispatcher 派发一个
+  partial-synthesis subagent;不产生任何 `oversize:true` 的已派发 shard,不派发注定超限的请求
+
+#### Scenario: Atomic oversize record is slimmed or fails loud
+
+- **WHEN** 单条 T1 记录自身序列化字节 > 预算(贪心打包无法再切)
+- **THEN** 物化层对该记录做确定性瘦身投影(非判定字段截断 + `_slimmed` 标记,`evidence` 锚点不截,`checkpoints/t1`
+  原件不变),截断痕迹记入 shard 的 `slimmed` 披露;瘦身后仍 > 预算时 `plan_aggregate.py` 退出码 2 并报出记录文件
+  与字节数,不派发任何单元
+
+#### Scenario: Rollup reconciles across parts of the same category
+
+- **WHEN** 某 category 被切成多个 part,各 part 的 partial 摘要均已就绪,rollup 消费全部摘要
+- **THEN** rollup 对**同 category 跨 part**(以及跨 category)的重复/竞争控制按同一组判定信号归并 canonical,
+  部分摘要的 within-part 判定除跨 shard 重复强制 canonical 变更外不被重审;终态 inventory 与整 category 视图路径
+  同 schema,过 `validate_inventory.py --check`
 
 #### Scenario: T2 map phase reuses dispatcher machinery
 
 - **WHEN** T2 map 阶段经 `--tier t2` 运行,且被宿主硬杀后残留孤儿 partial-synthesis 子进程
 - **THEN** `fanout_runner.py --kill-stale --tier t2` 检出并清理孤儿;`partial:true` 时重派同一命令
   (`--time-budget-ms` 软时限先于宿主硬杀);零推进连续 N 波触发熔断(fail-loud + `stalled_pending[]`)——与
-  scout/t1/t3 同一 tier 无关代码路径,无 per-tier 分支
+  scout/t1/t3 同一 tier 无关代码路径,无 per-tier 分支;part shard 与普通 shard 同经 marker-aware 重列收敛
 
 #### Scenario: scout-merge over budget uses batch-cluster shards
 
@@ -1507,8 +1592,9 @@ map-reduce 产物同样适用。
 
 #### Scenario: Reduction is disclosed, not silent
 
-- **WHEN** 一次运行触发了聚合 map-reduce 降级
-- **THEN** `init_manifest.json::boundaries[]` + `report.md` 记录触发节点、shard 数与每 shard 预算,不静默溢出
+- **WHEN** 一次运行触发了聚合 map-reduce 降级、category part 切分或原子瘦身
+- **THEN** `init_manifest.json::boundaries[]` + `report.md` 记录触发节点、shard 数、每 shard 预算、part 切分
+  (`<category> → N parts`)与瘦身痕迹(被截字段 + 原始字节数),不静默溢出
 
 #### Scenario: plan_aggregate is self-contained, offline, and contract-complete
 

@@ -31,16 +31,38 @@ runs — yields a writable file. A single cluster whose materialization write fa
 its `.failed` terminal marker is written + `failed` count +1 + the batch continues (exit 0);
 a `.failed` marker that also cannot be written → exit 2 fail-loud (systemic run-dir damage).
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
+Deterministic small-cluster packing (`--pack-bytes`, opt-in quota amortization): with
+`--pack-bytes B > 0` (+ `--pack-max N` member cap, default 8) the enumeration unit shifts
+from the cluster to the PACK — same-category clusters whose whole-cluster input fits
+`--max-unit-bytes` are sorted by `(bytes asc, cluster_id)` and greedily packed up to the
+byte cap; oversize/`::shard-<n>` units and terminal-failed clusters NEVER enter a pack.
+Pack id = `pack::<category[:64]>::<sha8(sorted member ids)>` — partition and id are PURE
+functions of `clusters.json` + the flag values (same input, same packs, stable across
+runs; marker state never influences identity). Each pending pack carries ONE merged input
+file (`members[]` = full cluster records, `checkpoints[]` = per-member checkpoint/done
+paths) so one subagent context amortizes its fixed call overhead over several clusters;
+member-level `.done` markers stay the ONLY truth source and the recovery granularity
+(a re-dispatched pack skips already-done members via the task template; the pack is
+pending iff ≥1 member marker is missing). `total` = dispatch units (packs + independent
+oversize/shard clusters); stdout adds `cluster_total`/`cluster_done` cluster-level
+disclosure. A pack whose merged input cannot be written is excluded from `pending[]`
+with a stderr warning (batch continues, exit code unchanged). Off (`--pack-bytes 0`,
+the default) the legacy per-cluster path runs byte-identical — no new fields, zero pack
+code executed.
+
+Zero runtime deps (Python >=3.10 stdlib: argparse/hashlib/json/pathlib/sys).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py list_clusters.py --clusters <clusters.json> [--checkpoints <t1-dir>]
        [--candidates <controls_candidates.json>] [--materialize <inputs-dir>]
        [--offset N] [--limit N] [--max-unit-bytes B] [--orch-budget-bytes B]
+       [--pack-bytes B] [--pack-max N]
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<ClusterLite>, ...],
    "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
+  packing mode adds: "cluster_total": C, "cluster_done": D  (cluster-level counts; never
+  present on the off path)
   - total       = len(clusters[])             (the REAL count, not len(wrapper))
   - done        = #canonical units whose `.done` marker exists (FORWARD marker-path
                   computation: encode `<safe(unit_id)>.json.done` with the same
@@ -82,12 +104,18 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - truncated   = passthrough of the wrapper's `truncated` flag (no silent loss)
   - offset/limit/effective_limit/shrunk = paging (R5.3b); orchestrator advances offset
     by effective_limit. shrunk=true iff a page was auto-tightened to ≤ --orch-budget-bytes.
+  Packing mode: a pending[] PACK item carries `cluster_id` = the pack id (the dispatcher
+  and ack state machine consume the same field slot, zero changes), `input_path` = the
+  merged pack input, pack-level checkpoint/done/failed marker paths + `slice_dir`, and
+  adds `members[]` = [{cluster_id, input_path, checkpoint_path, done_marker, bytes}]
+  (per-member, all `Path.resolve()` absolute — pass through verbatim).
 
 Exit codes (R5.3b): 0 ok (incl. empty clusters) · 1 clusters.json missing/malformed ·
 2 misuse (argparse / bad budget / scout-incomplete-gate). Idempotent, no TTY.
 """
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -103,6 +131,8 @@ from init_tier import (scout_complete, safe_unit_filename, forward_marker_paths,
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — aligns with --big-file-bytes 200KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
 MAX_UNIT_FILENAME_STEM = 200           # alias of init_tier.MAX_UNIT_FILENAME_STEM (single source)
+DEFAULT_PACK_BYTES = 0                 # packing off (opt-in; off path stays byte-identical)
+DEFAULT_PACK_MAX = 8                   # per-pack member cap when packing is on
 
 
 def _abs_file(raw, repo_path):
@@ -123,18 +153,21 @@ def _abs_file(raw, repo_path):
         return raw
 
 
-def _absolutize_paths(obj, repo_path):
+def _absolutize_paths(obj, repo_path, with_repo=True):
     """Walk a materialized input record (cluster header + candidate hits) and make every
     file path ABSOLUTE (resolved against the repo root), preserving the original value as
-    `repo_relative`. ALSO sinks the absolute `repo` root into the record as a TOP-LEVEL
-    field (fan-out input anchor: the reader subagent anchors its tool paths on it without
-    re-deriving, and rejects input path fields resolving outside the anchored tree as
-    poisoned — shared contract with list_scout_batches / list_test_groups). Operates on a
-    shallow copy; returns the copy."""
+    `repo_relative`. By default ALSO sinks the absolute `repo` root into the record as a
+    TOP-LEVEL field (fan-out input anchor: the reader subagent anchors its tool paths on
+    it without re-deriving, and rejects input path fields resolving outside the anchored
+    tree as poisoned — shared contract with list_scout_batches / list_test_groups).
+    `with_repo=False` (pack members): absolutize paths only — the merged pack envelope
+    carries `repo` once at top level, never duplicated per member. Operates on a shallow
+    copy; returns the copy."""
     if not isinstance(obj, dict) or repo_path is None:
         return obj
     out = dict(obj)
-    out["repo"] = str(repo_path)
+    if with_repo:
+        out["repo"] = str(repo_path)
     for key in ("evidence_files", "usage_sites"):
         if isinstance(out.get(key), list):
             out[key] = [_abs_file(p, repo_path) for p in out[key]]
@@ -387,6 +420,242 @@ def _shrink_page(page: list, orch_budget: int):
     return page[:eff], eff, eff < len(page)
 
 
+# ---------------------------------------------------------------------------
+# Deterministic small-cluster packing (--pack-bytes > 0, opt-in): the T1
+# enumeration unit shifts from the cluster to the PACK so one subagent context
+# amortizes its fixed LLM call overhead over several same-category small
+# clusters (quota-constrained gateways bill per call, not per byte).
+# ---------------------------------------------------------------------------
+
+def _pack_id(category: str, member_ids) -> str:
+    """Deterministic pack id: `pack::<category[:64]>::<sha8>`. sha8 = sha1 hex[:8] over
+    the NEWLINE-joined SORTED member cluster ids (a separator keeps distinct member sets
+    from concatenating to the same bytes). Pure function of (category, member id set):
+    same members → same id across runs (re-dispatch identity stable); any member-id
+    change → a new id. The category display slot is truncated at 64 so the whole id
+    stays well under the cluster-id 160 bound."""
+    cat = (category or "")[:64]
+    tail = hashlib.sha1("\n".join(sorted(member_ids)).encode("utf-8")).hexdigest()[:8]
+    return f"pack::{cat}::{tail}"
+
+
+def _pack_partition(items, pack_bytes: int, pack_max: int):
+    """Greedy deterministic packing over ONE category's eligible clusters, pre-sorted by
+    (bytes asc, cluster_id): keep appending while the pack stays within --pack-bytes AND
+    --pack-max; otherwise seal the pack and start a new one. A single cluster larger
+    than --pack-bytes still gets its own pack (packing never splits a cluster — that is
+    the oversize shard path's job)."""
+    packs, cur, cur_b = [], [], 0
+    for it in items:
+        if cur and (cur_b + it["bytes"] > pack_bytes or len(cur) >= pack_max):
+            packs.append(cur)
+            cur, cur_b = [], 0
+        cur.append(it)
+        cur_b += it["bytes"]
+    if cur:
+        packs.append(cur)
+    return packs
+
+
+def _pack_member_entry(cluster: dict, hits: list, repo_path):
+    """One member record inside a merged pack input: cluster header + its candidate hits
+    with file paths absolutized (same read-side confinement as single-unit inputs), NO
+    per-member `repo` injection (the merged envelope carries `repo` once, top level)."""
+    return _absolutize_paths(dict(_cluster_header(cluster), candidates=hits),
+                             repo_path, with_repo=False)
+
+
+def _write_pack_input(inputs_dir: Path, pack_id: str, merged: dict) -> Path:
+    """Write the merged pack input `<inputs_dir>/<safe(pack_id)>.input.json` (idempotent
+    overwrite; same `_safe_name` stem cap/sanitization as unit inputs). Returns the
+    absolute path."""
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    path = (inputs_dir / f"{_safe_name(pack_id)}.input.json").resolve()
+    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _slim_pack(pack_id: str, category, kind, hit_count: int, merged_path: str,
+               merged_bytes: int, checkpoints_dir: Path, members: list) -> dict:
+    """Pack-level slim envelope: `cluster_id` carries the PACK id (the dispatcher's id
+    field slot and ack state machine consume it unchanged); path fields are PACK-level
+    (the ack `.failed` marker the dispatcher writes on a failed pack is exactly this
+    path); `members[]` carries the per-member absolute paths the task template walks."""
+    cp, dm, fm = _paths(checkpoints_dir, pack_id)
+    return {
+        "cluster_id": pack_id,
+        "category": category,
+        "kind": kind,
+        "shape": "packed",
+        "candidate_count": hit_count,
+        "input_path": merged_path,
+        "checkpoint_path": cp,
+        "done_marker": dm,
+        "failed_marker": fm,
+        "bytes": merged_bytes,
+        "oversize": False,
+        "slice_dir": _slice_dir(checkpoints_dir, pack_id),
+        "members": members,
+    }
+
+
+def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_dir,
+                      repo_root, done, failed) -> int:
+    """The `--pack-bytes > 0` enumeration path. Classification is pure and marker-blind
+    for identity: terminal-failed clusters (pre-existing `.failed`) are never packable;
+    oversize clusters stay on the existing shard path; everything else is packable
+    within its category, DONE members included (pack identity must depend only on
+    `clusters.json` + flags, so a crash-interrupted pack keeps its id and its done
+    members are skipped by the task template on re-dispatch)."""
+    pack_max = args.pack_max if args.pack_max is not None else DEFAULT_PACK_MAX
+    packable = {}          # category -> [{bytes, cid, cluster, hits}]
+    independent = []       # (cluster, hits) — oversize, existing shard path
+    clusters_failed = 0
+    whole_ids = []
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        cid = cluster.get("cluster_id")
+        if not cid:
+            continue
+        whole_ids.append(cid)
+        if cid in failed:  # terminal → excluded from any pack, counted failed
+            clusters_failed += 1
+            continue
+        hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
+        nbytes = _byte_len(_absolutize_paths(
+            dict(_cluster_header(cluster), candidates=hits), repo_root))
+        if hits and nbytes > args.max_unit_bytes:
+            independent.append((cluster, hits))
+            continue
+        packable.setdefault(cluster.get("category") or "", []).append(
+            {"bytes": nbytes, "cid": cid, "cluster": cluster, "hits": hits})
+
+    all_units = []
+    packs_all = packs_done = packs_failed = 0
+    pack_member_total = 0
+    for category in sorted(packable):
+        items = sorted(packable[category], key=lambda it: (it["bytes"], it["cid"]))
+        for members in _pack_partition(items, args.pack_bytes, pack_max):
+            packs_all += 1
+            pack_member_total += len(members)
+            member_ids = [m["cid"] for m in members]
+            if all(cid in done for cid in member_ids):
+                packs_done += 1  # every member marker present → nothing to dispatch
+                continue
+            pack_id = _pack_id(category, member_ids)
+            if Path(_paths(checkpoints_dir, pack_id)[2]).is_file():
+                packs_failed += 1  # pack-level terminal failure (failed ack); NOT retried
+                continue
+            merged_members = []
+            checkpoints_index = []
+            for m in members:
+                merged_members.append(
+                    _pack_member_entry(m["cluster"], m["hits"], repo_root))
+                mcp, mdm, _ = _paths(checkpoints_dir, m["cid"])
+                checkpoints_index.append({"cluster_id": m["cid"],
+                                          "checkpoint_path": mcp,
+                                          "done_marker": mdm})
+            merged = {
+                "repo": str(repo_root) if repo_root is not None else wrapper.get("repo"),
+                "pack_id": pack_id,
+                "category": category,
+                "members": merged_members,
+                "checkpoints": checkpoints_index,
+            }
+            try:
+                merged_path = _write_pack_input(inputs_dir, pack_id, merged)
+            except OSError as e:
+                # Pack-materialize isolation: this pack is excluded from pending
+                # entirely (stderr warning, batch continues, exit code unchanged);
+                # member markers are untouched — members stay pending for the next
+                # successful enumeration. NEVER abort the batch on one bad pack.
+                print(f"warn: pack {pack_id} materialize failed ({e}); pack excluded "
+                      f"from pending (exit code unchanged)", file=sys.stderr)
+                continue
+            members_meta = []
+            for m in members:
+                mcp, mdm, _ = _paths(checkpoints_dir, m["cid"])
+                members_meta.append({"cluster_id": m["cid"],
+                                     "input_path": str(merged_path),
+                                     "checkpoint_path": mcp,
+                                     "done_marker": mdm,
+                                     "bytes": m["bytes"]})
+            all_units.append(_slim_pack(
+                pack_id, category, members[0]["cluster"].get("kind"),
+                sum(len(m["hits"]) for m in members), str(merged_path),
+                merged_path.stat().st_size, checkpoints_dir, members_meta))
+
+    # independent oversize clusters: the existing per-cluster shard path, verbatim
+    # (same `_resolve_units` + OSError isolation semantics as the unpacked path).
+    independent_all = independent_done = 0
+    for cluster, hits in independent:
+        cid = cluster["cluster_id"]
+        independent_all += 1
+        try:
+            units = list(_resolve_units(cid, cluster, hits,
+                                        args.max_unit_bytes, inputs_dir, repo_root))
+        except OSError as e:
+            # Same single-cluster isolation as the unpacked path: `.failed` terminal
+            # marker + batch continues; unwritable `.failed` → systemic → exit 2.
+            print(f"error: cluster {cid} materialize failed: {e}", file=sys.stderr)
+            failed_path = _paths(checkpoints_dir, cid)[2]
+            try:
+                Path(failed_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(failed_path).write_text(json.dumps(
+                    {"unit": cid, "reason": f"materialize failed: {e}", "tier": "t1"},
+                    ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                print(f"error: cannot write failed marker for {cid} — systemic "
+                      f"run-dir failure", file=sys.stderr)
+                return 2
+            clusters_failed += 1
+            continue
+        emitted = False
+        for uid, ipath, nbytes in units:
+            if uid in done or uid in failed:
+                continue
+            shard = uid != cid
+            all_units.append(_slim_materialized(
+                cluster, uid, len(hits) if not shard else _shard_hit_count(inputs_dir, uid),
+                ipath, nbytes, shard, checkpoints_dir))
+            emitted = True
+        if not emitted:
+            independent_done += 1
+
+    total = packs_all + independent_all
+    done_count = packs_done + independent_done
+    failed_count = packs_failed + clusters_failed
+    cluster_done = sum(1 for cid in whole_ids if cid in done)
+    avg = (pack_member_total / packs_all) if packs_all else 0.0
+    print(f"packing: {packs_all} pack(s) over {pack_member_total} packable cluster(s), "
+          f"avg {avg:.1f} member(s)/pack; {independent_all} independent oversize/shard "
+          f"cluster(s) outside packs; {packs_failed} failed pack(s); "
+          f"cluster_total={len(clusters)} cluster_done={cluster_done}", file=sys.stderr)
+    req_limit = args.limit if args.limit is not None else len(all_units)
+    page = all_units[args.offset: args.offset + max(0, req_limit)]
+    page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)
+    result = {
+        "repo": wrapper.get("repo"),
+        "total": total,
+        "done": done_count,
+        "failed": failed_count,
+        "pending": page,
+        "truncated": bool(wrapper.get("truncated", False)),
+        "offset": args.offset,
+        "limit": req_limit,
+        "effective_limit": eff,
+        "shrunk": shrunk,
+        "cluster_total": len(clusters),
+        "cluster_done": cluster_done,
+    }
+    print(f"clusters.json: {total} total, {done_count} done, {failed_count} failed, "
+          f"{len(all_units)} pending unit(s); page offset={args.offset} eff={eff} "
+          f"shrunk={shrunk} (checkpoints: {checkpoints_dir})", file=sys.stderr)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="list pending T1 clusters from clusters.json (deterministic work-list)")
@@ -414,15 +683,51 @@ def main():
     ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES,
                     help=f"orchestrator single-request page byte cap (default "
                          f"{DEFAULT_ORCH_BUDGET_BYTES}; page auto-tightened + shrunk:true)")
+    ap.add_argument("--pack-bytes", type=int, default=DEFAULT_PACK_BYTES,
+                    help=f"opt-in deterministic small-cluster packing (default "
+                         f"{DEFAULT_PACK_BYTES} = OFF: legacy per-cluster path, byte-identical). "
+                         f">0 shifts the enumeration unit from the cluster to the PACK: "
+                         f"same-category clusters whose whole-cluster input fits "
+                         f"--max-unit-bytes are sorted by (bytes asc, cluster_id) and "
+                         f"greedily packed up to this byte cap (unit=pack; oversize and "
+                         f"::shard-<n> units never pack). Pack id = "
+                         f"pack::<category>::<sha8(member ids)> — a pure function of "
+                         f"clusters.json + these flag values (same input, same packs). "
+                         f"Member-level .done markers stay the ONLY truth source and the "
+                         f"recovery granularity: a pack is pending iff >=1 member marker "
+                         f"is missing; a re-dispatched pack skips done members via the "
+                         f"task template. Requires --materialize. Quota-constrained "
+                         f"suggested value: 16384")
+    ap.add_argument("--pack-max", type=int, default=None,
+                    help=f"per-pack member cap when --pack-bytes > 0 (default "
+                         f"{DEFAULT_PACK_MAX}; guardrail against template-iteration "
+                         f"bloat). Passing it while --pack-bytes is 0/absent is an "
+                         f"invalid combination -> exit 2")
     args = ap.parse_args()
 
     if args.offset < 0:
         print("error: --offset must be >= 0", file=sys.stderr)
         return 2
     for label, raw in (("--max-unit-bytes", args.max_unit_bytes),
-                       ("--orch-budget-bytes", args.orch_budget_bytes)):
+                       ("--orch-budget-bytes", args.orch_budget_bytes),
+                       ("--pack-bytes", args.pack_bytes)):
         v = _parse_bytes(label, raw)
         if v < 0:
+            return 2
+    pack_max = args.pack_max if args.pack_max is not None else DEFAULT_PACK_MAX
+    if args.pack_max is not None and args.pack_bytes == 0:
+        print("error: --pack-max requires --pack-bytes > 0 (invalid combination: "
+              "packing is off). recipe: enable packing with e.g. `--pack-bytes 16384 "
+              "--pack-max 8`, or drop --pack-max", file=sys.stderr)
+        return 2
+    if args.pack_bytes > 0:
+        if not args.materialize:
+            print("error: --pack-bytes requires --materialize (each pack materializes "
+                  "ONE merged input file). recipe: add --materialize <inputs/t1>",
+                  file=sys.stderr)
+            return 2
+        if pack_max < 1:
+            print("error: --pack-max must be >= 1", file=sys.stderr)
             return 2
 
     clusters_path = Path(args.clusters)
@@ -498,6 +803,12 @@ def main():
     for name in orphan_markers(checkpoints_dir, canonical_ids):
         print(f"warn: orphan marker (no canonical unit id matches; audit only, "
               f"not counted): {name}", file=sys.stderr)
+
+    # Opt-in packing: units shift from clusters to deterministic packs (see
+    # _enumerate_packed). Off path below stays byte-identical — zero pack code runs.
+    if materialize and args.pack_bytes > 0:
+        return _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands,
+                                 inputs_dir, repo_root, done, failed)
 
     all_units = []          # full slim work-list (pre-page)
     clusters_with_pending = 0

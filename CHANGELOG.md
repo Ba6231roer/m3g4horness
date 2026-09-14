@@ -16,6 +16,48 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — `/mgh-init` T1 deterministic small-cluster packing — quota amortization, opt-in (0.1.43)
+
+Quota-constrained intranet LLM gateways bill per call (observed: 100 calls / 10 min),
+and every T1 unit pays a fixed 3–5 call overhead (session start / read task / read
+input / ack) regardless of cluster size. A real run with 221 small clusters
+(inputs 1.6–4.3KB) spent ≈900 calls — near a third of the quota — on overhead alone.
+Bigger waves cannot help under a call-rate cap; fewer units can
+(`improve-mgh-init-t1-cluster-packing`):
+
+- **Pack partition** (`list_clusters.py --pack-bytes B`, default 0 = off; `--pack-max N`
+  member cap, default 8): same-category clusters whose whole-cluster input fits
+  `--max-unit-bytes` are sorted by `(bytes asc, cluster_id)` and greedily packed;
+  oversize/`::shard-<n>` units and terminal-failed clusters never enter a pack. Pack id
+  = `pack::<category[:64]>::<sha8(sorted member ids)>` — partition and id are pure
+  functions of `clusters.json` + flag values (same input, same packs, any cwd).
+- **One merged input per pack** (`<inputs/t1>/<safe(pack_id)>.input.json`, body
+  `{repo, pack_id, category, members[], checkpoints[]}`): one subagent Read amortizes
+  the fixed overhead over all members. `pending[]` pack items carry the pack id in the
+  `cluster_id` field slot (dispatcher + ack state machine consume it unchanged) and a
+  `members[]` list with per-member absolute paths; stdout adds `cluster_total`/
+  `cluster_done` (packing path only). Paging and `--orch-budget-bytes` shrink apply
+  to the packed list unchanged.
+- **Cluster-level markers stay the only truth source**: a pack is pending iff ≥1
+  member lacks `.done`; a re-dispatched pack skips done members via the dual-form task
+  template (`fanout/t1-task.md` Form B: probe `checkpoints[]` → skip done → induce per
+  member → `unit` = member cluster_id → ack `ok <pack_id> <n>` /
+  `failed <member ids>: <reason>`). Recovery granularity stays cluster-level; a
+  pack-level `.failed` (written by the dispatcher on a failed pack ack) recovers by
+  deleting the marker and re-listing. Pack-level markers are excluded from the orphan
+  audit (`init_tier.orphan_markers`).
+- **Zero changes** to `fanout_runner.py` (packed pending flows through the same field
+  slots), T1 record schema, `validate_t1_records.py`, the T2 records gate, and
+  `resume_state.py` (cluster-level counting is pack-agnostic by construction).
+- **Enablement surface**: the orchestrator's `list_clusters.py` call lines
+  (`init-stage/t1.md` manual path + `discipline_core.py` t1-pack recipe + man page);
+  suggested quota value 16384. The dispatcher main path does not yet forward the flag
+  (its enumerator argv is fixed by the zero-change constraint) — hand-dispatch path
+  enables packing today; dispatcher pass-through is a small follow-up if wanted.
+- Off-path regression is byte-identical (no new stdout fields, zero pack code);
+  invalid combinations (`--pack-max` without `--pack-bytes`, packing without
+  `--materialize`) exit 2.
+
 ### Changed — `/mgh-init` T2 oversize category: deterministic part split + atomic slim projection (0.1.42)
 
 A T2 unit crashed with a model context-overflow in a real run: the `authorization`

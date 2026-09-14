@@ -804,6 +804,21 @@ class TestForwardDoneJudgment(unittest.TestCase):
         (self.cp / "merge.json.done").write_text("", encoding="utf-8")
         self.assertEqual(self.it.orphan_markers(self.cp, ids, exclude=("merge.json",)), [])
 
+    def test_pack_level_markers_not_orphans(self):
+        # t1 packing: a pack-level .failed marker (pack::<category>::<sha8>, encoded
+        # `pack__...`) is a legit dispatch-unit terminal — NEVER audited as an orphan
+        # (pack ids are not members of the canonical cluster-id set by design).
+        self.cp.mkdir(parents=True, exist_ok=True)
+        (self.cp / "pack__crypto__ab12cd34.json.failed").write_text(
+            json.dumps({"unit": "pack::crypto::ab12cd34", "reason": "r", "tier": "t1"}),
+            encoding="utf-8")
+        (self.cp / "pack__crypto__deadbeef.json.done").write_text("", encoding="utf-8")
+        self.assertEqual(self.it.orphan_markers(self.cp, ["crypto::X::01"]), [])
+        # a genuinely unknown marker still audits
+        (self.cp / "legacy__renamed.json.done").write_text("", encoding="utf-8")
+        self.assertEqual(self.it.orphan_markers(self.cp, ["crypto::X::01"]),
+                         ["legacy__renamed.json.done"])
+
 
 if __name__ == "__main__":
     unittest.main()

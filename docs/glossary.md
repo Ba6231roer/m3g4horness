@@ -63,6 +63,7 @@
 | 嵌套派发(nesting) | 派发脚本启动的 headless opencode 子进程,自己又跑一个派发脚本去启动孙代 opencode 进程。和会话树的深度上限是两回事:每换一个新进程,会话深度计数就从头再来。 |
 | centralized / distributed | `/mgh-init` 簇(`clusters.json::clusters[]`)的两种**归簇形态**。centralized = 控制定义在一处(一个 util / filter / config / interceptor 类),按**锚点** `category::anchor::file` 归簇,典型例子:`SecurityConfig` 里整套授权配置;distributed = 注解类控制跨文件散落,按 **token** `category::pattern` 归簇,典型例子:`@PreAuthorize` / `@Valid` 出现在很多文件里。`shape` 字段取值二者之一。 |
 | cluster_id | `/mgh-init` 每个簇(`clusters.json`)的**确定性单元标识**。组成形态:`{category}::{anchor}::{file}::{sha8}`(centralized 簇)或 `{category}::{pattern}::{sha8}`(distributed 簇),`sha8` = 完整 key 的 sha1 前 8 位 hex。用途:T1 的隔离/续跑单元名、检查点记录与扇出路径的基准。总长 ≤ 160 字符(超预算截显示槽位、保留 sha8 判别尾);含 `::`(NTFS 分隔符),落盘文件名须消毒。 |
+| 打包(pack) | `/mgh-init` 分批归纳阶段的省调用数开关(默认关):把同一类别的几个小簇装进同一个「包」,一个子 AI 按顺序逐簇处理,固定的调用开销按包摊薄而不是按簇付。包的成员和包 id 完全由输入数据 + 参数算出来(同输入必得同包,跨运行不变);每个簇自己的完成标记照旧独立存放,中断重跑时已完成的簇自动跳过、只补缺的。 |
 | wrapper 字典 | 顶层是一个 dict、真正的列表数据挂在某个键下的 JSON 形态(如 `{"repo": "...", "clusters": [...], "truncated": false}`)。对**顶层** `len()` 得到的是键的个数(上例 = 3),**不是**数据条数——数列表要读对应键(`clusters[]`)或读产出者 stdout 的计数字段。 |
 | 安全设计符合性复核(SDR) | `/mgh-sdr` 干的事:不是扫描找漏洞,而是对照项目里**已经定好的安全规矩**,检查这次代码改动有没有漏按规矩做。 |
 | 存量安全设计 | 项目里已经定下来、并写进规则文件的安全做法(哪些接口要鉴权、SQL 必须参数化、敏感字段要脱敏……)。由 `/mgh-init` 产出,`/mgh-sdr` 拿它当检查基准。 |

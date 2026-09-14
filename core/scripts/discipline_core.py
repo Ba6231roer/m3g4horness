@@ -128,6 +128,9 @@ _DISCIPLINE = {
             _pr("t1-fanout-path",
                 "T1 单元输出路径 = list_clusters stdout pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path + touch done_marker;失败 ack → 编排器写 failed_marker(终态)",
                 "list_clusters --step 契约"),
+            _pr("t1-pack",
+                "配额受限(网关按调用数限流)时 list_clusters 枚举行加 --pack-bytes 16384(--pack-max 8)启用小簇打包:枚举单元 = 包(cluster_id 载包 id、members[] 载成员绝对路径清单,逐字透传;成员级 .done marker 仍是唯一真相源,重派跳过已完成成员);包级 .failed 恢复 recipe:删除该包的 .failed marker(<checkpoints>/t1/<safe(pack id)>.json.failed)→ 重跑枚举 → 包回 pending → 已 done 成员被任务模板跳过,仅缺失成员重归纳",
+                "list_clusters --pack-bytes 契约"),
         ],
         "nevers": [
             "NEVER 整份 Read clusters.json",

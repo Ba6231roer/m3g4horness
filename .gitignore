@@ -15,6 +15,7 @@ security-scan/
 # 其他工具产物
 .obsidian/
 .claude/
+.zcode/
 .opencode/
 .validate-webgoat/
 .codegraph/

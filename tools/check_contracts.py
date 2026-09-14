@@ -66,6 +66,11 @@ DISCOVER_REQUIRED_FLAGS = ["--time-budget-ms", "--rebuild-cache", "--resume"]
 # --help (request-context-budget; R5.1 contract surface). Asserted directly so the contract
 # holds even if a shell's fenced example is trimmed.
 LIST_SCRIPT_FLAGS = ["--materialize", "--offset", "--limit", "--max-unit-bytes", "--orch-budget-bytes"]
+# list_clusters.py t1 packing flags (deterministic small-cluster packing adoption) MUST be
+# declared in its --help (R5.1 contract surface) — list_*-scoped, hence not in the shared
+# LIST_SCRIPT_FLAGS above (the other enumeration scripts have no packing).
+LIST_CLUSTERS_PACK_SCRIPT = ROOT / "core" / "scripts" / "list_clusters.py"
+LIST_CLUSTERS_PACK_FLAGS = ["--pack-bytes", "--pack-max"]
 LIST_SCRIPTS = [
     ROOT / "core" / "scripts" / "list_clusters.py",
     ROOT / "core" / "scripts" / "list_scout_batches.py",
@@ -311,6 +316,19 @@ def main():
         for flag in LIST_SCRIPT_FLAGS:
             if flag not in declared:
                 failures.append(f"{script.name}: --help missing required {flag!r}")
+
+    # list_clusters.py packing flags MUST be declared in its --help (t1 packing adoption).
+    if not LIST_CLUSTERS_PACK_SCRIPT.is_file():
+        failures.append(f"script not found: {LIST_CLUSTERS_PACK_SCRIPT}")
+    else:
+        declared = declared_flags(LIST_CLUSTERS_PACK_SCRIPT)
+        if declared is None:
+            failures.append("list_clusters.py: `--help` failed")
+        else:
+            for flag in LIST_CLUSTERS_PACK_FLAGS:
+                if flag not in declared:
+                    failures.append(
+                        f"list_clusters.py: --help missing required {flag!r}")
 
     # /mgh-srr intake (ingest_requirements) + render adapter flags MUST be declared in the
     # respective script's --help (request-context-budget adoption; R5.1).

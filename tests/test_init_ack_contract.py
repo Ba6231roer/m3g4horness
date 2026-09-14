@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "core" / "prompts" / "stages"
 CLAUDE_AGENTS = ROOT / "releases" / "claude-code" / "agents"
 OPENCODE_AGENTS = ROOT / "releases" / "opencode" / "agent"
+T1_TASK_TEMPLATE = ROOT / "core" / "prompts" / "fragments" / "fanout" / "t1-task.md"
 
 STAGES = ["init-survey", "init-resolve", "init-scout", "init-scout-merge",
           "init-scout-audit", "init-induct", "init-synthesis", "init-rulewriter",
@@ -55,6 +56,45 @@ class TestAckContract(unittest.TestCase):
             self.assertIn("the orchestrator gives you", text,
                           f"{s}: Output not reframed to orchestrator-given absolute path")
             self.assertIn("NEVER", text, f"{s}: missing NEVER-interpolate path boundary")
+
+
+class TestT1PackedAckContract(unittest.TestCase):
+    """t1-task.md dual-form contract (deterministic small-cluster packing): Form B walks
+    the merged input's members[], skips members whose done_marker exists, writes
+    per-member records (unit = member cluster_id, NEVER the pack id), and acks in the
+    packed shapes. Form A (single cluster) stays byte-for-byte the original contract."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = T1_TASK_TEMPLATE.read_text(encoding="utf-8")
+
+    def test_dual_form_selection_by_input_keys(self):
+        self.assertIn("Form A", self.text)
+        self.assertIn("Form B", self.text)
+        # the input file decides the form: single = cluster_id, packed = pack_id+members
+        self.assertIn("pack_id", self.text)
+        self.assertIn("members[]", self.text)
+        self.assertIn("checkpoints[]", self.text)
+
+    def test_single_cluster_form_unchanged(self):
+        # Form A keeps the original single-unit contract verbatim shapes
+        self.assertIn("`ok <checkpoint_path> <n>`", self.text)
+        self.assertIn("`::shard-<n>` form when", self.text)
+        self.assertIn("EXACTLY the `cluster_id` line above", self.text)
+
+    def test_packed_member_iteration_contract(self):
+        self.assertIn("SKIP the member entirely", self.text)          # done-marker skip
+        self.assertIn("already exists", self.text)
+        self.assertIn("NEVER re-induce", self.text)
+        self.assertIn("EXACTLY that member's `cluster_id`", self.text)  # unit = member id
+        self.assertIn("(NEVER the pack id)", self.text)
+        self.assertIn("finish all", self.text)                        # D6: finish rest first
+        self.assertIn("remaining members first", self.text)
+
+    def test_packed_ack_shapes(self):
+        self.assertIn("`ok <pack_id> <n>`", self.text)
+        self.assertIn("`failed <failed member ids, comma-separated>: <reason>`", self.text)
+        self.assertIn("NEVER\n   echo any record body", self.text)    # bounded ack guardrail
 
 
 if __name__ == "__main__":

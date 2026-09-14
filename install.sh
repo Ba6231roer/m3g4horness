@@ -88,20 +88,20 @@ cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 #    co-location (R5.8: CI 必 fail).
 _missing=()
 for s in expand_scope discover_controls chunk_sources plan_scout merge_scout assemble_rules \
-         list_clusters list_scout_batches list_rule_jobs list_steps describe_artifact validate_inventory validate_t1_records \
+         list_clusters list_scout_batches list_rule_jobs plan_aggregate list_steps describe_artifact validate_inventory validate_t1_records \
          discipline_core fanout_runner \
          prepare_augment merge_augment merge_memory ingest_requirements render_report \
          list_chunks list_verify_jobs prefilter dedup emit_sarif \
          classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \
          resume_ut_init_state write_ut_runconfig list_ut_steps \
-         diff_group sdr_context render_sdr_report mgh_sdr_launch; do
+         diff_group sdr_context render_sdr_report mgh_sdr_launch read_roots_config; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
 if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, /mgh-srr, /mgh-ut-init, or /mgh-sdr may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/t1/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/mgh_sdr_launch"
+  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/mgh_sdr_launch/read_roots_config"
 fi
 
 # 4a) Fan-out tier payload self-check (fail-soft per R5.8): the tier-aware
@@ -109,18 +109,25 @@ fi
 #     the fanout agent clones (mode: primary) by name at spawn time — a missing
 #     file breaks that tier's dispatch at runtime. Warn only; CI enforces.
 _fanout_missing=()
-for t in scout-task t1-task t3-task sdr-task; do
+for t in scout-task t1-task t2-task t3-task sdr-task; do
   [[ -f "$DEST/mgh-core/prompts/fragments/fanout/$t.md" ]] || _fanout_missing+=("prompts/fragments/fanout/$t.md")
 done
+# T2 synthesis map-reduce split prompts (t2 map-stage adoption): the partial (per-shard) and
+# rollup (cross-shard reduce) stage prompts mirror with the whole-core copy; a missing file
+# breaks the over-budget map-reduce path at runtime. Shared by both platforms (core copy).
+for s in init-synthesis-partial init-synthesis-rollup; do
+  [[ -f "$DEST/mgh-core/prompts/stages/$s.md" ]] || _fanout_missing+=("prompts/stages/$s.md")
+done
 if [[ "$PLATFORM" == "opencode" ]]; then
-  for a in init-scout-fanout init-induct-fanout init-rulewriter-fanout sdr-review-fanout; do
+  for a in init-scout-fanout init-induct-fanout init-synthesis-fanout init-synthesis-rollup \
+           init-rulewriter-fanout sdr-review-fanout; do
     [[ -f "$DEST/agent/$a.md" ]] || _fanout_missing+=("agent/$a.md")
   done
 fi
 if (( ${#_fanout_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing fan-out tier payload: ${_fanout_missing[*]}" >&2
 else
-  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,t1,t3,sdr}-task.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout,init-induct,init-rulewriter,sdr-review}-fanout.md" )"
+  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,t1,t2,t3,sdr}-task.md + prompts/stages/init-synthesis-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout,init-induct,init-synthesis-fanout,init-synthesis-rollup,init-rulewriter,sdr-review}-fanout.md" )"
 fi
 
 # 4b) Distribution-purity self-check (R5.10; fail-soft per R5.8): shipped md MUST be

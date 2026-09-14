@@ -977,11 +977,12 @@ class TestReadSideConfinement(unittest.TestCase):
 
 
 class TestSentinelReadRoots(unittest.TestCase):
-    """Sentinel read_roots[] (add-mgh-sdr): declared external roots grant TOOL-FACE
-    read-only access (Read/Glob/Grep) when active via disk sentinel. Every other layer
-    keeps judging against MGH_TARGET alone: Bash file-search verbs, the write side (tool
-    + Bash verb + redirect), and the leaf-source block are never relaxed. Fail-closed:
-    a declared root must exist and be a directory at judgment time (a missing root
+    """Sentinel read_roots[] (add-mgh-sdr): declared external roots grant READ-ONLY access
+    on BOTH faces — the tool face (Read/Glob/Grep) and the Bash face (search/listing verbs +
+    the catch-all path-token allowset) — when active via disk sentinel (semantic reversal:
+    the Bash face now judges the same unified allow-set, not MGH_TARGET alone). The write
+    side (tool + Bash verb + redirect) and the leaf-source block are NEVER relaxed. Fail-
+    closed: a declared root must exist and be a directory at judgment time (a missing root
     grants zero). Absent read_roots = byte-for-byte legacy behavior."""
 
     def setUp(self):
@@ -1042,19 +1043,32 @@ class TestSentinelReadRoots(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("MGH_TARGET tree", err)
 
-    def test_bash_rg_declared_root_still_blocked(self):
+    def test_bash_rg_declared_root_now_passes(self):
+        # semantic reversal: the Bash face judges the unified read allow-set, so a declared
+        # root is Bash-searchable exactly like it is tool-face-readable.
         target, front, _ = self._setup_trees()
-        code, _ = _run_with_sentinel(self.m,
+        code, err = _run_with_sentinel(self.m,
             {"tool_name": "Bash", "tool_input": {"command": f"rg pattern {front}\\src"}},
+            "sdr", self._sentinel(target, front))
+        self.assertEqual(code, 0, err)
+
+    def test_bash_rg_outside_target_and_roots_blocked(self):
+        # the complementary face: outside the target tree AND every declared root => blocked.
+        target, front, other = self._setup_trees()
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Bash", "tool_input": {"command": f"rg pattern {other}"}},
             "sdr", self._sentinel(target, front))
         self.assertEqual(code, 2)
 
     def test_bash_write_declared_root_still_blocked(self):
+        # mutation rules run BEFORE the read net: a write-shaped hit surfaces the write-side
+        # recipe (read_roots never relaxes a write, not even via the catch-all).
         target, front, _ = self._setup_trees()
-        code, _ = _run_with_sentinel(self.m,
+        code, err = _run_with_sentinel(self.m,
             {"tool_name": "Bash", "tool_input": {"command": f"Set-Content {front}\\evil.txt x"}},
             "sdr", self._sentinel(target, front))
         self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
 
     def test_no_read_roots_byte_identical_legacy(self):
         # a legacy sentinel without read_roots: out-of-tree read blocked as before,
@@ -1777,6 +1791,573 @@ class TestWriteSideConfinement(unittest.TestCase):
         code, _ = self._bash(f'Set-Content {self._OUT}\\f.json "x"',
                              target=self._SONA, active="")
         self.assertEqual(code, 0)
+
+
+class _RealTreeBashMixin:
+    """Shared runner for the three new-rule test classes: builds REAL temp target/sibling
+    trees (the rules chdir + Path.exists() judge real disk), pins MGH_TARGET, isolates
+    sibling-domain env, and restores cwd/env. Returns (code, stderr)."""
+
+    def _setup(self):
+        self.m = _load()
+        self.sona = Path(tempfile.mkdtemp(prefix="mgh_sona_"))
+        self.sonb = Path(tempfile.mkdtemp(prefix="mgh_sonb_"))
+        self.neutral = tempfile.mkdtemp(prefix="mgh_neutral_")
+        (self.sona / "src").mkdir()
+
+    def _teardown(self):
+        import shutil
+        shutil.rmtree(self.sona, ignore_errors=True)
+        shutil.rmtree(self.sonb, ignore_errors=True)
+
+    def _bash(self, cmd, target=None, cwd=None, active="1"):
+        """target=None => degrade path (MGH_TARGET unset); cwd=None => the neutral temp dir
+        (outside sona — the cwd-drift judge for bare verbs / relative refs)."""
+        key = _DOMAIN_ENV["init"]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != "init"]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = active
+        if target is None:
+            os.environ.pop("MGH_TARGET", None)
+        else:
+            os.environ["MGH_TARGET"] = str(target)
+        old_cwd, old_stdin = os.getcwd(), sys.stdin
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            os.chdir(cwd or self.neutral)
+            sys.stdin = io.StringIO(json.dumps(
+                {"tool_name": "Bash", "tool_input": {"command": cmd}}))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.chdir(old_cwd)
+            os.environ.pop(key, None) if old_active is None else os.environ.__setitem__(key, old_active)
+            os.environ.pop("MGH_TARGET", None) if old_target is None else os.environ.__setitem__("MGH_TARGET", old_target)
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+
+class TestListingConfinement(unittest.TestCase, _RealTreeBashMixin):
+    """Bash directory-listing escape route (rule j, harden-mgh-guard-listing-exec-confinement):
+    ls/dir/Get-ChildItem/gci leading a simple command with an out-of-tree scope (explicit
+    absolute-path argument, or no explicit path with the cwd outside the tree) is blocked —
+    the enumeration peer of the file-search rule. In-tree listing, bare `ls` with an in-tree
+    cwd, and no-target sessions pass. The observed real-machine shape: `ls /home` / `ls
+    /adhome` hunting for prompts/scripts after a 404."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    # --- BLOCK: out-of-tree listing ---
+    def test_block_ls_home(self):
+        code, err = self._bash("ls /home", target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("directory listing", err)
+
+    def test_block_ls_adhome(self):
+        code, _ = self._bash("ls /adhome", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_ls_sibling_abs(self):
+        code, _ = self._bash(f"ls {self.sonb}", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_get_childitem_drive(self):
+        code, _ = self._bash("Get-ChildItem D:/", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_gci_sibling(self):
+        code, _ = self._bash(f"gci {self.sonb}" + chr(92) + "src", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_ls_posix_deep(self):
+        code, _ = self._bash("ls /adhome/xxx/gitlab_pab", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_ls_cwd_outside_no_path(self):
+        # no explicit path -> cwd anchor; the neutral temp cwd is outside sona (D4 mirror).
+        code, _ = self._bash("ls -la", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_ls_after_delimiter(self):
+        code, _ = self._bash(f"py x.py --in a.java; ls {self.sonb}", target=self.sona,
+                             cwd=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_dir_dotdot_climb(self):
+        # a relative argument whose cwd-relative resolution climbs outside the tree.
+        code, err = self._bash("dir " + ".." + chr(92) + "..", target=self.sona,
+                               cwd=self.sona / "src")
+        self.assertEqual(code, 2)
+        self.assertIn("directory listing", err)
+
+    # --- PASS: in-tree / degrade / inactive ---
+    def test_pass_ls_in_tree_relative(self):
+        code, _ = self._bash("ls src", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_ls_in_tree_abs(self):
+        code, _ = self._bash("ls " + str(self.sona / "src"), target=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_bare_ls_cwd_in_tree(self):
+        code, _ = self._bash("ls", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_ls_flag_in_tree(self):
+        code, _ = self._bash("ls -la " + str(self.sona / ".mgh-init"), target=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_degrades_without_target(self):
+        code, _ = self._bash("ls /home", target=None)
+        self.assertEqual(code, 0)
+
+    def test_inactive_session_passes(self):
+        code, _ = self._bash("ls /home", target=self.sona, active="")
+        self.assertEqual(code, 0)
+
+    def test_pass_dir_inside_token_not_leading(self):
+        # `dir` inside a non-leading token does NOT trip (verb is anchored at first-token
+        # / delimiter position only).
+        code, _ = self._bash("py x.py --textdir src", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+
+class TestInterpreterExecConfinement(unittest.TestCase, _RealTreeBashMixin):
+    """Bash interpreter out-of-tree execution (rule k): py/py3/python/python3/python2 running
+    a script that resolves OUTSIDE the target tree is blocked — the explicit launcher prefix
+    exempts the file-association rule, so the executed script's LOCATION is judged here.
+    `--flag <path>` values are data paths, never the executed script; `py -c`/`-m` bodies are
+    governed by the introspection/write-relabel rules; relative script paths are not judged."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    # --- BLOCK: interpreter + out-of-tree script ---
+    def test_block_py_home_script(self):
+        code, err = self._bash("py /home/x/run.py", target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree script", err)
+
+    def test_block_python3_tilde_script(self):
+        code, _ = self._bash("python3 ~/tools/scan.py", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_python_abs_sibling_script(self):
+        code, _ = self._bash("python " + str(self.sonb / "tools" / "scan.py"),
+                             target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_py_after_delimiter(self):
+        code, _ = self._bash("ls src; py /home/x/run.py", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+
+    # --- PASS: in-tree / flag-value / -c / relative / degrade ---
+    def test_pass_installed_resume_state(self):
+        # the canonical sanctioned invocation: with mgh-core actually installed under the
+        # target, the stop-all rule (rule l) passes AND the interpreter rule judges the
+        # script arg in-tree (relative form) -> pass.
+        inst = self.sona / ".claude" / "mgh-core" / "scripts"
+        inst.mkdir(parents=True)
+        (inst / "resume_state.py").write_text("x", encoding="utf-8")
+        code, _ = self._bash("py .claude/mgh-core/scripts/resume_state.py --target .",
+                             target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_in_tree_abs_script(self):
+        code, _ = self._bash("py " + str(self.sona / ".mgh-init" / "tools" / "x.py") +
+                             " --in a.json", target=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_block_flag_value_out_of_tree_caught_by_net(self):
+        # `--clusters <out-of-tree>` is a DATA path, never the executed script — rule k still
+        # does not judge it, but the catch-all net now does (D5: accepted new block).
+        code, err = self._bash("py x.py --clusters " + str(self.sonb / "c.json"),
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+        self.assertNotIn("out-of-tree script", err)   # rule k's own stance survives
+
+    def test_block_flag_value_skipped_then_in_tree_script(self):
+        # the flag value itself is out-of-tree: the net blocks the command even though the
+        # executed script is in-tree (the net judges EVERY token, not just the script).
+        code, err = self._bash("py x.py --clusters " + str(self.sonb / "c.json") + " " +
+                               str(self.sona / "run.py"), target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+        self.assertNotIn("out-of-tree script", err)
+
+    def test_pyc_body_not_judged_here(self):
+        # `py -c` has no script-extension positional argument: this rule does not fire; the
+        # existing introspection rule owns the body (assert its recipe surfaces instead).
+        code, err = self._bash("py -c \"import json; json.load(open('x.json'))\"",
+                               target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("introspection", err)
+        self.assertNotIn("out-of-tree script", err)
+
+    def test_pass_relative_script_not_judged(self):
+        # relative script paths are not location-judged (observed-shape stance).
+        code, _ = self._bash("py ./local_helper.py", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_degrades_without_target(self):
+        code, _ = self._bash("py /home/x/run.py", target=None)
+        self.assertEqual(code, 0)
+
+    def test_inactive_session_passes(self):
+        code, _ = self._bash("py /home/x/run.py", target=self.sona, active="")
+        self.assertEqual(code, 0)
+
+    def test_pass_pwsh_file_launcher_unchanged(self):
+        # pwsh -File keeps passing the file-association rule (unchanged), and non-interpreter
+        # leading verbs never enter this rule.
+        code, _ = self._bash("pwsh -File x.ps1", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+
+class TestMghCoreMissingInstall(unittest.TestCase, _RealTreeBashMixin):
+    """mgh-core missing-install stop-all (rule l, terminal state — checked BEFORE every other
+    Bash rule): a command referencing an mgh-core/scripts script-extension path that is ABSENT
+    on disk (cwd- AND target-relative) or exists OUTSIDE the tree (another project's install)
+    => exit 2 + the stop-all recipe. Installed in-tree references pass; non-mgh-core missing
+    paths never trip; existing rules' recipes are unaffected by the new first-position check
+    (order regression)."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    # --- BLOCK: missing install (stop-all recipe wording) ---
+    def test_block_absent_mgh_core_script(self):
+        # no mgh-core anywhere: cwd-relative AND target-relative resolution both miss.
+        code, err = self._bash("py .claude/mgh-core/scripts/resume_state.py --target .",
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("STOP ALL TASKS", err)
+        self.assertIn("install", err.lower())
+        self.assertIn("NEVER search other directories", err)
+
+    def test_block_out_of_tree_mgh_core_reference(self):
+        # mgh-core exists only in the SIBLING project (the root-project-only install shape):
+        # the reference resolves outside the target tree -> stop-all.
+        foreign = self.sonb / ".claude" / "mgh-core" / "scripts"
+        foreign.mkdir(parents=True)
+        (foreign / "resume_state.py").write_text("x", encoding="utf-8")
+        code, err = self._bash("py .claude/mgh-core/scripts/resume_state.py --target .",
+                               target=self.sona, cwd=self.sonb)
+        self.assertEqual(code, 2)
+        self.assertIn("STOP ALL TASKS", err)
+
+    def test_block_absent_mgh_core_sh_reference(self):
+        # any script extension under mgh-core/scripts trips (not just .py).
+        code, err = self._bash("bash .opencode/mgh-core/scripts/helper.sh",
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("STOP ALL TASKS", err)
+
+    # --- PASS: installed / non-mgh-core / -c exclusion / degrade ---
+    def test_pass_installed_in_tree_reference(self):
+        inst = self.sona / ".claude" / "mgh-core" / "scripts"
+        inst.mkdir(parents=True)
+        (inst / "resume_state.py").write_text("x", encoding="utf-8")
+        code, _ = self._bash("py .claude/mgh-core/scripts/resume_state.py --target .",
+                             target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_non_mgh_core_missing_path(self):
+        # arbitrary in-tree user scripts are the caller's concern, not the guard's.
+        code, _ = self._bash("py ./local_helper.py", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_pyc_body_with_mgh_core_token(self):
+        # `py -c` bodies are excluded (rules a/h own them) — the introspection recipe surfaces.
+        code, err = self._bash("py -c \"print(open('.claude/mgh-core/scripts/x.py').read())\"",
+                               target=self.sona)
+        self.assertEqual(code, 2)   # introspection rule fires (open( token)
+        self.assertIn("introspection", err)
+        self.assertNotIn("STOP ALL TASKS", err)
+
+    def test_degrades_without_target(self):
+        code, _ = self._bash("py .claude/mgh-core/scripts/resume_state.py --target .",
+                             target=None, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_inactive_session_passes(self):
+        code, _ = self._bash("py .claude/mgh-core/scripts/resume_state.py --target .",
+                             target=self.sona, cwd=self.sona, active="")
+        self.assertEqual(code, 0)
+
+    # --- order regression: existing rules' hits are unaffected by the new first-position rule ---
+    def test_order_introspection_recipe_unaffected(self):
+        code, err = self._bash("py -c \"import json; json.load(open('x.json'))\"",
+                               target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("introspection", err)
+        self.assertNotIn("STOP ALL TASKS", err)
+
+    def test_order_file_search_recipe_unaffected(self):
+        code, err = self._bash(f"rg x {self.sonb}", target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("file search", err)
+        self.assertNotIn("STOP ALL TASKS", err)
+
+    def test_order_aggregate_read_recipe_unaffected(self):
+        code, err = self._bash("cat .mgh-init/clusters.json", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("input_path", err)
+        self.assertNotIn("STOP ALL TASKS", err)
+
+
+class TestBashPathAllowset(unittest.TestCase, _RealTreeBashMixin):
+    """Rule m — the verb-independent fail-closed net (harden-mgh-bash-path-allowlist):
+    EVERY path-like token in a Bash command must resolve inside the unified read allow-set
+    (MGH_TARGET ∪ sentinel read_roots[] ∪ project config read_roots[]), regardless of which
+    verb (if any) leads the command. Closes the enumeration-table escape class (robocopy /
+    Get-Content / curl -o / Expand-Archive / …) that previously passed. Mutation rules run
+    FIRST (write-shaped hits surface their write recipe); no path token => pass; unpinned
+    target => degrade to pass (other rules still fire); URL tokens, bare `~`, and bare `..`
+    are not judged."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    # --- BLOCK: table-escape verbs with out-of-tree tokens ---
+    def test_block_robocopy_out_of_tree_dest(self):
+        # `robocopy` is in NO verb enumeration table — previously passed wholesale.
+        code, err = self._bash(f"robocopy {self.sona}\\docs {self.sonb}\\backup",
+                               target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+        self.assertIn("read-roots.json", err)
+
+    def test_block_get_content_out_of_tree_file(self):
+        # plain read verb (not search/listing) — previously passed every rule.
+        code, err = self._bash(f"Get-Content {self.sonb}\\notes.json", target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+
+    def test_block_type_dotdot_climb(self):
+        # `..`-leading token resolved against the guard cwd climbs out of the tree.
+        code, err = self._bash("type " + ".." + chr(92) + ".." + chr(92) + "secret.txt",
+                               target=self.sona, cwd=self.sona / "src")
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+
+    def test_block_tilde_path(self):
+        # `~/`-leading token expands to the user profile — outside any allow root.
+        code, _ = self._bash("cat ~/secrets.txt", target=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_block_posix_abs(self):
+        code, err = self._bash("cat /etc/passwd", target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+
+    def test_block_quoted_out_of_tree_token(self):
+        # quoted tokens are judged too (quotes stripped by the extractor).
+        code, _ = self._bash("rg pattern \"" + str(self.sonb / "src") + "\"",
+                             target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+
+    # --- PASS: in-tree / not-a-token / degrade / other-rules-first ---
+    def test_pass_all_in_tree_tokens(self):
+        inst = self.sona / ".claude" / "mgh-core" / "scripts"
+        inst.mkdir(parents=True)
+        (inst / "list_clusters.py").write_text("x", encoding="utf-8")
+        (self.sona / ".mgh-init").mkdir()
+        (self.sona / ".mgh-init" / "clusters.json").write_text("[]", encoding="utf-8")
+        code, err = self._bash("py .claude/mgh-core/scripts/list_clusters.py --clusters " +
+                               str(self.sona / ".mgh-init" / "clusters.json"),
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_pass_url_token_excluded(self):
+        # `https://…` must not yield a false `s:/…` path fragment (URL-scheme exclusion) —
+        # with mgh-core installed in-tree, rule l passes and the net sees no path token.
+        inst = self.sona / ".claude" / "mgh-core" / "scripts"
+        inst.mkdir(parents=True)
+        (inst / "tool.py").write_text("x", encoding="utf-8")
+        code, err = self._bash("py .claude/mgh-core/scripts/tool.py --doc https://example.com/a/b",
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_pass_bare_tilde_and_dotdot(self):
+        # bare `~` and bare `..` are NOT path tokens (the verb rules own cwd judgments).
+        code, err = self._bash("cd ~; cd ..", target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_pass_no_path_token(self):
+        code, err = self._bash("echo hello world", target=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_degrades_without_target(self):
+        code, _ = self._bash("cat /etc/passwd", target=None)
+        self.assertEqual(code, 0)
+
+    def test_no_target_other_rules_still_fire(self):
+        # unpinned target degrades ONLY the path net; the introspection rule is path-free.
+        code, err = self._bash("py -c \"import json; json.load(open('x.json'))\"", target=None)
+        self.assertEqual(code, 2)
+        self.assertIn("introspection", err)
+
+    def test_mutation_rule_still_wins_before_net(self):
+        # a known write verb to an out-of-tree destination surfaces the WRITE recipe,
+        # never the read-net recipe (D2: mutation rules run first).
+        code, err = self._bash(f"Set-Content {self.sonb}\\evil.txt x", target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
+        self.assertNotIn("read allow-set", err)
+
+
+class TestReadRootsConfig(unittest.TestCase):
+    """Project read-roots config <target>/.mgh/read-roots.json (harden-mgh-bash-path-
+    allowlist): extends the unified read allow-set in EVERY run-domain, alongside the
+    sentinel's read_roots[] (union). READ-ONLY on both faces (tool + Bash); the write side
+    keeps judging MGH_TARGET alone. Fail-closed: missing file = unchanged behavior;
+    malformed JSON / wrong-typed read_roots = zero grants, no crash; each entry needs
+    exist-and-is-dir containment (a missing entry grants zero); unknown fields ignored."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _setup_trees(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_cfg_tgt_"))
+        shared = Path(tempfile.mkdtemp(prefix="mgh_cfg_shared_"))
+        other = Path(tempfile.mkdtemp(prefix="mgh_cfg_other_"))
+        (shared / "specs").mkdir(parents=True, exist_ok=True)
+        (shared / "specs" / "auth.md").write_text("# spec", encoding="utf-8")
+        (other / "f.txt").write_text("x", encoding="utf-8")
+        (target / "in_tree.json").write_text("{}", encoding="utf-8")
+        return target, shared, other
+
+    def _sentinel(self, target, extra_roots=()):
+        roots = [str(r) for r in extra_roots]
+        return {"domain": "mgh-sast", "target": str(target),
+                "out_roots": [], "read_roots": roots, "v": 1}
+
+    def _write_config(self, target, body):
+        cfg = target / ".mgh"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "read-roots.json").write_text(body, encoding="utf-8")
+
+    def test_config_root_read_and_bash_rg_pass(self):
+        target, shared, _ = self._setup_trees()
+        self._write_config(target, json.dumps({"v": 1, "read_roots": [str(shared)]}))
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 0, err)
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Bash", "tool_input": {"command": f"rg token {shared}\\specs"}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 0, err)
+
+    def test_write_into_config_root_blocked(self):
+        target, shared, _ = self._setup_trees()
+        self._write_config(target, json.dumps({"v": 1, "read_roots": [str(shared)]}))
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Write", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 2)
+        self.assertIn("MGH_TARGET tree", err)
+
+    def test_malformed_json_fail_closed_no_crash(self):
+        target, shared, other = self._setup_trees()
+        self._write_config(target, "{not valid json")
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 2)          # config root grants NOTHING when malformed
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(target / "in_tree.json")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 0)          # in-tree judgments unaffected (no crash)
+
+    def test_wrong_typed_read_roots_grants_zero(self):
+        target, shared, _ = self._setup_trees()
+        self._write_config(target, json.dumps({"v": 1, "read_roots": "not-a-list"}))
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 2)
+
+    def test_missing_config_unchanged_behavior(self):
+        target, shared, other = self._setup_trees()
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 2)          # no config => out-of-tree read blocked as before
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(target / "in_tree.json")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 0)
+
+    def test_config_union_with_sentinel_roots(self):
+        target, shared, other = self._setup_trees()
+        front = Path(tempfile.mkdtemp(prefix="mgh_cfg_front_"))
+        (front / "x.js").write_text("// f", encoding="utf-8")
+        self._write_config(target, json.dumps({"v": 1, "read_roots": [str(shared)]}))
+        sent = self._sentinel(target, extra_roots=[front])
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", sent)
+        self.assertEqual(code, 0, err)     # config-declared root
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(front / "x.js")}},
+            "sast", sent)
+        self.assertEqual(code, 0, err)     # sentinel-declared root — the union holds
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(other / "f.txt")}},
+            "sast", sent)
+        self.assertEqual(code, 2)          # sanity: everything else stays closed
+
+    def test_nonexistent_config_entry_grants_zero(self):
+        target, shared, _ = self._setup_trees()
+        gone = shared.parent / "gone_shared"
+        self._write_config(target, json.dumps({"v": 1, "read_roots": [str(gone)]}))
+        code, _ = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 2)
+
+    def test_unknown_fields_ignored(self):
+        target, shared, _ = self._setup_trees()
+        self._write_config(target, json.dumps(
+            {"v": 1, "read_roots": [str(shared)], "approved_by": "user", "future": [1]}))
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Read", "tool_input": {"file_path": str(shared / "specs" / "auth.md")}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 0, err)
+
+    def test_residual_unknown_writeverb_into_declared_root_passes_net(self):
+        # D6 residual boundary, pinned as documented behavior: an UNKNOWN write verb
+        # targeting a declared read-only root passes the net (the token is inside the read
+        # allow-set; the mutation rules do not recognize the verb). The sdr approval-flow
+        # change governs this; disclosed in the honest-boundary docs.
+        target, shared, _ = self._setup_trees()
+        self._write_config(target, json.dumps({"v": 1, "read_roots": [str(shared)]}))
+        code, err = _run_with_sentinel(self.m,
+            {"tool_name": "Bash", "tool_input": {"command": f"somecmd --out {shared}\\x.txt"}},
+            "sast", self._sentinel(target))
+        self.assertEqual(code, 0, err)
 
 
 if __name__ == "__main__":

@@ -36,7 +36,10 @@ candidates; you do NOT see other clusters (by design).
 `slice_dir`/`evidence_files[]`/`usage_sites[]`)解析后**不在锚树内**(典型:漂到盘符根)
 → 视为**毒输入**:回 `failed <suspected path drift: <字段名>>` ack,不 Read / 不 Write /
 不 touch 任何东西(编排器写 `.failed`,对错树执行比失败更糟)。绝对路径本身合法——判据
-是「解析后在锚树内」,非「带盘符」。
+是「解析后在锚树内」,非「带盘符」。**锚内预期路径不存在**(stage 提示词、`chunk_sources.py`
+等 mgh-core 资产的锚内路径 Read 失败/文件缺失)→ 同款毒输入处理:立即回
+`failed mgh-core prompts not installed at <path>` ack,**NEVER** 跨目录(父项目、`/home`、
+`/adhome`、兄弟项目)漫游搜索提示词或脚本。
 
 ## Task
 Induce what security control this cluster represents and how it should be used.

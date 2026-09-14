@@ -68,13 +68,18 @@ Blocks the real-world failure shapes —
       INTERRUPT the run (soft failure). Now a fail-loud exit 2 + read-side recipe (D4: a
       Glob/Grep with no `path` and a cwd outside the target tree is the cwd-drift leak).
       target absent => degrade to pass (NEVER a hard read block when none was pinned).
-      read_roots[] exception (declarative, tool-face read-only): when the sentinel carries
-      read_roots[], a tool-face read anchor inside ANY declared root that exists and is a
-      directory AT JUDGMENT TIME passes (fail-closed: a non-existent declared root grants
-      nothing). This relaxation covers ONLY the tool-abstraction read layer below — the Bash
-      file-search confinement, the write side (all layers), and the leaf-source block keep
-      judging against MGH_TARGET alone; an external read root NEVER becomes writable or
-      Bash-searchable.
+      read_roots[] exception (declarative, read-only): when the sentinel carries read_roots[],
+      a read anchor inside ANY declared root that exists and is a directory AT JUDGMENT TIME
+      passes (fail-closed: a non-existent declared root grants nothing). This relaxation covers
+      the tool-abstraction read layer AND the Bash face (search/listing verbs + the catch-all
+      path-token allowset, rule m): what is readable at all is readable through any tool. The
+      write side (all layers), the leaf-source block, and the `py -c` / temp-I/O /
+      file-association blocks keep judging against MGH_TARGET alone; an external read root
+      NEVER becomes writable. The project config file <target>/.mgh/read-roots.json (schema
+      {"v":1,"read_roots":["<abs root>",…]}) merges its read_roots[] into the SAME unified
+      read allow-set in EVERY domain (missing file = unchanged behavior; malformed JSON /
+      wrong-typed read_roots = grants nothing, fail-closed, never a crash; declared roots are
+      read-only and hand-editable).
   (f2) Leaf-script source read: a `Read` whose resolved file_path bears a script extension
       AND lives under an installed `mgh-core/scripts/` path segment (both
       `.claude/mgh-core/scripts/` and `.opencode/mgh-core/scripts/` layouts) — the read-side
@@ -110,6 +115,48 @@ Blocks the real-world failure shapes —
       the .ts shim, glue-only) is confined path-by-path. An out-of-tree / blocked-script-ext /
       non-sanctioned-subtree path on either => fail-loud + write-side recipe (delete wording for
       apply_patch delete operations). `.ipynb` is NOT a script extension (artifact, not runtime).
+  (j) Bash directory-listing escape route: `ls`/`dir`/`Get-ChildItem`/`gci` leading a simple
+      command (FIRST token or after `;`/`|`/`&&`/`||`) with an out-of-tree scope — any explicit
+      absolute-path argument resolving outside the tree, a `..`-climbing relative argument whose
+      cwd-relative resolution leaves the tree, or no explicit path with the cwd outside the tree
+      (mirror of (g)'s judgment; `ls`/`dir` are the enumeration peer of rg/grep). Regex-over-
+      observed-shape (pipes/aliases/other relative forms not guaranteed); target absent =>
+      degrade to pass.
+  (k) Bash interpreter out-of-tree execution: `py`/`py3`/`python`/`python3`/`python2` leading a
+      simple command whose FIRST positional script-extension argument resolves OUTSIDE the tree
+      — closes the bypass where an explicit launcher prefix passed rule (e) and no rule judged
+      the executed script's location. Only absolute-looking (`D:\…` / UNC / `/…` / `~…`) script
+      tokens are judged; relative script paths are not (observed-shape stance). A `--flag <path>`
+      value is NOT the executed script and is never judged; a `py -c`/`-m` body is governed by
+      the introspection / write-relabel rules, not here. Target absent => degrade to pass.
+  (l) mgh-core missing-install stop-all — checked BEFORE every other Bash rule (terminal state:
+      once mgh-core is not installed there is no sanctioned continuation, so later recipes are
+      meaningless). A command referencing an `mgh-core/scripts` script-extension path whose
+      resolution is ABSENT on disk (tried cwd-relative, then target-root-relative) or resolves
+      to an EXISTING path outside the tree (another project's install) => exit 2 + the stop-all
+      recipe: STOP ALL TASKS, report to the USER that mgh-* must be installed in the CURRENT
+      project directory, NEVER search other directories (parent project, /home, /adhome,
+      siblings) for scripts or prompts. Encodes the root-project-only-install /
+      independent-sub-project-run shape where scripts 404 and the model wanders. `py -c` bodies
+      are excluded (rules (a)/(h) own them); target absent => degrade to pass.
+  (m) Bash path-token allowset — the verb-independent fail-closed net UNDER every verb rule
+      (harden-mgh-bash-path-allowlist): with a pinned target, EVERY path-like token in the
+      command (Windows drive-letter absolute / UNC / POSIX absolute / `..`-leading resolved
+      against the guard cwd / `~/`-leading expanduser-resolved; bare `~` is NOT a token; bare
+      `..` without a separator is NOT a token; quoted forms are stripped; tokens containing
+      `://` are URL fragments and excluded) MUST resolve inside the unified read allow-set —
+      MGH_TARGET ∪ sentinel read_roots[] ∪ project config read_roots[] — REGARDLESS of which
+      verb leads the command. Closes the "verb not in any enumeration table" escape class
+      (robocopy, curl -o, .NET static write methods, Get-Content of an out-of-tree file,
+      Expand-Archive, …). Runs LAST in the Bash chain (after the mutation / introspection /
+      temp / aggregate / file-assoc / search / listing / interpreter / redirect rules) so
+      mutation-shaped hits keep surfacing their specific write/delete recipes; the verb tables
+      REMAIN IN FORCE as refinements (write/delete wording, cwd-drift coverage, init/ut-init
+      P1 root pollution). Target unpinned => degrade to pass (mirror of every other path
+      rule). Residual boundaries (regex-over-string, NOT a shell parser): alias/variable
+      indirection (`$p='D:\\out'; cp x $p`) extracts no bare path; an unknown write verb INTO a
+      declared read root passes the net (the root is in the read allow-set) — declared roots
+      are user-approved read-only trees.
 On a hit: exit 2 (Claude Code blocks the call) + stderr recipe pointing at the sanctioned
 primitives (list_* --materialize input_path / describe_artifact / producer stdout).
 
@@ -206,6 +253,59 @@ _COPY_MOVE_DEST_VERBS = ("copy-item", "cpi", "cp", "copy", "xcopy", "move-item",
 _MUTATION_VERB_RX = re.compile(
     r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_WRITE_VERBS + _DELETE_VERBS) + r')\b',
     re.IGNORECASE)
+
+# Directory-listing verbs a model can invoke DIRECTLY in Bash to enumerate outside the target
+# tree — the observed real-machine failure shape is `ls /home` / `ls /adhome` while hunting for
+# prompts/scripts after a 404 (harden-mgh-guard-listing-exec-confinement). `ls`/`dir` are the
+# enumeration peer of the file-search verbs above (`Get-ChildItem`/`gci` are the pwsh spellings;
+# the alias table covers the pwsh aliases resolving to Get-ChildItem). Same judgment skeleton as
+# _out_of_tree_file_search: verb leading a simple command (FIRST token / after `;`/`|`/`&&`/`||`),
+# scope = any explicit absolute-path argument (ANY out-of-tree => hit) else the cwd anchor.
+# Regex-over-observed-shape: pipes feeding a listing verb, aliases beyond the table, and
+# relative-path listings are not guaranteed (same documented stance as the search-verb rule).
+_LISTING_VERBS = ("ls", "dir", "get-childitem", "gci")
+# A leading directory-listing verb (start/delimiter-bound), same shape as _FILE_SEARCH_VERB_RX.
+_LISTING_VERB_RX = re.compile(
+    r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_LISTING_VERBS) + r')\b',
+    re.IGNORECASE)
+
+# Interpreter executable names whose FIRST script-extension positional argument is the EXECUTED
+# script (rule k): `py /home/x/run.py` used to pass every rule because the explicit launcher
+# prefix exempted the file-association rule and no other rule judged the script's LOCATION.
+# `-c`/`-m` forms are excluded (the introspection / write-relabel rules own those bodies).
+_INTERPRETERS = ("py", "py3", "python", "python3", "python2")
+# A leading interpreter invocation (start/delimiter-bound). The negative lookaheads skip the
+# `-c` and `-m` forms right after the interpreter name.
+_INTERPRETER_RX = re.compile(
+    r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_INTERPRETERS) + r')\b(?!-(?:c|m)\b)',
+    re.IGNORECASE)
+# A token that starts with a path anchor making its location judgeable without a cwd: Windows
+# drive-letter (`D:\…`/`D:/…`), UNC (`\\…`), POSIX absolute (`/…`), or a leading `~` (shell
+# expansion to a home dir OUTSIDE the project — the `python3 ~/tools/scan.py` observed shape).
+# Relative script paths are NOT judged (observed-shape stance; the sanctioned in-tree invocation
+# `py .claude/mgh-core/scripts/x.py` is relative and never reaches an out-of-tree verdict).
+_ANCHORED_TOKEN_RX = re.compile(r'(?:[A-Za-z]:[\\/]|\\\\|/|~)[^\s;"\'&|]*')
+
+# A PATH-LIKE token for the catch-all allowset rule (rule m): Windows drive-letter absolute
+# (`C:\…`/`C:/…`), UNC (`\\…`), POSIX absolute (`/…`), a `..`-leading relative token (the
+# caller resolves it against the guard cwd), or a `~/`-leading token (expanduser-resolved;
+# bare `~` is NOT a token, `..` without a separator is NOT a token). The left boundary
+# (start / whitespace / shell delimiter / quote / paren / `=`) anchors the token to a TOKEN
+# position, so mid-word slashes (`foo/bar`, `a=b/c`) and URL bodies (`https://…`) never
+# match; `--flag=<abs path>` values DO match at the `=`. Quote-wrapped forms are consumed
+# (quotes stripped off group 1). The body stops at shell delimiters, mirroring
+# _ABS_PATH_TOKEN_RX. Regex-over-observed-shape: alias/env-var indirection is not guaranteed
+# (same stance as every other Bash rule). The `://` post-filter in _bash_path_tokens is the
+# belt-and-suspenders URL exclusion on top of the boundary.
+_PATH_TOKEN_RX = re.compile(
+    r'(?:^|[\s;&|("\'=])"?\'?'
+    r'((?:[A-Za-z]:[\\/]|\\\\|/|\.\.[/\\]|~[/\\])[^\s;"\'&|]*)'
+    r'"?\'?')
+
+# mgh-core missing-install discrimination (rule l): a path segment pair marking an INSTALLED
+# mgh-core script + a script extension. The segment is host-neutral (matches both
+# `.claude/mgh-core/scripts/…` and `.opencode/mgh-core/scripts/…`).
+_MGH_CORE_SEG_RX = re.compile(r'mgh-core[/\\]scripts[/\\]', re.IGNORECASE)
 
 # Per-domain sanctioned work-list primitives (the recipe points the agent at the right
 # one). describe_artifact.py + producer stdout are shared across domains.
@@ -306,17 +406,19 @@ def _recipe(domain: str) -> str:
 
 def _read_recipe(domain: str, target, read_roots=()) -> str:
     """Read-side out-of-tree recipe (peer of _recipe; shared by the tool-abstraction rule
-    Read/Glob/Grep and the Bash file-search rule rg/grep/find/…). Read side has NO positive
-    allowlist (only 'stay inside the target tree' + sentinel-declared read_roots[] external
-    roots); the recipe points at the batch input + repo-root-anchored search, never at the
-    parent dir / sibling modules. Declared read roots are not a wildcard: a blocked path was
-    outside BOTH the target tree and every declared root."""
+    Read/Glob/Grep and the Bash file-search / listing rules). Read side has NO positive
+    allowlist beyond the unified read allow-set (the target tree + declared read_roots[]:
+    sentinel roots ∪ the project config <target>/.mgh/read-roots.json — the SAME set on the
+    tool face and the Bash face); the recipe points at the batch input + repo-root-anchored
+    search, never at the parent dir / sibling modules. Declared read roots are not a
+    wildcard: a blocked path was outside the target tree AND every declared root."""
     tgt = target if target is not None else "<not pinned — resolve MGH_TARGET>"
     roots_note = ""
     if read_roots:
         roots_note = (
-            "\n  declared read_roots[] cover ONLY their listed roots (tool-face read-only; "
-            "this path is outside all of them). NEVER treat them as a wildcard prefix.")
+            "\n  declared read_roots[] (sentinel ∪ project config) cover ONLY their listed "
+            "roots (READ-ONLY, both faces; this path is outside all of them). NEVER treat "
+            "them as a wildcard prefix.")
     return (
         f"  target tree = {tgt}\n"
         f"  Read/Glob/Grep (and Bash rg/grep/find/findstr/…) MUST stay inside the target "
@@ -411,35 +513,186 @@ def _is_leaf_script_read(tool_input) -> bool:
     return False
 
 
-def _out_of_tree_file_search(command, target, cwd):
+def _out_of_tree_file_search(command, target, cwd, read_roots=()):
     """True iff a Bash command invokes a file-search verb (rg/grep/findstr/find/fd/ag/ack,
     as the FIRST token of the command or a sub-command after `;`/`|`/`&&`/`||`) with an
     out-of-tree scope. On a verb hit: scan every explicit absolute-path token (Windows
     drive-letter / POSIX / UNC) in the command — ANY one resolving outside the target tree
-    => True. No explicit absolute path => the search root defaults to cwd (D4): block iff cwd
-    is outside the target tree. Returns False (pass) when target is None (degrade), no
-    file-search verb leads any simple command, or no path resolves. Regex-over-observed-shape:
-    does NOT parse which token is pattern vs path (syntax varies), does NOT claim exhaustive
-    coverage of pipes/aliases/env-injected paths (same stance as temp-I/O / file-assoc rules).
+    AND outside the unified read allow-set (read_roots: sentinel read_roots[] ∪ project
+    config read_roots[]) => True. No explicit absolute path => the search root defaults to
+    cwd (D4): block iff cwd is outside BOTH. Returns False (pass) when target is None
+    (degrade), no file-search verb leads any simple command, or no path resolves.
+    Regex-over-observed-shape: does NOT parse which token is pattern vs path (syntax varies),
+    does NOT claim exhaustive coverage of pipes/aliases/env-injected paths (same stance as
+    temp-I/O / file-assoc rules).
     """
     if target is None or not _FILE_SEARCH_VERB_RX.search(command):
         return False
     abs_tokens = _ABS_PATH_TOKEN_RX.findall(command)
     for tok in abs_tokens:
         try:
-            if not Path(tok).resolve().is_relative_to(target):
-                return True
+            r = Path(tok).resolve()
         except (OSError, ValueError):
             continue
+        if not r.is_relative_to(target) and not _in_read_root(r, read_roots):
+            return True
     # No explicit absolute-path token at all -> the search root defaults to cwd: a cwd that
     # drifted outside the target tree is the leak shape (D4). If ANY absolute-path argument
     # was present (all in-tree), the search root is that path, NOT cwd -> pass.
     if abs_tokens:
         return False
     try:
-        return not cwd.is_relative_to(target)
+        return not cwd.is_relative_to(target) and not _in_read_root(cwd, read_roots)
     except (OSError, ValueError):
         return False
+
+
+def _out_of_tree_listing(command, target, cwd, read_roots=()):
+    """True iff a Bash command invokes a directory-listing verb (ls/dir/Get-ChildItem/gci as
+    the FIRST token of the command or a sub-command after `;`/`|`/`&&`/`||`) with an
+    out-of-tree scope. Sibling of _out_of_tree_file_search with a wider scope judgment: every
+    non-flag token of the verb's simple command resolves against the cwd (`..` folded by
+    resolve()) — so an explicit absolute argument outside the tree AND a relative argument
+    whose cwd-relative resolution climbs outside the tree (`dir ..\\..`) are both hits; the
+    unified read allow-set (read_roots) passes a token inside a declared root. No path
+    argument => the listing root defaults to cwd: block iff cwd is outside BOTH. Returns
+    False (pass) when target is None (degrade), no listing verb leads any simple command, or
+    every path token resolves in-allow-set. Regex-over-observed-shape, same stance as the
+    file-search rule."""
+    if target is None:
+        return False
+    m = _LISTING_VERB_RX.search(command)
+    if not m:
+        return False
+    # isolate the listing verb's simple command: from the verb up to the next shell delimiter
+    sub = re.split(r'[;|&]', command[m.start(1):], maxsplit=1)[0]
+    toks = [t.strip('"\'') for t in sub.split()]
+    path_toks = [t for t in toks[1:] if t and not t.startswith("-")]
+    for tok in path_toks:
+        try:
+            p = Path(tok)
+            r = p.resolve() if p.is_absolute() else (cwd / p).resolve()
+        except (OSError, ValueError):
+            continue
+        if not r.is_relative_to(target) and not _in_read_root(r, read_roots):
+            return True
+    if path_toks:
+        return False
+    try:
+        return not cwd.is_relative_to(target) and not _in_read_root(cwd, read_roots)
+    except (OSError, ValueError):
+        return False
+
+
+def _out_of_tree_interpreter_exec(command, target, cwd):
+    """True iff a Bash command invokes an interpreter (py/py3/python/python3/python2 leading a
+    simple command) whose FIRST positional script-extension argument resolves OUTSIDE the
+    target tree. Token walk mirror of the file-association rule's operand-vs-arg stance: a
+    token following a `--flag` token is that flag's VALUE (a data path, never the executed
+    script) and is skipped; the first remaining script-extension token is the script. Only
+    anchored tokens (drive-letter / UNC / POSIX-absolute / `~`) are judged — relative script
+    paths are not (observed-shape stance). `py -c` / `-m` forms are excluded by
+    _INTERPRETER_RX (the introspection / write-relabel rules own those). Returns False
+    (pass/degrade) when target is None, no interpreter leads a simple command, or the first
+    script token is not anchored or will not resolve."""
+    if target is None or not _INTERPRETER_RX.search(command):
+        return False
+    toks = command.split()
+    skip_next = False
+    for tok in toks:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok.startswith("--"):
+            skip_next = True          # `--flag <path>`: the next token is a data value
+            continue
+        if tok.lower().endswith(_SCRIPT_EXTS):
+            if not _ANCHORED_TOKEN_RX.fullmatch(tok):
+                return False          # first script token is relative/flag-like -> not judged
+            try:
+                return not Path(tok).resolve().is_relative_to(target)
+            except (OSError, ValueError):
+                return False
+    return False
+
+
+def _mgh_core_missing_install(command, target, cwd):
+    """True iff a Bash command references an installed mgh-core script (`mgh-core/scripts`
+    path segment + script extension) whose resolution is ABSENT on disk or — when it does
+    exist — OUTSIDE the target tree (another project's install; the cross-directory wandering
+    shape). A relative reference resolves cwd-relative first (the sanctioned
+    `py .claude/mgh-core/scripts/x.py` form), falling back to target-root-relative; an
+    in-tree existing reference passes. `py -c` bodies are excluded (rules (a)/(h) own them).
+    Returns False (pass/degrade) when target is None, no mgh-core script reference exists,
+    or no reference resolves. Fires on the FIRST offending reference: a missing install is
+    terminal for the run — there is no sanctioned continuation."""
+    if target is None or _PYC_RX.search(command):
+        return False
+    toks = command.replace(";", " ").replace("|", " ").replace("&", " ").split()
+    for tok in toks:
+        tok = tok.strip('"\'')
+        if not tok.lower().endswith(_SCRIPT_EXTS) or not _MGH_CORE_SEG_RX.search(tok):
+            continue
+        p = Path(tok)
+        bases = (cwd, target) if not p.is_absolute() else (None,)
+        for base in bases:
+            try:
+                cand = p.resolve() if base is None else (base / p).resolve()
+            except (OSError, ValueError):
+                continue
+            if not cand.exists():
+                continue   # try the next base; an unresolved reference at BOTH bases => absent
+            return not cand.is_relative_to(target)
+        return True           # absent at every base => missing install
+    return False
+
+
+def _bash_path_tokens(command: str):
+    """Single-pass extraction of PATH-LIKE tokens from a Bash command string (rule m,
+    regex-over-string — NOT a shell parser, same stance as every other Bash rule): Windows
+    drive-letter absolute (`C:\\…`/`C:/…`), UNC (`\\\\…`), POSIX absolute (`/…`),
+    `..`-leading relative tokens, and `~`-leading path tokens (bare `~` alone is NOT a token;
+    bare `..` is not a token — both are handled by the verb rules' cwd judgments). Quotes are
+    stripped by the regex's optional quote wrappers. Tokens containing `://` are excluded
+    (URL scheme — `https://example.com/a` must not yield a false `s:/…` path fragment).
+    Left-boundary anchoring (`[\\s;&|("'=]` + optional quotes) keeps mid-word fragments out.
+    """
+    toks = []
+    for m in _PATH_TOKEN_RX.finditer(command):
+        tok = m.group(1)
+        if "://" in tok:
+            continue
+        toks.append(tok)
+    return toks
+
+
+def _path_outside_allowset(command, target, cwd, read_roots):
+    """Rule m judge: return the FIRST path-like token whose resolution falls OUTSIDE the
+    unified read allow-set — the resolved MGH_TARGET tree ∪ the passed-in read_roots (sentinel
+    read_roots[] ∪ project config read_roots[], already merged by the caller) — or None when
+    every token is inside (pass). Verb-independent: which verb (if any) leads the command is
+    irrelevant — the earlier enumeration rules own mutation-shaped hits; this is the
+    fail-closed net under all of them. `..`-leading tokens resolve against the guard's cwd
+    (the context that issued the call); `~`-leading tokens expanduser first; absolute tokens
+    resolve directly. A token that fails to resolve is skipped (never a crash); NO path token
+    at all => None (pass — all other rules still apply); target is None => None (degrade,
+    mirror of every other path rule)."""
+    if target is None:
+        return None
+    for tok in _bash_path_tokens(command):
+        try:
+            if tok.startswith("~"):
+                r = Path(tok).expanduser().resolve()
+            elif tok.startswith(".."):
+                r = (cwd / tok).resolve()
+            else:
+                r = Path(tok).resolve()
+        except (OSError, ValueError):
+            continue
+        if r.is_relative_to(target) or _in_read_root(r, read_roots):
+            continue
+        return tok
+    return None
 
 
 def _is_introspect_py_c(cmd: str) -> bool:
@@ -632,6 +885,33 @@ def _read_sentinel(path: Path):
     return data
 
 
+def _read_read_roots_config(target):
+    """Project read-roots config <target>/.mgh/read-roots.json — schema
+    {"v":1,"read_roots":["<abs root>",…]}; unknown fields ignored. Consulted in EVERY
+    run-domain; entries merge into the unified read allow-set (tool face + Bash face) as
+    READ-ONLY allowances (the write side keeps judging MGH_TARGET alone — a config root is
+    never writable, and the leaf-source / `py -c` / temp-I/O / file-assoc blocks never
+    relax). Fail-closed: missing file => () (behavior identical to no config); malformed
+    JSON / wrong-typed `read_roots` / non-dict body => () with zero grants and no error;
+    each entry is judged later with the same fail-closed containment as the sentinel's
+    read_roots[] (_in_read_root: root must exist and be a directory at judgment time).
+    The file lives inside the target tree, so writes to it are governed by the ordinary
+    write-confinement rules; it is hand-editable (a deterministic writer is a follow-up)."""
+    if target is None:
+        return ()
+    try:
+        with open(target / ".mgh" / "read-roots.json", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    roots = data.get("read_roots")
+    if not isinstance(roots, list):
+        return ()
+    return tuple(r for r in roots if isinstance(r, str) and r.strip())
+
+
 def _safe_resolve(p: str):
     try:
         return Path(p).resolve()
@@ -789,6 +1069,43 @@ def _emit_bash_write_block(domain, cmd, kind, dest, target, out_roots):
         f"out-of-tree destination.\n{_write_recipe(domain, target, kind)}\n")
 
 
+def _emit_missing_install_block(domain, cmd, target):
+    """Stop-all recipe for a referenced-but-missing (or out-of-tree) mgh-core script (rule l).
+    Unlike every other recipe there is NO sanctioned continuation: the only correct action is
+    to stop the run and have the USER install mgh-* in the current project directory."""
+    sys.stderr.write(
+        f"blocked: mgh-core is not installed in this target ({domain} run-domain): `{cmd}`\n"
+        f"  A command referenced an installed mgh-core script path that is ABSENT on disk or "
+        f"lives OUTSIDE the target tree (mgh-core installed only in a parent/sibling project "
+        f"while the run executes here).\n"
+        f"  STOP ALL TASKS — do not continue the run. Report to the USER that mgh-init must "
+        f"be installed in the CURRENT project directory (run install), then resume.\n"
+        f"  NEVER search other directories (parent project, /home, /adhome, siblings) for "
+        f"mgh-core scripts or prompts; the prompts' pinned path is their ONLY location.\n"
+        f"  target tree = {target if target is not None else '<not pinned>'}\n")
+
+
+def _emit_bash_allowset_block(domain, cmd, token, target, sentinel_roots, config_roots):
+    """Rule m stderr block: a path token resolved outside the unified read allow-set
+    (target tree ∪ sentinel read_roots[] ∪ project config read_roots[]). Names all three
+    allow-root classes + the config-file remedy + the read-only caveats (declared roots are
+    NEVER a write destination and NEVER a wildcard)."""
+    sent = ", ".join(str(r) for r in sentinel_roots) if sentinel_roots else "(none declared)"
+    conf = ", ".join(config_roots) if config_roots else "(no config file)"
+    sys.stderr.write(
+        f"blocked: path outside the read allow-set in {domain} run-domain: `{cmd}`\n"
+        f"  offending path token = {token}\n"
+        f"  Every path in a Bash command must resolve inside the read allow-set:\n"
+        f"  1. the target tree = {target if target is not None else '<not pinned>'}\n"
+        f"  2. sentinel read_roots[] = {sent}\n"
+        f"  3. project config read_roots[] = {conf}\n"
+        f"  If this path must be READ at run time, declare it read-only in the project "
+        f"config <target>/.mgh/read-roots.json (schema {{\"v\":1,\"read_roots\":[\"<abs>\"]}}); "
+        f"the entry takes effect on the next call (root must exist and be a directory).\n"
+        f"  Declared roots are READ-ONLY: NEVER a write destination, NEVER a wildcard "
+        f"prefix; declare only roots the USER approved.\n")
+
+
 def main():
     # Read stdin FIRST: the payload's `cwd` field (claude PreToolUse carries the session/
     # tool cwd) is the BEST activation anchor — it is the context that issued the tool
@@ -812,14 +1129,26 @@ def main():
     out_roots = (sentinel or {}).get("out_roots") or []
     if not isinstance(out_roots, list):
         out_roots = []
-    read_roots = (sentinel or {}).get("read_roots") or []
-    if not isinstance(read_roots, list):
-        read_roots = []
+    sentinel_read_roots = (sentinel or {}).get("read_roots") or []
+    if not isinstance(sentinel_read_roots, list):
+        sentinel_read_roots = []
+    # Unified read allow-set (D1): sentinel read_roots[] ∪ project config read_roots[]
+    # (<target>/.mgh/read-roots.json, fail-closed reader). The SAME merged set feeds the
+    # tool-face read rule, the Bash search/listing rules, and the catch-all path-token net;
+    # the write side keeps judging MGH_TARGET alone (a declared root is NEVER writable).
+    config_read_roots = list(_read_read_roots_config(target))
+    read_roots = list(sentinel_read_roots) + config_read_roots
     tool = payload.get("tool_name", "")
     ti = payload.get("tool_input") or {}
 
     if tool == "Bash":
         cmd = (ti.get("command") or "")
+        # rule l (terminal state, FIRST): a command referencing an mgh-core script that is
+        # absent on disk or installed outside the tree is the root-project-only-install shape;
+        # every later recipe is meaningless — stop-all wins before any other judgment.
+        if _mgh_core_missing_install(cmd, target, cwd):
+            _emit_missing_install_block(domain, cmd, target)
+            return 2
         # rule-a relabel (L1/D8): a `py -c` WRITE/DELETE shape with an out-of-tree path is
         # checked BEFORE the introspection rule. The prior _INTRO_TOKENS `open(`/`load(`/`.json`
         # falsely labelled `py -c "open('D:/out/f','w').write('x')"` as introspection, surfacing
@@ -891,12 +1220,34 @@ def main():
         # confinement. Block when its search scope (any explicit absolute-path argument OR the
         # implicit cwd anchor) is outside the MGH_TARGET tree. Operand-vs-arg: a command with
         # no file-search verb as a leading token (e.g. `py … --in x.java`) does NOT enter here.
-        if _out_of_tree_file_search(cmd, target, cwd):
+        if _out_of_tree_file_search(cmd, target, cwd, read_roots):
             sys.stderr.write(
                 f"blocked: out-of-tree file search in {domain} run-domain: `{cmd}`\n"
                 f"  The native Grep/grep tool's `path` confinement is bypassed by invoking a "
                 f"file-search binary (rg/grep/findstr/find/…) directly in Bash with an "
-                f"out-of-tree scope.\n{_read_recipe(domain, target)}\n")
+                f"out-of-tree scope.\n{_read_recipe(domain, target, read_roots)}\n")
+            return 2
+        # read-side confinement, directory-listing escape route (rule j): ls/dir/Get-ChildItem/
+        # gci are the enumeration peer of the search verbs above — the observed real-machine
+        # shape is `ls /home` / `ls /adhome` hunting for prompts/scripts after a 404.
+        if _out_of_tree_listing(cmd, target, cwd, read_roots):
+            sys.stderr.write(
+                f"blocked: out-of-tree directory listing in {domain} run-domain: `{cmd}`\n"
+                f"  Listing verbs (ls/dir/Get-ChildItem/…) directly in Bash bypass the native "
+                f"read confinement with an out-of-tree scope.\n{_read_recipe(domain, target, read_roots)}\n")
+            return 2
+        # execution confinement (rule k): an interpreter running a script that resolves
+        # OUTSIDE the target tree — the explicit launcher prefix exempts the file-association
+        # rule, so the executed script's LOCATION is judged here instead.
+        if _out_of_tree_interpreter_exec(cmd, target, cwd):
+            sys.stderr.write(
+                f"blocked: interpreter executing an out-of-tree script in {domain} "
+                f"run-domain: `{cmd}`\n"
+                f"  The explicit interpreter prefix bypasses the file-association rule, but "
+                f"the executed script lives outside the target tree. Run the INSTALLED "
+                f"in-tree script verbatim: `py .claude/mgh-core/scripts/<script>.py …` "
+                f"(or .opencode/mgh-core/scripts/…).\n"
+                f"{_read_recipe(domain, target)}\n")
             return 2
         # write confinement, Bash escape route (W2/D3): a `>`/`>>` redirect whose target resolves
         # OUTSIDE the MGH_TARGET tree (generalizes _TEMP_WRITE_RX, which matched only temp-dir
@@ -928,6 +1279,22 @@ def main():
                         f"run-domain: `{cmd}`\n"
                         f"{_write_recipe(domain, target, 'write')}\n")
                     return 2
+        # rule m — the fail-closed net (LAST; runs after every rule above): judge EVERY
+        # path-like token in the command against the unified read allow-set
+        # (target ∪ sentinel read_roots[] ∪ project config read_roots[]), verb-independently.
+        # This is the structural under-layer closing the "verb not in any enumeration table"
+        # escape class (robocopy / curl -o / [IO.File]::WriteAllText / Get-Content <file> /
+        # Expand-Archive / …): a token that resolves outside ALL allow-roots blocks no matter
+        # which verb leads. All the enumeration rules above REMAIN IN FORCE as refinements —
+        # they surface the specific write/delete/introspection recipes and own
+        # mutation-shaped + cwd-drift + P1 judgments first (D2), so a mutation hit into a
+        # declared read root surfaces the WRITE recipe, never a read-net pass. No path token
+        # => pass; target unpinned => degrade to pass (mirror of every other path rule).
+        offender = _path_outside_allowset(cmd, target, cwd, read_roots)
+        if offender is not None:
+            _emit_bash_allowset_block(domain, cmd, offender, target,
+                                      sentinel_read_roots, config_read_roots)
+            return 2
     elif tool in ("Read", "Glob", "Grep"):
         # leaf-script source read block (f2): a Read pulling an installed mgh-core leaf
         # script's source into context — the read-side peer of "leaf scripts read-only".
@@ -948,10 +1315,11 @@ def main():
         # anchor (Read.file_path / Glob.path / Grep.path, defaulting to cwd) falls outside the
         # MGH_TARGET tree. The soft failure that interrupted runs (host permission prompt on a
         # cross-module read) becomes a fail-loud recipe. target absent => degrade to pass
-        # (NEVER use cwd as a hard read block target when none was pinned). Sentinel
-        # read_roots[] grants a TOOL-FACE read-only allowance inside declared external roots
-        # (fail-closed: root must exist + be a dir); every other layer (Bash search verbs,
-        # writes, leaf-source block) keeps judging against MGH_TARGET alone.
+        # (NEVER use cwd as a hard read block target when none was pinned). The unified read
+        # allow-set (sentinel ∪ project config read_roots[]) grants a READ-ONLY allowance
+        # inside declared external roots on the tool face AND the Bash face alike
+        # (fail-closed: root must exist + be a dir); the write layers and the leaf-source /
+        # `py -c` / temp-I/O / file-assoc blocks keep judging against MGH_TARGET alone.
         if _read_out_of_tree(ti, target, cwd, read_roots):
             sys.stderr.write(
                 f"blocked: read outside the MGH_TARGET tree in {domain} run-domain.\n"

@@ -15,7 +15,15 @@ solved OUTSIDE the host CLI session —
      runs IN THIS PROCESS, before any host CLI is spawned. The host session (and its
      subagents) only ever sees materialized conclusion files => zero permission prompts
      inside the run. The explicitly confirmed external roots land in the disk sentinel's
-     read_roots[] (tool-face read-only escape valve).
+     read_roots[] (tool-face read-only escape valve). AUTHORIZATION: retrieval is gated
+     on the project config <repo>/.mgh/read-roots.json — a DECLARED repo that is not
+     configured there is NEVER read (zero reads): this process skips it (stderr warn),
+     omits it from the sentinel read_roots[], and discloses it via stdout/
+     orchestrator-prompt `pending_approval[]` for the host-session user decision
+     (approve => `read_roots_config.py --add` + re-run this launcher with the same
+     arguments; the config takes effect on the next run). The gate is judged twice with
+     the same resolve-normalized semantics — inside sdr_context.py before retrieval AND
+     here before the sentinel write (version-skew defense).
   2. lifecycle ownership: this process writes <repo>/.mgh-sdr/.active (with target +
      read_roots) before spawning and REMOVES it after the host CLI exits. A crash leaves
      the sentinel behind; the next launcher start detects a same-target residual,
@@ -61,6 +69,11 @@ RUNS_REL = Path(".mgh-sdr") / "runs"
 DEFAULT_BASE = "master"
 CLAUDE_TIME_BUDGET_MS = 480000   # claude Bash 600000ms cap x 0.8 (drain headroom)
 OPENCODE_TIME_BUDGET_MS = 720000  # 900s assumed host allowance x 0.8
+# fanout_runner four-level invariant: stall-timeout-s < call-timeout-s < budget-ms x 0.8.
+# Values here pair with the budgets above (480000->360 / 720000->540); fanout_runner
+# re-validates at spawn time (exit 2 on violation).
+CALL_TIMEOUT_S = {"claude": 360, "opencode": 540}
+STALL_TIMEOUT_S = 300
 
 
 def _eprint(*a):
@@ -157,6 +170,42 @@ def _script_path(name: str) -> str:
     return str(Path(__file__).resolve().parent / name)
 
 
+def _approved_read_roots(repo: Path) -> set[str]:
+    """Resolve-normalized strings of <repo>/.mgh/read-roots.json entries that exist and
+    are directories. Twin of sdr_context._approved_read_roots (same fail-closed
+    semantics as the guard's config reader) — the launcher re-judges the gate before the
+    sentinel write so a version-skewed sibling cannot leak an unapproved root into
+    read_roots[]."""
+    cfg = repo / ".mgh" / "read-roots.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    roots = data.get("read_roots")
+    if not isinstance(roots, list):
+        return set()
+    out: set[str] = set()
+    for r in roots:
+        if not isinstance(r, str) or not r.strip():
+            continue
+        try:
+            p = Path(r.strip()).resolve()
+        except OSError:
+            continue
+        if p.is_dir():
+            out.add(str(p))
+    return out
+
+
+def _is_approved(path: str, approved: set[str]) -> bool:
+    try:
+        return str(Path(path).resolve()) in approved
+    except OSError:
+        return False
+
+
 def _run_context(repo: Path, run_dir: Path, base: str, branch: str, dims: str | None,
                  read_roots: list[str]) -> dict:
     """sdr_context.py IN THIS PROCESS (external retrieval happens with the user's
@@ -175,7 +224,9 @@ def _run_context(repo: Path, run_dir: Path, base: str, branch: str, dims: str | 
         sys.exit(1 if r.returncode == 1 else 2)
     ctx = json.loads(r.stdout)
     _eprint(f"[launch] baseline={ctx['baseline_bytes']}B truncated={ctx['baseline_truncated']}; "
-            f"external={len(ctx['external_repos'])}; catalog={ctx['sensitive_catalog_source']}")
+            f"external={len(ctx['external_repos'])}; "
+            f"pending_approval={len(ctx.get('pending_approval') or [])}; "
+            f"catalog={ctx['sensitive_catalog_source']}")
     return ctx
 
 
@@ -206,7 +257,20 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
     ]
     if skipped:
         lines.append(f"外部仓跳过披露: {'; '.join(skipped)}")
+    pending = ctx.get("pending_approval") or []
+    if pending:
+        lines += [
+            "",
+            "外部仓待批(存量设计声明、但未经用户写入项目配置;本次零检索,相关检查面未覆盖):",
+            *[f"- {p}" for p in pending],
+            "处理:在宿主会话向用户呈现以上清单并请求决策。同意 → 逐仓执行 "
+            f"`py {_script_path('read_roots_config.py')} --target {repo} --add <以上绝对路径>`"
+            f"(写 <repo>/.mgh/read-roots.json,即时生效),然后重跑本 launcher 同参数完成检索;"
+            "拒绝 → 不写配置,按当前降级继续,报告如实披露。",
+            "铁律:**NEVER 未经用户明确同意写配置**。",
+        ]
     time_budget = CLAUDE_TIME_BUDGET_MS if host == "claude" else OPENCODE_TIME_BUDGET_MS
+    call_timeout = CALL_TIMEOUT_S[host]
     lines += [
         "",
         "按 /mgh-sdr 命令壳的 Orchestration flow 执行 step 2 起:",
@@ -215,7 +279,10 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
         "跑 `--check <run>`。",
         f"3. `py <mgh-core>/scripts/fanout_runner.py --tier sdr --repo <repo> --base <base> "
         f"--branch <branch> --checkpoints <run>/markers --inputs-dir <run>/slices "
-        f"--time-budget-ms {time_budget}`;partial:true → 同参重派;退出码 2 → 转述 stderr 停止。",
+        f"--time-budget-ms {time_budget} --call-timeout-s {call_timeout} "
+        f"--stall-timeout-s {STALL_TIMEOUT_S}`(带 per-call `timeout` ≥ "
+        f"{time_budget}ms 跑;四级超时不变式已按此组合满足,NEVER 省略 call/stall 两级)"
+        f";partial:true → 同参重派;退出码 2 → 转述 stderr 停止。",
         "4. `py <mgh-core>/scripts/render_sdr_report.py --run-dir <run> --repo <repo>`;"
         "跑 `--check <run>`。",
         "5. 打印报告绝对路径 + counts;声明「发现是 LLM 候选需人工复核」;`rm <repo>/.mgh-sdr/.active`。",
@@ -258,8 +325,8 @@ def _read_multi_branch(path: Path) -> list[str]:
 
 
 def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
-             read_roots: list[str], dry_run: bool) -> tuple[bool, str]:
-    """One complete branch flow. Returns (ok, report_path_or_reason)."""
+             read_roots: list[str], dry_run: bool) -> tuple[bool, str, list[str]]:
+    """One complete branch flow. Returns (ok, report_path_or_reason, pending_approval)."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = repo / RUNS_REL / (f"{ts}-{_safe_name(branch)}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -267,10 +334,21 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     try:
         ctx = _run_context(repo, run_dir, base, branch, dims, read_roots)
     except SystemExit:
-        return False, f"sdr_context failed for {branch}"
+        return False, f"sdr_context failed for {branch}", []
+    pending = list(ctx.get("pending_approval") or [])
+    for p in pending:
+        _eprint(f"[launch] WARN: external repo declared but NOT approved — zero reads, "
+                f"skipped, pending user approval: {p}\n"
+                f"  approve: py {_script_path('read_roots_config.py')} --target {repo} "
+                f"--add {p}   (writes <repo>/.mgh/read-roots.json), then re-run this "
+                f"command unchanged")
     # sentinel read_roots = ACTUALLY SEARCHED external roots (+ operator --read-root);
-    # NEVER a user-supplied catch-all (read_roots minimalism).
-    roots = sorted({e["path"] for e in ctx.get("external_repos", []) if e.get("path")}
+    # NEVER a user-supplied catch-all (read_roots minimalism). Every retrieved root is
+    # re-judged against the project config here (second gate judgment — sdr_context
+    # already gated before retrieval; this catches version skew).
+    approved = _approved_read_roots(repo)
+    roots = sorted({e["path"] for e in ctx.get("external_repos", []) if e.get("path")
+                    and _is_approved(e["path"], approved)}
                    | set(read_roots))
     _write_sentinel(repo, roots)
     _eprint(f"[launch] sentinel written (read_roots={len(roots)} root(s))")
@@ -281,7 +359,7 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     if dry_run:
         _eprint("[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; "
                 "NOT spawning the host CLI (sentinel kept for the next real run)")
-        return True, str(prompt_path)
+        return True, str(prompt_path), pending
     try:
         code = _spawn_host(host, repo, prompt)
     finally:
@@ -290,10 +368,10 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     # guarantee (covers host crash-exit paths that skip step 5)
     _remove_sentinel(repo)
     if code != 0:
-        return False, f"host CLI exited {code} for {branch}"
+        return False, f"host CLI exited {code} for {branch}", pending
     reports = sorted(repo.glob("mgh-sdr-*.md"), key=lambda p: p.stat().st_mtime)
     report = str(reports[-1]) if reports else "(report not found — check host output)"
-    return True, report
+    return True, report, pending
 
 
 def main():
@@ -336,10 +414,12 @@ def main():
 
     failed: list[str] = []
     reports: list[str] = []
+    pending_all: list[str] = []
     for branch in branches:
         _eprint(f"[launch] === branch {branch} ===")
-        ok, outcome = _run_one(repo, branch, args.base, host, args.dimensions,
-                               args.read_root or [], args.dry_run)
+        ok, outcome, pending = _run_one(repo, branch, args.base, host, args.dimensions,
+                                        args.read_root or [], args.dry_run)
+        pending_all.extend(p for p in pending if p not in pending_all)
         if ok:
             reports.append(outcome)
             _eprint(f"[launch] branch {branch}: ok -> {outcome}")
@@ -351,9 +431,15 @@ def main():
         _eprint(f"[launch] FAILED BRANCHES ({len(failed)}):")
         for f in failed:
             _eprint(f"  - {f}")
+        if pending_all:
+            _eprint("[launch] pending_approval (external repos skipped, need user "
+                    "approval):")
+            for p in pending_all:
+                _eprint(f"  - {p}")
         return 1
     print(json.dumps({"launcher": "mgh_sdr_launch", "host": host, "branches": branches,
-                      "reports": reports, "dry_run": bool(args.dry_run)},
+                      "reports": reports, "dry_run": bool(args.dry_run),
+                      "pending_approval": pending_all},
                      ensure_ascii=False))
     return 0
 

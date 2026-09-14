@@ -16,6 +16,246 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — `/mgh-init` T2 oversize category: deterministic part split + atomic slim projection (0.1.42)
+
+A T2 unit crashed with a model context-overflow in a real run: the `authorization`
+category alone serialized to 400KB > the 256KB budget, and `plan_aggregate.py`'s
+old fallback ("`oversize:true` + stderr warn + dispatch anyway") sent a doomed
+request. Root cause: per-category sharding treated one category as atomic even
+when it alone exceeded the budget. Fix: split it (`harden-mgh-init-t2-oversize-shard`):
+
+- **Part split**: an over-budget category is greedy-packed whole-record (existing
+  glob order, deterministic) into ≤-budget parts `t2-<category>-part<N>`; the shard
+  input envelope and stdout shard items carry `part_index`/`part_count` (0/1 when
+  unsplit). Rollup now reconciles across shards — same category across parts AND
+  across categories, same judgment signals; partial still makes NO cross-shard
+  judgment. Marker-aware re-list / `.done`/`.failed` / dispatcher waves unchanged.
+- **Atomic-oversize fallback**: a single record > budget is slim-projected at
+  materialization (truncates `description`/`usage`/`protects`/`gaps`/`entry_points`
+  to internal caps; `evidence` anchors never cut; `_slimmed` marker + stdout
+  `slimmed` disclosure; `checkpoints/t1` originals never rewritten). Still over
+  after slimming → exit 2 with the record file + byte count, zero dispatch.
+  Dispatched T2 shards are always ≤ budget ⇒ `oversize` is always false (field
+  kept for compat). scout-merge envelope/stdout byte-identical (hand-paged).
+- **P2 diagnosis**: `fanout_runner.py` matches crashed units' stderr tails against
+  a context-overflow signature set → `reason:context-overflow` + narrow-`--budget`
+  recipe on the run.log unit line/stderr + `context_overflow[]` in the stdout
+  summary; tier-agnostic, outcome semantics unchanged.
+- **Zero regression**: `needs_reduce=false` small-repo stdout pinned byte-identical
+  in tests; no new flags, no new dependencies.
+
+### Changed — fanout dispatch stall containment: slot backfill + tree-kill + four-level timeout invariant (0.1.41)
+
+`fanout_runner.py` dispatch hardened against hung subagent units burning the whole run
+(`harden-mgh-fanout-stall-containment`):
+
+- **Slot-backfill dispatch core** (was wave-barrier): in-flight capped at `--wave`, harvested
+  via `concurrent.futures.wait(FIRST_COMPLETED)`, next unit backfilled immediately; queued
+  units lazy-skip if their `.done`/`.failed` marker appeared since listing. A single hung unit
+  no longer stalls the whole wave. `waves_run` = cumulative dispatch count; stdout contract
+  otherwise unchanged (plus new `stall_killed[]`).
+- **Stall detection + surgical tree-kill**: per-unit reader threads track output byte-silence;
+  silence ≥ `--stall-timeout-s` (default 900, floor 60) or wall-clock ≥ `--call-timeout-s`
+  → `_kill_tree` (process group, fixes `.cmd` shim orphans) → unit re-enqueued (no marker —
+  crash ≠ confirmed failure). Every unit terminal state appends a `run.log`
+  (`<checkpoints>/<tier>/<unit>.run.log`, stdout/stderr tails, ok included); non-ok terminals
+  name it on stderr; heartbeat every `--hb-interval-s` prints `inflight/idle/done`.
+- **Four-level timeout invariant, fail-loud at spawn (exit 2 + recipe)**: with
+  `--time-budget-ms`, explicit `--call-timeout-s` is REQUIRED and must satisfy
+  `stall-timeout-s < call-timeout-s < budget-ms × 0.8 < host per-call timeout`
+  (compliant pairs: 720000/540/300 opencode, 480000/360/300 claude). Budget without
+  call-timeout used to silently inherit 7200s — past every host hard-kill.
+- **Zero-progress breaker, dual observation points**: disk terminal count re-listed every
+  K = `--stall-waves × --wave` dispatched units AND on queue-drain re-list;
+  `--stall-waves` consecutive zero-growth observations with units still outstanding →
+  exit 2 + `stalled:true` + `stalled_pending[]` (id + on-disk marker existence). Deterministic
+  trip math (wave=1, always-stall): trip at (stall_waves+1)×K dispatches.
+- **Bugfix**: run.log previously recorded crash units as `spawn-ok` (status settled after
+  evidence write); status classification now precedes the log write.
+- **Call-surface sync**: the four init-stage dispatch fragments, both `mgh-sdr.md` shells,
+  `discipline_core.py` fan-out recipes, and `mgh_sdr_launch.py`'s emitted command now carry
+  explicit `--call-timeout-s`/`--stall-timeout-s` (launcher-emitted commands stay
+  invariant-compliant); man pages gained 现象→原因→改法 sections for heartbeats, stall
+  auto-recovery, run.log triage, and the breaker.
+- **opencode fanout agents pinned**: all five `*-fanout.md` frontmatter permissions add
+  `external_directory: deny` + `doom_loop: deny` (claude `-p` headless already auto-denies).
+- **Tests**: `test_fanout_runner.py` 77 green (breaker trip/recovery math, slot backfill,
+  real-child tree-kill, invariant CLI matrix), `test_fanout_stale.py` 17 green; five-tier
+  `--pending-file` + `--kill-stale --dry-run` smoke; contract/purity/prompt-budget lints pass.
+
+### Added — sdr external-repo read authorization gate (0.1.40)
+
+`/mgh-sdr` external-repo retrieval flipped from implicit (any path declared in the existing
+design docs was auto-allowed per run) to **explicit user opt-in** (`add-mgh-sdr-read-root-config`):
+
+- **New `core/scripts/read_roots_config.py`** — the config writer for `<repo>/.mgh/read-roots.json`
+  (`--target/--add/--remove/--list/--check`; exit 0/1/2; transactional all-or-nothing `--add`;
+  repair-with-`.bad`-backup on malformed config; atomic write; idempotent; `--check` fail-loud
+  on stale/nonexistent entries with a `--remove` recipe). Config is hand-editable, read-only
+  to runs, NEVER written without explicit user consent.
+- **Authorization gate, judged twice** (sdr_context.py before retrieval; mgh_sdr_launch.py
+  before sentinel write — version-skew defense, semantics in lockstep with the guard's
+  config reader): approved = resolve-normalized entry in config ∧ exists ∧ is-dir.
+  Unapproved declarations → **zero reads**, `external_skipped:"unapproved: <path>"`,
+  `pending_approval[]` in stdout + manifest.
+- **pending_approval flow**: stdout → orchestrator → host session asks the user per repo.
+  Consent → `read_roots_config.py --add` (one write, persistent) → re-run same args.
+  Refusal → degrade with disclosure; NEVER write config without explicit consent.
+- **launcher**: prompt + stderr WARN carry the approve recipe and the NEVER clause; sentinel
+  `read_roots[]` = configured ∩ actually-retrieved repos ∪ operator `--read-root`.
+- **render_sdr_report.py**: new `unapproved` degradation variant, disclosed distinctly from
+  `not-found` (unreachable): 外部仓未授权 → 前端相关检查面未覆盖.
+- **Shells** (claude + opencode mgh-sdr.md): step-1 pending_approval ask + approve recipe +
+  Always-disclose bullet; **contract lint** `tools/check_contracts.py` asserts the new script
+  flags + both shells' markers; **install.sh** co-location self-check adds `read_roots_config`;
+  zero-dep AST scan covers it via the existing `core/scripts/*.py` glob.
+- **Tests**: new `tests/test_read_roots_config.py` (16); `tests/test_sdr_context.py` (20),
+  `tests/test_mgh_sdr_launch.py` (9), `tests/test_render_sdr_report.py` (18) extended.
+
+### Added — Bash path-token allowset net + project read-roots config (0.1.39)
+
+Guard Bash face reversed from verb-enumeration blacklist to a verb-independent fail-closed
+path allowlist (`harden-mgh-bash-path-allowlist`):
+
+- `block_adhoc_scripts.py` (claude + opencode byte-identical) adds **rule m** — appended LAST
+  in the Bash rule chain: EVERY path-like token in any Bash command (drive-letter `C:\…`/`C:/…`,
+  UNC `\\…`, POSIX `/…`, `..`-leading resolved against the guard cwd, `~/`-leading expanduser;
+  quotes stripped; `://` URL tokens excluded; bare `~`/`..` not judged) must resolve inside the
+  **unified read allow-set** = `MGH_TARGET` ∪ sentinel `read_roots[]` ∪ project config
+  `read_roots[]`, or the command blocks (exit 2 + recipe naming the three allow-root classes +
+  the config remedy). Closes the "verb not in any enumeration table" escape class (`robocopy`,
+  `curl -o`, `[IO.File]::WriteAllText`, `Get-Content <file>`, `Expand-Archive`, …); the five
+  verb tables REMAIN as refinements (write/delete recipes, cwd-drift, P1 root pollution) and
+  mutation rules still run FIRST. No path token / unpinned target => pass.
+- **Read allow-set unified across both faces (semantic reversal)**: sentinel `read_roots[]`
+  now covers the Bash face (search/listing verbs + the net) exactly like the tool face —
+  "what is readable at all is readable through any tool". The write side keeps judging
+  `MGH_TARGET` alone; leaf-source / `py -c` / temp-I/O / file-assoc blocks unrelaxed.
+- **New project config `<target>/.mgh/read-roots.json`** (schema `{"v":1,"read_roots":["<abs>…"]}`),
+  consulted in EVERY run-domain: hand-editable, read-only, never writable, fail-closed
+  (missing file = unchanged behavior; malformed JSON / wrong-typed `read_roots` = zero grants,
+  no crash; each entry needs exist-and-is-dir containment).
+- Accepted new blocks (previously passed): single `> /tmp/x` writes, `--flag=<out-of-tree>`
+  values, `git -C <out>`, harmless out-of-tree mentions — remedy = declare a read-only root in
+  the config or run outside an mgh session. Residual boundaries disclosed: unknown write verb
+  into a declared read-only root; alias/variable indirection.
+- `core/contracts/hooks/runtime-enforcement.md` + AGENTS.md R5.7 synced (decision-model table,
+  config contract, reversal note); regression tests +24 (`TestBashPathAllowset`,
+  `TestReadRootsConfig`), 3 existing cases flipped per the reversal / accepted-blocks budget;
+  opencode `.ts` shim + matcher untouched (parity green).
+
+### Added — guard listing/execution confinement + mgh-core missing-install stop-all (0.1.38)
+
+Real-machine Linux first-run hardening (`harden-mgh-guard-listing-exec-confinement`):
+mgh-core installed only in the root project while the run executes in an independent
+sub-project — scout 409/409 done then T1 stuck 0/9 with the agent roaming `/home`/`/adhome`
+hunting for prompts/scripts, plus a `SyntaxWarning` polluting every leaf-script stderr.
+
+- `block_adhoc_scripts.py` (claude + opencode byte-identical) adds three Bash rules:
+  **listing confinement** (rule j — `ls`/`dir`/`Get-ChildItem`/`gci` leading a simple command
+  with an out-of-tree scope: explicit path token OR `..`-climbing relative OR cwd-anchor,
+  mirroring the file-search rule), **interpreter execution confinement** (rule k —
+  `py`/`py3`/`python`/`python3`/`python2` running a script whose first anchored
+  script-extension positional argument resolves outside the tree; `--flag <path>` values are
+  data paths and never judged; `py -c`/`-m` excluded), and **mgh-core missing-install
+  stop-all** (rule l — a command referencing an `mgh-core/scripts` script-extension path
+  absent on disk (cwd- and target-relative) or existing outside the tree => exit 2 +
+  STOP-ALL recipe: stop all tasks, ask the USER to install in the CURRENT project directory,
+  NEVER search other directories; checked BEFORE every other Bash rule — terminal state
+  short-circuits). Target absent => degrade to pass on all three.
+- fan-out task templates (`t1/t2/t3/scout-task.md`): the stage-prompt path is pinned as the
+  ONLY location; Read failure => immediate `failed mgh-core prompts not installed at <path>`
+  ack, NEVER cross-directory wandering. Stage prompts (`init-induct` / `init-scout` /
+  `init-rulewriter`): an in-anchor expected path that does not exist gets the same
+  poisoned-input treatment.
+- `list_clusters.py` module docstring is now a raw string (the `` `\` `` invalid escape
+  triggered a SyntaxWarning on every import-chain load, polluting stderr). New regression
+  `tests/test_no_compile_warnings.py` compiles all `core/scripts/*.py` with
+  `warnings.simplefilter("always")` — any Warning fails loud.
+- Guard suite grows the three-rule hit/pass matrix (+40 tests → 225) including order
+  regressions proving existing recipes are unaffected by the new first-position rule.
+
+### Changed — `/mgh-sdr` report restructure: 简报表 + P-NN 详述 + 分支调用链图 (0.1.37)
+
+Report-side readability rework (`improve-mgh-sdr-report-structure`): the per-dimension
+problem list is replaced by a unit-row summary table with inlined abbreviated call
+chains; problem details move to globally-numbered P-NN sections; only branched units
+get a mermaid chain diagram (Plan C — maintainer-selected format sample).
+
+- `diff_group.py`: **chain materialization** — grouping retains raw callee edges (the
+  changed-set filter previously dropped unchanged downstream edges) and inverts caller
+  edges, then projects each interface unit a deterministic `chain[]` node sequence
+  (`{fqn_short, label, file, line, change, route?, branch_of?}`; fqn_short = package
+  initials + class + `.` + method; interface→impl resolution prefers the impl; mapper
+  XML terminal via one deterministic repo `*.xml` scan keyed by namespace∧statement-id;
+  zero new codegraph queries). grouping.json gains `units[]` (full-unit projection with
+  route/chain/status — the renderer's row truth, survives fan-out completion).
+  Fixed latent `_brace_end` bug: a `//` comment permanently broke brace matching for
+  all subsequent lines (methods silently dropped from the symbol map). `--check`
+  validates chain node fields + legal branch_of indices.
+- `sdr_context.py`: route annotation regex extended to the `@RequestMapping` family
+  with class-level base-route join (look-ahead past the class declaration; a class
+  annotation itself is a base, never an endpoint). `_external_retrieve` materializes
+  per-route occurrence counts into context.json `external_repos[].route_hits[]`
+  (`{route, count}` list; was hits.md text only) — the renderer joins it deterministically.
+  The permission-config hit count field is renamed `config_hits`. `--check` validates
+  the `route_hits[]` shape when present.
+- `render_sdr_report.py`: three-section report — 章节一 简报表 (row = unit, sorted
+  interface-by-route then standalone; columns = entry / abbreviated chain
+  (`·`/`⤷`/`⇢`/`†`) / 前端两列 (route join route_hits three-state) / 6 dimension
+  columns `否`|`是 [P-NN]`), 章节二 问题详述 (global P-NN, severity-asc, 位置
+  `file:line` with degrade to `file`), 章节三 分支调用链图 (mermaid `flowchart LR`
+  per branched unit only). NO md internal anchors anywhere (obsidian/Zed cannot jump
+  them) — `--check` asserts `<a id=`/`{#`/`](#` absence and manifest rows-length ==
+  table rows. Draft schema gains optional `line` (int anchor line; old drafts degrade,
+  not fail). Failed units never become table rows (honesty boundary discloses them).
+- sdr-task fragment + both `sdr-review-fanout` agent mirrors: draft schema documents
+  `line`; both mgh-sdr shells note the three-section report structure + frontend
+  two-column data source.
+
+### Added — `/mgh-init` T2 synthesis map-stage dispatcher adoption (map-reduce), split partial/rollup prompts (0.1.36)
+
+Over-budget T2 synthesis (`plan_aggregate --node t2` → `needs_reduce=true`)
+previously fell back to per-shard manual orchestration (one LLM turn per shard,
+no timeouts / kill-stale / circuit breaker). The map stage now goes through the
+same deterministic dispatcher as scout/t1/t3.
+
+- `fanout_runner.py`: TIERS adds a `t2` row (enumerator = `plan_aggregate.py
+  --node t2`; template `fanout/t2-task.md`; fanout agent
+  `init-synthesis-fanout`; placeholder/path set
+  `input_path`/`checkpoint_path`/`done_marker`/`failed_marker` +
+  `shard_id`/`categories`/`repo`). New `--init-dir`/`--budget` flags; `--tier`
+  closed set is now `scout|t1|t2|t3|sdr`. plan_path special case anchors the
+  sidecar/liveness home at `<init-dir>` via `run_config.json` (design D5). Wave
+  loop / ack state machine / timeouts / liveness / `--kill-stale` / circuit
+  breaker / sidecar reused unchanged (tier-agnostic code path untouched).
+- `plan_aggregate.py` `--node t2` stdout is now a **marker-aware legal fanout
+  enumerator**: top-level `repo` (= `--init-dir` parent anchor) and marker-derived
+  `total`/`done`/`failed`; each shard carries `failed_marker`; `pending[]`
+  excludes shards whose `.done`/`.failed` marker exists (so the dispatcher's
+  re-list converges and its circuit breaker reads marker truth);
+  `summary_paths`/`shards` stay the full set (rollup + disclosure).
+  `needs_reduce=false` path is byte-identical. `scout-merge` (hand-paged, a
+  non-goal) is untouched.
+- synthesis prompts split into three states: `init-synthesis.md` (whole,
+  small-repo single-context, unchanged), `init-synthesis-partial.md` (per-shard
+  bounded partial → structured shard summary; no cross-shard canonical/competing),
+  `init-synthesis-rollup.md` (cross-shard merge over summaries → final
+  inventory). New opencode primary agents `init-synthesis-fanout.md` /
+  `init-synthesis-rollup.md`; claude resolves them via `--agents` inline JSON.
+- orchestrator step face: `init-stage/t2.md` is dispatcher-first
+  (`needs_reduce=false` → single-context; `true` → `--kill-stale` pre +
+  `fanout_runner --tier t2` + `partial:true` re-dispatch + exit-2 manual
+  fallback; map all `.done` → one rollup); `list_steps.py` t2 step carries the
+  dispatcher call line; `discipline_core.py` t2 adds the soft-deadline
+  re-dispatch path recipe; `resume_state.py --check` treats shard markers
+  without the `synthesis.json.done` rollup terminal as a LEGAL intermediate
+  (advisory note, no new step id).
+- contract/install: `check_contracts.py` asserts the t2 tier set + new flags;
+  `install.sh` self-check mirrors `t2-task.md`, the partial/rollup stage
+  prompts, and the two new opencode agents; distribution-purity lint stays
+  clean.
+
 ### Fixed — `/mgh-init` done-marker identity: forward marker-path judgment + dispatcher stall circuit breaker (0.1.35)
 
 Root cause of the observed infinite T1 re-dispatch (32 overlong-id clusters

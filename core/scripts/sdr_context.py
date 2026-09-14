@@ -23,7 +23,13 @@ and occurrence counts of the new routes across the external repo's text files. C
 materialize as small files under <run-dir>/external/<repo-slug>/ (per-repo byte budget,
 default 64KB, over-cap truncation disclosed). stdout carries external_repos[] = the ACTUAL
 searched roots (for the sentinel read_roots[] declaration) — NEVER any user-supplied
-catch-all path. Declaration missing / path unreachable / not a git dir => graceful
+catch-all path. AUTHORIZATION GATE: each declared repo is checked against the project
+config <repo>/.mgh/read-roots.json BEFORE retrieval (approved = resolve-normalized entry
+in the config list AND exists AND is a directory — the same fail-closed semantics as the
+guard's config reader and read_roots_config.py); an UNAPPROVED repo is NEVER read (zero
+reads), degrades as external_skipped:"unapproved: <path>", and lands in stdout
+pending_approval:[<abs>…] for the host-session user decision. Declaration missing / path
+unreachable / not a git dir / not approved => graceful
 degrade: external_repos: [] + external_skipped:<reason>, the flow continues.
 
 (c) Sensitive-catalog resolution — project catalog <repo>/.mgh-sra/sensitive_catalog.json
@@ -37,7 +43,7 @@ default template instead of narrowing to 6 facets); the resolved object + source
 Exit codes (R5.3b): 0 ok · 1 input error (--repo/--run-dir missing) · 2 misuse (argparse)
 or closed-set violation (project catalog invalid / --check violations).
 --check <run-dir>: baseline.md exists within budget, external conclusion files complete,
-sensitive_catalog object shape valid (R5.9).
+sensitive_catalog object shape valid, pending_approval[] shape + skip-consistency (R5.9).
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/re/sys/pathlib).
 """
@@ -226,18 +232,101 @@ def _external_slug(decl: dict) -> str:
     return _safe_slug(Path(decl["path"]).name)
 
 
+def _approved_read_roots(repo: Path) -> set[str]:
+    """Resolve-normalized strings of the project config's read_roots[] entries that
+    exist and are directories — the authorization set for external-repo retrieval.
+    Same fail-closed semantics as the guard's config reader: missing file / malformed
+    JSON / wrong-typed read_roots => zero grants, never a crash. Must stay in lockstep
+    with read_roots_config.py (the writer) and block_adhoc_scripts.py (the judge)."""
+    cfg = repo / ".mgh" / "read-roots.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    roots = data.get("read_roots")
+    if not isinstance(roots, list):
+        return set()
+    out: set[str] = set()
+    for r in roots:
+        if not isinstance(r, str) or not r.strip():
+            continue
+        try:
+            p = Path(r.strip()).resolve()
+        except OSError:
+            continue
+        if p.is_dir():
+            out.add(str(p))
+    return out
+
+
 def _new_routes(repo: Path, base: str, branch: str) -> list[str]:
     """Branch-new interface route strings (java mapping annotations in the diff's added
-    lines, joined with class-level base routes where trivially visible). Best-effort by
-    design: the occurrence count in the external repo is the signal, not a route registry."""
-    r = _git(repo, "diff", "--no-color", "-U0", f"{base}..{branch}", "--", "*.java")
+    lines, joined with class-level base routes where trivially visible). The annotation
+    family matches diff_group's route family: @GetMapping/@PostMapping/@PutMapping/
+    @DeleteMapping/@PatchMapping AND @RequestMapping (method-level); a class-level base
+    route (`@RequestMapping("...")` above the class decl) is trivially prepended when the
+    diff context carries it. Best-effort by design: the occurrence count in the external
+    repo is the signal, not a route registry."""
+    r = _git(repo, "diff", "--no-color", "-U3", f"{base}..{branch}", "--", "*.java")
     if r.returncode != 0:
         return []
+    text = r.stdout
     routes: set[str] = set()
-    for m in re.finditer(r'^\+.*@(?:Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?"([^"]*)"',
-                         r.stdout, re.MULTILINE):
-        if m.group(1):
-            routes.add(m.group(1))
+    method_rx = re.compile(
+        r'@((?:Get|Post|Put|Delete|Patch)Mapping|RequestMapping)'
+        r'\s*\(\s*(?:value\s*=\s*)?"([^"]*)"')
+    base_rx = re.compile(r'^\+?\s*@RequestMapping\s*\(\s*(?:value\s*=\s*)?"([^"]*)"')
+    class_rx = re.compile(r'\b(?:public\s+|final\s+|abstract\s+)*class\s+\w+')
+    for fm in re.finditer(r'^\+.*$', text, re.MULTILINE):
+        line = fm.group(0)
+        mm = method_rx.search(line)
+        if mm is None or not mm.group(2):
+            continue
+        mpath = mm.group(2)
+        # a class-level `@RequestMapping("/x")` sits immediately above the class decl
+        # (only annotations/blank lines between) — it is a BASE ROUTE, not an endpoint;
+        # the following added/context line decides (diff_group's look-ahead rule)
+        nxt = text[fm.end():].splitlines()
+        nxt = next((l.lstrip().removeprefix("+").strip() for l in nxt
+                    if l.lstrip().removeprefix("+").strip()), "")
+        if mm.group(1) == "RequestMapping" and class_rx.match(nxt):
+            continue                       # base route itself: never an endpoint
+        # method-level base-route join: walk UP through context/+ lines; the class
+        # annotation sits immediately above the class declaration, so the walk crosses
+        # the class decl into its annotation block (bounded) and stops at the first
+        # @RequestMapping — anything beyond is another class's header (or a previous
+        # class's method annotation, which the class decl boundary excludes).
+        prefix = text[:fm.start()]
+        tail = prefix.splitlines()[-24:]   # bounded look-back window
+        base_route = ""
+        class_seen = False
+        for ln in reversed(tail):
+            body = ln.lstrip().removeprefix("+")
+            if class_rx.search(body):
+                class_seen = True
+                continue                   # cross the class decl into its annotations
+            if class_seen and base_rx.match(body):
+                base_route = base_rx.match(body).group(1)
+                break                      # the class's own @RequestMapping
+            if class_seen and body.strip() and not body.lstrip().startswith(("@", "//", "*", "/*")):
+                break                      # annotation block ended: stop cleanly
+            if not class_seen and base_rx.match(body):
+                break                      # method annotation of a previous class: ignore
+        # a method-level @RequestMapping needs its class context visible; without it a
+        # bare @RequestMapping line is indistinguishable from the class-level annotation
+        # (diff_group resolves this with the look-ahead window the diff cannot carry) —
+        # keep it (occurrence counting is best-effort; a stray extra string degrades
+        # nothing) but never invent a base for it
+        if mm.group(1) == "RequestMapping" and not class_seen:
+            routes.add(mpath if mpath.startswith("/") else f"/{mpath}")
+            continue
+        if base_route:
+            joined = f"{base_route.rstrip('/')}/{mpath.lstrip('/')}"
+        else:
+            joined = mpath if mpath.startswith("/") else f"/{mpath}"
+        routes.add(joined)
     return sorted(routes)
 
 
@@ -295,8 +384,12 @@ def _external_retrieve(decl: dict, repo: Path, base: str, branch: str,
         lines += ([f"- {h}" for h in hits[:200]] or ["- (无命中)"])
         lines.append("")
 
-    # 3) route occurrence counts across the external repo's text files
+    # 3) route occurrence counts across the external repo's text files — the
+    #    route_hits[] list ({route, count}) is MATERIALIZED into the record so the
+    #    renderer can join it by route (previously this lived only in hits.md text,
+    #    unconsumable by render_sdr_report)
     counts: list[str] = []
+    route_hits: list[dict] = []
     if routes:
         text_exts = (".js", ".vue", ".ts", ".jsx", ".tsx", ".html", ".json")
         skip_dirs = {".git", "node_modules", "dist", "build"}
@@ -314,7 +407,9 @@ def _external_retrieve(decl: dict, repo: Path, base: str, branch: str,
             for rt in routes:
                 if rt and rt in txt:
                     occurrence[rt].append(rel)
-        for rt, locs in occurrence.items():
+        for rt in sorted(occurrence):
+            locs = occurrence[rt]
+            route_hits.append({"route": rt, "count": len(locs)})
             counts.append(f"- {rt}: {len(locs)} 处" +
                           (f" ({', '.join(locs[:10])})" if locs else ""))
         lines += ["## 新增路由在前端的出现计数", *counts, ""]
@@ -337,7 +432,8 @@ def _external_retrieve(decl: dict, repo: Path, base: str, branch: str,
         "branch_fallback": branch_fallback,
         "summary_path": str((out_dir / "hits.md").resolve()),
         "diff_files": len(file_list),
-        "route_hits": len(hits),
+        "config_hits": len(hits),
+        "route_hits": route_hits,
         "bytes": min(len(raw), budget),
         "truncated": truncated,
     }
@@ -402,13 +498,23 @@ def _run(args) -> dict:
     baseline_path = run_dir / "baseline.md"
     baseline_path.write_text(baseline, encoding="utf-8")
 
-    # (b) external repos
+    # (b) external repos — authorization gate BEFORE any retrieval (the launcher process
+    # reads do not pass the guard, so the check MUST happen here at the retrieval site)
     external: list[dict] = []
     skipped: list[str] = []
+    pending_approval: list[str] = []
     if not args.no_external:
         decls, not_found = _parse_declarations(texts)
         skipped.extend(not_found)
+        approved = _approved_read_roots(repo)
         for decl in decls:
+            resolved = str(Path(decl["path"]).resolve())
+            if resolved not in approved:
+                # zero reads of this repo; surface it for the host-session user decision
+                skipped.append(f"unapproved: {decl['path']}")
+                if resolved not in pending_approval:
+                    pending_approval.append(resolved)
+                continue
             rec = _external_retrieve(decl, repo, base, branch,
                                      args.external_budget_bytes, run_dir)
             if rec is None:
@@ -424,7 +530,8 @@ def _run(args) -> dict:
                 external.append({"path": str(rp), "slug": _safe_slug(rp.name),
                                  "branch_sync_note": "operator-declared (no retrieval)",
                                  "branch_fallback": False, "summary_path": "",
-                                 "diff_files": 0, "route_hits": 0, "bytes": 0,
+                                 "diff_files": 0, "config_hits": 0,
+                                 "route_hits": [], "bytes": 0,
                                  "truncated": False})
     else:
         skipped.append("disabled: --no-external")
@@ -454,11 +561,13 @@ def _run(args) -> dict:
         "sensitive_catalog_source": source,
         "external_repos": external,
         "external_skipped": skipped,
+        "pending_approval": pending_approval,
     }
     (run_dir / "context.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     _eprint(f"[sdr_context] baseline={result['baseline_bytes']}B truncated={truncated}; "
             f"external={len(external)} repo(s) skipped={skipped or 'none'}; "
+            f"pending_approval={pending_approval or 'none'}; "
             f"sensitive_catalog_source={source}")
     return result
 
@@ -486,6 +595,40 @@ def _check(run_dir: Path) -> int:
             violations.append(f"external summary missing for {e.get('slug')}: {sp}")
         if not Path(e.get("path", "")).is_dir():
             violations.append(f"external root missing: {e.get('path')}")
+        # route_hits[] is an incremental field: absent (old context.json) = OK;
+        # present must be a {route, count} list of non-empty route + int count >= 0
+        rh = e.get("route_hits")
+        if rh is not None:
+            if not isinstance(rh, list):
+                violations.append(f"external route_hits not a list for {e.get('slug')}")
+            else:
+                for i, item in enumerate(rh):
+                    if (not isinstance(item, dict)
+                            or not isinstance(item.get("route"), str)
+                            or not item.get("route")
+                            or not isinstance(item.get("count"), int)
+                            or isinstance(item.get("count"), bool)
+                            or item.get("count") < 0):
+                        violations.append(
+                            f"external route_hits[{i}] shape invalid for "
+                            f"{e.get('slug')}: want {{route: non-empty str, count: int>=0}}")
+    # pending_approval[] is an incremental field: absent (old context.json) = OK;
+    # present must be a list of non-empty absolute paths, and every `unapproved:` skip
+    # must have its resolve-normalized counterpart in it (skip <=> pending consistency)
+    pa = ctx.get("pending_approval")
+    if pa is not None:
+        if (not isinstance(pa, list)
+                or any(not isinstance(x, str) or not x.strip() for x in pa)):
+            violations.append("pending_approval must be a list of non-empty paths")
+        else:
+            pa_set = {str(Path(x).resolve()) for x in pa}
+            for s in ctx.get("external_skipped", []):
+                if isinstance(s, str) and s.startswith("unapproved: "):
+                    p = s[len("unapproved: "):].strip()
+                    if str(Path(p).resolve()) not in pa_set:
+                        violations.append(
+                            f"external_skipped unapproved entry missing from "
+                            f"pending_approval: {p}")
     cat = ctx.get("sensitive_catalog")
     if cat is not None:
         try:

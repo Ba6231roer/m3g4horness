@@ -14,7 +14,8 @@ carries, against the check baseline the task message names.
 
 unit_id: {{unit_id}}
 kind: {{kind}}
-route: {{route}}
+route: {{route}} (a ';'-joined list = merged multi-route unit: judge EACH route
+separately against the shared downstream hunks and give every finding its own `route`)
 repo (anchor root, absolute): {{repo}}
 input_path (read this ONE slice file; diff hunks + change types + routes): {{input_path}}
 draft_path (write EXACTLY here, one JSON object): {{draft_path}}
@@ -26,7 +27,10 @@ changed chain (route method + downstream service/dao hunks): judge cross-layer (
 SQL + validation) inside the slice, do NOT re-derive the chain with codegraph. When
 codegraph=off, the unit may be split at an interface boundary and what this slice carries
 is all you judge — NEVER chase another unit's slice or read the external repo to patch a
-split you assume; no anchor in the slice = no finding for that dimension.
+split you assume; no anchor in the slice = no finding for that dimension. An
+`upstream-route` annotation-context block = the UNCHANGED route method this chain hangs
+from (the controller itself was not modified): treat it as the authz-face anchor —
+evaluate its annotations in place, but findings still cite the CHANGED hunks only.
 
 ## Check baseline (read BEFORE judging; a missing path means the step did not run — skip it)
 
@@ -66,9 +70,15 @@ the slice => no finding for that dimension (never speculate beyond the diff).
    "route": "<route string; standalone units carry \"\">",
    "file": "<repo-relative path from the slice>",
    "line_hint": "<hunk line range, e.g. 88-102>",
+   "line": <int: the finding's anchor line in `file` (the hunk line the evidence sits
+   on); omit ONLY when no single line can be named>,
    "risk": "简体中文:风险描述(具体、可复核)",
    "suggestion": "简体中文:整改建议(具体到改法)",
    "control_ref": "<命中的存量安全设计名,或 null>"}]}
+
+`line_hint` stays the hunk-range evidence cite; `line` (int, optional) is the precise
+anchor the report's 位置 field prints as `file:line` (omitted => the report degrades to
+`file` — never guess a line you cannot see in the slice).
 
 Dimension closed set (default): vertical-authz / horizontal-authz / other-authz /
 sql-injection / sensitive-data / input-validation. The orchestrator's `--dimensions`

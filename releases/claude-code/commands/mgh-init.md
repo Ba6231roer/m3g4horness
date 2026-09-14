@@ -66,7 +66,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - **launch-cwd 前置(跨 session 纪律)**:**首次** `list_steps.py` 调用(discover 步)用相对 `.claude/mgh-core/scripts/` 路径,解析于编排器 Bash cwd(命令壳加载处 = 目标项目根)。下游工具路径经其 stdout `script_abs` 已全钉死绝对,但**首调本身**依赖从目标项目根发起;从歧义 cwd 调用可使首调命中错 install 副本。新 session 续跑前确认 cwd。
 - Work units (isolation unit): i1 per file, **scout per batch**, T1 per cluster, T2/T4 whole, T3 per category.
 - `<target>/.mgh-init/checkpoints/<tier>/<unit>.json.done`(成功)**或** `.failed`(确认失败)= 终态,gate `--resume`(均跳过、不重派);`run_config.json` 使 `--resume` 免重输 flag。done/failed 判定 = **正向 marker 路径计算**(canonical 单元 id 经与物化同一编码函数算出 marker 路径、`is_file()` 即终态),NEVER 依赖记录体字段或文件名 stem 反推;孤儿 marker 只告警不进计数。
-- **零推进熔断 recipe**:`fanout_runner.py` 连续 N 波(默认 2,`--stall-waves`)`done+failed` 零推进且 pending 非空 → **退出码 2** + stdout `stalled:true` + `stalled_pending[]`(每卡住单元的 id + 其 `.done`/`.failed` marker 在盘存在性)→ **停止重派该命令**,改跑 `py .claude/mgh-core/scripts/resume_state.py --target <target> --check` 诊断磁盘状态,并对照 `stalled_pending[]` 逐单元核对 marker 存在性/可写性;诊断清楚后 `--resume` 续跑。NEVER 在熔断后继续盲目重派(那正是熔断要截断的烧钱循环)。
+- **零推进熔断 recipe(双观察点)**:`fanout_runner.py` 每新派发 N×`--wave` 个单元或队列耗尽重列(默认 N=2,`--stall-waves`)重列一次磁盘 `done+failed` 终态计数;连续 N 次零增长且仍有待派 → **退出码 2** + stdout `stalled:true` + `stalled_pending[]`(每卡住单元的 id + 其 `.done`/`.failed` marker 在盘存在性)→ **停止重派该命令**,改跑 `py .claude/mgh-core/scripts/resume_state.py --target <target> --check` 诊断磁盘状态,并对照 `stalled_pending[]` 逐单元核对 marker 存在性/可写性;诊断清楚后 `--resume` 续跑。NEVER 在熔断后继续盲目重派(那正是熔断要截断的烧钱循环)。
 - Call graph is rebuilt by discover each run; pass `--rebuild-cache` to force (mtime-based skip otherwise).
 
 ## Output (per `<target>/.mgh-init/`)

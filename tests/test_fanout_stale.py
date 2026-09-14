@@ -142,6 +142,80 @@ class TestLivenessFile(unittest.TestCase):
         FR._update_liveness_children(lp, after, [])
         self.assertEqual(json.loads(lp.read_text(encoding="utf-8"))["children"], [])
 
+    def test_children_registered_at_spawn_removed_at_terminal(self):
+        # slot-backfill refresh timing: children[] registers a child AT SPAWN
+        # (on_spawn fires with the Popen pid inside _run_unit) and removes it at
+        # that unit's terminal event — the registry reflects the true in-flight
+        # set at any instant. _run_unit is faked; it calls on_spawn and probes
+        # the liveness file at each spawn.
+        units = []
+        for i in (1, 2):
+            cp = self.env.init / "checkpoints" / "scout" / f"scout-{i:03d}.json"
+            units.append({
+                "batch_id": f"scout-{i:03d}",
+                "input_path": str(self.env.init / "inputs" / "scout" / f"u{i}.md"),
+                "checkpoint_path": str(cp),
+                "done_marker": str(Path(str(cp) + ".done")),
+                "failed_marker": str(Path(str(cp) + ".failed")),
+                "slice_dir": str(self.env.init / "slices"),
+            })
+            Path(units[-1]["input_path"]).write_text("{}", encoding="utf-8")
+            # NO markers ever written: the fake _run_unit returns ok without
+            # touching disk (a real subagent would write the marker), so the
+            # disk-derived stub keeps listing both units pending — the drain
+            # re-list (breaker observation point b) counts two zero-growth
+            # re-lists and trips: exit 2, stalled. Assertions below cover the
+            # children[] timing on BOTH dispatch rounds plus liveness cleanup
+            # on the stalled exit path (finally runs regardless).
+        stub = self.env.tmp / "stub_disk_enum.py"
+        body = f"""
+import json, sys
+from pathlib import Path
+UNITS = json.loads({json.dumps(units)!r})
+pending = [u for u in UNITS if not Path(u['done_marker']).is_file()]
+print(json.dumps({{'repo': {str(self.env.repo)!r}, 'total': len(UNITS),
+                   'done': len(UNITS) - len(pending), 'failed': 0,
+                   'pending': pending}}))
+"""
+        stub.write_text(body, encoding="utf-8")
+        lp = self.env.liveness_path()
+        snapshots = []
+
+        def fake_run(host, cmd, task, cwd, call_timeout_s, stall_timeout_s=0,
+                     run_log_path=None, uid="", on_spawn=None):
+            pid = 700000 + len(snapshots) + 1
+            if on_spawn is not None:
+                on_spawn(pid)
+                # AT SPAWN: this unit's pid is registered...
+                children = json.loads(lp.read_text(encoding="utf-8"))["children"]
+                # ...and (wave=1) the PREVIOUS unit's entry is already gone
+                # (removed at its terminal event).
+                snapshots.append([dict(c) for c in children])
+            return ("spawn-ok", "ok", "ok", pid, False)
+
+        saved = FR._run_unit
+        FR._run_unit = fake_run
+        saved_list = dict(FR.TIERS["scout"])
+        FR.TIERS["scout"]["list_script"] = str(stub)
+        try:
+            code, out, err = self.env.main("--host", "claude", "--wave", "1")
+        finally:
+            FR._run_unit = saved
+            FR.TIERS["scout"].update(saved_list)
+        self.assertEqual(code, 2, err)
+        self.assertIn("stalled", out)
+        self.assertIn("STALLED", err)
+        # breaker trip = 2 dispatch rounds x 2 units (drain re-list counted
+        # two zero-growth re-derivations; --stall-waves default 2)
+        self.assertEqual(len(snapshots), 4, "two rounds, both units re-dispatched")
+        self.assertEqual([c[0]["pid"] for c in snapshots],
+                         [700000 + i for i in range(1, 5)],
+                         "at each spawn the registry holds exactly the new child")
+        self.assertTrue(all(len(c) == 1 for c in snapshots),
+                        "previous unit's entry removed at its terminal")
+        # stalled exit still removes the liveness file (try/finally)
+        self.assertFalse(lp.exists())
+
     def test_liveness_not_a_lock_two_writes_coexist(self):
         # liveness semantics, not mutex: two tiers' files coexist without error
         FR._write_liveness(self.env.init, "scout", "opencode")
@@ -341,12 +415,28 @@ class TestHeartbeatAndStdoutContract(unittest.TestCase):
                     if ln.startswith("[fanout_runner scout] +")]
         self.assertTrue(hb_lines, "heartbeat lines must reach stderr")
         for ln in hb_lines:
+            # slot-backfill loop: wave= = the unit's dispatch ordinal; events
+            # are per-unit spawn/terminal only (no wave-end — no wave barrier)
             self.assertRegex(
                 ln,
                 r"^\[fanout_runner scout\] \+\d{2}:\d{2}:\d{2} wave=\d+ "
-                r"unit=\S+ (spawn|ok|failed|timeout|crash|wave-end) done=\d+/\d+$")
+                r"unit=\S+ (spawn|ok|failed|timeout|crash|stall) done=\d+/\d+$")
         self.assertTrue(any(" failed " in ln for ln in hb_lines))
-        self.assertTrue(any(" wave-end " in ln for ln in hb_lines))
+        self.assertFalse(any(" wave-end " in ln for ln in hb_lines),
+                         "wave barrier removed -> no wave-end lines")
+
+    def test_inflight_heartbeat_line_format(self):
+        # periodic in-flight disclosure (--hb-interval-s): unit id + idle
+        # seconds since its child's last output — the "slow vs hung" signal
+        buf = io.StringIO()
+        t0 = FR.time.monotonic() - 125.0
+        with contextlib.redirect_stderr(buf):
+            FR._hb_inflight(t0, "t1", 2, "clst-aa", 300, 45, 830)
+        line = buf.getvalue().strip()
+        self.assertRegex(
+            line,
+            r"^\[fanout_runner t1\] \+\d{2}:\d{2}:\d{2} inflight=2 unit=clst-aa "
+            r"idle=300s done=45/830$")
 
     def test_stdout_exactly_one_json_line_last(self):
         lp = self.env.tmp / "pending.json"

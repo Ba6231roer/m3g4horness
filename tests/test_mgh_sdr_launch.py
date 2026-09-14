@@ -147,12 +147,21 @@ class TestLauncherDryRun(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def _approve_front(self):
+        """Write the project read-roots config (what read_roots_config.py produces)."""
+        cfg = self.repo / ".mgh" / "read-roots.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"v": 1, "read_roots": [str(self.front)]}),
+                       encoding="utf-8")
+
     def test_dry_run_artifacts_complete(self):
+        self._approve_front()
         code, out, err = self._launch(["--repo", str(self.repo),
                                        "--branch", "feature-pay", "--dry-run"])
         self.assertEqual(code, 0, err)
         payload = json.loads(out)
         self.assertEqual(payload["branches"], ["feature-pay"])
+        self.assertEqual(payload["pending_approval"], [])
         run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
         # sdr_context artifacts
         ctx = json.loads((run_dir / "context.json").read_text(encoding="utf-8"))
@@ -169,6 +178,47 @@ class TestLauncherDryRun(unittest.TestCase):
         prompt = (run_dir / "orchestrator_prompt.md").read_text(encoding="utf-8")
         self.assertIn("NEVER", prompt)
         self.assertIn(str(ctx["baseline_path"]), prompt)
+
+    # --- authorization gate (add-mgh-sdr-read-root-config 2.2) ---
+    def test_unapproved_repo_zero_reads_sentinel_clean_pending_disclosed(self):
+        # declared but NOT configured: zero retrieval, sentinel read_roots[] empty,
+        # launcher stdout + prompt + stderr carry the pending-approval disclosure
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["pending_approval"], [str(self.front)])
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        ctx = json.loads((run_dir / "context.json").read_text(encoding="utf-8"))
+        self.assertEqual(ctx["external_repos"], [])
+        self.assertFalse((run_dir / "external").exists())     # zero reads
+        sentinel = json.loads((self.repo / ".mgh-sdr" / ".active").read_text(encoding="utf-8"))
+        self.assertEqual(sentinel["read_roots"], [])          # NOT granted this run
+        prompt = (run_dir / "orchestrator_prompt.md").read_text(encoding="utf-8")
+        self.assertIn(str(self.front), prompt)
+        self.assertIn("read_roots_config.py", prompt)
+        self.assertIn("NEVER", prompt)
+        self.assertIn("WARN", err)
+        self.assertIn("NOT approved", err)
+        self.assertIn("read_roots_config.py", err)
+
+    def test_approved_after_config_write_is_retrieved(self):
+        # the "user approved -> config written -> re-run same args" loop: second run
+        # retrieves the repo, pending_approval empties, sentinel grants the root
+        code1, _, _ = self._launch(["--repo", str(self.repo),
+                                    "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code1, 0)
+        self._approve_front()   # what read_roots_config.py --add produces
+        code2, out2, err2 = self._launch(["--repo", str(self.repo),
+                                          "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code2, 0, err2)
+        payload = json.loads(out2)
+        self.assertEqual(payload["pending_approval"], [])
+        run_dirs = sorted((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        ctx = json.loads((run_dirs[-1] / "context.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(ctx["external_repos"]), 1)
+        sentinel = json.loads((self.repo / ".mgh-sdr" / ".active").read_text(encoding="utf-8"))
+        self.assertEqual(sentinel["read_roots"], [str(self.front)])
 
     def _launch(self, argv):
         old_argv = sys.argv

@@ -9,6 +9,8 @@ permission:
   list: allow
   bash: allow
   edit: allow
+  external_directory: deny
+  doom_loop: deny
 ---
 
 You are **T3 — per-category rule writer**. Your behavior is defined by the prompt

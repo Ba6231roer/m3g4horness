@@ -139,7 +139,7 @@ py minifanout.py tasks.json        # 进度看 stderr,摘要看 stdout(JSON)
 
 中途 Ctrl-C / 超时 / 断电都不丢进度:重跑同一命令,已 `.done` 的自动跳过,剩下的继续派。
 
-## 5. 极简版 → 产品版的差距(为什么 `fanout_runner.py` 有 600 行)
+## 5. 极简版 → 产品版的差距(为什么 `fanout_runner.py` 有千余行)
 
 极简版保留了**骨架闭环**(波次循环 / stdin 消息 / 标记断点续跑 / 零进展熔断),产品版
 `core/scripts/fanout_runner.py` 在骨架之上补的都是真机跑大仓才暴露的承重件:
@@ -155,13 +155,69 @@ py minifanout.py tasks.json        # 进度看 stderr,摘要看 stdout(JSON)
 | 宿主适配 | 仅 opencode | `--host` 自动探测 opencode/claude(`claude -p --agents <JSON>` 等价映射),都缺则 fail-loud + 回退手派 |
 | 回归保障 | 无 | 单测 `tests/test_fanout_runner.py` + 契约 lint + token lint |
 
-## 6. 参考索引
+## 6. 调度设计的血泪经验(2026-09 T1 真机事故复盘)
+
+> 事故催生的加固正由 openspec change `harden-mgh-fanout-stall-containment` 落地;落地前产品版
+> 现状 = 波次屏障 + 仅绝对兜底超时。以下按「现象→原因→改法」沉淀,极简版照抄同样适用。
+
+**事故一句话**:T1 resume 连续两波各卡死 1 个子代理(换单元、输入才几 KB——不是任务太大),
+其余 4 个槽位全程陪等,宿主 15/60 分钟硬超时把整棵进程树杀掉;卡死单元没写完成标记,重派,
+下一波再卡,每波净推进 4/5。opencode 源码核实根因:子进程对 LLM 流**没有任何超时**
+(`timeout: false`),内网接口流一停,子进程零输出永久挂死。结论:**挂死不可消除,调度器必须自己兜住**。
+
+**经验 1 — 波次屏障是故障放大器,要槽位补位。**「全波收完才派下一波」意味着 1 个卡死 =
+4 个槽位陪葬、整 run 停摆。改成槽位补位(谁到终态谁腾坑、立刻补新人)后,卡死的代价从
+「整波陪葬」降为「占一个坑」,其余槽位照常推进。
+
+**经验 2 — 每个子任务挂两块表,先到先杀。**只有一块绝对总长表是不够的:事故里兜底 7200s
+比宿主超时还大,永远轮不到它生效。两块表分工:
+
+| 表 | 参数(示例取值,宿主 15min 时) | 杀谁 |
+| --- | --- | --- |
+| 静默表 | `--stall-timeout-s`(5min) | 连续 5 分钟**零字节输出**的单元——大概率挂死 |
+| 总长表 | `--call-timeout-s`(9min) | 启动起 9 分钟没干完的单元——**哪怕一直在正常输出**也杀,防「活得很欢但没完没了」无限占坑 |
+
+慢 ≠ 挂:静默表只杀不说话的,总长表管说话但跑不完的。被杀单元没写标记 → 留待办 → 重派
+重新起算(偶发卡死重派一次就好,事故实证:卡死单元 A 重派后正常完成)。
+
+**经验 3 — 所有时钟嵌套,留 ~20% 余量,spawn 前校验。**
+
+```
+静默 5min < 单元总长 9min < 收工闹钟 12min < 宿主硬超时 15min
+```
+
+单元表每次重派重新起算;收工闹钟(`--time-budget-ms`)和宿主刀是**整次调用**的,永不刷新。
+收工闹钟的意义:软时限一到就停派新任务、等在飞的收敛、退出码 0 + `partial:true` 干净早退,
+下次重跑从磁盘续——**永远赶在宿主动刀之前体面收工,绝不体验硬杀**。且必须在 spawn 任何
+单元**之前**校验嵌套关系:默认值组合(兜底 2 小时)对小时级宿主预算必然违例,静默错配 =
+把同一事故原样重演。
+
+**经验 4 — Windows 上杀子进程必须树杀,`proc.kill()` 是假的。**npm 装的 CLI 在 Windows
+是 `.cmd` 转发脚本,`proc.kill()` 只杀转发层,真进程成孤儿继续烧 token。必须
+`taskkill /pid <pid> /T /F` 杀整棵树(POSIX 用进程组)。
+
+**经验 5 — 重试不数次数,熔断盯磁盘进度。**卡死单元重派几次没有固定上限,上限是进度判据:
+观察点从磁盘重派生 done+failed 计数,连续 2 个观察点零增长且队列还有活 → 停,退出码 2,
+点名卡住单元。观察点必须包含「队列只剩坏单元」的尾巴形态(队列耗尽重列),否则单个确定性
+坏死单元永远凑不满统计窗口、无限重派烧钱。
+
+**经验 6 — 事后定位靠证据,不靠猜。**每个单元的 stdout/stderr 尾部落盘 `*.run.log`(非 ok
+终态必写),stderr 诊断行附路径——没有它,复盘只能靠猜。再加心跳:每分钟一行在飞单元 +
+距其上次输出的秒数,人从 TUI 实时区分「正常慢」和「卡死了」,不再有 57 分钟零输出不可判读。
+
+**经验 7 — headless 子代理的权限问询 = 挂死面,agent 定义里显式钉扎 deny。**opencode
+默认权限表有 ask 类(`external_directory`/`doom_loop` 等);run 无头模式下 ask 在旧版 =
+无应答者**永久挂**。agent frontmatter 显式 `deny`(工具报错、agent 适配后继续)与版本无关
+地消除问询面——不要赌装机版本的行为。
+
+## 7. 参考索引
 
 | 材料 | 位置 |
 | --- | --- |
 | 可行性分析(subagent 创建机制、三路对比、源码锚点) | [`docs/opencode-subagent-fanout-analysis.md`](opencode-subagent-fanout-analysis.md) |
 | change 提案 / 设计(含 spike 实证回填) | `openspec/changes/archive/2026-08-18-add-mgh-init-scout-fanout-runner/{proposal,design}.md` |
 | 已 sync 的能力规格 | `openspec/specs/fanout-dispatch/spec.md` |
+| 卡死围堵加固(槽位补位/失活检测/树杀/run.log/熔断重锚) | `openspec/changes/harden-mgh-fanout-stall-containment/{proposal,design,tasks}.md` |
 | 产品版调度器 | `core/scripts/fanout_runner.py` |
 | fanout 专用 agent 定义(`mode: primary` 克隆) | `releases/opencode/agent/init-scout-fanout.md` |
 | 任务消息模板 | `core/prompts/fragments/fanout/scout-task.md` |

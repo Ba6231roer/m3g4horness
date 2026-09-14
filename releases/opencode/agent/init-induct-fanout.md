@@ -9,6 +9,8 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  external_directory: deny
+  doom_loop: deny
 ---
 
 You are **T1 — per-cluster inductor**. Your behavior is defined by the prompt at

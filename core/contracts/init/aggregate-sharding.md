@@ -24,7 +24,7 @@ py plan_aggregate.py --node t2|scout-merge --init-dir <dir>
 
 | node | 上一层记录(records) | 分桶键 |
 |---|---|---|
-| `t2` | `checkpoints/t1/*.json`(每簇 T1 记录;`*.done` 不读) | `category`(T2 canonical 判定需整 category 视图,故**不跨 category 拆**) |
+| `t2` | `checkpoints/t1/*.json`(每簇 T1 记录;`*.done` 不读) | `category`(不跨 category 混装;单 category 自身超预算 → 按记录整条贪心再切 part,同 category 跨 part 归并归 rollup) |
 | `scout-merge` | `checkpoints/scout/*.json`(reader 批记录;排除 `merge.json`/`audit.json`) | batch 簇(贪心打包,每桶 ≤ 预算) |
 
 `total_bytes` = records 序列化字节和。
@@ -37,17 +37,23 @@ py plan_aggregate.py --node t2|scout-merge --init-dir <dir>
   "total_bytes": 400000,
   "budget": 262144,
   "needs_reduce": true,
-  "shards": 3,
+  "shards": 4,
   "pending": [
-    {"shard_id":"t2-authorization","node":"t2","categories":["authorization"],
+    {"shard_id":"t2-authorization-part00","node":"t2","categories":["authorization"],
      "input_path":"<abs>","bytes":150000,"oversize":false,
-     "checkpoint_path":"<abs checkpoints/t2/shards/t2-authorization.json>",
+     "part_index":0,"part_count":2,"slimmed":{},
+     "checkpoint_path":"<abs checkpoints/t2/shards/t2-authorization-part00.json>",
+     "done_marker":"<abs ...>.done"},
+    {"shard_id":"t2-crypto","node":"t2","categories":["crypto"],
+     "input_path":"<abs>","bytes":60000,"oversize":false,
+     "part_index":0,"part_count":1,"slimmed":{},
+     "checkpoint_path":"<abs checkpoints/t2/shards/t2-crypto.json>",
      "done_marker":"<abs ...>.done"}
   ],
-  "truncated": false, "offset": 0, "limit": 3, "effective_limit": 3, "shrunk": false,
+  "truncated": false, "offset": 0, "limit": 4, "effective_limit": 4, "shrunk": false,
   "rollup": {"summary_paths":["<abs shard checkpoint>...", "output":"<abs controls_inventory.json>",
               "done_marker":"<abs checkpoints/t2/synthesis.json.done>"},
-  "note": "aggregate input 400000B > budget 262144B — 3 shard(s); per-shard partial then single rollup"
+  "note": "aggregate input 400000B > budget 262144B — 4 shard(s); per-shard partial then single rollup"
 }
 ```
 
@@ -65,10 +71,23 @@ py plan_aggregate.py --node t2|scout-merge --init-dir <dir>
 
 - 每 `pending[]` 项:`shard_id` + `input_path`(该 shard 有界记录,subagent 自读)+ `checkpoint_path`
   (partial-synthesis 写该 shard 摘要的绝对路径)+ `done_marker`(均绝对,编排器逐字透传)。
+- **T2 shard 项另带** `part_index`/`part_count`(part 切分披露;未切分 = `0`/`1`)与 `slimmed`(原子瘦身披露;
+  未瘦身 = 空对象)。已派发 T2 shard 恒 ≤ 预算 ⇒ `oversize` 恒 `false`(字段保留、stdout 兼容;旧
+  「单桶超预算 warn + 照发」路径废除)。shard 输入 envelope 同样携带 `part_index`/`part_count`
+  (partial 从输入文件自读 part 身份;`t2-task.md` 模板占位符集不变)。
+- **单 category > 预算 → 自动 part 切分**:按 T1 记录(既有 glob 序)整条贪心打包成多个 ≤ 预算 part,
+  `shard_id = t2-<category>-part<N>`(N 自 0 两位零填充);同 category 跨 part 的 canonical/competing
+  归并由 rollup 承接(见下);marker-aware 重列 / `.done`/`.failed` / dispatcher 波次机不变
+  (parts 只是更多普通 shard;旧 run 残留的单桶 marker 不匹配 part shard_id → 相应 part 重跑,无害)。
+- **原子超限(单条记录自身 > 预算)**:物化层做**确定性瘦身投影**——仅截 `description`/`usage`/`protects`/
+  `gaps`(str 与 list 形态均可)与 `entry_points` 至内部常量上限;`evidence` 锚点与其余结构字段不截;
+  投影记录带 `_slimmed` 标记(被截字段 + 原始字节数),痕迹记入该 shard 的 `slimmed` 披露;
+  `checkpoints/t1` 原件 **NEVER** 改写。瘦身后仍 > 预算(结构字段本身超限 = 病态记录)→ **退出码 2**
+  fail-loud(stderr 报记录文件与字节数),零派发、零物化。
 - `rollup.summary_paths` = 各 shard 的 `checkpoint_path`(rollup subagent 仅吞这些**摘要**,非原始记录全集);
   `rollup.output`/`done_marker` = 终态产物(`controls_inventory.json` / `scout_candidates.json` + 其 `.done`)。
-- 单 category(shard)> 预算 → `oversize:true`(无法再拆而不损整 category 视图)+ stderr 警告;
-  该 shard 仍发(部分有界),`boundaries[]` 披露。
+- scout-merge(`--node scout-merge`)的 shard id / envelope / stdout 保持逐字不变(手派非目标):
+  batch 簇贪心打包遇单桶超预算仍为 `oversize:true` + stderr 警告 + 照发,`boundaries[]` 披露。
 
 ## 两段 map-reduce(超预算时;≤ 预算逐字不变)
 
@@ -79,8 +98,9 @@ plan_aggregate --node t2 --materialize <shards>     # 决策 + 物化有界 shar
             → 写 controls_inventory.json + checkpoints/t2/synthesis.json.done
 ```
 
-rollup 输入 = 各 shard 的**结构化摘要**(非原始 T1/scout 全集),上下文 ≪ 任一 shard;跨 category 的
-canonical/competing 归并在 rollup 完成(跨 category 视图保留)。scout-merge 同构(`--node scout-merge`,
+rollup 输入 = 各 shard 的**结构化摘要**(非原始 T1/scout 全集),上下文 ≪ 任一 shard;跨 shard 的
+canonical/competing 归并在 rollup 完成——**同 category 跨 part 与跨 category 同一组判定信号**
+(partial 不做任何跨 shard 判定)。scout-merge 同构(`--node scout-merge`,
 按 batch 簇分桶,rollup 写 `scout_candidates.json` + `checkpoints/scout/merge.json.done`)。
 
 ## 边界

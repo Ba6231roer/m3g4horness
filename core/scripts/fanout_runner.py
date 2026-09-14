@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-fanout_runner — deterministic tier-aware wave dispatcher for /mgh-init fan-out
-(tiers: scout | t1 | t3).
+fanout_runner — deterministic tier-aware slot-backfill dispatcher for /mgh-init
+fan-out (tiers: scout | t1 | t2 | t3; sdr for /mgh-sdr).
 
-Replaces the per-wave orchestrator LLM turn with a pure-code loop: consume the
+Replaces the per-unit orchestrator LLM turn with a pure-code loop: consume the
 pending work-list from the tier's enumeration script (`--materialize` mode)
 stdout, build each subagent's task message from a FIXED template + verbatim
-field substitution, spawn host-CLI subprocesses concurrently in waves, parse
-bounded acks, and re-derive pending from disk markers after each wave. Zero LLM
-turns inside the dispatch loop; every path field is passed verbatim from the
-enumerator stdout (path spelling failures become impossible by construction).
+field substitution, and spawn host-CLI subprocesses under an in-flight cap of
+`--wave`: any unit reaching a terminal state (ok/failed/timeout/stall/crash)
+immediately frees its slot and the next queued unit is dispatched (SLOT
+BACKFILL — a hung unit occupies only its own slot, never the whole run; there
+is no wave barrier). Before taking a unit from the queue the dispatcher lazily
+stats its `.done`/`.failed` marker (already terminal on disk → skipped, never
+spawned). Zero LLM turns inside the dispatch loop; every path field is passed
+verbatim from the enumerator stdout (path spelling failures become impossible
+by construction).
 
 Tier mapping (single point, TIERS below): each tier names its enumeration
 script + forwarded flags, task-message template, placeholder set, anchor-tree
-path fields, fanout agent name, and marker `tier` value. The wave loop, ack
+path fields, fanout agent name, and marker `tier` value. The backfill loop, ack
 state machine, timeouts, sidecar, and audit copies are shared — no per-tier
 branches in the loop body.
 
@@ -24,6 +29,12 @@ branches in the loop body.
          template fanout/t1-task.md; agent init-induct-fanout
          (list_clusters exit 2 = scout-incomplete-gate → passed through as
          exit 2 with its stderr recipe; NEVER swallowed into a crash loop)
+  t2:    plan_aggregate.py --node t2/--init-dir/[--budget]/--materialize
+         (map stage only; rollup is a separate orchestrator step)
+         template fanout/t2-task.md; agent init-synthesis-fanout
+         (marker-aware enumerator: D2a — plan_aggregate excludes terminal
+         shards from pending[] and reports total/done/failed; plan_path =
+         <init-dir>/run_config.json so the sidecar/liveness home = <init-dir>)
   t3:    list_rule_jobs.py --inventory/--format/--rules-dir/--checkpoints/
          --target/--materialize
          template fanout/t3-task.md; agent init-rulewriter-fanout
@@ -43,20 +54,30 @@ Host spawn mapping (spike-verified, see change design D3):
             (cwd=repo, stdin redirected from /dev/null)
 Host detection: `--host` explicit > opencode in PATH > claude in PATH
 (shutil.which); neither present → exit 2 + fallback recipe (the orchestrator
-falls back to the existing per-wave manual dispatch, behavior unchanged).
+falls back to the existing manual dispatch, behavior unchanged).
 
 State machine (disk markers are the ONLY truth source): `ok`/`oversize` ack or
 `.done` marker → done; `failed` ack → this script writes the `.failed` marker
-(body {unit,reason,tier}; terminal, not retried, does not block the wave);
-crash/timeout with no ack and no marker → unit stays pending → `--resume`
-re-dispatches it (crash != confirmed failure). Unparsable stdout → trust the
-disk markers only.
+(body {unit,reason,tier}; terminal, not retried, does not block other slots);
+stall/timeout/crash/spawn-error with no ack and no marker → the unit is
+re-enqueued for in-run re-dispatch AND stays pending for `--resume` (crash !=
+confirmed failure). Unparsable stdout → trust the disk markers only.
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/concurrent.futures/datetime/
-json/os/pathlib/shutil/signal/subprocess/sys/tempfile/threading/time).
+Per-unit stall detection + surgical tree kill: two reader threads per child
+roll a byte-level last-output timestamp + an 8KB tail per stream; silence >=
+`--stall-timeout-s` (default 900) or total runtime >= `--call-timeout-s` kills
+that unit's WHOLE process tree (`taskkill /pid <pid> /T /F` — the npm `.cmd`
+shim chain's real host-CLI process dies too, never an orphan burning tokens;
+POSIX process group). No ack, no marker → the unit stays pending for
+re-dispatch. Every spawn terminal (ok included) appends the captured
+stdout/stderr tails to `<checkpoints>/<tier>/<unit-id-sanitized>.run.log`;
+non-ok terminals name the run.log absolute path on stderr.
+
+Zero runtime deps (Python >=3.10 stdlib: argparse/collections/concurrent.futures/
+datetime/json/os/pathlib/shutil/signal/subprocess/sys/tempfile/threading/time).
 
 CLI contract (`--help` is the contract surface, R5.1):
-  py fanout_runner.py --tier scout|t1|t3 [tier flags] [options]
+  py fanout_runner.py --tier scout|t1|t2|t3|sdr [tier flags] [options]
 
   scout tier (default; existing call shape unchanged):
     --scout-plan <scout_plan.json> --checkpoints <scout-dir>
@@ -64,41 +85,63 @@ CLI contract (`--help` is the contract surface, R5.1):
   t1 tier:
     --clusters <clusters.json> --candidates <controls_candidates.json>
     --checkpoints <t1-dir> --inputs-dir <inputs-dir>
+  t2 tier (map stage only):
+    --init-dir <target>/.mgh-init [--budget <bytes>]
+    --checkpoints <t2-dir> --inputs-dir <inputs/t2>
+    (run_config.json under --init-dir anchors the sidecar/liveness home;
+    the enumerator reports needs_reduce + marker-aware pending)
   t3 tier:
     --inventory <controls_inventory.json> --format opencode|claude
     --rules-dir <rules-dir> --target <target> --checkpoints <t3-dir>
     --inputs-dir <inputs-dir>
 
-  --tier            scout|t1|t3 (default scout). Selects the enumeration
-                   script, template, placeholder set, and fanout agent.
+  --tier            scout|t1|t2|t3|sdr (default scout). Selects the
+                   enumeration script, template, placeholder set, and fanout
+                   agent.
   --checkpoints     tier checkpoint dir (markers live here; forwarded).
   --inputs-dir      per-unit input dir (forwarded as --materialize; audit
                    copies `<unit>.task.md` land here too).
   --host            claude|opencode explicit; default: opencode in PATH, else
                    claude in PATH, else exit 2 + recipe.
-  --wave            concurrent subprocesses per wave (default 5).
-  --time-budget-ms  soft deadline: stop starting new waves, drain in-flight,
+  --wave            in-flight subprocess cap (default 5) — a slot-backfill
+                    concurrency limit, not a batch size.
+  --time-budget-ms  soft deadline: stop dispatching new units, drain in-flight,
                     exit 0 with partial:true (re-dispatch the same command).
                     RECOMMENDED = host per-call timeout x 0.8 (e.g. host
                     900000ms -> 720000; claude host caps Bash at 600000ms ->
                     480000). MUST stay BELOW the host per-call timeout so the
                     soft deadline always fires first (a host hard-kill loses
-                    in-flight waves and degenerates into a kill/re-dispatch
-                    loop).
-  --call-timeout-s  per-subprocess timeout (default 7200s, calibrated for
-                    slow intranet LLM endpoints: one unit = one full LLM
-                    subagent run at minutes-level, ~4x headroom; better-slow-
-                    than-killed — a killed unit leaves no marker, stays
-                    pending, and re-dispatch wastes a whole run). Timeout ->
-                    kill -> no ack -> unit stays pending.
+                    in-flight units and degenerates into a kill/re-dispatch
+                    loop). When passed, `--call-timeout-s` MUST be passed
+                    explicitly and stay below budget x 0.8 (spawn-time
+                    validation, exit 2 otherwise).
+  --call-timeout-s  per-subprocess absolute timeout in seconds (default 7200s,
+                    calibrated for slow intranet LLM endpoints: one unit = one
+                    full LLM subagent run at minutes-level, ~4x headroom;
+                    better-slow-than-killed — a killed unit leaves no marker,
+                    stays pending, and re-dispatch wastes a whole run). The
+                    kill path is the whole-tree kill (see stall detection).
+  --stall-timeout-s per-unit output-silence (stall) threshold in seconds
+                    (default 900; < 60 rejected with exit 2). No stdout/stderr
+                    bytes for this long -> the unit's whole process tree is
+                    killed and the unit stays pending for re-dispatch.
+                    Byte-silence is the high-signal hang indicator (healthy
+                    LLM subagents stream continuously; minutes-level observed,
+                    so 900s ~ 5x headroom); a mis-killed unit re-dispatches and
+                    self-heals, its run.log keeps the evidence.
+  --hb-interval-s   stderr in-flight heartbeat period in seconds (default 60).
 
-  TIMEOUT INVARIANT (inner < outer, >=20% headroom per level):
-    call-timeout-s x drain headroom < time-budget-ms < host per-call timeout
-  (drain = wait for the slowest in-flight subprocess to finish, not an
-  immediate cut; the levels above are defaults/recommendations — the
-  INVARIANT is the contract, the numbers are calibration). Applies to all
-  three tiers identically (a t1/t3 unit = one full LLM subagent run, same
-  calibration as scout).
+  TIMEOUT INVARIANT (four levels, inner < outer, >=20% headroom per level):
+    stall-timeout-s < call-timeout-s < time-budget-ms x 0.8 < host per-call
+    timeout
+  Spawn-time validation (fail-loud, exit 2 + compliant-values recipe BEFORE
+  any spawn or enumerator side effect): passing --time-budget-ms REQUIRES an
+  explicit --call-timeout-s below budget x 0.8, and stall < call always. The
+  defaults (call 7200 > any hour-level host budget) are for out-of-host
+  manual runs only — a host-driven run that kept them is guaranteed to
+  degenerate into the host hard-killing the tree first (observed 2026-09-14).
+  Applies to all tiers identically (a t1/t3/sdr unit = one full LLM subagent
+  run, same calibration as scout).
   --resume          re-derive pending from disk markers (same entry point as a
                     fresh call; kept for call-shape parity with the shell).
   --pending-file    TEST HOOK: consume the tier listing from a file instead of
@@ -136,63 +179,86 @@ CLI contract (`--help` is the contract surface, R5.1):
 Liveness file (`<init-dir>/fanout_runner.<tier>.pid`): the dispatcher mode
 (none of --kill-stale/--purge-audit/--pending-file) atomically writes it at
 startup — body {pid, started_ts, tier, host, cmdline, children[]} where
-children[] = the in-flight host-CLI child PIDs of the current wave ({pid,
-unit, tier}, refreshed after each wave's spawns and cleared at wave end via
-subprocess.Popen pids) — and deletes it on ANY exit path (try/finally). It is
-an ORPHAN SIGNAL, not a lock: a hard-killed runner leaves the file behind and
-`--kill-stale` disambiguates via PID liveness + cmdline matching. Not read by
-resume_state for progress (disk markers remain the only truth source).
+children[] = the in-flight host-CLI child PIDs ({pid, unit, tier}, registered
+at each spawn via the Popen pid, removed at that unit's terminal event) — and
+deletes it on ANY exit path (try/finally). It is an ORPHAN SIGNAL, not a lock:
+a hard-killed runner leaves the file behind and `--kill-stale` disambiguates
+via PID liveness + cmdline matching. Not read by resume_state for progress
+(disk markers remain the only truth source).
 
-stderr heartbeat: the dispatch loop prints one line per key node — per-unit
-spawn / per-unit terminal status (ok|failed|timeout|crash) / wave end — shaped
-`[fanout_runner <tier>] +HH:MM:SS wave=<k> unit=<id> <event> done=<d>/<total>`
-(elapsed = time.monotonic() relative to runner start). Host TUIs (opencode
+stderr heartbeat: per-unit spawn / per-unit terminal status
+(ok|failed|timeout|crash|stall) lines shaped
+`[fanout_runner <tier>] +HH:MM:SS wave=<seq> unit=<id> <event> done=<d>/<total>`
+(wave= = that unit's dispatch ordinal this run; elapsed = time.monotonic()
+relative to runner start), plus every `--hb-interval-s` one in-flight
+disclosure line per running unit:
+`[fanout_runner <tier>] +HH:MM:SS inflight=<k> unit=<id> idle=<s>s
+done=<d>/<total>` (idle = seconds since that child's last output — a human
+watches the host TUI distinguish "slow" from "hung"). Host TUIs (opencode
 Bash tool renders the merged stdout+stderr sliding tail while running; claude
 includes stderr in the Bash result) surface these lines live. stdout contract
 unchanged: still exactly one JSON summary line at the end.
 
 stdout (structured JSON summary; stderr = diagnostics/progress only, R5.3b):
-  {"runner": "fanout_runner", "tier": "scout|t1|t3", "repo": "...",
+  {"runner": "fanout_runner", "tier": "scout|t1|t2|t3|sdr", "repo": "...",
    "host": "claude|opencode|test", "total": N, "done": M, "failed": F,
    "pending": P, "wave": W, "waves_run": K, "partial": bool,
+   "stall_killed": [units stall-killed this run],
    "stalled": bool,
    "stalled_pending": [{"id", "done_marker_exists", "failed_marker_exists"}]
                      (only when stalled:true),
+   "context_overflow": [units whose crash stderr matched a context-overflow
+                     signature (only when non-empty; additive diagnosis —
+                     the narrow---budget recipe rides the unit's run.log and
+                     stderr lines; outcome semantics unchanged)],
    "audit_purged": [names] (with --purge-audit),
    "kill_stale": {killed, removed, none} (with --kill-stale)}
+(waves_run = cumulative units dispatched this run; the summary's `wave` stays
+the concurrency cap.)
 
-Zero-progress convergence circuit breaker (--stall-waves, default 2): after each
-fully-joined wave, done+failed is snapshotted; N consecutive equal snapshots with
-pending non-empty → stop dispatching, exit 2, stdout stalled:true +
-stalled_pending[] (per stuck unit: id + its actual .done/.failed marker existence
-on disk), stderr diagnosis recipe (stop re-dispatching; diagnose via
-`resume_state.py --check`; cross-check each unit's marker existence). A legal slow
-wave (in-flight units call-timeout with no ack) does NOT trip: the next wave that
-advances progress resets the window. partial early-exit / clean completion paths
-are byte-identical to pre-breaker behavior (the breaker only fires on
-"pending perpetually non-empty AND progress perpetually zero").
+Zero-progress convergence circuit breaker (--stall-waves, default 2): slot
+backfill has no wave boundary, so TWO observation points feed the same
+zero-growth counter (each re-derives the done+failed terminal count from disk
+once, markers = only truth): (a) every K = --stall-waves x --wave newly
+dispatched units; (b) the queue-drain re-list — when the queue is empty,
+in-flight is zero, and the disk re-derivation STILL shows pending units, that
+observation counts too and those units get one more attempt round in THIS run
+(the lone-poison-unit tail "kill -> re-dispatch -> kill" that never fills a
+K-window is truncated in-run after --stall-waves consecutive zero-growth
+observations, instead of bouncing partial:true to the orchestrator for an
+endless cross-call re-dispatch loop). Trip = stop dispatching, drain, exit 2,
+stdout stalled:true + stalled_pending[] (per stuck unit: id + its actual
+.done/.failed marker existence on disk), stderr diagnosis recipe (stop re-
+dispatching; diagnose via `resume_state.py --check`; cross-check each unit's
+marker existence). A stall-killed unit does NOT raise the disk count (no
+marker) — a deterministically-hung unit is exactly what this breaker
+truncates; an occasional stall whose re-dispatch succeeds resets the window.
+Deadline partial early-exit and clean completion stdout/exit codes are
+unchanged.
 
-Progress sidecar (human-facing run-state disclosure, written each wave + on
-every exit): <init-dir>/fanout_progress.<tier>.json — the init-dir that holds
-the tier's plan artifact (scout_plan.json / clusters.json /
+Progress sidecar (human-facing run-state disclosure, written on dispatch
+windows + on every exit): <init-dir>/fanout_progress.<tier>.json — the
+init-dir that holds the tier's plan artifact (scout_plan.json / clusters.json /
 controls_inventory.json) — holds {ts, host, tier, total, done, failed,
 pending, wave, waves_run, wave_done_avg_s, eta_batches, state} with state in
-{running, exited-partial, exited-clean}. It is FOR HUMANS: watch it from a
-second terminal (e.g. `Get-Content -Wait`); the orchestrator and any agent
-NEVER read it (not a truth source, not a contract artifact — resume_state.py
-and init_manifest.json neither read nor validate it; a stale copy — including
-a pre-rename `fanout_progress.json` — is harmless). Counts derive from the
-same snapshot as the stdout summary (single test asserts they agree). Write
-failures warn on stderr and never break the run.
+{running, exited-partial, exited-clean} (wave = concurrency cap; waves_run =
+cumulative dispatches; wave_done_avg_s = mean per-unit runtime this run).
+It is FOR HUMANS: watch it from a second terminal (e.g. `Get-Content -Wait`);
+the orchestrator and any agent NEVER read it (not a truth source, not a
+contract artifact — resume_state.py and init_manifest.json neither read nor
+validate it; a stale copy — including a pre-rename `fanout_progress.json` —
+is harmless). Counts derive from the same snapshot as the stdout summary
+(single test asserts they agree). Write failures warn on stderr and never
+break the run.
 
 Exit codes (R5.3b): 0 ok (incl. partial:true) · 1 misuse of inputs
 (tier artifact/inputs-dir missing, template unreadable, unparsable pending) ·
 2 CLI misuse / host CLI unavailable / tier gate refusal (t1
 scout-incomplete-gate passed through with the enumerator's stderr recipe,
-fail-loud) / zero-progress stall (convergence circuit breaker,
-`--stall-waves` consecutive waves with no done+failed progress and pending
-non-empty; stdout carries stalled:true + stalled_pending[]). Idempotent; no
-TTY; reads/writes only inside the repo-anchored tree (every path field is
+fail-loud) / timeout-invariant violation (spawn-time, exit 2 + compliant-
+values recipe) / zero-progress stall (convergence circuit breaker, dispatch-
+window anchored; stdout carries stalled:true + stalled_pending[]). Idempotent;
+no TTY; reads/writes only inside the repo-anchored tree (every path field is
 resolve()-anchored against `repo` before spawn; out-of-tree → that unit is
 marked failed with reason=path-drift and NEVER spawned).
 """
@@ -207,8 +273,9 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 # Self-locate this script's dir so sibling scripts / the prompts tree resolve
@@ -221,14 +288,57 @@ DEFAULT_WAVE = 5
 # worst case. Better-slow-than-killed: a killed unit leaves NO marker, so it
 # stays pending and re-dispatching it wastes an entire run.
 DEFAULT_CALL_TIMEOUT_S = 7200
-# Convergence-circuit-breaker window (default 2 waves, --stall-waves N): after
-# each fully-joined wave, snapshot done+failed; N consecutive equal snapshots
-# with pending still non-empty = zero-progress loop (pending 判定与 marker 写入
-# 任何一侧身份/权限漂移都表现为「每波全量重派、进度恒零」) → stop dispatching,
-# exit 2 + stalled diagnosis. 2 not 1: a legal slow wave (in-flight units
-# call-timeout with no ack; the NEXT wave advances) must not trip; a真卡死
-# unit's pending set is wave-invariant, so 2 waves provably catches it.
+# Per-unit byte-silence (stall) threshold, seconds: healthy LLM subagents
+# stream continuously (tool calls / text deltas), so output silence is the
+# high-signal hang indicator (opencode's LLM request has NO overall timeout —
+# provider.ts timeout:false — an SSE stream stalling mid-flight hangs the
+# child with zero output forever). Observed healthy units run minutes-level,
+# so 900s ~ 5x headroom; a mis-kill costs one re-dispatch (self-heals, and
+# run.log keeps the evidence) vs 8x cheaper than the old call-timeout-only
+# kill. < 60 rejected at spawn time (exit 2): below the floor the false-kill
+# rate dominates.
+DEFAULT_STALL_TIMEOUT_S = 900
+# Periodic in-flight heartbeat period, seconds: one stderr line per running
+# unit disclosing its seconds-since-last-output so a human watching the host
+# TUI distinguishes "slow" from "hung" (the 2026-09-14 incident ran 57 silent
+# minutes with no readable signal).
+DEFAULT_HB_INTERVAL_S = 60
+# Convergence-circuit-breaker window multiplier (--stall-waves N): slot
+# backfill has no wave boundary, so the breaker re-anchors on a dispatch
+# window — every K = N x --wave newly dispatched units the disk terminal count
+# is re-derived once; N consecutive zero-growth re-derivations with units
+# still queued = zero-progress loop (deterministic hang kill→re-dispatch→kill,
+# or identity/permission drift where every dispatch re-derives the same
+# pending set) → stop dispatching, exit 2 + stalled diagnosis. 2 not 1: a
+# legal slow window (in-flight units call-timeout with no ack; the next window
+# advances) must not trip.
 DEFAULT_STALL_WAVES = 2
+# Per-stream run.log tail cap (chars): bounded evidence, never unbounded
+# capture (stdout of an LLM subagent can be huge; the tail answers "what was
+# it doing when it died", which is the only diagnostic question).
+_TAIL_CAP = 8192
+
+# Context-overflow signature match (P2 diagnosis, ADDITIVE ONLY — never
+# changes any unit's success/failure outcome): a crashed unit's stderr tail is
+# matched case-insensitively against these provider/host wordings for the
+# "request exceeds the model context" rejection. A hit marks the run.log unit
+# line and the stdout summary with reason:context-overflow + the narrow---
+# budget recipe, so the orchestrator/human goes straight to the sharding fix
+# instead of treating it as a generic crash. A miss = today's generic crash
+# line (never misleading). Append new host wordings here as observed in real
+# runs (each host phrases the provider's rejection differently).
+CONTEXT_OVERFLOW_SIGS = (
+    "context length",
+    "prompt is too long",
+    "request too large",
+    "maximum context",
+    "context window",
+    "too many tokens",
+)
+_OVERFLOW_MARK = "reason:context-overflow"
+_OVERFLOW_RECIPE = ("context-overflow signature matched — the request exceeded the "
+                    "model context; recipe: narrow --budget (--max-aggregate-bytes) "
+                    "and re-run")
 
 # ---------------------------------------------------------------------------
 # Tier mapping (single point of tier variation, design D1/D2). The wave loop,
@@ -237,12 +347,16 @@ DEFAULT_STALL_WAVES = 2
 # ---------------------------------------------------------------------------
 # Placeholders are pure str.replace, never format()-derived: what the template
 # says is what the subagent gets (D2). Common placeholders every tier fills:
-#  <id-field> (unit identity: batch_id/cluster_id/category per tier),
+#  <id-field> (unit identity: batch_id/cluster_id/shard_id/category per tier),
 #  input_path, done_marker, failed_marker, repo. scout/t1 add
-#  checkpoint_path, slice_dir, chunk_sources_abs, codegraph; t3 adds
-#  rule_path, category, format.
+#  checkpoint_path, slice_dir, chunk_sources_abs, codegraph; t2 adds
+#  shard_id, categories (checkpoint_path without slice_dir/chunk_sources —
+#  partial-synthesis reads a bounded shard record, writes a summary
+#  checkpoint, never slices); t3 adds rule_path, category, format.
 _SCOUT_PATH_FIELDS = ("input_path", "checkpoint_path", "done_marker",
                       "failed_marker", "slice_dir")
+_T2_PATH_FIELDS = ("input_path", "checkpoint_path", "done_marker",
+                   "failed_marker")
 _T3_PATH_FIELDS = ("input_path", "rule_path", "done_marker", "failed_marker")
 
 TIERS = {
@@ -284,6 +398,38 @@ TIERS = {
         "agent_tools": "Read Glob Grep Bash Write",
         "uses_codegraph": True,
         "uses_chunk_sources": True,
+    },
+    # t2 = T2 SYNTHESIS map stage (design D1/D2/D5 + D2a marker-aware
+    # enumerator). NOT a full tier in the scout/t1/t3 sense — the map stage is
+    # dispatched here, but the ROLLUP is a separate orchestrator step (its
+    # terminal marker `synthesis.json.done` != any shard `.done`; single reduce,
+    # not a wave). The enumerator is plan_aggregate.py --node t2 (marker-aware
+    # pending since D2a); plan_arg = init_dir with a run_config.json special
+    # case so the sidecar/liveness home = <init-dir>. The agent
+    # init-synthesis-fanout runs a per-shard BOUNDED partial synthesis
+    # (stages/init-synthesis-partial.md) — never slices, never cross-shard
+    # canonical/competing (uses_codegraph=False, uses_chunk_sources=False).
+    "t2": {
+        "list_script": "plan_aggregate.py",
+        # plan_aggregate --node t2; --budget forwarded only when the caller set
+        # it (else plan_aggregate's own DEFAULT_BUDGET applies).
+        "list_args": lambda a: ["--node", "t2", "--init-dir", a.init_dir]
+            + (["--budget", str(a.budget)] if a.budget is not None else [])
+            + ["--materialize", a.inputs_dir],
+        "required_args": ("init_dir", "inputs_dir"),
+        # plan_arg attr whose dir = init-dir; the main() special case below
+        # re-anchors plan_path onto <init-dir>/run_config.json (D5) so the
+        # sidecar + liveness home (plan_path.parent) = <init-dir>.
+        "plan_arg": "init_dir",
+        "template_rel": Path("prompts") / "fragments" / "fanout" / "t2-task.md",
+        "path_fields": _T2_PATH_FIELDS,
+        "placeholders": _T2_PATH_FIELDS + ("shard_id", "categories", "repo"),
+        "id_field": "shard_id",
+        "agent": "init-synthesis-fanout",
+        "agent_desc": "mgh-init T2 per-shard partial synthesis (fanout dispatch, primary)",
+        "agent_tools": "Read Glob Grep Bash Write",
+        "uses_codegraph": False,
+        "uses_chunk_sources": False,
     },
     "t3": {
         "list_script": "list_rule_jobs.py",
@@ -485,19 +631,85 @@ def _parse_ack(stdout_text: str) -> str | None:
     return None
 
 
-def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
-              call_timeout_s: int) -> tuple[str, str | None, str, int | None]:
-    """Spawn one subprocess with the task message piped to stdin; returns
-    (status, ack, detail, child_pid).
+def _context_overflow(err_tail: str) -> bool:
+    """True when the stderr tail carries a context-overflow signature
+    (case-insensitive, tier-agnostic — every tier's units die the same way
+    when their input busts the model context). Diagnosis only."""
+    low = (err_tail or "").lower()
+    return any(sig in low for sig in CONTEXT_OVERFLOW_SIGS)
 
-    status ∈ spawn-ok | spawn-error | timeout | crash — ack is the parsed
-    bounded ack (None if unparsable). child_pid = the OS PID of the spawned
-    host CLI (for the liveness `children[]` registry; None when spawn failed).
-    Popen + communicate(timeout=) is the exact equivalent of the former
-    subprocess.run(timeout=) capture semantics, plus the PID. On timeout the
-    child is killed (run() does the same internally) and reaped. spawn/
-    timeout/crash produce no marker here; the caller re-derives truth from
-    disk."""
+
+def _elapsed_prefix(t0: float) -> str:
+    """`+HH:MM:SS` elapsed since t0 (monotonic), for stderr heartbeat lines."""
+    el = max(0, int(time.monotonic() - t0))
+    hh, rem = divmod(el, 3600)
+    mm, ss = divmod(rem, 60)
+    return f"+{hh:02d}:{mm:02d}:{ss:02d}"
+
+
+def _tail_stream(stream, sink: dict) -> None:
+    """Reader-thread body: roll `sink["ts"]` (monotonic ts of the last byte on
+    this stream — the stall-detection signal) and `sink["tail"]` (last
+    _TAIL_CAP chars — run.log evidence). Exits at EOF or on any stream error
+    (a dead child's pipes simply close)."""
+    try:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            with sink["lock"]:
+                sink["ts"] = time.monotonic()
+                sink["tail"] = (sink["tail"] + chunk)[-_TAIL_CAP:]
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _write_run_log(path: Path, uid: str, status: str, detail: str,
+                   out_tail: str, err_tail: str) -> None:
+    """Append one per-attempt evidence block to the unit's run.log
+    `<checkpoints>/<tier>/<unit>.run.log` (tails already capped at _TAIL_CAP
+    each by the reader threads). APPEND, not overwrite: a stall-killed
+    attempt's evidence must survive a later successful re-dispatch. Failure is
+    a stderr warning only — evidence I/O must never break the dispatch loop."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"===== attempt {datetime.now().astimezone().isoformat(timespec='seconds')} "
+                    f"unit: {uid} status: {status} =====\n")
+            if detail:
+                f.write(f"detail: {detail}\n")
+            f.write(f"----- stdout tail (last {_TAIL_CAP} chars) -----\n{out_tail}\n")
+            f.write(f"----- stderr tail (last {_TAIL_CAP} chars) -----\n{err_tail}\n")
+    except OSError as e:
+        _eprint(f"warn: run.log unwritable for {uid} at {path}: {e}")
+
+
+def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
+              call_timeout_s: int, stall_timeout_s: int = 0,
+              run_log_path: Path | None = None, uid: str = "",
+              on_spawn=None) -> tuple[str, str | None, str, int | None, bool]:
+    """Spawn one subprocess with the task message piped to stdin; returns
+    (status, ack, detail, child_pid, stall_killed).
+
+    status ∈ spawn-ok | spawn-error | timeout | stall | crash — ack is the
+    parsed bounded ack (None if unparsable or the child was killed). Two
+    reader threads track byte-level last-output time per stream; the monitor
+    loop (1s granularity) tree-kills the child on output silence >=
+    stall_timeout_s (stall) or total runtime >= call_timeout_s (timeout) —
+    both via `_kill_tree` (whole tree: the npm .cmd shim chain's real host-CLI
+    process dies too, NEVER an orphan burning tokens). A killed child gets NO
+    ack (trust nothing after a kill); the caller re-derives truth from disk.
+    on_spawn(pid) fires immediately after a successful Popen (the caller
+    registers the liveness children[] entry at SPAWN time, not terminal).
+    run_log_path: when set, one evidence block (stdout/stderr tails) is
+    appended at every terminal, ok included. stall_killed=True only for the
+    silence-triggered kill (the stdout summary discloses these in
+    stall_killed[])."""
     proc = None
     try:
         proc = subprocess.Popen(
@@ -505,24 +717,94 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
             stderr=subprocess.PIPE, cwd=str(cwd), text=True,
             encoding="utf-8", errors="replace")
     except OSError as e:
-        return "spawn-error", None, f"spawn failed: {e}", None
-    try:
-        out, err = proc.communicate(input=task, timeout=call_timeout_s)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        return "spawn-error", None, f"spawn failed: {e}", None, False
+    if on_spawn is not None:
         try:
-            out, err = proc.communicate(timeout=30)
-        except (subprocess.TimeoutExpired, ValueError):
-            out, err = "", ""
-        return ("timeout", None,
-                "per-call timeout exceeded (killed; no ack)", proc.pid)
-    ack = _parse_ack(out)
-    if proc.returncode != 0 and ack is None:
-        return ("crash", None,
-                f"exit={proc.returncode}; stderr tail: {(err or '')[-300:]}",
-                proc.pid)
-    return ("spawn-ok", ack,
-            out.strip().splitlines()[-1] if out.strip() else "", proc.pid)
+            on_spawn(proc.pid)
+        except Exception:
+            pass
+    t_start = time.monotonic()
+    lock = threading.Lock()
+    out_sink = {"ts": t_start, "tail": "", "lock": lock}
+    err_sink = {"ts": t_start, "tail": "", "lock": lock}
+    readers = [
+        threading.Thread(target=_tail_stream, args=(proc.stdout, out_sink),
+                         daemon=True),
+        threading.Thread(target=_tail_stream, args=(proc.stderr, err_sink),
+                         daemon=True),
+    ]
+    for th in readers:
+        th.start()
+    try:
+        proc.stdin.write(task)
+        proc.stdin.flush()
+    except OSError:
+        pass  # child died before consuming stdin — monitor/reap below handles it
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+    status: str | None = None
+    detail = ""
+    was_stalled = False
+    call_deadline = t_start + call_timeout_s
+    while True:
+        try:
+            proc.wait(timeout=1)
+            break  # exited on its own
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        with lock:
+            last_out = min(out_sink["ts"], err_sink["ts"])
+        if stall_timeout_s and now - last_out >= stall_timeout_s:
+            _kill_tree(proc.pid)
+            status, was_stalled = "stall", True
+            detail = (f"output silent >= {stall_timeout_s}s (stall-timeout; "
+                      "tree-killed; no ack)")
+            break
+        if now >= call_deadline:
+            _kill_tree(proc.pid)
+            status = "timeout"
+            detail = (f"per-call timeout exceeded ({call_timeout_s}s; "
+                      "tree-killed; no ack)")
+            break
+    # Reap + drain: give the killed/exited child and its reader threads a
+    # bounded window to flush the pipes into the sinks (evidence for run.log).
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+    for th in readers:
+        th.join(timeout=30)
+    out_tail, err_tail = out_sink["tail"], err_sink["tail"]
+    if status is None:
+        # natural exit: settle the terminal status BEFORE the evidence write
+        # (a crash must be recorded as "crash" in run.log, never the
+        # placeholder "spawn-ok")
+        ack = _parse_ack(out_tail)
+        if proc.returncode != 0 and ack is None:
+            status = "crash"
+            detail = f"exit={proc.returncode}; stderr tail: {err_tail[-300:]}"
+            if _context_overflow(err_tail):
+                # P2 diagnosis only (design D6): the mark rides FIRST in the
+                # detail so the bounded stderr line, the run.log detail line,
+                # and the stdout summary classification all carry it. Never
+                # changes the outcome — the unit still stays pending.
+                detail = f"{_OVERFLOW_MARK} ({_OVERFLOW_RECIPE}); {detail}"
+        else:
+            status = "spawn-ok"
+            detail = out_tail.strip().splitlines()[-1] if out_tail.strip() else ""
+    if run_log_path is not None:
+        _write_run_log(run_log_path, uid, status, detail, out_tail, err_tail)
+    if status == "stall":
+        return ("stall", None, detail, proc.pid, True)
+    if status == "timeout":
+        return ("timeout", None, detail, proc.pid, False)
+    if status == "crash":
+        return ("crash", None, detail, proc.pid, False)
+    return ("spawn-ok", ack, detail, proc.pid, False)
 
 
 def _list_pending(tier: dict, args) -> dict:
@@ -666,25 +948,37 @@ def _atomic_write_json(target: Path, body: dict) -> None:
 
 def _update_liveness_children(liveness_path: Path, body: dict,
                               children: list) -> None:
-    """Atomically refresh `children[]` in the liveness file after a wave's
-    spawns (each entry {pid, unit, tier}); cleared by writing [] at wave end.
-    Failure is a stderr warning only (non-fatal by the same contract as the
-    initial write)."""
+    """Atomically refresh `children[]` in the liveness file (each entry
+    {pid, unit, tier}): a child is registered AT SPAWN (on_spawn fires with
+    the Popen pid) and removed AT that unit's terminal event, so the registry
+    reflects the true in-flight set at any instant — a runner hard-killed
+    mid-run leaves behind exactly its still-running children. Failure is a
+    stderr warning only (non-fatal by the same contract as the initial
+    write)."""
     body["children"] = children
     _atomic_write_json(liveness_path, body)
 
 
-def _hb(t0: float, tier: str, wave_no: int, uid: str, event: str,
+def _hb(t0: float, tier: str, seq: int, uid: str, event: str,
         done: int, total: int) -> None:
     """One stderr heartbeat line at a dispatch-loop key node (unit spawn /
-    unit terminal status / wave end). opencode's Bash tool renders the merged
-    stdout+stderr sliding tail while running -> these lines are the live TUI
-    progress; stdout's single-JSON-line contract is untouched."""
-    el = max(0, int(time.monotonic() - t0))
-    hh, rem = divmod(el, 3600)
-    mm, ss = divmod(rem, 60)
-    _eprint(f"[fanout_runner {tier}] +{hh:02d}:{mm:02d}:{ss:02d} "
-            f"wave={wave_no} unit={uid} {event} done={done}/{total}")
+    unit terminal status: ok|failed|timeout|crash|stall). `seq` = the unit's
+    dispatch ordinal this run (heartbeat field `wave=`, name kept). opencode's
+    Bash tool renders the merged stdout+stderr sliding tail while running ->
+    these lines are the live TUI progress; stdout's single-JSON-line contract
+    is untouched."""
+    _eprint(f"[fanout_runner {tier}] {_elapsed_prefix(t0)} "
+            f"wave={seq} unit={uid} {event} done={done}/{total}")
+
+
+def _hb_inflight(t0: float, tier: str, k: int, uid: str, idle_s: int,
+                 done: int, total: int) -> None:
+    """One periodic stderr in-flight disclosure line (--hb-interval-s): unit
+    id + seconds since its child's last output — a human watching the host TUI
+    distinguishes "slow" from "hung" live (the 2026-09-14 incident ran 57
+    silent minutes unreadable). stdout's single-JSON-line contract untouched."""
+    _eprint(f"[fanout_runner {tier}] {_elapsed_prefix(t0)} "
+            f"inflight={k} unit={uid} idle={idle_s}s done={done}/{total}")
 
 
 # Host-CLI cmdline markers for the PID-reuse guard: a child PID is only killed
@@ -921,14 +1215,18 @@ def _purge_audit(inputs_dir: Path, dry_run: bool) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="deterministic tier-aware wave dispatcher for /mgh-init + /mgh-sdr "
-                    "fan-out (tiers: scout/t1/t3/sdr; zero LLM turns; fixed template + "
-                    "verbatim fields; host-CLI spawn)")
-    ap.add_argument("--tier", choices=["scout", "t1", "t3", "sdr"], default="scout",
+        description="deterministic tier-aware slot-backfill dispatcher for /mgh-init "
+                    "+ /mgh-sdr fan-out (tiers: scout/t1/t2/t3/sdr; zero LLM turns; "
+                    "fixed template + verbatim fields; in-flight-capped host-CLI "
+                    "spawn; per-unit stall kill)")
+    ap.add_argument("--tier", choices=["scout", "t1", "t2", "t3", "sdr"],
+                    default="scout",
                     help="fan-out tier (default scout). Selects the enumeration "
                          "script, task template, placeholder set, and fanout agent; "
-                         "scout call shape (--scout-plan etc.) is unchanged. sdr tier: "
-                         "diff_group.py --repo/--base/--branch/--checkpoints/--materialize")
+                         "scout call shape (--scout-plan etc.) is unchanged. t2 tier "
+                         "(map stage only): plan_aggregate.py --node t2 "
+                         "--init-dir/[--budget]/--materialize. sdr tier: diff_group.py "
+                         "--repo/--base/--branch/--checkpoints/--materialize")
     # scout artifacts (scout tier)
     ap.add_argument("--scout-plan",
                     help="path to scout_plan.json (scout tier; forwarded to "
@@ -940,6 +1238,15 @@ def main() -> int:
     ap.add_argument("--candidates",
                     help="path to controls_candidates.json (t1 tier; hit lookup "
                          "for --materialize)")
+    # t2 artifacts (t2 tier; forwarded to plan_aggregate --node t2)
+    ap.add_argument("--init-dir",
+                    help="path to .mgh-init dir (t2 tier; forwarded to "
+                         "plan_aggregate --init-dir; run_config.json under it "
+                         "anchors the sidecar/liveness home)")
+    ap.add_argument("--budget", type=int, default=None,
+                    help="per-request aggregate byte cap (t2 tier; forwarded to "
+                         "plan_aggregate --budget; default None -> plan_aggregate "
+                         "DEFAULT_BUDGET)")
     # t3 artifacts (t3 tier)
     ap.add_argument("--inventory",
                     help="path to controls_inventory.json (t3 tier; forwarded to "
@@ -970,28 +1277,59 @@ def main() -> int:
                     help="explicit host CLI; default: opencode in PATH, else claude, "
                          "else exit 2 + manual-dispatch fallback recipe")
     ap.add_argument("--wave", type=int, default=DEFAULT_WAVE,
-                    help=f"concurrent subprocesses per wave (default {DEFAULT_WAVE})")
+                    help=f"in-flight subprocess cap (default {DEFAULT_WAVE}) - a "
+                         f"slot-backfill concurrency limit, not a batch size: any "
+                         f"unit reaching a terminal state frees its slot and the "
+                         f"next queued unit is dispatched immediately")
     ap.add_argument("--time-budget-ms", type=int, default=None,
-                    help="soft deadline in ms: stop starting waves, drain in-flight, "
-                         "exit 0 with partial:true (re-dispatch the same command). "
-                         "RECOMMENDED = host per-call timeout x 0.8 (host 900000ms -> "
-                         "720000; claude Bash cap 600000ms -> 480000); MUST stay BELOW "
-                         "the host per-call timeout (soft deadline fires before the "
-                         "host hard kill; invariant: call-timeout-s x drain headroom "
-                         "< time-budget-ms < host per-call timeout, >=20%% per level)")
-    ap.add_argument("--call-timeout-s", type=int, default=DEFAULT_CALL_TIMEOUT_S,
-                    help=f"per-subprocess timeout in seconds (default "
-                         f"{DEFAULT_CALL_TIMEOUT_S}; calibrated for slow intranet LLM "
-                         f"endpoints, ~4x headroom; better-slow-than-killed: a killed "
-                         f"unit leaves no marker, stays pending, re-dispatch wastes "
-                         f"a whole run)")
+                    help="soft deadline in ms: stop dispatching new units, drain "
+                         "in-flight, exit 0 with partial:true (re-dispatch the same "
+                         "command). RECOMMENDED = host per-call timeout x 0.8 (host "
+                         "900000ms -> 720000; claude Bash cap 600000ms -> 480000); "
+                         "MUST stay BELOW the host per-call timeout (soft deadline "
+                         "fires before the host hard kill; four-level invariant: "
+                         "stall-timeout-s < call-timeout-s < time-budget-ms x 0.8 < "
+                         "host per-call timeout, >=20%% per level). When passed, "
+                         "--call-timeout-s MUST be passed explicitly and stay below "
+                         "budget x 0.8 (spawn-time validation, exit 2 otherwise)")
+    ap.add_argument("--call-timeout-s", type=int, default=None,
+                    help=f"per-subprocess absolute timeout in seconds (default "
+                         f"{DEFAULT_CALL_TIMEOUT_S} for out-of-host manual runs; "
+                         f"calibrated for slow intranet LLM endpoints, ~4x headroom; "
+                         f"better-slow-than-killed: a killed unit leaves no marker, "
+                         f"stays pending, re-dispatch wastes a whole run). When "
+                         f"--time-budget-ms is passed this flag MUST be passed "
+                         f"explicitly and stay below budget x 0.8. The kill path is "
+                         f"the whole-tree kill (see --stall-timeout-s)")
+    ap.add_argument("--stall-timeout-s", type=int, default=None,
+                    help=f"per-unit output-silence (stall) threshold in seconds "
+                         f"(default {DEFAULT_STALL_TIMEOUT_S}; < 60 rejected with "
+                         f"exit 2): no stdout/stderr bytes for this long -> that "
+                         f"unit's whole process tree is killed (taskkill /T /F - "
+                         f"the .cmd shim chain's real host-CLI process dies too) "
+                         f"and the unit stays pending for re-dispatch. Byte-silence "
+                         f"is the high-signal hang indicator (healthy LLM subagents "
+                         f"stream continuously, minutes-level, ~5x headroom); a "
+                         f"mis-killed unit re-dispatches and self-heals, its "
+                         f"<checkpoints>/<tier>/<unit>.run.log keeps the evidence")
+    ap.add_argument("--hb-interval-s", type=int, default=DEFAULT_HB_INTERVAL_S,
+                    help=f"stderr in-flight heartbeat period in seconds (default "
+                         f"{DEFAULT_HB_INTERVAL_S}): one line per running unit "
+                         f"(unit id + seconds since its child's last output) so a "
+                         f"human distinguishes 'slow' from 'hung' live from the "
+                         f"host TUI; stdout stays a single JSON line")
     ap.add_argument("--stall-waves", type=int, default=DEFAULT_STALL_WAVES,
-                    help=f"convergence circuit breaker: stop dispatching and exit 2 "
-                         f"after N consecutive waves with ZERO done+failed progress "
-                         f"and pending non-empty (default {DEFAULT_STALL_WAVES}; "
-                         f"stdout carries stalled:true + stalled_pending[] with each "
-                         f"stuck unit's marker existence; recipe: stop re-dispatching, "
-                         f"diagnose via resume_state.py --check)")
+                    help=f"convergence circuit breaker window multiplier: every "
+                         f"--stall-waves x --wave dispatched units the disk "
+                         f"terminal count (done+failed markers) is re-derived once; "
+                         f"--stall-waves consecutive zero-growth re-derivations "
+                         f"with units still queued/in-flight -> stop dispatching, "
+                         f"exit 2 (default {DEFAULT_STALL_WAVES}; stdout carries "
+                         f"stalled:true + stalled_pending[] with each stuck unit's "
+                         f"marker existence; a stall-killed unit does not raise the "
+                         f"disk count, so a deterministic hang is truncated here; "
+                         f"recipe: stop re-dispatching, diagnose via "
+                         f"resume_state.py --check)")
     ap.add_argument("--resume", action="store_true",
                     help="re-derive pending from disk markers (same entry point as a "
                          "fresh call; kept for call-shape parity)")
@@ -999,8 +1337,9 @@ def main() -> int:
                     help="orphan-tree cleanup: inspect <init-dir>/fanout_runner.<tier>.pid "
                          "liveness files and kill what they record (runner tree; or, when "
                          "the runner is dead, recorded host-CLI child trees). DESTRUCTIVE: "
-                         "run with --dry-run first — a real kill with detected targets and "
-                         "no prior dry-run review exits 2 + recipe. Idempotent; tier-agnostic")
+                         "run with --dry-run first - a real kill with detected targets and "
+                         "no prior dry-run review exits 2 + recipe. Idempotent; "
+                         "tier-agnostic")
     ap.add_argument("--pending-file", metavar="<list-stdout.json>",
                     help="TEST HOOK: consume the tier listing from a file "
                          "(no spawn, no list invocation)")
@@ -1026,8 +1365,23 @@ def main() -> int:
     if args.time_budget_ms is not None and args.time_budget_ms < 0:
         _eprint("error: --time-budget-ms must be >= 0")
         return 2
+    # Explicit-flag detection BEFORE defaults fill in (argparse default=None):
+    # the invariant distinguishes "caller chose this value" from "default".
+    call_explicit = args.call_timeout_s is not None
+    if args.call_timeout_s is None:
+        args.call_timeout_s = DEFAULT_CALL_TIMEOUT_S
     if args.call_timeout_s < 1:
         _eprint("error: --call-timeout-s must be >= 1")
+        return 2
+    if args.stall_timeout_s is None:
+        args.stall_timeout_s = DEFAULT_STALL_TIMEOUT_S
+    if args.stall_timeout_s < 60:
+        _eprint("error: --stall-timeout-s must be >= 60 (byte-silence floor: "
+                "healthy LLM units run minutes-level — below 60s the false-kill "
+                "rate dominates; raise it instead)")
+        return 2
+    if args.hb_interval_s < 1:
+        _eprint("error: --hb-interval-s must be >= 1")
         return 2
     if args.stall_waves < 1:
         _eprint("error: --stall-waves must be >= 1")
@@ -1066,6 +1420,48 @@ def main() -> int:
                 f"--help for the per-tier call shapes")
         return 2
 
+    # Four-level timeout invariant, spawn-time fail-loud (design D5): the
+    # defaults are calibrated for out-of-host manual runs; a host-driven run
+    # that passes --time-budget-ms while keeping the 7200s default call-timeout
+    # is GUARANTEED to degenerate into the host hard-killing the whole tree
+    # first (observed 2026-09-14) — reject BEFORE any spawn or enumerator side
+    # effect. budget=0 is exempt from the budget-vs-call levels (it can never
+    # dispatch anything; the protective purpose is moot) but stall < call still
+    # holds. Applies to all tiers identically.
+    budget = args.time_budget_ms
+    invariant_problems = []
+    if budget is not None and budget > 0:
+        budget_s = budget / 1000.0
+        if not call_explicit:
+            invariant_problems.append(
+                f"--time-budget-ms {budget} passed without an explicit "
+                f"--call-timeout-s (default {DEFAULT_CALL_TIMEOUT_S}s >= "
+                f"budget x 0.8 = {budget_s * 0.8:.0f}s -> the soft deadline can "
+                f"never fire before the per-call kill)")
+        elif args.call_timeout_s >= budget_s * 0.8:
+            invariant_problems.append(
+                f"--call-timeout-s {args.call_timeout_s} must be < "
+                f"time-budget-ms x 0.8 ({budget_s * 0.8:.0f}s)")
+    if args.stall_timeout_s >= args.call_timeout_s:
+        invariant_problems.append(
+            f"--stall-timeout-s {args.stall_timeout_s} must be < "
+            f"--call-timeout-s {args.call_timeout_s} (a unit must hit the "
+            f"silence kill before the absolute kill)")
+    if invariant_problems:
+        _eprint("error: timeout invariant violated:\n  - "
+                + "\n  - ".join(invariant_problems))
+        _eprint("recipe (compliant example for a 900000ms host / 720000ms "
+                "budget): --time-budget-ms 720000 --call-timeout-s 540 "
+                "--stall-timeout-s 300  (four levels, >=20% headroom per "
+                "level: stall-timeout-s < call-timeout-s < time-budget-ms x "
+                "0.8 < host per-call timeout; see --help)")
+        return 2
+    if budget is None:
+        _eprint(f"hint: no --time-budget-ms (out-of-host manual run): "
+                f"--call-timeout-s {args.call_timeout_s}s / --stall-timeout-s "
+                f"{args.stall_timeout_s}s apply, no host hard-kill clamp above "
+                f"them")
+
     plan_path = Path(getattr(args, tier["plan_arg"]))
     checkpoints = Path(args.checkpoints)
     inputs_dir = Path(args.inputs_dir)
@@ -1074,6 +1470,12 @@ def main() -> int:
     # = the run dir — same <init-dir>/ neighbor semantics as the init tiers.
     if tier["list_script"] == "diff_group.py":
         plan_path = (checkpoints.parent / "grouping.json").resolve()
+    # t2: plan_arg = init_dir (a DIRECTORY anchor); the dispatcher's plan artifact is
+    # <init-dir>/run_config.json (design D5) so the sidecar/liveness home (plan_path.parent)
+    # = <init-dir> — same neighbor semantics as the other init tiers. run_config.json is
+    # written by write_runconfig at step 0, so it always exists under a live run.
+    if tier["list_script"] == "plan_aggregate.py":
+        plan_path = (Path(args.init_dir) / "run_config.json").resolve()
     if not plan_path.is_file():
         _eprint(f"error: {tier['plan_arg'].replace('_', '-')} artifact not found: "
                 f"{plan_path}")
@@ -1124,16 +1526,22 @@ def main() -> int:
 
     deadline = (time.monotonic() + args.time_budget_ms / 1000.0
                 if args.time_budget_ms is not None else None)
-    waves_run = 0
+    waves_run = 0            # cumulative units dispatched this run (slot backfill)
     failed_written: list[str] = []
-    wave_durations: list[float] = []
-    soft_deadline_hit = False
+    stall_killed: list[str] = []
+    overflow_units: list[str] = []  # crashes whose stderr matched an overflow signature
+    unit_durations: list[float] = []
+    skipped_terminal = 0     # units lazy-skipped: marker already terminal on disk
     stalled = False
-    # zero-progress circuit breaker state: terminal-count snapshot after each
-    # fully-joined wave (anchor = wave-boundary final state, NOT in-flight counts);
-    # N consecutive equal snapshots with pending non-empty → convergence failure.
-    stall_waves_left = args.stall_waves
+    # Zero-progress circuit breaker, dispatch-window anchored: every K =
+    # --stall-waves x --wave newly dispatched units, re-derive the disk
+    # terminal count once; --stall-waves consecutive zero-growth re-derivations
+    # with units still queued → convergence failure.
+    window_k = args.stall_waves * args.wave
+    dispatched_since_window = 0
+    window_left = args.stall_waves
     last_terminal_count = None
+    last_window_snap: dict = {}
 
     def _sidecar_payload(state: str, snap_dict: dict, pending_now: list) -> dict:
         """Sidecar body — counts derive from the SAME snapshot as the stdout
@@ -1141,7 +1549,7 @@ def main() -> int:
         done_n = int(snap_dict.get("done", done0))
         failed_n = int(snap_dict.get("failed", failed0)) + len(set(failed_written))
         pending_n = len(pending_now)
-        avg = (sum(wave_durations) / len(wave_durations)) if wave_durations else 0.0
+        avg = (sum(unit_durations) / len(unit_durations)) if unit_durations else 0.0
         return {
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),  # local tz
             "host": host,
@@ -1153,15 +1561,16 @@ def main() -> int:
             "wave": args.wave,
             "waves_run": waves_run,
             "wave_done_avg_s": round(avg, 1),
-            # Conservative ETA (one unit per wave slot): a human reference
+            # Conservative ETA (one unit per in-flight slot): a human reference
             # number, precision NOT promised.
             "eta_batches": pending_n,
             "state": state,
         }
 
     def _snapshot() -> dict:
-        """Re-derive pending via the list CLI (or the frozen test listing, first
-        iteration only) — disk markers remain the only truth source (D4)."""
+        """Re-derive pending via the list CLI (or the frozen test listing,
+        before the first dispatch) — disk markers remain the only truth source
+        (D4)."""
         if args.pending_file and waves_run == 0:
             return listing
         if args.pending_file:
@@ -1170,17 +1579,17 @@ def main() -> int:
         return _list_pending(tier, args)
 
     snap = _snapshot()
-    pending = snap.get("pending", [])
     id_field = tier["id_field"]
+    queue: deque = deque(snap.get("pending", []))
     _eprint(f"[fanout_runner] tier={args.tier} host={host} repo={repo} "
-            f"total={total} pending={len(pending)} wave={args.wave} "
+            f"total={total} pending={len(queue)} wave={args.wave} "
             f"codegraph={codegraph}")
 
     # Liveness registration (orphan signal, NOT a lock): written for EVERY
     # dispatch exit path via try/finally below; a hard kill leaves it behind
     # and --kill-stale disambiguates. The body dict is reused (mutated only in
     # its `children` field) so the started_ts/cmdline stay stable across
-    # per-wave refreshes.
+    # refreshes.
     liveness_path = _write_liveness(plan_path.parent, args.tier, host)
     liveness_body = json.loads(liveness_path.read_text(encoding="utf-8"))
     children_now: list = []
@@ -1188,137 +1597,285 @@ def main() -> int:
     hb_state = {"done": done0}
     hb_lock = threading.Lock()
     t0 = time.monotonic()
+    # in-flight output sinks for the periodic heartbeat: uid -> (out_sink, err_sink)
+    sinks: dict = {}
+    sinks_lock = threading.Lock()
+    next_hb = t0 + args.hb_interval_s
+    pool = ThreadPoolExecutor(max_workers=args.wave)
+    inflight: dict = {}  # Future -> unit (main loop only)
 
     def _hb_count(inc: int = 0) -> int:
         with hb_lock:
             hb_state["done"] += inc
             return hb_state["done"]
 
-    try:
-        while pending:
-            if deadline is not None and time.monotonic() >= deadline:
-                _eprint(f"[fanout_runner] soft time budget reached; stopping new waves "
-                        f"({len(pending)} pending stay resumable)")
-                soft_deadline_hit = True
-                break
-            wave = pending[: args.wave]
-            waves_run += 1
-            wave_t0 = time.monotonic()
-            _eprint(f"[fanout_runner] wave {waves_run}: dispatching {len(wave)} unit(s): "
-                    f"{[u.get(id_field) for u in wave]}")
+    def _next_unit() -> dict | None:
+        """Pop the next dispatchable unit from the in-memory queue; marker
+        lazy-check first (disk truth, O(1)): a unit whose .done/.failed marker
+        already exists is skipped, never re-spawned — the queue snapshot may be
+        stale by the time a slot frees."""
+        nonlocal skipped_terminal
+        while True:
+            try:
+                unit = queue.popleft()
+            except IndexError:
+                return None
+            dm, fm = unit.get("done_marker"), unit.get("failed_marker")
+            try:
+                if (dm and Path(dm).is_file()) or (fm and Path(fm).is_file()):
+                    skipped_terminal += 1
+                    _eprint(f"[fanout_runner] unit {unit.get(id_field, '?')}: "
+                            f"marker already terminal on disk — skip (lazy check)")
+                    continue
+            except OSError:
+                pass
+            return unit
 
-            def _dispatch(unit: dict) -> None:
-                uid = unit.get(id_field, "?")
-                # Anchor-tree interception BEFORE spawn (path-drift never spawns).
-                reason = _anchor_check(tier, unit, repo)
-                if reason:
-                    _write_failed_marker(tier, unit, reason)
-                    failed_written.append(uid)
-                    _hb(t0, args.tier, waves_run, uid, "failed", _hb_count(), total)
-                    _eprint(f"[fanout_runner] unit {uid}: FAILED pre-spawn ({reason})")
-                    return
-                task = _fill_template(tier, template, unit, repo_str, codegraph)
-                audit = inputs_dir / f"{_safe_name(uid)}.task.md"
-                try:
-                    audit.parent.mkdir(parents=True, exist_ok=True)
-                    audit.write_text(task, encoding="utf-8")
-                except OSError as e:
-                    _eprint(f"warn: audit copy unwritable for {uid}: {e}")
-                if host == "test":
-                    _eprint(f"[fanout_runner] unit {uid}: test hook — no spawn")
-                    return
-                if args.dry_run:
-                    # --dry-run alone: fill audit copies, spawn nothing (R5.3b
-                    # contract; also the no-LLM smoke path over the real list CLI).
-                    _eprint(f"[fanout_runner] unit {uid}: dry-run — no spawn")
-                    return
-                cmd = _spawn_cmd(tier, host)
-                _hb(t0, args.tier, waves_run, uid, "spawn", _hb_count(), total)
-                status, ack, detail, child_pid = _run_unit(
-                    host, cmd, task, repo, args.call_timeout_s)
-                if child_pid is not None:
-                    with children_lock:
-                        children_now.append({"pid": child_pid, "unit": uid,
-                                             "tier": args.tier})
-                        _update_liveness_children(liveness_path, liveness_body,
-                                                  list(children_now))
-                if ack is not None and ack.startswith("failed:"):
-                    _write_failed_marker(tier, unit, ack[len("failed:"):])
-                    failed_written.append(uid)
-                    _hb(t0, args.tier, waves_run, uid, "failed", _hb_count(), total)
-                    _eprint(f"[fanout_runner] unit {uid}: failed ack → .failed marker")
-                elif status in ("timeout", "crash", "spawn-error"):
-                    _hb(t0, args.tier, waves_run, uid,
-                        "timeout" if status == "timeout" else "crash",
-                        _hb_count(), total)
-                    _eprint(f"[fanout_runner] unit {uid}: {status} ({detail[:200]}) → "
-                            f"stays pending (resume re-dispatches)")
-                else:
-                    _hb(t0, args.tier, waves_run, uid, "ok", _hb_count(1), total)
-                    _eprint(f"[fanout_runner] unit {uid}: {ack or 'marker-only'} ({detail[:120]})")
-
-            with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-                list(pool.map(_dispatch, wave))
-
-            wave_durations.append(time.monotonic() - wave_t0)
-            # Wave end: clear the in-flight children registry + wave-end
-            # heartbeat line.
+    def _register_child(uid: str):
+        def _reg(pid: int) -> None:
+            # liveness children[] registers AT SPAWN (_run_unit fires this with
+            # the Popen pid) and the entry is removed at that unit's terminal —
+            # the registry reflects the true in-flight set at any instant.
             with children_lock:
-                children_now.clear()
-            _update_liveness_children(liveness_path, liveness_body, [])
-            _hb(t0, args.tier, waves_run, "-", "wave-end", _hb_count(), total)
-            snap = _snapshot()
-            pending = snap.get("pending", [])
-            # Per-wave sidecar refresh (counts = snapshot-derived, same source as
-            # the stdout summary; human watches from a second terminal, zero
-            # orchestrator involvement).
-            _write_sidecar(plan_path.parent, args.tier,
-                           _sidecar_payload("running", snap, pending))
-            # Zero-progress circuit breaker: every unit of this wave fully joined,
-            # so the terminal count here is the wave-boundary FINAL state. N
-            # consecutive zero-progress waves with pending non-empty = identity/
-            # permission drift between pending derivation and marker writes
-            # (each wave re-dispatches the same finished units, progress stays 0)
-            # → stop dispatching, exit 2 with per-unit diagnosis. This REPLACES
-            # the old same-size heuristic (which only caught a full-wave crash
-            # and never fired when the enumerator misjudged units as pending).
-            terminal_count = (int(snap.get("done", 0)) + int(snap.get("failed", 0))
-                              + len(failed_written))
-            if pending:
-                if last_terminal_count is not None and terminal_count == last_terminal_count:
-                    stall_waves_left -= 1
-                else:
-                    stall_waves_left = args.stall_waves - 1
-                last_terminal_count = terminal_count
-                if stall_waves_left <= 0:
-                    stalled = True
-                    _eprint(f"[fanout_runner] STALLED: {args.stall_waves} consecutive "
-                            f"wave(s) with zero done+failed progress and "
-                            f"{len(pending)} pending — stopping dispatch (pending "
-                            f"units remain resumable). Recipe: stop re-dispatching "
-                            f"this command; diagnose via "
-                            f"`resume_state.py --target <target> --check` and "
-                            f"cross-check each unit's marker existence against "
-                            f"stalled_pending[] below (marker-unwritable / "
-                            f"identity drift).")
-                    break
-            else:
-                stall_waves_left = args.stall_waves
-                last_terminal_count = None
+                children_now.append({"pid": pid, "unit": uid, "tier": args.tier})
+                _update_liveness_children(liveness_path, liveness_body,
+                                          list(children_now))
+        return _reg
 
+    def _terminal_children_rm(child_pid: int | None) -> None:
+        if child_pid is None:
+            return
+        with children_lock:
+            children_now[:] = [c for c in children_now
+                               if c["pid"] != child_pid]
+            _update_liveness_children(liveness_path, liveness_body,
+                                      list(children_now))
+
+    def _dispatch(unit: dict, seq: int) -> None:
+        uid = unit.get(id_field, "?")
+        # Anchor-tree interception BEFORE spawn (path-drift never spawns).
+        reason = _anchor_check(tier, unit, repo)
+        if reason:
+            _write_failed_marker(tier, unit, reason)
+            failed_written.append(uid)
+            _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
+            _eprint(f"[fanout_runner] unit {uid}: FAILED pre-spawn ({reason})")
+            return
+        task = _fill_template(tier, template, unit, repo_str, codegraph)
+        audit = inputs_dir / f"{_safe_name(uid)}.task.md"
+        try:
+            audit.parent.mkdir(parents=True, exist_ok=True)
+            audit.write_text(task, encoding="utf-8")
+        except OSError as e:
+            _eprint(f"warn: audit copy unwritable for {uid}: {e}")
+        if host == "test":
+            _eprint(f"[fanout_runner] unit {uid}: test hook — no spawn")
+            return
+        if args.dry_run:
+            # --dry-run alone: fill audit copies, spawn nothing (R5.3b
+            # contract; also the no-LLM smoke path over the real list CLI).
+            _eprint(f"[fanout_runner] unit {uid}: dry-run — no spawn")
+            return
+        cmd = _spawn_cmd(tier, host)
+        out_sink = {"ts": time.monotonic(), "tail": ""}
+        err_sink = {"ts": out_sink["ts"], "tail": ""}
+        sink_lock = threading.Lock()
+        out_sink["lock"] = sink_lock
+        err_sink["lock"] = sink_lock
+        with sinks_lock:
+            sinks[uid] = (out_sink, err_sink)
+        _hb(t0, args.tier, seq, uid, "spawn", _hb_count(), total)
+        spawn_t0 = time.monotonic()
+        run_log = (Path(args.checkpoints) / args.tier /
+                   f"{_safe_name(uid)}.run.log").resolve()
+        status, ack, detail, child_pid, was_stalled = _run_unit(
+            host, cmd, task, repo, args.call_timeout_s,
+            args.stall_timeout_s, run_log, uid, _register_child(uid))
+        unit_durations.append(time.monotonic() - spawn_t0)
+        with sinks_lock:
+            sinks.pop(uid, None)
+        if was_stalled:
+            stall_killed.append(uid)
+        if ack is not None and ack.startswith("failed:"):
+            _write_failed_marker(tier, unit, ack[len("failed:"):])
+            failed_written.append(uid)
+            _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
+            _eprint(f"[fanout_runner] unit {uid}: failed ack → .failed marker")
+            _terminal_children_rm(child_pid)
+        elif status in ("timeout", "crash", "spawn-error", "stall"):
+            _hb(t0, args.tier, seq, uid,
+                "stall" if status == "stall" else
+                "timeout" if status == "timeout" else "crash",
+                _hb_count(), total)
+            _eprint(f"[fanout_runner] unit {uid}: {status} ({detail[:200]}) → "
+                    f"stays pending (re-dispatch); run.log: {run_log}")
+            if status == "crash" and detail.startswith(_OVERFLOW_MARK):
+                # P2 diagnosis: surface the sharding fix; the unit itself keeps
+                # the unchanged crash semantics below (stays pending).
+                overflow_units.append(uid)
+                _eprint(f"[fanout_runner] unit {uid}: {_OVERFLOW_RECIPE}")
+            # Terminal-less unit (no ack, no marker): back into the queue tail
+            # for in-run re-dispatch. The dispatch-window breaker is what
+            # truncates a deterministically hung unit's kill→re-dispatch cycle.
+            queue.append(unit)
+            _terminal_children_rm(child_pid)
+        else:
+            _hb(t0, args.tier, seq, uid, "ok", _hb_count(1), total)
+            _eprint(f"[fanout_runner] unit {uid}: {ack or 'marker-only'} ({detail[:120]})")
+            _terminal_children_rm(child_pid)
+
+    def _fill() -> bool:
+        """Top up in-flight slots from the queue (slot backfill). Returns True
+        when the soft deadline stopped new dispatches."""
+        nonlocal waves_run, dispatched_since_window
+        stopped = False
+        while len(inflight) < args.wave:
+            if deadline is not None and time.monotonic() >= deadline:
+                stopped = True
+                break
+            unit = _next_unit()
+            if unit is None:
+                break
+            waves_run += 1
+            inflight[pool.submit(_dispatch, unit, waves_run)] = unit
+            dispatched_since_window += 1
+        return stopped
+
+    def _soft_stop_msg() -> None:
+        _eprint(f"[fanout_runner] soft time budget reached; stopping new "
+                f"dispatches ({len(queue)} pending stay resumable)")
+
+    def _breaker_observe(wsnap: dict) -> bool:
+        """One zero-progress breaker observation (design D7, both points):
+        advance the zero-growth window from a fresh disk re-derivation; True =
+        tripped (stalled) with units still to dispatch. Growth, or the first
+        observation ever, resets the window."""
+        nonlocal dispatched_since_window, last_window_snap
+        nonlocal last_terminal_count, window_left, stalled
+        dispatched_since_window = 0
+        last_window_snap = wsnap
+        terminal_count = (int(wsnap.get("done", 0))
+                          + int(wsnap.get("failed", 0))
+                          + len(set(failed_written)))
+        if (last_terminal_count is not None
+                and terminal_count == last_terminal_count):
+            window_left -= 1
+        else:
+            window_left = args.stall_waves
+        last_terminal_count = terminal_count
+        _write_sidecar(plan_path.parent, args.tier,
+                       _sidecar_payload("running", wsnap, list(queue)))
+        if window_left <= 0 and (queue or inflight):
+            stalled = True
+        return stalled
+
+    def _stall_diag(how: str) -> None:
+        _eprint(f"[fanout_runner] STALLED ({how}): {args.stall_waves} "
+                f"consecutive zero-growth re-derivation(s) of the disk "
+                f"done+failed terminal count with units still to dispatch — "
+                f"stopping dispatch (pending units remain resumable). Note: a "
+                f"stall-killed unit does NOT raise the disk count (no marker) "
+                f"— a unit that dies on every attempt surfaces here. Recipe: "
+                f"stop re-dispatching this command; diagnose via "
+                f"`resume_state.py --target <target> --check` and cross-check "
+                f"each unit's marker existence against stalled_pending[] below "
+                f"(marker-unwritable / identity drift / deterministic stall).")
+
+    try:
+        stopped = _fill()
+        if stopped:
+            _soft_stop_msg()
+        # Slot-backfill rounds: harvest terminal futures (FIRST_COMPLETED, 1s
+        # poll granularity) and backfill each freed slot immediately — a hung
+        # unit occupies only its own slot, NEVER the whole run. When queue AND
+        # in-flight both drain, the drain re-list (breaker observation point
+        # b) decides: more pending on disk → one more in-run round; nothing →
+        # clean exit.
+        while not (stalled or stopped):
+            while inflight:
+                ready, _ = wait(list(inflight), timeout=1.0,
+                                return_when=FIRST_COMPLETED)
+                for fut in ready:
+                    unit = inflight.pop(fut)
+                    try:
+                        fut.result()
+                    except SystemExit:
+                        raise
+                    except Exception as e:
+                        _eprint(f"warn: unit {unit.get(id_field, '?')} dispatch "
+                                f"thread error: {e}")
+                if stalled:
+                    break
+                if _fill():
+                    stopped = True
+                    _soft_stop_msg()
+                    break
+                elif dispatched_since_window >= window_k:
+                    # Observation point (a): K = --stall-waves x --wave units
+                    # dispatched since the last check → re-derive the disk
+                    # terminal count once (markers = only truth).
+                    if _breaker_observe(_snapshot()):
+                        _stall_diag("dispatch window")
+                        break
+                # Periodic in-flight heartbeat (disclosure, --hb-interval-s):
+                # unit id + seconds since its child's last output.
+                now = time.monotonic()
+                if now >= next_hb:
+                    next_hb = now + args.hb_interval_s
+                    with sinks_lock:
+                        live = list(sinks.items())
+                    for uid, (o, e) in live:
+                        idle = max(0, int(now - min(o["ts"], e["ts"])))
+                        _hb_inflight(t0, args.tier, len(live), uid, idle,
+                                     _hb_count(), total)
+            if stalled or stopped:
+                break
+            # Observation point (b) — drain re-list (design D7): queue empty
+            # and in-flight zero. Re-derive pending from disk; units still
+            # pending get one more zero-growth-bounded attempt round in THIS
+            # run (the lone-poison-unit tail "kill → re-dispatch → kill" is
+            # truncated in-run instead of bouncing partial:true to the
+            # orchestrator forever).
+            wsnap = _snapshot()
+            pending_now = wsnap.get("pending") or []
+            if not pending_now:
+                break  # clean drain: nothing left to dispatch
+            queue.extend(pending_now)
+            if _breaker_observe(wsnap):
+                _stall_diag("queue drained but the disk re-list still shows "
+                            "pending units")
+                break
+            stopped = _fill()
+            if stopped:
+                _soft_stop_msg()
+        pool.shutdown(wait=True)
+
+        if stalled:
+            snap = last_window_snap or snap
+            pending_units = list(queue)
+        else:
+            snap = _snapshot()
+            pending_units = snap.get("pending") or []
+            if not pending_units and queue:
+                pending_units = list(queue)
+            if waves_run == 0 and skipped_terminal and not queue:
+                # every queued unit was lazy-skipped as already-terminal on
+                # disk; the frozen test listing cannot reflect that — disk
+                # markers are the truth, nothing is pending
+                pending_units = []
         done_now = int(snap.get("done", done0))
         failed_now = int(snap.get("failed", failed0)) + len(failed_written)
         # Reconcile: markers written this run may not be reflected in the last
-        # snapshot if the wave bailed before re-listing.
+        # snapshot if the run bailed before re-listing.
         if failed_written:
             failed_now = max(failed_now, failed0 + len(set(failed_written)))
-        partial = bool(pending)
+        partial = bool(pending_units)
         # Terminal sidecar state (counts consistent with the stdout summary below
         # by construction — both derive from {snap, failed_written}).
         _write_sidecar(plan_path.parent, args.tier,
                        _sidecar_payload(
                            "exited-partial" if partial else "exited-clean",
-                           snap, pending))
+                           snap, pending_units))
         result = {
             "runner": "fanout_runner",
             "tier": args.tier,
@@ -1327,10 +1884,11 @@ def main() -> int:
             "total": total,
             "done": done_now,
             "failed": failed_now,
-            "pending": len(pending),
+            "pending": len(pending_units),
             "wave": args.wave,
             "waves_run": waves_run,
             "partial": partial,
+            "stall_killed": stall_killed,
             "stalled": stalled,
         }
         if stalled:
@@ -1344,7 +1902,13 @@ def main() -> int:
                  if u.get("done_marker") else None,
                  "failed_marker_exists": Path(u["failed_marker"]).is_file()
                  if u.get("failed_marker") else None}
-                for u in pending]
+                for u in pending_units]
+        if overflow_units:
+            # P2 diagnosis disclosure (additive; absent when no crash matched
+            # an overflow signature — stdout stays byte-identical otherwise).
+            # De-duplicated in dispatch order: a re-dispatched unit crashes
+            # once per attempt, but the summary names the UNIT once.
+            result["context_overflow"] = list(dict.fromkeys(overflow_units))
         if args.dry_run:
             result["dry_run"] = True
         _eprint(f"[fanout_runner] done ({args.tier}): {result['done']}/{total} done, "
@@ -1353,6 +1917,7 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False))
         return 2 if stalled else 0
     finally:
+        pool.shutdown(wait=True)
         # Liveness deregistration on ANY exit path (incl. partial early-exit,
         # list-CLI sys.exit, unexpected exception). Hard-kill leaves the file
         # behind — a legal residual state disambiguated by --kill-stale.

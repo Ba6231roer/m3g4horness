@@ -114,11 +114,13 @@ class SdrContextTest(unittest.TestCase):
         self.assertGreater(d["baseline_truncated_bytes"], 0)
 
     # --- external repo retrieval ---
-    def _make_front(self, reachable=True):
-        front = self.tmp / ("front" if reachable else "gone_front")
-        decl_path = front.as_posix() if reachable else (self.tmp / "gone_front").as_posix()
+    def _make_front(self, reachable=True, configured=True, name="front"):
+        """Create a declared external repo. configured=False leaves the project config
+        untouched => the authorization gate must skip it (zero reads)."""
+        front = self.tmp / name
+        decl_path = front.as_posix() if reachable else (self.tmp / f"gone_{name}").as_posix()
         (self.repo / "docs" / "security-controls").mkdir(parents=True, exist_ok=True)
-        (self.repo / "docs" / "security-controls" / "ext.md").write_text(
+        (self.repo / "docs" / "security-controls" / f"ext-{name}.md").write_text(
             f"本地前端项目地址 {decl_path},前端分支名与本项目一致;\n"
             f"垂直越权以 buttonAuth.properties 配置为准,接口不应在前端多处出现。\n",
             encoding="utf-8")
@@ -135,7 +137,22 @@ class SdrContextTest(unittest.TestCase):
         (front / "config" / "buttonAuth.properties").write_text(
             "pay/quick=allow,roleA\n", encoding="utf-8")
         _commit_all(front, "branch")
+        if configured:
+            self._approve(front)
         return front
+
+    def _approve(self, *roots):
+        """Write the project read-roots config (what read_roots_config.py produces)."""
+        cfg = self.repo / ".mgh" / "read-roots.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        existing = []
+        if cfg.is_file():
+            existing = json.loads(cfg.read_text(encoding="utf-8")).get("read_roots", [])
+        for r in roots:
+            if str(r) not in existing:
+                existing.append(str(r))
+        cfg.write_text(json.dumps({"v": 1, "read_roots": existing}, ensure_ascii=False),
+                       encoding="utf-8")
 
     def test_external_declaration_hit_materializes_conclusions(self):
         front = self._make_front(reachable=True)
@@ -151,6 +168,132 @@ class SdrContextTest(unittest.TestCase):
         self.assertIn("pay/quick", hits)
         self.assertIn("pay.vue", hits)           # route occurrence in the frontend
         self.assertEqual(d["external_skipped"], [])
+        self.assertEqual(d["pending_approval"], [])
+
+    # --- authorization gate (add-mgh-sdr-read-root-config 2.1) ---
+    def test_unapproved_declaration_skipped_and_pending(self):
+        front = self._make_front(reachable=True, configured=False)
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["external_repos"], [])          # zero retrieval
+        self.assertFalse((self.run_dir / "external").exists())   # ZERO reads
+        self.assertTrue(any(s.startswith(f"unapproved: ")
+                            and str(front) in s for s in d["external_skipped"]))
+        self.assertEqual(d["pending_approval"], [str(front)])
+        ctx = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        self.assertEqual(ctx["pending_approval"], [str(front)])
+
+    def test_mixed_declarations_one_configured_one_not(self):
+        front = self._make_front(reachable=True, configured=True)
+        front2 = self._make_front(reachable=True, configured=False, name="front2")
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual([e["path"] for e in d["external_repos"]], [str(front)])
+        self.assertEqual(d["pending_approval"], [str(front2)])
+        self.assertTrue(any("unapproved" in s and str(front2) in s
+                            for s in d["external_skipped"]))
+
+    def test_check_pending_shape_violation(self):
+        self._make_front(reachable=True, configured=False)
+        self._run(*self._base_args())
+        ctx_path = self.run_dir / "context.json"
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx["pending_approval"] = "not-a-list"
+        ctx_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("pending_approval", err)
+
+    def test_check_skip_pending_consistency(self):
+        # unapproved skip WITHOUT its pending_approval counterpart => --check exit 2
+        self._make_front(reachable=True, configured=False)
+        self._run(*self._base_args())
+        ctx_path = self.run_dir / "context.json"
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx["pending_approval"] = []
+        ctx_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("missing from pending_approval", err)
+
+    # --- @RequestMapping family + class base-route join (improve-mgh-sdr-report-structure 2.1) ---
+    def test_new_routes_requestmapping_family_and_base_route(self):
+        _git(self.repo, "checkout", "-q", "master")
+        _git(self.repo, "checkout", "-qb", "feat-rm")
+        src = self.repo / "src"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "OrderController.java").write_text(
+            '@RestController\n'
+            '@RequestMapping("/order")\n'
+            'public class OrderController {\n'
+            '    @PostMapping("/submit")\n'
+            '    public String submit() { return "ok"; }\n'
+            '\n'
+            '    @RequestMapping("/list")\n'
+            '    public String list() { return "ok"; }\n'
+            '}\n', encoding="utf-8")
+        (src / "QController.java").write_text(
+            '@RestController\n'
+            'public class QController {\n'
+            '    @RequestMapping("/q")\n'
+            '    public String q() { return "ok"; }\n'
+            '}\n', encoding="utf-8")
+        _commit_all(self.repo, "rm")
+        routes = self.m._new_routes(self.repo, "master", "feat-rm")
+        # @PostMapping joined with class base; method-level @RequestMapping WITH class
+        # context joins the base too; one without a base route stays as-is
+        self.assertEqual(routes, ["/order/list", "/order/submit", "/q"])
+
+    # --- route_hits[] materialization (improve-mgh-sdr-report-structure 2.2) ---
+    def test_route_hits_materialized_in_record_and_context(self):
+        self._make_front(reachable=True)
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        rec = d["external_repos"][0]
+        self.assertEqual(rec["route_hits"], [{"route": "/pay/quick", "count": 1}])
+        ctx = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        self.assertEqual(ctx["external_repos"][0]["route_hits"],
+                         [{"route": "/pay/quick", "count": 1}])
+        # hits.md text still carries the per-route count section
+        self.assertIn("出现计数", Path(rec["summary_path"]).read_text(encoding="utf-8"))
+
+    def test_route_hits_absent_without_routes(self):
+        # no java diff between base and branch -> no routes -> route_hits == []
+        _git(self.repo, "checkout", "-qb", "feat-empty")
+        (self.repo / "notes.txt").write_text("no java changes\n", encoding="utf-8")
+        _commit_all(self.repo, "txt")
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["external_repos"], [])   # no declaration in this fixture
+        for rec in d["external_repos"]:
+            self.assertEqual(rec["route_hits"], [])
+
+    # --- --check route_hits[] shape (improve-mgh-sdr-report-structure 2.3) ---
+    def test_check_route_hits_shape_violation(self):
+        self._make_front(reachable=True)
+        self._run(*self._base_args())
+        ctx_path = self.run_dir / "context.json"
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx["external_repos"][0]["route_hits"] = [{"route": "/pay/quick"}]  # count missing
+        ctx_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("route_hits", err)
+
+    def test_check_old_context_without_route_hits_ok(self):
+        self._make_front(reachable=True)
+        self._run(*self._base_args())
+        ctx_path = self.run_dir / "context.json"
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        for e in ctx["external_repos"]:
+            e.pop("route_hits", None)               # incremental field: absence = OK
+        ctx_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
 
     def test_unreachable_declaration_degrades(self):
         self._make_front(reachable=False)

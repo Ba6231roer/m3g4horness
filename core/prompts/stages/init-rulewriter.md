@@ -22,6 +22,9 @@ rule(s) for the target agent **in exactly one format** (`--format`).
   - `done_marker` — the exact `.done` path you MUST touch after.
 - **NEVER** `Read`/`cat`/`py -c` the whole `controls_inventory.json` (the orchestrator
   already sank your category into `input_path`); **NEVER** `py -c`/`python -c` introspection.
+- **锚内预期路径不存在**(本 stage 提示词或其他 mgh-core 资产的锚内路径 Read 失败/文件缺失)
+  → 毒输入同款处理:立即回 `failed mgh-core prompts not installed at <path>` ack,**NEVER**
+  跨目录(父项目、`/home`、`/adhome`、兄弟项目)漫游搜索提示词或脚本。
 
 ## Format selection (mutually exclusive — pick the fragment that matches --format)
 - `--format claude` → follow `core/prompts/fragments/rules-format-claude.md`

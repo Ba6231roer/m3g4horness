@@ -428,6 +428,47 @@ class TestForwardCaliberAndCheck(unittest.TestCase):
         self.assertTrue(any("orphan marker" in n and "legacy__id.json.done" in n
                             for n in body["notes"]), body["notes"])
 
+    def test_t2_map_substate_helper_distinguishes_intermediate_from_done(self):
+        # adopt-fanout-t2: shard partial markers without the rollup terminal marker
+        # = LEGAL map-reduce intermediate (advisory, no new step id); once
+        # synthesis.json.done exists the state is "t2 complete" → no advisory.
+        s = _State(no_scout=True)
+        self.assertIsNone(RS._t2_map_substate(s.init))          # pre-map: nothing
+        s.touch("checkpoints/t2/shards/t2-authorization.json.done")
+        note = RS._t2_map_substate(s.init)
+        self.assertIsNotNone(note)
+        self.assertIn("map-reduce intermediate", note)
+        self.assertIn("LEGAL", note)
+        s.touch("checkpoints/t2/synthesis.json.done")           # rollup done → distinct
+        self.assertIsNone(RS._t2_map_substate(s.init))
+        # failed-shard flavour: advisory warns rollup is blocked (missing summary)
+        s2 = _State(no_scout=True)
+        s2.touch("checkpoints/t2/shards/.t2-crypto.json.failed")
+        n2 = RS._t2_map_substate(s2.init)
+        self.assertIsNotNone(n2)
+        self.assertIn("block rollup", n2)
+
+    def test_t2_map_intermediate_is_legal_not_violation_in_check(self):
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                  "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": "auth::U::ff", "category": "authorization", "kind": "auth"}],
+            "truncated": False})
+        enc = IT.safe_unit_filename("auth::U::ff")
+        s.write_json(f"checkpoints/t1/{enc}.json", {"cluster_id": "auth::U::ff"})
+        s.touch(f"checkpoints/t1/{enc}.json.done")
+        s.touch("checkpoints/t2/shards/t2-authorization.json.done")
+        st = s.state()
+        self.assertEqual(st["step"], "t2")          # no new step id
+        self.assertTrue(any("map-reduce intermediate" in n for n in st["notes"]), st["notes"])
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+        body = json.loads(out)
+        self.assertTrue(body["ok"])                 # legal intermediate, NOT a violation
+        self.assertTrue(any("map-reduce intermediate" in n for n in body["notes"]),
+                        body["notes"])
+
     def test_check_touch_only_done_marker_not_violation(self):
         # `.done` with NO sibling record body = legal touch-only form (the marker is
         # the terminal credential; bodies are diagnostic) → --check exit 0.

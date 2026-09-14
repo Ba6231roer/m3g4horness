@@ -125,9 +125,13 @@ _STEPS = [
     },
     {
         "step": "t2",
-        "kind": "subagent",
-        "script_name": None,  # Subagent: no leaf script
-        "cli_args": None,
+        # Dispatcher-first over the MAP stage (over-budget map-reduce): the
+        # deterministic drive = fanout_runner --tier t2. Small-repo (needs_reduce
+        # false) single-context init-synthesis is a subagent branch per the t2
+        # fragment; fanout with empty pending is a clean no-op (benign, partial:false).
+        "kind": "bash",
+        "script_name": "fanout_runner.py",
+        "cli_args": "--tier t2 --init-dir <init-dir> --budget <max-aggregate-bytes> --checkpoints <init-dir>/checkpoints/t2 --inputs-dir <init-dir>/inputs/t2",
         "input": {"artifact": "checkpoints/t1/*.json", "shape": "[T1 records]"},
         "output": {"artifact": "controls_inventory.json", "shape": "{controls[],category}",
                    "path_pattern": "<init-dir>/controls_inventory.json"},

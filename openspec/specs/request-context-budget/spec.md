@@ -117,12 +117,14 @@ pending=32 恒定不收敛)〕。
 (stderr 告警),保证**编排器单次请求 ≤ `--orch-budget-bytes`**。待办壳 SHALL 不携带可变长记录负载(完整
 记录下沉进 `input_path` 文件)。
 
-**dispatcher 路径增量**(mgh-init scout 首采,t1/t3 续采):当某 tier 的 fan-out 由确定性 dispatcher 叶脚本
+**dispatcher 路径增量**(mgh-init scout 首采,t1/t2/t3 续采):当某 tier 的 fan-out 由确定性 dispatcher 叶脚本
 (`fanout_runner.py`,见 `fanout-dispatch` 能力)驱动时,编排器驱动该 tier 的方式 SHALL 为一次
 `Bash` 调用 dispatcher + `partial:true` 时重派同一命令——dispatcher 内部对全量 `pending[]` 按
 `--orch-budget-bytes` 同源预算分页消费,编排器 NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息
-(由固定模板 + 逐字字段填充构造)、NEVER 在波次边界发起 LLM 决策回合。手派路径(编排器翻页 + 逐单元
-spawn)保留为宿主 CLI 不可用时的回退,其本 requirement 既有纪律不变。
+(由固定模板 + 逐字字段填充构造)、NEVER 在波次边界发起 LLM 决策回合。T2 map 阶段同样适用:编排器先
+`plan_aggregate.py --node t2` 判 `needs_reduce`,仅当 `needs_reduce=true` 时一次 `Bash` 调
+`fanout_runner.py --tier t2`,map 全 `.done` 后单一 rollup subagent 仅吞 `rollup.summary_paths`。手派路径
+(编排器翻页 + 逐单元 spawn)保留为宿主 CLI 不可用时的回退,其本 requirement 既有纪律不变。
 
 **dispatcher 长跑增量**:编排器每次调用/重派 dispatcher 时 SHALL 传 per-call `timeout` 且该值 >
 dispatcher 的 `--time-budget-ms`(软时限先于宿主硬杀触发;否则重派退化为「杀→查盘→重派→又被杀」
@@ -152,11 +154,18 @@ dispatcher 的 `--time-budget-ms`(软时限先于宿主硬杀触发;否则重派
 
 #### Scenario: Dispatcher-driven tier keeps the orchestrator out of paging
 
-- **WHEN** mgh-init 任一 dispatcher 采纳 tier(scout / t1 / t3)由 `fanout_runner.py` 驱动,pending
+- **WHEN** mgh-init 任一 dispatcher 采纳 tier(scout / t1 / t2 / t3)由 `fanout_runner.py` 驱动,pending
   单元数超过单页预算(如 500 单元)
 - **THEN** 编排器对整个 tier 只发起一次 `Bash` 调用(+`partial:true` 时重派同一命令),不出现
   手动 `--offset`/`--limit` 翻页、不逐次撰写 subagent 任务消息;分页消费发生在 dispatcher 内部
   (同源 `--orch-budget-bytes` 预算)
+
+#### Scenario: T2 map phase keeps the orchestrator out of manual paging
+
+- **WHEN** T2 map 阶段 `needs_reduce=true`(K 个 category shard 超单页预算)
+- **THEN** 编排器对 map 阶段只发起一次 `Bash` 调 `fanout_runner.py --tier t2`(+`partial:true` 重派),
+  不手动 `--offset`/`--limit` 翻页、不逐 shard 撰写 partial-synthesis 任务消息;map 全 `.done` 后仅
+  单一 rollup subagent 吞 `rollup.summary_paths`
 
 #### Scenario: Re-dispatch carries per-call timeout above the soft deadline
 

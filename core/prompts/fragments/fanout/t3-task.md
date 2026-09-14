@@ -15,7 +15,10 @@ defined by the prompt at
 `{{repo}}/.opencode/mgh-core/prompts/stages/init-rulewriter.md` (or
 `{{repo}}/.claude/mgh-core/prompts/stages/init-rulewriter.md` on a claude
 install) — READ it first and follow it exactly; this message supplies only
-your input fields.
+your input fields. That path is the stage prompt's ONLY location: if the Read
+fails, immediately reply `failed mgh-core prompts not installed at <path>` —
+NEVER search other directories (parent project, /home, /adhome, siblings) for
+prompts or scripts.
 
 category: {{category}}
 format (exactly one; never mix structures): {{format}}

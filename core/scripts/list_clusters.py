@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""
+r"""
 list_clusters — deterministic T1 work-list producer for /mgh-init.
 
 Reads the wrapper dict `clusters.json` ({repo, clusters[], truncated}) and the T1

@@ -24,6 +24,15 @@ Grouping rules (heuristic, NOT a promise — disclosed in the report):
     merge in sorted order while the combined slice stays within --max-standalone-bytes
     (a single oversize file is its own unit — merged-capped, never split mid-file).
 
+Exclusion filter (deterministic closed set, applied BEFORE any grouping, both modes):
+  test trees / build outputs / generated code / static assets / lockfiles / build
+  scripts never become review units (the real-repo first run produced 401 units, most
+  of them tests and artifacts). The whitelist ALWAYS wins: *.sql, *Mapper.xml,
+  application*.yml, *.properties, logback*.xml are the six-dimension review face and
+  are NEVER excluded, even under a build dir. Exclusion is never silent: stdout
+  `excluded{count, by_reason{}}` + the report's honesty boundary disclose it, and
+  --include-excluded is the one-flag fallback restoring the full review.
+
 Slice file: per-unit diff hunks (git default 3-line context) + file list + change types
 (A/M/D/R) + routes. Draft path / markers: drafts live in `<checkpoints>/../drafts`
 (deterministic sibling of the markers dir in the standard <run-dir>/ layout); slices in
@@ -35,7 +44,8 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": "<abs>", "base": "...", "branch": "...", "empty": bool,
    "total": N, "done": M, "failed": F, "counts": {"interface": I, "standalone": S},
    "pending": [unit...], "offset": 0, "limit": K}
-  unit = {unit_id, input_path, draft_path, done_marker, failed_marker, kind, route, unit_bytes}
+  unit = {unit_id, input_path, draft_path, done_marker, failed_marker, kind, route,
+          unit_bytes, chain (interface units in codegraph mode; standalone/off = [])}
 The same JSON is written to `<checkpoints>/../grouping.json` (the run's enumeration
 record; fanout plan artifact + `--check` input).
 
@@ -57,16 +67,35 @@ Call-chain grouping (optional, codegraph-gated): when `<repo>/.codegraph/` exist
 `codegraph` binary is on PATH (env override MGH_CODEGRAPH_BIN for tests/operators), the
 changed-method symbol set (deterministic local scan: annotations + method-decl brace
 extent) is queried with `codegraph callees/callers --json` and the returned call edges
-(restricted to the changed set) drive route-anchored downstream closures — every route
-method's closure becomes ONE interface unit carrying the whole changed chain's hunks
-(controller + changed service/dao), so cross-layer judgement (authz + SQL + validation)
-stays inside a single subagent slice. Changed symbols unreachable from any route anchor
-(reflection/DI residue or codegraph=off) fall to standalone units — split, never forced
-into a chain. Shared downstream (a changed method called by >1 changed route) is split
-per route: its hunks repeat inside each referencing interface slice (dedup left to the
-renderer), never merged into one unit. No codegraph (or every query failing) degrades to
-the annotation+directory grouping below — byte-identical to the no-codegraph baseline.
-stdout carries `codegraph: true|false` (whether this run used call-chain grouping).
+drive route-anchored downstream closures — every route method's closure becomes ONE
+interface unit carrying the whole changed chain's hunks (controller + changed
+service/dao), so cross-layer judgement (authz + SQL + validation) stays inside a single
+subagent slice. Upstream anchoring: a changed symbol with no changed-route owner walks
+the CALLER edges (which codegraph already returned for the unchanged endpoints — kept,
+not dropped) up <=2 hops; a route method found on the way (deterministic local
+annotation scan of the caller's branch file) absorbs the symbol into its interface
+unit, whose slice carries a bounded upstream-route source snippet. Shared-chain merge:
+within the SAME controller file, routes whose downstream changed-symbol reach sets are
+equal or subsets merge into one interface unit (`route` = semicolon-joined). Across
+controller files routes stay split (hunks repeat per referencing slice; renderer dedups).
+An interface unit past --max-interface-bytes (default 256KB) is deterministically split
+into `-partN` units per route group. Chain materialization: every interface unit in
+codegraph mode carries `chain[]` — the deterministic node projection of its route
+anchor(s) down the ALREADY-RETURNED call edges (zero new codegraph queries; the
+unchanged-downstream edges the changed-set filter previously dropped are consumed
+here). Nodes: {fqn_short, label, file, line, change: changed|unchanged|external,
+route?, branch_of?}; branch_of = host node index (fan-out, never a tree); dao methods
+get a mapper-XML terminal node (change=external) from one deterministic repo *.xml
+scan (namespace last segment = class stem ∧ statement id = method). Standalone units
+and codegraph-off runs carry chain=[] (structure always present). Java residual files
+no anchor/closure claims fall
+to directory clustering + --max-standalone-bytes (same as non-java residuals — one unit
+per file was reverted after the real-repo 401-unit run). No codegraph (or every query
+failing) degrades to the annotation+directory grouping below — byte-identical to the
+no-codegraph baseline. stdout carries `codegraph: true|false` (whether this run used
+call-chain grouping) plus `codegraph_stats{...}` (capture diagnostics; all-zero but
+present when off). Probe failure prints its reason (no .codegraph dir / no binary) to
+stderr.
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/re/shutil/subprocess/sys/pathlib).
 """
@@ -83,11 +112,64 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 DEFAULT_MAX_STANDALONE_BYTES = 64 * 1024  # 64KB merge cap for standalone clusters
+DEFAULT_MAX_INTERFACE_BYTES = 256 * 1024  # 256KB split cap for interface units
 
 CODEGRAPH_LIMIT = 500    # callees/callers --limit: raise well above the CLI default 20 so
 # a real changed-set edge is not truncated away behind unrelated same-name callers.
 CODEGRAPH_TIMEOUT = 20   # per-query subprocess timeout; a hang degrades to no edges
 CODEGRAPH_DIR = ".codegraph"
+
+# Upstream anchoring: BFS depth cap over the caller edges (2 hops, visited-guarded).
+ANCHOR_MAX_HOPS = 2
+# Bounded route-method source snippet in an upstream-anchored slice (~60 lines).
+UPSTREAM_ROUTE_MAX_LINES = 60
+
+# --- exclusion filter (deterministic closed set; the whitelist ALWAYS wins) ---
+#
+# Order matters: _EXCLUDE_WHITELIST_RX is checked FIRST — *.sql / *Mapper.xml /
+# application*.yml / *.properties / logback*.xml are the six-dimension review face
+# (SQL injection / sensitive data / config authz) and standalone clustering already
+# makes them cheap, so they are NEVER excluded even under a build directory.
+_EXCLUDE_WHITELIST_RX = re.compile(
+    r"(?:^|/)[^/]*\.sql$"
+    r"|[^/]*Mapper\.xml$"
+    r"|application[^/]*\.ya?ml$"
+    r"|(?:^|/)[^/]*\.properties$"
+    r"|logback[^/]*\.xml$")
+_EXCLUDE_RULES: list[tuple[str, "re.Pattern[str]"]] = [
+    # test trees (java `src/test/java` covered by the src/test/ segment; python/frontend
+    # `tests/` collected too) + test-style file names
+    ("test-tree", re.compile(r"(?:^|/)src/test/"      # java: src/test/java/...
+                             r"|(?:^|/)(?:tests?|__tests__)/"
+                             r"|[^/]*Tests?\.java$"
+                             r"|[^/]*IT\.java$")),
+    # build outputs (any depth)
+    ("build-output", re.compile(r"(?:^|/)(?:target|build|out|dist)(?:/|$)")),
+    # generated code
+    ("generated", re.compile(r"(?:^|/)(?:generated|generated-sources)(?:/|$)")),
+    # static assets & third-party binaries (min.* bundles / sourcemaps included)
+    ("static-asset", re.compile(r"\.(?:png|jpe?g|gif|ico|svg|webp|bmp|woff2?|ttf|otf|eot"
+                                r"|map|pdf|zip|gz|jar|class)$"
+                                r"|\.(?:min\.(?:js|css))$")),
+    # lockfiles
+    ("lockfile", re.compile(r"(?:^|/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$")),
+    # build scripts
+    ("build-script", re.compile(r"(?:^|/)(?:pom\.xml|build\.gradle(?:\.kts)?"
+                                r"|settings\.gradle(?:\.kts)?|mvnw(?:\.cmd|\.bat)?"
+                                r"|gradlew(?:\.bat)?)$")),
+]
+
+
+def _exclude_reason(rel: str) -> str | None:
+    """Reason label when the file is in the closed exclusion set, else None. The
+    whitelist is checked first and always wins (review-face files stay in)."""
+    p = rel.replace("\\", "/")
+    if _EXCLUDE_WHITELIST_RX.search(p):
+        return None
+    for reason, rx in _EXCLUDE_RULES:
+        if rx.search(p):
+            return reason
+    return None
 
 # Class-level controller markers (branch file content scan).
 _CONTROLLER_RX = re.compile(r"@(?:RestController|Controller)\b")
@@ -205,10 +287,20 @@ def _cg_query(repo: Path, sub: str, symbol: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _codegraph_probe_reason(repo: Path) -> str | None:
+    """Why call-chain grouping is off (None = available). Diagnostic only."""
+    if not (repo / CODEGRAPH_DIR).is_dir():
+        return "no .codegraph dir"
+    if _codegraph_bin() is None:
+        return "no binary"
+    return None
+
+
 def _cg_edges(repo: Path, key: str) -> tuple[set[str], set[str]]:
     """(callers_keys, callees_keys) for a bare symbol name. Entries (name, filePath)
-    are folded to `filePath::name` keys here; the caller matches them against the
-    changed-symbol set (superset union across files is safe — the filter drops extras)."""
+    are folded to `filePath::name` keys here. Callers are kept VERBATIM including
+    unchanged endpoints (upstream anchoring needs them; consumers match them against
+    their own symbol set so extras are inert)."""
     callers: set[str] = set()
     callees: set[str] = set()
     for sub, acc in (("callers", callers), ("callees", callees)):
@@ -358,14 +450,12 @@ def _brace_end(lines: list[str], decl: int) -> int | None:
     //- and /* */-comments. None = no opening brace (abstract/interface method or a
     declaration that never closes) -> not a body symbol."""
     depth, opened = 0, False
-    in_str = in_ch = in_line_c = in_block_c = False
+    in_str = in_ch = in_block_c = False
     for i in range(decl - 1, len(lines)):
         ln = lines[i]
         j = 0
         while j < len(ln):
             c = ln[j]
-            if in_line_c:
-                break
             if in_block_c:
                 if c == "*" and j + 1 < len(ln) and ln[j + 1] == "/":
                     in_block_c = False
@@ -392,8 +482,8 @@ def _brace_end(lines: list[str], decl: int) -> int | None:
             if c == "/" and j + 1 < len(ln):
                 nxt = ln[j + 1]
                 if nxt == "/":
-                    in_line_c = True
-                    break
+                    break   # line comment: the rest of THIS line is dead (state is
+                            # per-line — a comment must not poison the next line)
                 if nxt == "*":
                     in_block_c = True
                     j += 2
@@ -493,6 +583,34 @@ def _owning_symbol(syms: list[dict], hline: int | None) -> int | None:
     return best
 
 
+def _owning_hunk_symbol(syms: list[dict], hunk: tuple) -> int | None:
+    """Ownership via the hunk's anchor candidates: the FIRST added line that falls
+    inside a symbol wins (a hunk's leading '+' lines may be javadoc/blank between
+    methods — the anchor must not strand on them when a later '+' line carries the
+    actual new method); falls back to the first added line (file-level change)."""
+    cands = _hunk_anchor_candidates(hunk)
+    for hline in cands:
+        o = _owning_symbol(syms, hline)
+        if o is not None:
+            return o
+    return None
+
+
+def _hunk_anchor_candidates(hunk: tuple) -> list[int]:
+    """New-file positions of every added ('+') line in the hunk, in order (a
+    leading 'add blank/javadoc' line and the actual code line both appear)."""
+    start, _count, body = hunk
+    cur, out = start, []
+    for line in body:
+        pre = line[:1]
+        if pre in (" ", "+"):
+            if pre == "+":
+                out.append(cur)
+            cur += 1
+        # '-' consumes no new-file line; '\' no-newline marker is skipped
+    return out
+
+
 def _hunk_anchor_line(hunk: tuple) -> int | None:
     """New-file line anchoring the ACTUAL edit in a hunk, not the git 3-line context:
     the first added ('+') line's new-file position when the hunk adds anything; else the
@@ -587,11 +705,12 @@ def _cluster_standalone_sel(items: list[tuple[FileDiff, list[int]]],
 
 class Unit:
     __slots__ = ("unit_id", "kind", "route", "files", "hunk_sel", "slice_bytes",
-                 "ann_ctx")
+                 "ann_ctx", "sym_ctx", "chain")
 
     def __init__(self, unit_id: str, kind: str, route: str,
                  files: list[FileDiff], hunk_sel: dict | None = None,
-                 ann_ctx: list[str] | None = None):
+                 ann_ctx: list[str] | None = None,
+                 sym_ctx: list[str] | None = None):
         self.unit_id = unit_id
         self.kind = kind
         self.route = route
@@ -599,6 +718,20 @@ class Unit:
         self.hunk_sel = hunk_sel or {}   # file path -> list of hunk indices (interface only)
         self.slice_bytes = 0
         self.ann_ctx = ann_ctx or []     # annotation-context lines (call-chain interface only)
+        self.sym_ctx = sym_ctx or []     # per-file symbol table (merged standalone clusters)
+        self.chain: list[dict] = []      # materialized call chain (interface+codegraph only)
+
+
+def _sym_table(syms: list[dict], limit: int = 40) -> list[str]:
+    """Bounded per-file symbol table lines (method name + line extent) for merged
+    standalone slices — the subagent keeps method-level addressing without a full read."""
+    out = []
+    for s in syms[:limit]:
+        out.append(f"  {s['name']}  lines {s['start']}-{s['end']}"
+                   + (f"  route {s['route']}" if s["route"] else ""))
+    if len(syms) > limit:
+        out.append(f"  ... (+{len(syms) - limit} more symbols)")
+    return out
 
 
 def _build_units(repo: Path, file_diffs: list[FileDiff], branch: str,
@@ -635,21 +768,332 @@ def _build_units(repo: Path, file_diffs: list[FileDiff], branch: str,
     return units
 
 
+def _route_method_snippet(repo: Path, path: str, branch: str, name: str) -> list[str]:
+    """Bounded upstream-route context: the (possibly unchanged) route method's annotation
+    block + brace body, ~UPSTREAM_ROUTE_MAX_LINES lines with a truncation note. Local
+    deterministic scan (same boundary source as the symbol map) — no extra queries."""
+    content = _branch_content(repo, path, branch)
+    if not content:
+        return []
+    lines = content.splitlines()
+    routes = {d for d, _p in _method_mappings(content)}
+    decls = [d for d in _method_decl_lines(content)
+             if _method_name_on_line(lines[d - 1]) == name]
+    decls.sort(key=lambda d: (d not in routes, d))   # prefer the mapping-annotated one
+    for d in decls:
+        end = _brace_end(lines, d)
+        hi = min(end if end else d + UPSTREAM_ROUTE_MAX_LINES,
+                 d + UPSTREAM_ROUTE_MAX_LINES)
+        snippet = list(_anno_block(lines, d, limit=10))
+        snippet += lines[d - 1:hi]
+        if end and end > hi:
+            snippet.append(f"... (truncated, method continues to line {end})")
+        return snippet
+    return []
+
+
+def _anchor_upstream(repo: Path, branch: str, start_key: str, changed: dict,
+                     caller_edges: dict[str, set[str]]) -> tuple[str, str, str] | None:
+    """Walk caller edges up <=ANCHOR_MAX_HOPS from an unanchored changed symbol; the
+    first waypoint that scans as a route method wins -> (route_key, route_str, file).
+    Route detection = deterministic local annotation scan of the waypoint's branch file
+    (`_java_symbols`, same boundary source everywhere). Waypoints are NOT expanded
+    downward (caller direction only) and the visited set guards cycles. None = no route
+    within the hop budget (the symbol falls to residual)."""
+    visited = {start_key}
+    frontier = [start_key]
+    for _hop in range(ANCHOR_MAX_HOPS):
+        nxt: list[str] = []
+        for k in frontier:
+            for up in sorted(caller_edges.get(k, ())):
+                if up in visited:
+                    continue
+                visited.add(up)
+                fpath, _sep, name = up.rpartition("::")
+                if not fpath:
+                    continue
+                rec = changed.get(up)
+                if rec is not None and rec["route"]:
+                    return up, rec["route"], rec["file"]
+                content = _branch_content(repo, fpath, branch)
+                if content is None:
+                    continue
+                base = _base_route(content)[0]
+                for s in _java_symbols(content):
+                    if s["name"] == name and s["route"]:
+                        return up, _route_str(base, s["route"]), fpath
+                nxt.append(up)   # not a route method: keep walking callers only
+        frontier = nxt
+    return None
+
+
+def _route_str(base: str, path: str) -> str:
+    if not base:
+        return path
+    if not path:
+        return base
+    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _fqn_short(path: str, name: str) -> str:
+    """FQN short form = bare class name (or file name) . method
+    (`com/x/y/controller/OrderController.java` + `submit` -> `OrderController.submit`;
+    the full package path is recovered from the `file` column when disambiguation is
+    needed). Non-java paths keep the file name; `name` empty -> bare class/file
+    short form."""
+    p = path.replace("\\", "/")
+    if p.endswith(".java"):
+        base = p[:-len(".java")].rsplit("/", 1)[-1]
+    else:
+        base = p.rsplit("/", 1)[-1]
+    return f"{base}.{name}" if name else base
+
+
+_MAPPER_NS_RX = re.compile(r'<mapper[^>]*namespace="([^"]*)"')
+_MAPPER_STMT_RX = re.compile(r'<(?:insert|select|update|delete)\b[^>]*id="([^"]*)"')
+
+
+def _mapper_index(repo: Path) -> dict:
+    """One deterministic pass over the repo's `*.xml` (exclusion-set respected):
+    {(namespace-last-segment, statement id): first xml repo-relative path}. The
+    namespace's LAST segment must equal the dao class name (file stem) — `src/main/java`
+    dir prefixes are not package segments, so a suffix match on the full dir-derived FQN
+    would never hit real repos. XML is not in the codegraph graph: this index powers the
+    deterministic mapper terminal hop (not a new query)."""
+    idx: dict[tuple[str, str], str] = {}
+    for xml in sorted(repo.rglob("*.xml")):
+        rel = xml.relative_to(repo).as_posix()
+        if _exclude_reason(rel):
+            continue
+        try:
+            text = xml.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        nsm = _MAPPER_NS_RX.search(text)
+        if nsm is None:
+            continue
+        stem = nsm.group(1).rsplit(".", 1)[-1]
+        for sm in _MAPPER_STMT_RX.finditer(text):
+            key = (stem, sm.group(1))
+            if key not in idx or rel < idx[key]:
+                idx[key] = rel
+    return idx
+
+
+def _key_class_method(key: str) -> tuple[str, str] | None:
+    """`filePath::method` -> (java class stem, method) for .java keys; None otherwise
+    (non-java files never get a mapper hop)."""
+    fpath, _sep, name = key.rpartition("::")
+    p = fpath.replace("\\", "/")
+    if not p.endswith(".java") or not name:
+        return None
+    return p.rsplit("/", 1)[-1][:-len(".java")], name
+
+
+def _chain_nodes(repo: Path, branch: str, anchors: list[tuple[str, str]],
+                 changed: dict, down: dict[str, list[str]],
+                 mapper_idx: dict) -> list[dict]:
+    """Deterministic chain projection for ONE interface unit: the route method(s) (or
+    the analysis-reachable unchanged upstream anchors) down the ALREADY-RETURNED call
+    edges (`down`: raw-edge adjacency incl. the unchanged-downstream edges the
+    changed-set filter previously dropped — zero new codegraph queries). Node order =
+    linear main chain from the first anchor; a fan-out renders each child after the
+    first as a branch (`branch_of` = host node index); a second anchor (merged
+    multi-route unit) re-enters as a branch of the first entry. Nodes: {fqn_short,
+    label, file, line, change: changed|unchanged|external, route?, branch_of?}. The
+    unchanged upstream route entry carries the route + change=unchanged; mapper XML
+    terminals (deterministic completion via `mapper_idx`) branch off their dao node."""
+    content_cache: dict[str, str | None] = {}
+    decl_cache: dict[tuple[str, str], int | None] = {}
+
+    def _decl_line(fpath: str, name: str) -> int | None:
+        ck = (fpath, name)
+        if ck in decl_cache:
+            return decl_cache[ck]
+        if fpath not in content_cache:
+            content_cache[fpath] = _branch_content(repo, fpath, branch)
+        c = content_cache[fpath]
+        out: int | None = None
+        if c:
+            lines = c.splitlines()
+            for d in _method_decl_lines(c):
+                if _method_name_on_line(lines[d - 1]) == name:
+                    out = d
+                    break
+        decl_cache[ck] = out
+        return out
+
+    nodes: list[dict] = []
+    index_of: dict[str, int] = {}
+
+    def _emit(key: str, host_idx: int | None, via_route: str) -> int:
+        existing = index_of.get(key)
+        if existing is not None:
+            return existing
+        fpath, _sep, name = key.rpartition("::")
+        rec = changed.get(key)
+        ch = (rec["file"] if rec is not None else fpath) or fpath
+        node = {"fqn_short": _fqn_short(ch, name),
+                "label": f"{_stem(ch)}.{name}" if ch else name,
+                "file": ch, "line": _decl_line(ch, name),
+                "change": "changed" if rec is not None else "unchanged"}
+        if via_route:
+            node["route"] = via_route
+        if host_idx is not None:
+            node["branch_of"] = host_idx
+        nodes.append(node)
+        index_of[key] = len(nodes) - 1
+        return index_of[key]
+
+    def _resolve_children(children: list[str]) -> list[str]:
+        """Interface/impl resolution (impl preferred): same-NAME siblings where exactly
+        one file is interface-style (`I` + uppercase stem, e.g. IOrderService.java) keep
+        only the impl twin; unresolvable same-name pairs (neither interface-style) stay
+        BOTH (chain fidelity — the report's file column disambiguates)."""
+        by_name: dict[str, list[str]] = {}
+        for e in children:
+            fpath, _sep, name = e.rpartition("::")
+            by_name.setdefault(name, []).append(e)
+        out: list[str] = []
+        for name, keys in by_name.items():
+            if len(keys) > 1:
+                non_iface = [k for k in keys
+                             if not (len(_stem(k.rpartition("::")[0])) > 1
+                                     and _stem(k.rpartition("::")[0])[0] == "I"
+                                     and _stem(k.rpartition("::")[0])[1:2].isupper())]
+                if 0 < len(non_iface) < len(keys):
+                    out.extend(sorted(non_iface))
+                    continue
+            out.extend(sorted(keys))
+        return sorted(out)
+
+    for n, (ak, aroute) in enumerate(anchors):
+        # first anchor = the entry (no branch_of); a merged unit's other anchors
+        # re-enter as branches of the entry (the route strings carry the full list)
+        _emit(ak, 0 if n > 0 else None, aroute)
+        if ak not in index_of:
+            continue
+        seen = {ak}
+        frontier: list[tuple[str, int]] = [(ak, index_of[ak])]
+        while frontier:
+            key, idx = frontier.pop(0)
+            children = _resolve_children(down.get(key) or [])
+            for ci, e in enumerate(children):
+                if e in seen:
+                    continue
+                seen.add(e)
+                child = _emit(e, idx if ci > 0 else None, "")
+                frontier.append((e, child))
+            # mapper XML terminal hop (deterministic; every java node is a potential dao)
+            cm = _key_class_method(key)
+            term_rel = mapper_idx.get(cm) if cm is not None else None
+            if term_rel is not None:
+                tkey = f"xml::{cm[0]}::{cm[1]}"
+                if tkey not in index_of:
+                    fname = term_rel.rsplit("/", 1)[-1]
+                    nodes.append({"fqn_short": fname,
+                                  "label": f"{fname}:{cm[1]}",
+                                  "file": term_rel, "line": None,
+                                  "change": "external", "branch_of": idx})
+                    index_of[tkey] = len(nodes) - 1
+    return nodes
+
+
+def _split_interface_budget(hosts: list[dict], iface_cap: int, uid) -> list[Unit]:
+    """Enforce --max-interface-bytes. A host's constituents are its per-route bodies
+    (files + hunk selection + ann); under budget they emit as ONE unit (';'-joined
+    route); over budget they greedy-pack (route-sorted, deterministic) into `-partN`
+    units, each carrying its own route string + independent slice path. A single
+    constituent over the cap is further split across its files (sorted, greedy) so
+    EVERY part lands within budget — one oversize file may still exceed it (merged-
+    capped, never split mid-file, same rule as standalone). The host's materialized
+    chain rides EVERY part (the chain is a unit-level record, not a slice-budget body)."""
+    out: list[Unit] = []
+
+    def _fill(u: Unit, con: dict) -> None:
+        for fd in con["files"]:
+            if fd not in u.files:
+                u.files.append(fd)
+        for p, idxs in con["selmap"].items():
+            u.hunk_sel[p] = sorted(set(u.hunk_sel.get(p, ())) | set(idxs))
+        if con["ann"]:
+            u.ann_ctx.extend(con["ann"])
+
+    for host in hosts:
+        cons = host["constituents"]
+        total = sum(c["bytes"] for c in cons)
+        if total <= iface_cap or len(cons) <= 1:
+            u = host["unit"]
+            for c in cons:
+                _fill(u, c)
+            out.append(u)
+            continue
+        # over budget: greedy-pack constituents in route order into -partN units
+        parts: list[Unit] = []
+        acc_u: Unit | None = None
+        acc_bytes = 0
+        for c in sorted(cons, key=lambda c: c["route"]):
+            if c["bytes"] > iface_cap:
+                # single constituent over cap: flush, then split it across its files
+                if acc_u is not None:
+                    parts.append(acc_u)
+                    acc_u, acc_bytes = None, 0
+                for fd in sorted(c["files"], key=lambda f: f.path):
+                    sel = c["selmap"].get(fd.path, list(range(len(fd.hunks))))
+                    sz = _sel_hunks_size(fd, sel)
+                    if acc_u is not None and acc_bytes + sz > iface_cap and acc_u.files:
+                        parts.append(acc_u)
+                        acc_u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
+                                     "interface", c["route"], [], {}, [])
+                    if acc_u is None:
+                        acc_u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
+                                     "interface", c["route"], [], {}, list(c["ann"]))
+                    acc_u.chain = host.get("chain", [])
+                    acc_u.files.append(fd)
+                    acc_u.hunk_sel[fd.path] = sorted(
+                        set(acc_u.hunk_sel.get(fd.path, ())) | set(sel))
+                    acc_bytes += sz
+                if acc_u is not None:
+                    parts.append(acc_u)
+                    acc_u, acc_bytes = None, 0
+                continue
+            if acc_u is not None and acc_bytes + c["bytes"] > iface_cap:
+                parts.append(acc_u)
+                acc_u, acc_bytes = None, 0
+            if acc_u is None:
+                acc_u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
+                             "interface", c["route"], [], {}, list(c["ann"]))
+            else:
+                acc_u.route = f"{acc_u.route};{c['route']}"
+            acc_u.chain = host.get("chain", [])
+            _fill(acc_u, c)
+            acc_bytes += c["bytes"]
+        if acc_u is not None:
+            parts.append(acc_u)
+        out.extend(parts)
+    return out
+
+
 def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
-                           cap: int) -> list[Unit]:
-    """codegraph-gated call-chain grouping (D1/D2/D4). Only called when the probe
-    succeeded (`_codegraph_available`); every codegraph failure degrades per-symbol.
+                           cap: int, iface_cap: int,
+                           stats: dict) -> list[Unit]:
+    """codegraph-gated call-chain grouping. Only called when the probe succeeded
+    (`_codegraph_available`); every codegraph failure degrades per-symbol.
 
     Changed java methods (deterministic local symbol scan) are queried for call
     edges; every changed ROUTE method's downstream closure becomes one interface unit
     (route method + changed service/dao it reaches) with the chain's hunks merged into
-    one slice. Changed methods unreachable from any route (reflection/DI residue, or
-    codegraph with no edges) and file-level hunks fall to standalone residual — split,
-    never force-merged. A downstream method reached by >1 route repeats inside each
-    referencing interface slice (shared-downstream-per-interface, D4); renderer dedups.
-    Interface-file hunks left over after route-anchoring keep a class-level interface
-    unit (route = base) so nothing drops and a base-route change stays an interface
-    signal."""
+    one slice. Upstream anchoring (<=2 caller hops): a changed symbol no changed route
+    owns walks the ALREADY-RETURNED caller edges (unchanged endpoints kept) to an
+    unchanged route method, whose interface unit absorbs it (slice carries a bounded
+    route-method snippet; `anchors_upstream` counts anchored symbols). Shared-chain
+    merge: within the SAME controller file, routes whose downstream changed-symbol
+    reach sets are equal or subsets merge into one unit (`route` = ';'-joined;
+    `chain_merged` counts the absorbed routes); across controller files they stay
+    split. An interface unit past `iface_cap` is deterministically split into
+    `-partN` units per route group. Java residual files (no anchor/closure claim) fall
+    to directory clustering + `cap` — same path as non-java residuals, with a bounded
+    per-file symbol table in the slice header."""
     units: list[Unit] = []
     seen_ids: set[str] = set()
 
@@ -672,7 +1116,14 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
             continue
         syms = _java_symbols(content)
         base, is_ctrl = _base_route(content)
-        owner = [_owning_symbol(syms, _hunk_anchor_line(h)) for h in fd.hunks]
+        if fd.change_type == "A":
+            # a NEW file: every symbol in it is added — all hunks belong to all symbols
+            # (the hunk anchor sits on the package/import header, outside every body;
+            # per-hunk ownership would strand the whole file and silently drop it from
+            # the changed-symbol set)
+            owner = list(range(len(syms))) if syms else [None] * len(fd.hunks)
+        else:
+            owner = [_owning_hunk_symbol(syms, h) for h in fd.hunks]
         finfo[fd.path] = {"fd": fd, "syms": syms, "base": base, "owner": owner,
                           "is_iface": bool(is_ctrl or syms and any(s["route"] for s in syms))}
 
@@ -680,13 +1131,6 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
         return f"{path.replace(chr(92), '/')}::{name}"
 
     # 2. changed-symbol set (methods owning >=1 hunk); route anchors carry a route.
-    def _route_str(base: str, path: str) -> str:
-        if not base:
-            return path
-        if not path:
-            return base
-        return f"{base.rstrip('/')}/{path.lstrip('/')}"
-
     changed: dict[str, dict] = {}
     for path, info in finfo.items():
         for i, s in enumerate(info["syms"]):
@@ -703,30 +1147,46 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
             rec["hunks"].update(owned)
             if full_route and not rec["route"]:
                 rec["route"], rec["ann"] = full_route, s["ann"]
+    stats["symbols_queried"] = len(changed)
     anchors = sorted((k for k, r in changed.items() if r["route"]),
                      key=lambda k: (changed[k]["file"], changed[k]["name"]))
+    stats["anchors_changed"] = len(anchors)
 
-    # 3. call edges restricted to the changed set (superset union per name is safe —
-    #    endpoints are matched back by filePath+name so extras are dropped).
+    # 3. call edges: callees restricted to the changed set build the downstream
+    #    adjacency; callers are kept VERBATIM (incl. unchanged endpoints) in
+    #    caller_edges for upstream anchoring. RAW callee edges (incl. unchanged
+    #    endpoints — previously dropped by the `if e in adjacency` filter) are retained
+    #    in raw_down keyed by the CALLER key: the chain projection consumes them (zero
+    #    new codegraph queries).
     edge_cache: dict[str, tuple[set[str], set[str]]] = {}
     adjacency: dict[str, set[str]] = {k: set() for k in changed}
+    caller_edges: dict[str, set[str]] = {}
+    raw_down: dict[str, set[str]] = {}
+    edges_captured = 0
     for key, rec in changed.items():
         ck = edge_cache.get(rec["name"])
         if ck is None:
             ck = _cg_edges(repo, rec["name"])
             edge_cache[rec["name"]] = ck
         callers, callees = ck
+        edges_captured += len(callers) + len(callees)
+        caller_edges.setdefault(key, set()).update(callers)
+        raw_down.setdefault(key, set()).update(callees)
+        # invert the caller side: an edge (unchanged upstream anchor -> changed key)
+        # is downstream raw data for the anchor (its own callees were never queried —
+        # the anchor is not in the changed set)
+        for e in callers:
+            raw_down.setdefault(e, set()).add(key)
         for e in callees:
             if e in adjacency:
                 adjacency[key].add(e)      # key calls e
         for e in callers:
             if e in adjacency:
                 adjacency[e].add(key)      # e calls key
+    stats["edges_captured"] = edges_captured
+    stats["edges_in_changed_set"] = sum(len(v) for v in adjacency.values())
 
-    # 4. route-anchored downstream closure -> one interface unit per route anchor.
-    claimed: dict[str, set[int]] = {}
-    for ak in anchors:
-        rec = changed[ak]
+    def _closure(ak: str) -> set[str]:
         reach = {ak}
         frontier = [ak]
         while frontier:
@@ -737,33 +1197,160 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
                         reach.add(t)
                         nxt.append(t)
             frontier = nxt
-        by_file: dict[str, list[dict]] = {}
+        return reach
+
+    def _cons_unit(route: str, ann: list[str], anchor: str | None = None) -> dict:
+        """One route constituent (mutable body: files + hunk selection + ann + the
+        anchor key that projects the chain). Hunks are attached via `_absorb` so
+        leftovers never double-count."""
+        return {"route": route, "files": [], "selmap": {}, "ann": ann,
+                "anchor": anchor}
+
+    def _absorb(con: dict, reach: set[str]) -> None:
+        """Claim a changed-symbol reach set into a constituent (create or extend):
+        append files, union per-file hunk selections; mark hunks claimed. Shared
+        downstream hunks legitimately repeat across constituents (renderer dedups)."""
+        by_file: dict[str, set[int]] = {}
         for k in reach:
             r = changed[k]
-            by_file.setdefault(r["file"], []).append(r)
-        files: list[FileDiff] = []
-        selmap: dict[str, list[int]] = {}
-        ann: list[str] = []
+            fd = finfo[r["file"]]["fd"]
+            by_file.setdefault(fd.path, set()).update(
+                i for i in r["hunks"] if i < len(fd.hunks))
         for path in sorted(by_file):
-            info = finfo[path]
-            fd = info["fd"]
-            files.append(fd)
-            idxs = sorted(i for r in by_file[path] for i in r["hunks"] if i < len(fd.hunks))
-            selmap[fd.path] = idxs
+            fd = finfo[path]["fd"]
+            idxs = set(by_file[path]) - set(con["selmap"].get(fd.path, ()))
+            if not idxs:
+                continue
+            if fd not in con["files"]:
+                con["files"].append(fd)
+            con["selmap"][fd.path] = sorted(set(con["selmap"].get(fd.path, ())) | idxs)
             claimed.setdefault(fd.path, set()).update(idxs)
+
+    def _con_bytes(con: dict) -> int:
+        return sum(_sel_hunks_size(fd, con["selmap"].get(fd.path,
+                                                           list(range(len(fd.hunks)))))
+                   for fd in con["files"])
+
+    # 4. route-anchored downstream closure -> one constituent per route anchor.
+    claimed: dict[str, set[int]] = {}
+    route_units: list[dict] = []   # {route, file(controller), reach, downstream, ann}
+    for ak in anchors:
+        rec = changed[ak]
+        ann = [f"{rec['file']}: {a}" for a in rec.get("ann", [])]
         base = finfo[rec["file"]]["base"]
-        for a in rec.get("ann", []):
-            ann.append(f"{rec['file']}: {a}")
         if base:
             ann.append(f"{rec['file']}: class base route {base!r}")
-        units.append(Unit(_uid(f"{_stem(rec['file'])}::{rec['route'] or _stem(rec['file'])}"),
-                          "interface", rec["route"], files, selmap, ann))
+        reach = _closure(ak)
+        route_units.append({"route": rec["route"], "file": rec["file"],
+                            "reach": reach, "downstream": reach - {ak}, "ann": ann,
+                            "anchor": ak})
+
+    # 4b. shared-chain merge: within ONE controller file, absorb routes whose
+    #     DOWNSTREAM set (closure minus the anchor itself) equals another's or is a
+    #     subset — "both routes call the same changed service method" merges, distinct
+    #     downstreams stay split. Cross-file merges NEVER happen (the anchoring
+    #     controller's authz face is the review unit boundary). chain_merged counts
+    #     the absorbed routes.
+    route_units.sort(key=lambda ru: (ru["file"], -len(ru["downstream"]), ru["route"]))
+    hosts: list[dict] = []
+    for ru in route_units:
+        host = next((h for h in hosts if h["file"] == ru["file"]
+                     and (ru["downstream"] <= h["downstream"])), None)
+        if host is None:
+            host = {"file": ru["file"], "reach": set(), "downstream": set(),
+                    "base_id": f"{_stem(ru['file'])}::{ru['route'] or _stem(ru['file'])}",
+                    "constituents": []}
+            hosts.append(host)
+        elif any(c["route"] == ru["route"] for c in host["constituents"]):
+            continue   # same route already present (union semantics): never double
+        else:
+            stats["chain_merged"] += 1
+        host["reach"] |= ru["reach"]
+        host["downstream"] |= ru["downstream"]
+        con = _cons_unit(ru["route"], ru["ann"], ru["anchor"])
+        _absorb(con, ru["reach"])
+        host["constituents"].append(con)
+
+    # 4c. upstream anchoring: changed symbols no changed-route closure claimed walk
+    #     caller edges up <=2 hops to a (possibly unchanged) route method; hits join
+    #     (or create) that route's host.
+    claimed_syms = set().union(*[h["reach"] for h in hosts]) if hosts else set()
+    for k in sorted(k for k in changed if k not in claimed_syms):
+        rec = changed[k]
+        hit = _anchor_upstream(repo, branch, k, changed, caller_edges)
+        if hit is None:
+            continue
+        uk, route, ufile = hit
+        stats["anchors_upstream"] += 1
+        host = next((h for h in hosts if h["file"] == ufile
+                     and any(c["route"] == route for c in h["constituents"])), None)
+        uname = uk.rpartition("::")[2]
+        if host is None:
+            host = {"file": ufile, "reach": set(),
+                    "base_id": f"{_stem(ufile)}::{route or _stem(ufile)}",
+                    "constituents": []}
+            hosts.append(host)
+        host["reach"].add(k)
+        if any(c["route"] == route for c in host["constituents"]):
+            con = next(c for c in host["constituents"] if c["route"] == route)
+            if con.get("anchor") is None:
+                con["anchor"] = uk   # chain entry = the unchanged route method
+        else:
+            snippet = _route_method_snippet(repo, ufile, branch, uname)
+            # rides the Annotation context fence; the snippet itself is bounded
+            ann = ([f"upstream-route {route} (unchanged) at {ufile}::{uname}"]
+                   + snippet)
+            con = _cons_unit(route, ann, uk)
+            host["constituents"].append(con)
+        _absorb(con, {k})
+
+    # 4d. chain materialization: per host, project each constituent's anchor (the
+    #     changed route method, or the unchanged upstream route for anchored units)
+    #     down the raw edges (deterministic; zero new codegraph queries) -> chain[].
+    mapper_idx = _mapper_index(repo)
+    down_sorted = {k: sorted(v) for k, v in raw_down.items()}
+    stats["chains_materialized"] = 0
+
+    def _impl_preferring_anchor(cands: list[str]) -> str:
+        """Interface/impl resolution (impl preferred): among same-name candidates,
+        prefer the one whose file stem is NOT interface-style (`I` + uppercase, e.g.
+        IOrderService), then the lexicographic key order (deterministic)."""
+        def _rank(k: str) -> tuple:
+            stem = _stem(changed[k]["file"])
+            iface_style = (len(stem) > 1 and stem[0] == "I" and stem[1].isupper())
+            return (iface_style, k)
+        return sorted(cands, key=_rank)[0]
+
+    for h in hosts:
+        anchor_pairs: list[tuple[str, str]] = []
+        for c in h["constituents"]:
+            ak = c.get("anchor")
+            if ak is None:
+                cands = [k for k in changed
+                         if changed[k]["route"] == c["route"]]
+                if cands:
+                    ak = _impl_preferring_anchor(sorted(cands))
+            if ak is not None:
+                anchor_pairs.append((ak, c["route"]))
+        if anchor_pairs:
+            h["chain"] = _chain_nodes(repo, branch, anchor_pairs, changed,
+                                      down_sorted, mapper_idx)
+            stats["chains_materialized"] += 1
+        else:
+            h["chain"] = []
+        for c in h["constituents"]:
+            c["bytes"] = _con_bytes(c)
+        h["unit"] = Unit(_uid(h["base_id"]), "interface",
+                         ";".join(c["route"] for c in h["constituents"]), [], {}, [])
+        h["unit"].chain = h["chain"]
+    units.extend(_split_interface_budget(hosts, iface_cap, _uid))
 
     # 5. leftovers: interface-file unclaimed hunks keep a class-level interface unit;
-    #    java residuals are one standalone unit PER FILE (a changed method unreachable
-    #    from any route is its own component — split, never force-merged across files,
-    #    D1 "拆多个不硬塞"); non-java / deleted residuals keep directory clustering +
-    #    budget so a config/SQL sweep stays few units.
+    #    java residuals now take directory clustering + budget (same as non-java —
+    #    one-unit-per-file was reverted after the real-repo 401-unit run), with a
+    #    bounded per-file symbol table so method-level addressing survives the merge;
+    #    non-java / deleted residuals keep plain directory clustering + budget.
+    residual_java: list[tuple[FileDiff, list[int], dict]] = []
     residual_other: list[tuple[FileDiff, list[int]]] = []
     for fd in file_diffs:
         unclaimed = [i for i in range(len(fd.hunks))
@@ -776,10 +1363,19 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
                               "interface", info["base"], [fd], {fd.path: unclaimed}))
             continue
         if info is not None:
-            units.append(Unit(_uid(_stem(fd.path)), "standalone", "", [fd],
-                              {fd.path: unclaimed}))
+            residual_java.append((fd, unclaimed, info))
             continue
         residual_other.append((fd, unclaimed))
+    for name, members in _cluster_standalone_sel([(fd, sel) for fd, sel, _ in residual_java],
+                                                 cap):
+        selmap = {fd.path: sel for fd, sel in members}
+        files = [fd for fd, _ in members]
+        sym: list[str] = ["## Files & symbols in this cluster (branch version)"]
+        for fd, _sel in members:
+            info = next(i for f, _s, i in residual_java if f is fd)
+            sym.append(f"- {fd.path}")
+            sym.extend(_sym_table(info["syms"]))
+        units.append(Unit(_uid(name), "standalone", "", files, selmap, None, sym))
     for name, members in _cluster_standalone_sel(residual_other, cap):
         selmap = {fd.path: sel for fd, sel in members}
         files = [fd for fd, _ in members]
@@ -814,6 +1410,9 @@ def _render_slice(repo: Path, base: str, branch: str, unit: Unit,
         out += ["", "## Annotation context (branch version)", "```"]
         out.extend(unit.ann_ctx)
         out.append("```")
+    if unit.sym_ctx:
+        out += ["", "## Files & symbols in this cluster (branch version)"]
+        out.extend(unit.sym_ctx)
     out += ["", "## Diff hunks (unified, 3-line context)", "```diff"]
     for fd in unit.files:
         sel = unit.hunk_sel.get(fd.path) if unit.hunk_sel else None
@@ -845,7 +1444,25 @@ def _enumerate(args) -> dict:
                 f"recipe: verify both refs exist (`git rev-parse --verify <ref>`) and "
                 f"the work tree is readable; re-run with explicit --base/--branch.")
         sys.exit(2)
-    file_diffs = parse_diff(r.stdout)
+    all_diffs = parse_diff(r.stdout)
+
+    # exclusion filter: closed set, applied BEFORE any grouping; --include-excluded
+    # is the one-flag fallback restoring the full review. Never silent (excluded{}).
+    if args.include_excluded:
+        file_diffs = all_diffs
+        excluded = {"count": 0, "by_reason": {}}
+    else:
+        kept: list[FileDiff] = []
+        by_reason: dict[str, int] = {}
+        for fd in all_diffs:
+            reason = _exclude_reason(fd.path)
+            if reason is None:
+                kept.append(fd)
+            else:
+                by_reason[reason] = by_reason.get(reason, 0) + 1
+        file_diffs = kept
+        excluded = {"count": len(all_diffs) - len(kept), "by_reason": by_reason}
+    excluded_in_diff = excluded["count"] > 0
 
     checkpoints = Path(args.checkpoints).resolve()
     checkpoints.mkdir(parents=True, exist_ok=True)
@@ -854,18 +1471,32 @@ def _enumerate(args) -> dict:
     grouping_path = checkpoints.parent / "grouping.json"
 
     done, failed = _markers(checkpoints)
-    cg_on = bool(file_diffs) and _codegraph_available(repo)
+    probe_reason = _codegraph_probe_reason(repo) if not _codegraph_available(repo) else None
+    cg_on = bool(file_diffs) and probe_reason is None
+    stats = {k: 0 for k in ("symbols_queried", "edges_captured", "edges_in_changed_set",
+                            "anchors_changed", "anchors_upstream", "chain_merged",
+                            "chains_materialized")}
     if cg_on:
         units = _build_units_callchain(repo, file_diffs, branch,
-                                       args.max_standalone_bytes)
+                                       args.max_standalone_bytes,
+                                       args.max_interface_bytes, stats)
     else:
         units = _build_units(repo, file_diffs, branch, args.max_standalone_bytes) \
             if file_diffs else []
 
     pending = []
     counts = {"interface": 0, "standalone": 0}
+    all_units = []
     for u in units:
         counts[u.kind] += 1
+        # full-unit projection for the renderer's 简报表 rows (pending[] drops .done
+        # units; the report needs EVERY unit with its route/chain even after fan-out)
+        all_units.append({
+            "unit_id": u.unit_id, "kind": u.kind, "route": u.route,
+            "chain": u.chain,
+            "status": ("failed" if u.unit_id in failed
+                       else "done" if u.unit_id in done else "pending"),
+        })
         if u.unit_id in done or u.unit_id in failed:
             continue  # .done: skip re-materialization; .failed: terminal
         slice_text = _render_slice(repo, base, branch, u, r.stdout)
@@ -883,6 +1514,9 @@ def _enumerate(args) -> dict:
             "kind": u.kind,
             "route": u.route,
             "unit_bytes": u.slice_bytes,
+            # materialized call chain (interface units, codegraph mode; standalone and
+            # codegraph-off units carry [] — the structure is always present)
+            "chain": u.chain,
             # baseline + external-conclusion locations (verbatim absolute; produced by
             # sdr_context.py in the standard layout — a missing file means that step did
             # not run and the subagent skips it)
@@ -896,24 +1530,45 @@ def _enumerate(args) -> dict:
         "repo": str(repo),
         "base": base,
         "branch": branch,
-        "empty": not file_diffs,
+        # `empty` = nothing to review AT ALL (zero diff). A diff fully eaten by the
+        # exclusion filter is NOT empty: files arrived, none entered review — the
+        # distinction is observable via excluded.count + total == 0.
+        "empty": not all_diffs,
+        "excluded_nonempty": excluded_in_diff and not units,
         "codegraph": cg_on,
         "total": len(units),
+        # EVERY unit (done/pending/failed) with route + chain — the renderer's 简报表
+        # row source (pending[] is re-enumeration output and drops finished units)
+        "units": all_units,
         "done": len(done),
         "failed": len(failed),
         "counts": counts,
+        "excluded": excluded,
+        "codegraph_stats": {**stats, "excluded_files": excluded["count"]},
         "pending": page,
         "offset": args.offset,
         "limit": req_limit,
     }
+    if probe_reason:
+        _eprint(f"[diff_group] codegraph probe off: {probe_reason}")
     grouping_path.parent.mkdir(parents=True, exist_ok=True)
     grouping_path.write_text(json.dumps(result, ensure_ascii=False, indent=1),
                              encoding="utf-8")
-    _eprint(f"[diff_group] {base}..{branch}: {len(file_diffs)} file(s) -> "
+    reason_summary = ",".join(f"{k}={v}" for k, v in sorted(excluded["by_reason"].items())) \
+        or "-"
+    _eprint(f"[diff_group] {base}..{branch}: {len(all_diffs)} file(s) "
+            f"(excluded {excluded['count']}: {reason_summary}) -> "
             f"{counts['interface']} interface + {counts['standalone']} standalone unit(s); "
             f"codegraph={'on' if cg_on else 'off'} "
+            f"anchors_changed={stats['anchors_changed']} "
+            f"anchors_upstream={stats['anchors_upstream']} "
+            f"chain_merged={stats['chain_merged']} "
             f"done={len(done)} failed={len(failed)} pending={len(pending)} "
             f"(grouping: {grouping_path})")
+    if excluded_in_diff and not units:
+        _eprint("[diff_group] NOTE: every changed file was excluded by the closed set; "
+                "no review units were produced (re-run with --include-excluded to "
+                "review them anyway). This is NOT a zero-diff run.")
     return result
 
 
@@ -961,9 +1616,88 @@ def _check(run_dir: Path) -> int:
         fm = Path(u["failed_marker"]).exists() if u.get("failed_marker") else False
         if dm and fm:
             violations.append(f"{u.get('unit_id')}: both .done and .failed markers exist")
+        # route shape: a merged interface unit carries ';'-joined routes (no empties)
+        route = u.get("route")
+        if isinstance(route, str) and ";" in route:
+            segs = [s.strip() for s in route.split(";")]
+            if any(not s for s in segs):
+                violations.append(f"{u.get('unit_id')}: multi-route has empty segment: "
+                                  f"{route!r}")
+        elif route is not None and not isinstance(route, str):
+            violations.append(f"{u.get('unit_id')}: route not a string: {route!r}")
+        # part units (id carries -partN) must own their matching slice file
+        uid = str(u.get("unit_id", ""))
+        ip_name = Path(u.get("input_path", "")).name
+        if uid and ip_name and not ip_name.startswith(f"{uid}.slice.md"):
+            violations.append(f"{uid}: slice name {ip_name!r} disagrees with unit_id")
+        # chain[]: incremental field — absent (old grouping.json) is fine; present, it
+        # must be a list of nodes with the required fields + legal branch_of indices.
+        chain = u.get("chain")
+        if chain is not None:
+            if not isinstance(chain, list):
+                violations.append(f"{uid}: chain not a list: {type(chain).__name__}")
+                continue
+            for ci, nd in enumerate(chain):
+                if not isinstance(nd, dict):
+                    violations.append(f"{uid}: chain[{ci}] not an object")
+                    continue
+                for f in ("fqn_short", "label", "file", "change"):
+                    if not isinstance(nd.get(f), str) or not nd.get(f):
+                        violations.append(f"{uid}: chain[{ci}] missing field {f}")
+                if nd.get("change") not in ("changed", "unchanged", "external"):
+                    violations.append(f"{uid}: chain[{ci}] bad change: "
+                                      f"{nd.get('change')!r}")
+                ln = nd.get("line")
+                if ln is not None and not isinstance(ln, int):
+                    violations.append(f"{uid}: chain[{ci}] line not int|null: {ln!r}")
+                bo = nd.get("branch_of")
+                if bo is not None:
+                    if not isinstance(bo, int) or bo < 0 or bo >= len(chain) or bo == ci:
+                        violations.append(f"{uid}: chain[{ci}] branch_of illegal: {bo!r}")
     for field in ("base", "branch", "counts"):
         if field not in g:
             violations.append(f"grouping.json missing field: {field}")
+    # excluded / codegraph_stats: NEW fields — validated structurally when present,
+    # silently skipped when absent (old grouping.json stays --check-clean; backward
+    # compat is part of the contract).
+    exc = g.get("excluded")
+    if exc is not None:
+        if not isinstance(exc, dict) or not isinstance(exc.get("count", 0), int) \
+                or not isinstance(exc.get("by_reason", {}), dict) \
+                or not all(isinstance(v, int) for v in exc.get("by_reason", {}).values()):
+            violations.append(f"excluded malformed (want {{count:int, by_reason:int}}): {exc!r}")
+        elif exc["count"] != sum(exc["by_reason"].values()):
+            violations.append(f"excluded.count != sum(by_reason): {exc!r}")
+    cgs = g.get("codegraph_stats")
+    if cgs is not None and not isinstance(cgs, dict):
+        violations.append(f"codegraph_stats not an object: {cgs!r}")
+    # units[]: full-unit projection for the renderer — same chain validation as
+    # pending[], plus kind/status closed-set and route-typing. Absent (old
+    # grouping.json) = fine; present it must be structurally sound.
+    allu = g.get("units")
+    if allu is not None:
+        if not isinstance(allu, list):
+            violations.append(f"units not a list: {type(allu).__name__}")
+        else:
+            ids = [u.get("unit_id") for u in allu if isinstance(u, dict)]
+            if len(ids) != len(set(ids)):
+                violations.append("units has duplicate unit_id entries")
+            for u in allu:
+                if not isinstance(u, dict):
+                    violations.append(f"units item not an object: {u!r}")
+                    continue
+                if u.get("kind") not in ("interface", "standalone"):
+                    violations.append(f"{u.get('unit_id')}: bad kind: {u.get('kind')!r}")
+                if u.get("status") not in ("done", "pending", "failed"):
+                    violations.append(f"{u.get('unit_id')}: bad status: "
+                                      f"{u.get('status')!r}")
+                if not isinstance(u.get("route"), str):
+                    violations.append(f"{u.get('unit_id')}: route not a string")
+                ch = u.get("chain")
+                if ch is not None and not isinstance(ch, list):
+                    violations.append(f"{u.get('unit_id')}: chain not a list")
+            if g.get("total") != len(allu):
+                violations.append(f"units length {len(allu)} != total {g.get('total')}")
     if violations:
         _eprint(f"error: diff_group --check: {len(violations)} violation(s):")
         for v in violations:
@@ -996,6 +1730,15 @@ def main():
                     default=DEFAULT_MAX_STANDALONE_BYTES,
                     help=f"standalone cluster merge cap in bytes (default "
                          f"{DEFAULT_MAX_STANDALONE_BYTES})")
+    ap.add_argument("--max-interface-bytes", type=int,
+                    default=DEFAULT_MAX_INTERFACE_BYTES,
+                    help=f"interface unit split cap in bytes (default "
+                         f"{DEFAULT_MAX_INTERFACE_BYTES}; over-budget merged units "
+                         f"split into -partN units)")
+    ap.add_argument("--include-excluded", action="store_true",
+                    help="fallback: do NOT apply the closed exclusion filter (tests, "
+                         "build outputs, static assets, lockfiles, build scripts "
+                         "re-enter review; excluded count becomes 0)")
     ap.add_argument("--offset", type=int, default=0, help="page offset (default 0)")
     ap.add_argument("--limit", type=int, default=None,
                     help="max pending items per page (default: all)")
@@ -1027,6 +1770,9 @@ def main():
         return 2
     if args.max_standalone_bytes < 0:
         _eprint("error: --max-standalone-bytes must be >= 0")
+        return 2
+    if args.max_interface_bytes < 0:
+        _eprint("error: --max-interface-bytes must be >= 0")
         return 2
     if not args.materialize:
         _eprint("error: --materialize <slices-dir> is required for enumeration "

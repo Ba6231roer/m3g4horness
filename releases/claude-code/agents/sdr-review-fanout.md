@@ -47,7 +47,8 @@ the enumerator stdout, fields verbatim) and carries `unit_id`, `kind`
 
 Write ONE JSON object at the dispatcher-given absolute `draft_path`:
 {"unit": "<unit_id verbatim>", "findings": [{"dimension", "severity": "high|medium|low|info",
-"route", "file", "line_hint", "risk"(简体中文), "suggestion"(简体中文), "control_ref|null"}]}
+"route", "file", "line_hint", "line": <int anchor line in `file`, omit when no single
+line is visible in the slice>, "risk"(简体中文), "suggestion"(简体中文), "control_ref|null"}]}
 — then touch the absolute `done_marker`. Findings[] may be empty (a clean unit).
 
 Final reply = the single bounded ack line only.

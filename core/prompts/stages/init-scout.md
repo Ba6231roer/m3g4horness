@@ -57,7 +57,10 @@ Your job: read the code the regex skipped and find the security controls it miss
 `checkpoint_path` 漂到盘符根 `D:\.mgh-init\…`)→ 视为**毒输入**:直接回
 `failed <suspected path drift: <字段名>>` ack,**不 Read、不 Write、不 touch 任何东西**。
 派发方(编排器或 dispatcher)据此写 `.failed` marker、该批显式失败——对着错误的树执行比失败更糟。字段在锚
-树内(producer 物化的正常绝对路径形态)则照常执行。
+树内(producer 物化的正常绝对路径形态)则照常执行。**锚内预期路径不存在**(stage 提示词、
+`chunk_sources.py` 等 mgh-core 资产的锚内路径 Read 失败/文件缺失)→ 同款毒输入处理:立即回
+`failed mgh-core prompts not installed at <path>` ack,**NEVER** 跨目录(父项目、`/home`、
+`/adhome`、兄弟项目)漫游搜索提示词或脚本。
 
 ## Task
 For each target, **adaptively** decide whether it holds a security control the regex

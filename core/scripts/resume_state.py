@@ -291,6 +291,30 @@ def _t2_done(init_dir: Path) -> bool:
     return _marker_exists(t2 / "synthesis.json.done", t2 / ".done")
 
 
+def _t2_map_substate(init_dir: Path) -> str | None:
+    """t2 map-reduce intermediate state (map-stage dispatcher adoption): if shard
+    partial markers exist under checkpoints/t2/shards/ but the rollup terminal
+    marker synthesis.json.done is absent, the run is in a LEGAL intermediate
+    (map ongoing OR rollup pending) — NOT a violation; the step stays t2 (no new
+    step id). Returns an advisory note distinguishing clean map-done (rollup
+    pending) from a failed-shard state (rollup blocked until resolved, missing
+    summary). Empty / t2-complete / pre-map states → None (no note)."""
+    shards = init_dir / "checkpoints" / "t2" / "shards"
+    if not shards.is_dir() or _t2_done(init_dir):
+        return None
+    done_n = len(list(shards.glob("*.json.done")))
+    failed_n = len(list(shards.glob(".*.json.failed")))
+    if not (done_n or failed_n):
+        return None
+    note = (f"t2: {done_n} shard(s) done, {failed_n} failed under "
+            f"checkpoints/t2/shards, but synthesis.json.done absent — map-reduce "
+            f"intermediate (map ongoing or rollup pending), LEGAL; resume re-derives "
+            f"remaining shards via plan_aggregate --node t2 (marker-aware) then rolls up")
+    if failed_n:
+        note += "; failed shard(s) block rollup until resolved (missing summary)"
+    return note
+
+
 def _t4_done(init_dir: Path) -> bool:
     t4 = init_dir / "checkpoints" / "t4"
     return _marker_exists(t4 / "consistency.json.done", t4 / ".done")
@@ -594,6 +618,11 @@ def resolve(init_dir: Path):
         if budget is not None:
             notes.append(f"t2: if checkpoints/t1 aggregate > {budget}B, run plan_aggregate.py "
                          "--node t2 first (map-reduce); else single-context init-synthesis.")
+        # map-reduce intermediate sub-state (map-stage dispatcher adoption): advisory
+        # only — the run is mid-T2; no step-id change, marker truth stays on disk.
+        sub = _t2_map_substate(init_dir)
+        if sub:
+            notes.append(sub)
         nxt = _next("subagent",
                     "spawn init-synthesis (all T1 records, no raw code) -> controls_inventory.json",
                     [t1_cp, inventory, init_dir / "checkpoints" / "t2"])
@@ -724,6 +753,14 @@ def check(init_dir: Path) -> dict:
     # t3 .done without inventory
     if t3_cp.is_dir() and any(t3_cp.glob("*.json.done")) and not inventory.is_file():
         violations.append({"issue": "t3 .done marker(s) present but controls_inventory.json missing"})
+    # t2 map-reduce intermediate sub-state (map-stage dispatcher adoption): shard
+    # partial markers without the rollup terminal marker = LEGAL intermediate (map
+    # ongoing / rollup pending), advisory NOT a violation — distinct from "t2 done"
+    # (which requires synthesis.json.done). No new step id; resume re-derives the map
+    # from plan_aggregate --node t2 (marker-aware pending).
+    sub = _t2_map_substate(init_dir)
+    if sub:
+        notes.append(sub)
     # scout_candidates without merge marker
     if scout_candidates.is_file() and not _scout_merge_done(init_dir):
         violations.append({"issue": "scout_candidates.json present but scout merge marker absent"})

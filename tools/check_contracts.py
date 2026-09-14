@@ -110,6 +110,7 @@ RESUME_REQUIRED_FLAGS = ["--target", "--init-dir", "--run-root", "--check"]
 # so the contract holds even if a shell's fenced example is trimmed — --help IS the interface.
 FANOUT_RUNNER_SCRIPT = ROOT / "core" / "scripts" / "fanout_runner.py"
 FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candidates",
+                                "--init-dir", "--budget",
                                 "--inventory", "--format", "--rules-dir", "--target",
                                 "--repo", "--base", "--branch",
                                 "--checkpoints", "--inputs-dir", "--host",
@@ -117,11 +118,16 @@ FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candi
                                 "--stall-waves", "--resume",
                                 "--kill-stale", "--pending-file", "--purge-audit",
                                 "--dry-run", "--template"]
+# The --tier closed set MUST advertise the t2 tier (map stage adoption): argparse prints the
+# choices verbatim in --help's usage line — assert the expanded set textually (a trimmed shell
+# example / prose can't fake it; the usage line is argparse-generated).
+FANOUT_TIER_SET_HELP = "{scout,t1,t2,t3,sdr}"
 # Per-tier task-message templates the dispatcher reads (fanout-dispatch tier adoption);
 # existence asserted so a trimmed mirror cannot silently break dispatch.
 FANOUT_TEMPLATES = [
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "scout-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t1-task.md",
+    ROOT / "core" / "prompts" / "fragments" / "fanout" / "t2-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t3-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "sdr-task.md",
 ]
@@ -130,7 +136,8 @@ FANOUT_TEMPLATES = [
 # example is trimmed — --help IS the interface the agent learns from.
 DIFF_GROUP_SCRIPT = ROOT / "core" / "scripts" / "diff_group.py"
 DIFF_GROUP_REQUIRED_FLAGS = ["--repo", "--base", "--branch", "--checkpoints",
-                             "--materialize", "--max-standalone-bytes", "--offset",
+                             "--materialize", "--max-standalone-bytes",
+                             "--max-interface-bytes", "--include-excluded", "--offset",
                              "--limit", "--resume", "--check"]
 SDR_CONTEXT_SCRIPT = ROOT / "core" / "scripts" / "sdr_context.py"
 SDR_CONTEXT_REQUIRED_FLAGS = ["--repo", "--run-dir", "--base", "--branch", "--dimensions",
@@ -141,6 +148,17 @@ RENDER_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--out-dir", "--check"]
 SDR_LAUNCH_SCRIPT = ROOT / "core" / "scripts" / "mgh_sdr_launch.py"
 SDR_LAUNCH_REQUIRED_FLAGS = ["--repo", "--branch", "--base", "--host", "--dimensions",
                              "--multi-branch", "--read-root", "--dry-run"]
+# /mgh-sdr external-repo authorization gate: the config writer's flags MUST be declared
+# in its --help (R5.1 contract surface), and both shells MUST carry the authorization
+# step (the script invocation + the pending_approval disclosure) — mirrored assertion so
+# a trimmed shell cannot silently drop the user-decision gate.
+READ_ROOTS_SCRIPT = ROOT / "core" / "scripts" / "read_roots_config.py"
+READ_ROOTS_REQUIRED_FLAGS = ["--target", "--add", "--remove", "--list", "--check"]
+SDR_SHELLS = [
+    ROOT / "releases" / "claude-code" / "commands" / "mgh-sdr.md",
+    ROOT / "releases" / "opencode" / "command" / "mgh-sdr.md",
+]
+SDR_SHELL_REQUIRED_MARKERS = ["read_roots_config.py", "pending_approval"]
 PLAN_AGG_SCRIPT = ROOT / "core" / "scripts" / "plan_aggregate.py"
 PLAN_AGG_REQUIRED_FLAGS = ["--node", "--init-dir", "--budget", "--materialize",
                            "--offset", "--limit", "--orch-budget-bytes"]
@@ -359,6 +377,16 @@ def main():
             if flag not in declared:
                 failures.append(f"{script.name}: --help missing required {flag!r}")
 
+    # fanout_runner --tier closed set MUST include t2 (map-stage adoption): the argparse usage
+    # line prints the choices verbatim — assert the expanded set (a prose mention can't fake it).
+    if FANOUT_RUNNER_SCRIPT.is_file():
+        r = subprocess.run([PY, str(FANOUT_RUNNER_SCRIPT), "--help"], capture_output=True)
+        if r.returncode != 0:
+            failures.append("fanout_runner.py: `--help` failed")
+        elif FANOUT_TIER_SET_HELP not in r.stdout.decode("utf-8", "replace"):
+            failures.append(
+                f"fanout_runner.py: --tier choices must advertise t2 ({FANOUT_TIER_SET_HELP})")
+
     # fanout_runner per-tier task templates MUST exist (tier-aware dispatch reads them).
     for template in FANOUT_TEMPLATES:
         if not template.is_file():
@@ -368,7 +396,8 @@ def main():
     for script, req_flags in ((DIFF_GROUP_SCRIPT, DIFF_GROUP_REQUIRED_FLAGS),
                               (SDR_CONTEXT_SCRIPT, SDR_CONTEXT_REQUIRED_FLAGS),
                               (RENDER_SDR_SCRIPT, RENDER_SDR_REQUIRED_FLAGS),
-                              (SDR_LAUNCH_SCRIPT, SDR_LAUNCH_REQUIRED_FLAGS)):
+                              (SDR_LAUNCH_SCRIPT, SDR_LAUNCH_REQUIRED_FLAGS),
+                              (READ_ROOTS_SCRIPT, READ_ROOTS_REQUIRED_FLAGS)):
         if not script.is_file():
             failures.append(f"script not found: {script}")
             continue
@@ -379,6 +408,18 @@ def main():
         for flag in req_flags:
             if flag not in declared:
                 failures.append(f"{script.name}: --help missing required {flag!r}")
+
+    # /mgh-sdr shells MUST carry the external-repo authorization step (both the
+    # read_roots_config.py invocation and the pending_approval disclosure).
+    for shell in SDR_SHELLS:
+        if not shell.is_file():
+            failures.append(f"shell not found: {shell}")
+            continue
+        text = shell.read_text(encoding="utf-8")
+        for marker in SDR_SHELL_REQUIRED_MARKERS:
+            if marker not in text:
+                failures.append(f"{shell.name}: external-repo authorization step "
+                                f"missing {marker!r}")
 
     # /mgh-ut-init shells must advertise the shell-level request-context-budget + format flag.
     for shell in UT_INIT_SHELLS:

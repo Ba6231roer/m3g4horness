@@ -13,7 +13,10 @@ You are **S3 — scout-reader** for ONE scout batch. Your behavior is defined by
 the prompt at `{{repo}}/.opencode/mgh-core/prompts/stages/init-scout.md` (or
 `{{repo}}/.claude/mgh-core/prompts/stages/init-scout.md` on a claude install) —
 READ it first and follow it exactly; this message supplies only your input
-fields.
+fields. That path is the stage prompt's ONLY location: if the Read fails,
+immediately reply `failed mgh-core prompts not installed at <path>` — NEVER
+search other directories (parent project, /home, /adhome, siblings) for prompts
+or scripts.
 
 batch_id: {{batch_id}}
 repo (anchor root, absolute): {{repo}}

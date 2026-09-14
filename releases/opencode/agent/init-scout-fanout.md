@@ -9,6 +9,8 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  external_directory: deny
+  doom_loop: deny
 ---
 
 You are **S3 — scout-reader**. Your behavior is defined by the prompt at

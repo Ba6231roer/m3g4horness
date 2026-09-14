@@ -42,11 +42,34 @@ Optional field (absent by default; absence preserves the shape byte-for-byte):
 | `domain` | `mgh-init` / `mgh-sast` / `mgh-sra` / `mgh-srr` / `mgh-ut-init` / `mgh-sdr` (advisory; discovery is by path) |
 | `target` | abs project root (Windows-native; **MUST** come from a Python leaf-script stdout — `describe_artifact --field repo` / `prepare_augment`/`ingest_requirements` stdout `project_root` / `write_runconfig` stdout `target` — never bash `pwd`, which emits MSYS `/c/...` that pathlib mis-resolves on Windows) |
 | `out_roots[]` | abs roots for customized `--out` / `--rules-dir` (init & ut-init; honors custom output locations without over-blocking) |
-| `read_roots[]` | **optional** abs external READ-ONLY roots (sdr: confirmed external repos the launcher/sdr_context actually searched). Tool-face read side (`Read`/`Glob`/`Grep`) only; write side and Bash search verbs NEVER honored (judged against `MGH_TARGET` alone). **read_roots 最小化纪律**: declare only roots actually searched in this run — NEVER a user-supplied catch-all / drive root. Fail-closed: a declared root must exist and be a directory at judgment time; a missing root grants zero. |
+| `read_roots[]` | **optional** abs external READ-ONLY roots (sdr: confirmed external repos the launcher/sdr_context actually searched). BOTH read faces honor them: the tool face (`Read`/`Glob`/`Grep`) AND the Bash face (search/listing verbs + the catch-all path-token allowset, rule m) — **语义反转** (the prior "tool-face only; Bash search verbs judged against `MGH_TARGET` alone" decision is reversed; what is readable at all is readable through any tool). The write side (tool + Bash verb + redirect + delete) is NEVER honored — judged against `MGH_TARGET` alone; likewise the leaf-source / `py -c` / temp-I/O / file-assoc blocks. **read_roots 最小化纪律**: declare only roots actually searched in this run — NEVER a user-supplied catch-all / drive root. Fail-closed: a declared root must exist and be a directory at judgment time; a missing root grants zero. |
 | `v` | schema version |
 
 `out_roots[]` (write-side allowlist extension, init/ut-init) and `read_roots[]` (read-side-only
 extension, any domain) are independent fields with disjoint effects.
+
+### Project read-roots config `<target>/.mgh/read-roots.json`
+
+A per-project, hand-editable config extends the unified read allow-set in EVERY run-domain
+(guard reads it on every active call, once — same order as the sentinel read):
+
+```json
+{"v": 1, "read_roots": ["<abs root>", "..."]}
+```
+
+| Aspect | Contract |
+|---|---|
+| Location | `<MGH_TARGET>/.mgh/read-roots.json` (inside the target tree — writes to it are governed by the ordinary write-confinement rules) |
+| Union | entries merge with the sentinel's `read_roots[]` into ONE allow-set feeding the tool-face read rule, the Bash search/listing rules, and the rule-m catch-all net — the SAME set on both faces |
+| Read-only | a config root NEVER grants write access (write side judges `MGH_TARGET` alone) and NEVER relaxes the leaf-source / `py -c` / temp-I/O / file-assoc blocks |
+| Fail-closed | missing file = behavior identical to no config; malformed JSON / `read_roots` not a list / non-dict body = zero grants, no crash, no other judgment altered; each entry needs exist-and-is-dir containment at judgment time (a missing entry grants zero) |
+| Tolerance | unknown fields ignored; non-string / blank entries skipped |
+| Authoring | hand-editable by the user; the deterministic writer (sdr approval flow) is a follow-up change and not required |
+
+**语义反转注记**: with rule m in place the Bash face judges paths directly (verb-independently),
+so the prior decision that a declared root NEVER becomes a Bash-searchable location is REVERSED —
+"凡允许读的目录,用什么工具读都放行". The read/write asymmetry is deliberate: declared roots are
+readable, never writable.
 
 ### Per-domain run-root (sentinel location, discovered on the anchor chain)
 
@@ -135,7 +158,10 @@ over-blocking when no target was pinned).
    `rule_path` / `draft_path` absolute paths; NEVER Bash `Set-Content`/`New-Item`/`tee`/`>` /
    `apply_patch`/`MultiEdit`/`NotebookEdit` outside the tree). A delete hit additionally calls
    out irreversibility ("NEVER `Remove-Item`/`del`/`rm`/`rmtree` outside the target tree,
-   including sibling modules").
+   including sibling modules"). Unrecognized write-shaped verbs (`robocopy`/`fsutil`/`.NET`
+   static methods/…) are no longer a silent pass: the rule-m catch-all net beneath blocks any
+   out-of-tree token they carry — with the READ-net recipe (allowed roots + config remedy),
+   not the write recipe, since the verb was never recognized as a write verb.
 
 ### `mgh-init` sanctioned subtrees (positive allowlist)
 
@@ -167,29 +193,45 @@ A hit → exit 2 + stderr recipe pointing at `list_*` / `describe_artifact` / pr
 
 The read side is the **peer** of the write discipline — same `MGH_TARGET` precedence
 (env > sentinel.`target` > degrade), same `Path.resolve().is_relative_to(target)` semantics,
-NOT a positive-allowlist check (any file inside the target tree is readable; the goal is
-"stay in the working project", not "stay in a sanctioned subtree"). It replaces the soft
-failure (a cross-module read reaching the host **permission prompt and interrupting the
-run**) with a fail-loud recipe. `MGH_TARGET` absent => the read check degrades to pass
-(NEVER a hard read block when no target was pinned; the script-ext write block / `py -c` /
-temp-I/O / file-assoc blocks still fire).
+NOT a positive-allowlist check within the tree (any file inside the target tree is readable;
+the goal is "stay in the working project", not "stay in a sanctioned subtree"). The allow-set
+is the **unified read allow-set** = resolved `MGH_TARGET` tree ∪ sentinel `read_roots[]` ∪
+project config `read_roots[]` — the SAME set on the tool face and the Bash face. It
+replaces the soft failure (a cross-module read reaching the host **permission prompt and
+interrupting the run**) with a fail-loud recipe. `MGH_TARGET` absent => the read checks
+degrade to pass (NEVER a hard read block when no target was pinned; the script-ext write
+block / `py -c` / temp-I/O / file-assoc blocks still fire).
 
 | Layer | Tool / shape | Anchor | Blocked when |
 |---|---|---|---|
-| Tool abstraction | `Read` | `file_path` | resolved `file_path` outside the target tree **and** outside every declared `read_roots[]` root (a root must exist + be a dir at judgment time, else grants zero) |
+| Tool abstraction | `Read` | `file_path` | resolved `file_path` outside the target tree **and** outside every declared `read_roots[]` root (sentinel ∪ config; a root must exist + be a dir at judgment time, else grants zero) |
 | Tool abstraction | `Read` (leaf-source rule) | `file_path` | script extension ∧ `mgh-core/scripts` path segment (installed leaf script source — the read-side peer of "leaf scripts read-only"; target-project `.py` and non-script artifacts pass; fires even in the degrade-no-target case). NEVER relaxed by `read_roots[]` |
 | Tool abstraction | `Glob` / `Grep` | `path` (default = cwd) | resolved `path` outside the target tree **and** outside every declared `read_roots[]` root; `path` absent + cwd outside both (cwd-drift leak) |
 | Tool abstraction | — | `pattern` / `glob` | **NOT parsed** (the `path` anchor is authoritative; conservative vs false positives) |
-| Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside, OR no abs path + cwd outside — **never relaxed by `read_roots[]`** (external roots are tool-face-read-only by design) |
+| Bash escape | `Bash: rg`/`ripgrep`/`grep`/`egrep`/`fgrep`/`findstr`/`find`/`fd`/`ag`/`ack` (leading token of the command or a sub-command after `;`/`\|`/`&&`/`\|\|`) | any explicit absolute-path argument OR cwd | any absolute-path arg resolves outside the unified allow-set, OR no abs path + cwd outside both |
+| Bash escape | `Bash: ls`/`dir`/`Get-ChildItem`/`gci` (leading token) | any path argument (cwd-relative `..` folded) OR cwd | any argument resolves outside the unified allow-set, OR no path + cwd outside both |
+| Bash catch-all (rule m) | **ANY `Bash` command** — every path-like token (drive-letter `C:\…`/`C:/…`, UNC `\\…`, POSIX `/…`, `..`-leading [resolved vs guard cwd], `~/`-leading; bare `~`/`..` NOT tokens; `://` URL tokens excluded) | token resolution | ANY token resolves outside the unified allow-set → exit 2 + recipe naming the three allow-root classes (target tree / sentinel `read_roots[]` / config `read_roots[]`) + the config remedy. **Verb-independent, runs LAST (after all enumeration rules)** — mutation-shaped hits surface their write/delete recipe first; the enumeration tables REMAIN IN FORCE as refinements (write/delete recipes, cwd-drift, P1 root pollution). No path token => pass; unpinned target => degrade |
 | Path resolution | `..` chain (e.g. `<target>\aa\bb\cc\..\..\..\..\xxxx` folding to a drive root) | the resolved path | `Path.resolve()` folds `..` segments; a chain that climbs out of the tree resolves outside and is blocked (the reported D-root permission-prompt interrupt shape) |
 | Path resolution | hallucinated out-of-tree prefix (an underscore dir name regenerated as a separator pair, e.g. `acme_wing` → `acme\wing`) | the resolved path | resolves outside the tree and is blocked by the same out-of-tree judgment — no directory-name semantics are attempted |
 
+**Residual boundaries (rule m, disclosed — same style as the honest-boundary docs)**: ① an
+UNKNOWN write verb writing INTO a declared read-only root passes the net (token inside the
+read allow-set; the mutation rules do not recognize the verb) — governed by the sdr
+approval-flow change once declared roots are user-approved; ② alias/variable indirection
+(`$p='D:\out'; cp x $p`) extracts no bare path token → leaks (same no-shell-parser stance as
+every other Bash rule); ③ the interpreter-exec rule (executed script location) keeps judging
+`MGH_TARGET` alone — declared roots are read-only, running code from them is not a read.
+
 A hit → exit 2 + stderr **read-side recipe** (points at "read only this batch's `input_path`/
 `targets[]`; anchor `Glob`/`Grep` (and `rg`/`grep`/… in Bash) at the repo root; NEVER read
-the parent dir / sibling modules"; when the sentinel declares `read_roots[]` the recipe adds
-"declared roots are not a wildcard"). Regex-over-observed-shape: pipes/aliases/env-injected
-paths in the Bash file-search form are NOT guaranteed (same stance as the temp-I/O and
-file-association rules); a `--flag <path>` argument on a non-search verb does NOT trip.
+the parent dir / sibling modules"; when roots are declared the recipe adds "declared roots
+(sentinel ∪ config) are not a wildcard"). The rule-m recipe instead names the three
+allow-root classes + the `<target>/.mgh/read-roots.json` remedy. Regex-over-observed-shape:
+pipes/aliases/env-injected paths in the Bash file-search form are NOT guaranteed (same
+stance as the temp-I/O and file-association rules). Under the pre-rule-m search/listing
+rules a `--flag <path>` value on a non-search verb did NOT trip — the rule-m net NOW judges
+every token including flag values (an accepted new block: `--flag=<out-of-tree>` values,
+`git -C <out>`, harmless out-of-tree mentions).
 
 ### Read-side path materialization (scout / T1 fan-out)
 

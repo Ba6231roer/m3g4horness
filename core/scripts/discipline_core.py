@@ -86,7 +86,7 @@ _DISCIPLINE = {
         ],
         "path_recipes": [
             _pr("scout-fanout-dispatcher",
-                "主路径 = 一次 Bash 跑 fanout_runner.py(带 --time-budget-ms < 宿主 per-call timeout × 0.8);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);退出码 2(宿主 CLI 不可用)→ 回退手派路径;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
+                "主路径 = 一次 Bash 跑 fanout_runner.py(带 --time-budget-ms < 宿主 per-call timeout × 0.8,且 MUST 显式传 --call-timeout-s < budget×0.8、--stall-timeout-s < --call-timeout-s,四级不变式违反 spawn 前退出码 2;合规 720000/540/300 或 480000/360/300);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);单元输出静默 ≥ --stall-timeout-s → 树杀重派(不增磁盘终态计数);退出码 2(宿主 CLI 不可用)→ 回退手派路径;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
                 "fanout_runner --step 契约"),
             _pr("scout-fanout-path",
                 "scout 批输出路径 = list_scout_batches stdout pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path + touch done_marker;失败 ack → 编排器写 failed_marker(终态,不重试不阻断)",
@@ -123,7 +123,7 @@ _DISCIPLINE = {
         ],
         "path_recipes": [
             _pr("t1-fanout-dispatcher",
-                "主路径 = 一次 Bash 跑 fanout_runner.py --tier t1(带 --time-budget-ms < 宿主 per-call timeout × 0.8);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);退出码 2 → 看 stderr——宿主 CLI 不可用 → 回退手派路径,scout 闸门(scout-incomplete-gate)→ 先完成 scout 层;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
+                "主路径 = 一次 Bash 跑 fanout_runner.py --tier t1(带 --time-budget-ms < 宿主 per-call timeout × 0.8,且 MUST 显式传 --call-timeout-s < budget×0.8、--stall-timeout-s < --call-timeout-s,四级不变式违反 spawn 前退出码 2;合规 720000/540/300 或 480000/360/300);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);单元输出静默 ≥ --stall-timeout-s → 树杀重派(不增磁盘终态计数);退出码 2 → 看 stderr——宿主 CLI 不可用 → 回退手派路径,scout 闸门(scout-incomplete-gate)→ 先完成 scout 层;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
                 "fanout_runner --step 契约"),
             _pr("t1-fanout-path",
                 "T1 单元输出路径 = list_clusters stdout pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path + touch done_marker;失败 ack → 编排器写 failed_marker(终态)",
@@ -145,8 +145,14 @@ _DISCIPLINE = {
         ],
         "path_recipes": [
             _pr("t2-aggregate-budget",
-                "先判聚合预算:plan_aggregate.py --node t2;needs_reduce=true(> 预算)→ map-reduce 每 shard 扇出 + 单一 rollup,每个请求 ≤ 预算",
+                "先判聚合预算:plan_aggregate.py --node t2;needs_reduce=false → single-context init-synthesis(逐字不变);needs_reduce=true(> 预算)→ map-reduce,每个请求 ≤ 预算",
                 "plan_aggregate.py --node t2"),
+            _pr("t2-fanout-dispatcher",
+                "map 主路径(needs_reduce=true 且 pending 非空)= 一次 Bash 跑 fanout_runner.py --tier t2 --init-dir <init-dir> --budget <max-aggregate-bytes>(budget 与 gate 同值;带 --time-budget-ms < 宿主 per-call timeout × 0.8,且 MUST 显式传 --call-timeout-s < budget×0.8、--stall-timeout-s < --call-timeout-s,四级不变式违反 spawn 前退出码 2;合规 720000/540/300 或 480000/360/300);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);单元输出静默 ≥ --stall-timeout-s → 树杀重派(不增磁盘终态计数);退出码 2(宿主 CLI 不可用)→ 回退手派路径;map 全 .done 后单一 rollup init-synthesis-rollup 吞 rollup.summary_paths;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
+                "fanout_runner --step 契约"),
+            _pr("t2-fanout-path",
+                "t2 shard 输出路径 = plan_aggregate --node t2 stdout pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path(结构化 shard 摘要)+ touch done_marker;失败 ack → 编排器写 failed_marker(终态);任一 shard .failed → 不得 rollup(缺摘要),披露后修复再 --resume",
+                "plan_aggregate --node t2 --step 契约"),
         ],
         "nevers": [],
     },
@@ -155,7 +161,7 @@ _DISCIPLINE = {
         "gates": [],
         "path_recipes": [
             _pr("t3-fanout-dispatcher",
-                "主路径 = 一次 Bash 跑 fanout_runner.py --tier t3(带 --time-budget-ms < 宿主 per-call timeout × 0.8);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);退出码 2(宿主 CLI 不可用)→ 回退手派路径;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
+                "主路径 = 一次 Bash 跑 fanout_runner.py --tier t3(带 --time-budget-ms < 宿主 per-call timeout × 0.8,且 MUST 显式传 --call-timeout-s < budget×0.8、--stall-timeout-s < --call-timeout-s,四级不变式违反 spawn 前退出码 2;合规 720000/540/300 或 480000/360/300);partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);单元输出静默 ≥ --stall-timeout-s → 树杀重派(不增磁盘终态计数);退出码 2(宿主 CLI 不可用)→ 回退手派路径;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
                 "fanout_runner --step 契约"),
             _pr("t3-fanout-path",
                 "T3 category 输出路径 = list_rule_jobs stdout pending[].rule_path,绝对逐字透传;成功恰好写 rule_path + touch done_marker;失败 ack → 编排器写 failed_marker(终态)",

@@ -122,7 +122,8 @@ FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candi
                                 "--wave", "--time-budget-ms", "--call-timeout-s",
                                 "--stall-waves", "--resume",
                                 "--kill-stale", "--pending-file", "--purge-audit",
-                                "--dry-run", "--template"]
+                                "--dry-run", "--template",
+                                "--cooldown-s", "--no-rate-limit-stop", "--retry-failed"]
 # The --tier closed set MUST advertise the t2 tier (map stage adoption): argparse prints the
 # choices verbatim in --help's usage line — assert the expanded set textually (a trimmed shell
 # example / prose can't fake it; the usage line is argparse-generated).
@@ -143,7 +144,7 @@ DIFF_GROUP_SCRIPT = ROOT / "core" / "scripts" / "diff_group.py"
 DIFF_GROUP_REQUIRED_FLAGS = ["--repo", "--base", "--branch", "--checkpoints",
                              "--materialize", "--max-standalone-bytes",
                              "--max-interface-bytes", "--include-excluded", "--offset",
-                             "--limit", "--resume", "--check"]
+                             "--limit", "--resume", "--check", "--include-failed"]
 SDR_CONTEXT_SCRIPT = ROOT / "core" / "scripts" / "sdr_context.py"
 SDR_CONTEXT_REQUIRED_FLAGS = ["--repo", "--run-dir", "--base", "--branch", "--dimensions",
                               "--baseline-budget-bytes", "--external-budget-bytes",
@@ -166,7 +167,19 @@ SDR_SHELLS = [
 SDR_SHELL_REQUIRED_MARKERS = ["read_roots_config.py", "pending_approval"]
 PLAN_AGG_SCRIPT = ROOT / "core" / "scripts" / "plan_aggregate.py"
 PLAN_AGG_REQUIRED_FLAGS = ["--node", "--init-dir", "--budget", "--materialize",
-                           "--offset", "--limit", "--orch-budget-bytes"]
+                           "--offset", "--limit", "--orch-budget-bytes",
+                           "--include-failed"]
+# --include-failed (failed-terminal bounded re-dispatch adoption) MUST be declared in
+# each of the five tier enumerators' --help (R5.1 contract surface) — the dispatcher's
+# --retry-failed forwards it, so identity always comes from the enumerator.
+INCLUDE_FAILED_SCRIPTS = [
+    ROOT / "core" / "scripts" / "list_scout_batches.py",
+    ROOT / "core" / "scripts" / "list_clusters.py",
+    ROOT / "core" / "scripts" / "plan_aggregate.py",
+    ROOT / "core" / "scripts" / "list_rule_jobs.py",
+    ROOT / "core" / "scripts" / "diff_group.py",
+]
+INCLUDE_FAILED_FLAG = "--include-failed"
 WRITE_RUNCONFIG_SCRIPT = ROOT / "core" / "scripts" / "write_runconfig.py"
 WRITE_RUNCONFIG_REQUIRED_FLAGS = ["--target", "--format", "--init-dir", "--run-root", "--scope",
                                   "--no-scout", "--no-codegraph", "--skip-consistency",
@@ -329,6 +342,20 @@ def main():
                 if flag not in declared:
                     failures.append(
                         f"list_clusters.py: --help missing required {flag!r}")
+
+    # --include-failed MUST be declared in each of the five tier enumerators'
+    # --help (failed-terminal bounded re-dispatch adoption; R5.1 contract surface).
+    for script in INCLUDE_FAILED_SCRIPTS:
+        if not script.is_file():
+            failures.append(f"script not found: {script}")
+            continue
+        declared = declared_flags(script)
+        if declared is None:
+            failures.append(f"{script.name}: `--help` failed")
+            continue
+        if INCLUDE_FAILED_FLAG not in declared:
+            failures.append(
+                f"{script.name}: --help missing required {INCLUDE_FAILED_FLAG!r}")
 
     # /mgh-srr intake (ingest_requirements) + render adapter flags MUST be declared in the
     # respective script's --help (request-context-budget adoption; R5.1).

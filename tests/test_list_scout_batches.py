@@ -34,10 +34,11 @@ class TestListScoutBatches(unittest.TestCase):
         self.m = _load("list_scout_batches")
         self.d = Path(tempfile.mkdtemp(prefix="mgh_lsb_"))
 
-    def _run(self, plan, checkpoints=None):
+    def _run(self, plan, checkpoints=None, *extra):
         argv = ["list_scout_batches.py", "--scout-plan", str(plan)]
         if checkpoints:
             argv += ["--checkpoints", str(checkpoints)]
+        argv += list(extra)
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -156,6 +157,26 @@ class TestListScoutBatches(unittest.TestCase):
         self.assertEqual(data["failed"], 1)
         self.assertEqual(data["total"], data["done"] + data["failed"] + len(data["pending"]))
 
+    def test_include_failed_relists_failed_batch_canonical(self):
+        # --include-failed: the failed batch re-enters pending under its
+        # canonical batch_id with the forward-derived .failed marker path;
+        # failed stays counted and done stays marker-truth (no double count)
+        p = self._write(_BATCHES)
+        cp = self.d / "checkpoints" / "scout"
+        self._mark_failed("scout-002")
+        code, out, _ = self._run(p, cp, "--include-failed")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        ids = [b["batch_id"] for b in data["pending"]]
+        self.assertIn("scout-002", ids)
+        item = next(b for b in data["pending"] if b["batch_id"] == "scout-002")
+        self.assertEqual(item["failed_marker"],
+                         str((cp / "scout-002.json.failed").resolve()))
+        self.assertTrue(Path(item["failed_marker"]).is_absolute())
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["done"], 0)
+        self.assertEqual(data["total"], 3)
+
     def test_failed_excludes_merge_audit_markers(self):
         # stray merge.json.failed / audit.json.failed are tier-level, not reader batches
         p = self._write(_BATCHES)
@@ -188,12 +209,14 @@ class TestListRuleJobs(unittest.TestCase):
         self.m = _load("list_rule_jobs")
         self.d = Path(tempfile.mkdtemp(prefix="mgh_lrj_"))
 
-    def _run(self, inv, fmt="opencode", checkpoints=None, target=".", rules_dir=None):
+    def _run(self, inv, checkpoints=None, *extra, fmt="opencode", target=".",
+             rules_dir=None):
         argv = ["list_rule_jobs.py", "--inventory", str(inv), "--format", fmt, "--target", target]
         if checkpoints:
             argv += ["--checkpoints", str(checkpoints)]
         if rules_dir:
             argv += ["--rules-dir", rules_dir]
+        argv += list(extra)
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -304,6 +327,25 @@ class TestListRuleJobs(unittest.TestCase):
         self.assertEqual([j["category"] for j in data["pending"]], ["authorization"])
         self.assertEqual(data["failed"], 1)
         self.assertEqual(data["total"], data["done"] + data["failed"] + len(data["pending"]))
+
+    def test_include_failed_relists_failed_category_canonical(self):
+        # --include-failed: the failed category re-enters pending under its
+        # canonical category with the forward-derived .failed marker path;
+        # failed stays counted and done stays marker-truth
+        p = self._write([{"name": "a", "category": "authorization"},
+                         {"name": "b", "category": "crypto"}])
+        cp = self.d / "checkpoints" / "t3"
+        self._mark_failed("crypto", "opencode")
+        code, out, _ = self._run(p, cp, "--include-failed")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        cats = {j["category"]: j for j in data["pending"]}
+        self.assertIn("crypto", cats)
+        self.assertEqual(cats["crypto"]["failed_marker"],
+                         str((cp / "crypto.opencode.json.failed").resolve()))
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["done"], 0)
+        self.assertEqual(data["total"], 2)
 
     def test_pending_item_carries_failed_marker(self):
         p = self._write([{"name": "a", "category": "crypto"}])

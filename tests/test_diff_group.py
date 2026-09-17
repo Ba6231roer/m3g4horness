@@ -319,7 +319,38 @@ class DiffGroupTest(unittest.TestCase):
         self.assertTrue(all(u["kind"] == "standalone" and u["route"] == ""
                             for u in d["pending"]))
 
-    def test_zero_diff_empty(self):
+    def test_include_failed_relists_failed_unit_canonical(self):
+        # --include-failed: a unit whose .failed marker exists re-enters
+        # pending[] under its canonical unit_id with the same marker path and
+        # a re-materialized slice; default (flag off) keeps it excluded
+        repo = self._repo_with_feature()
+        ck, sl = self.tmp / "m3", self.tmp / "s3"
+
+        def _enum(*extra):
+            return self._run("--repo", str(repo), "--base", "master",
+                             "--branch", "feature-pay",
+                             "--checkpoints", str(ck),
+                             "--materialize", str(sl), *extra)
+
+        code, out, err = _enum()
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertTrue(d["pending"])
+        victim = d["pending"][0]
+        fm = Path(victim["failed_marker"])
+        fm.parent.mkdir(parents=True, exist_ok=True)
+        fm.write_text(json.dumps({"unit": victim["unit_id"], "reason": "r",
+                                  "tier": "sdr"}), encoding="utf-8")
+        code, out, _ = _enum()
+        d = json.loads(out)
+        self.assertNotIn(victim["unit_id"], [u["unit_id"] for u in d["pending"]])
+        code, out, _ = _enum("--include-failed")
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        relisted = {u["unit_id"]: u for u in d["pending"]}
+        self.assertIn(victim["unit_id"], relisted)
+        self.assertEqual(relisted[victim["unit_id"]]["failed_marker"], str(fm))
+        self.assertTrue(Path(relisted[victim["unit_id"]]["input_path"]).is_file())
         repo = self._repo_with_feature()
         code, out, err = self._run("--repo", str(repo), "--base", "feature-pay",
                                    "--branch", "feature-pay",

@@ -269,6 +269,12 @@ def main():
     ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES,
                     help=f"orchestrator single-request page byte cap (default "
                          f"{DEFAULT_ORCH_BUDGET_BYTES}; page auto-tightened + shrunk:true)")
+    ap.add_argument("--include-failed", action="store_true",
+                    help="re-list failed shards into pending[] under their canonical "
+                         "shard_id with their existing .failed marker path (t2 node "
+                         "only; identity from this enumerator's forward derivation, "
+                         "never filename stems; opt-in for the dispatcher's "
+                         "--retry-failed flow). Default off keeps stdout byte-identical")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk).
     # Before parse_args so --help is utf-8 too. No-op on StringIO (in-process tests).
     for stream in (sys.stdout, sys.stderr):
@@ -395,7 +401,11 @@ def main():
                 terminal = True
             elif Path(fm_abs).is_file():
                 failed_count += 1
-                terminal = True
+                # --include-failed: the failed shard re-enters pending under
+                # its canonical shard_id (fm_abs below is the same
+                # forward-derived marker path; the dispatcher's --retry-failed
+                # deletes it at claim). Default (flag off) keeps it terminal.
+                terminal = not args.include_failed
         item = {
             "shard_id": sid, "node": args.node,
             "checkpoint_path": cp_abs, "done_marker": dm_abs, "failed_marker": fm_abs,

@@ -521,6 +521,14 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
         whole_ids.append(cid)
         if cid in failed:  # terminal → excluded from any pack, counted failed
             clusters_failed += 1
+            if not args.include_failed:
+                continue
+            # --include-failed: the failed cluster re-enters on the independent
+            # (unpacked) path — same canonical identity the unpacked path would
+            # derive; pack identity must stay independent of failure markers.
+            independent.append((cluster,
+                                [cands[i] for i in cluster.get("candidate_ids", [])
+                                 if i in cands]))
             continue
         hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
         nbytes = _byte_len(_absolutize_paths(
@@ -546,7 +554,11 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
             pack_id = _pack_id(category, member_ids)
             if Path(_paths(checkpoints_dir, pack_id)[2]).is_file():
                 packs_failed += 1  # pack-level terminal failure (failed ack); NOT retried
-                continue
+                if not args.include_failed:
+                    continue
+                # --include-failed: the failed pack re-emits as the pack unit
+                # (canonical pack id; its failed_marker path is the pack-level
+                # marker the dispatcher's --retry-failed deletes at claim)
             merged_members = []
             checkpoints_index = []
             for m in members:
@@ -613,7 +625,7 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
             continue
         emitted = False
         for uid, ipath, nbytes in units:
-            if uid in done or uid in failed:
+            if uid in done or (uid in failed and not args.include_failed):
                 continue
             shard = uid != cid
             all_units.append(_slim_materialized(
@@ -703,6 +715,15 @@ def main():
                          f"{DEFAULT_PACK_MAX}; guardrail against template-iteration "
                          f"bloat). Passing it while --pack-bytes is 0/absent is an "
                          f"invalid combination -> exit 2")
+    ap.add_argument("--include-failed", action="store_true",
+                    help="re-list confirmed-failed units into pending[] under their "
+                         "canonical ids with their existing .failed marker paths "
+                         "(whole-cluster failures re-enter on the independent path, "
+                         "failed packs re-emit as the pack unit, failed shards "
+                         "re-emit; identity from this enumerator's forward "
+                         "derivation, never filename stems; opt-in for the "
+                         "dispatcher's --retry-failed flow). Default off keeps "
+                         "stdout byte-identical")
     args = ap.parse_args()
 
     if args.offset < 0:
@@ -813,6 +834,7 @@ def main():
     all_units = []          # full slim work-list (pre-page)
     clusters_with_pending = 0
     clusters_failed = 0
+    clusters_reincluded = 0
     for cluster in clusters:
         if not isinstance(cluster, dict):
             continue
@@ -821,7 +843,12 @@ def main():
             continue
         if cid in failed:  # whole-cluster confirmed-failed (terminal; NOT retried)
             clusters_failed += 1
-            continue
+            if not args.include_failed:
+                continue
+            # --include-failed: the failed cluster falls through to the normal
+            # materialize + emit below (canonical cluster id / shard ids; the
+            # forward-derived failed_marker path rides the emitted unit)
+            clusters_reincluded += 1
         emitted = False
         if materialize:
             hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
@@ -852,7 +879,9 @@ def main():
             for uid, ipath, nbytes in units:
                 if uid in done:
                     continue
-                if uid in failed:  # shard-level terminal failure (skip, not retried)
+                if uid in failed and not args.include_failed:
+                    # shard-level terminal failure (skip, not retried;
+                    # --include-failed re-emits it under its canonical shard id)
                     continue
                 shard = uid != cid
                 all_units.append(_slim_materialized(
@@ -866,7 +895,11 @@ def main():
             clusters_with_pending += 1
 
     total = len(clusters)
-    done_count = total - clusters_with_pending - clusters_failed
+    # re-included failed clusters sit in BOTH clusters_with_pending and
+    # clusters_failed — add them back so done stays the marker-truth count
+    # under --include-failed
+    done_count = (total - clusters_with_pending - clusters_failed
+                  + clusters_reincluded)
     req_limit = args.limit if args.limit is not None else len(all_units)
     page = all_units[args.offset: args.offset + max(0, req_limit)]
     page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)

@@ -259,6 +259,42 @@ class TestPlanAggregateT2(unittest.TestCase):
             # unsplit category shards carry the part identity 0/1
             self.assertEqual((item["part_index"], item["part_count"]), (0, 1))
 
+    def test_t2_include_failed_relists_failed_shard_canonical(self):
+        # --include-failed (t2): a shard whose dot-prefixed .failed marker exists
+        # re-enters pending[] under its canonical shard_id with the same
+        # forward-derived marker path; failed stays counted, done stays 0
+        records = [{"category": "authorization", "name": f"n{i}", "kind": "auth",
+                    "pad": "x" * 2000} for i in range(2)]
+        records += [{"category": "crypto", "name": f"m{i}", "kind": "auth",
+                     "pad": "y" * 2000} for i in range(2)]
+        self.a.write_t1(records)
+        code, out, _ = self.a.run("--node", "t2", "--budget", "4500", "--materialize",
+                                  str(self.a.init / "shards"))
+        self.assertEqual(code, 0)
+        victim = json.loads(out)["pending"][0]
+        fm = Path(victim["failed_marker"])
+        fm.parent.mkdir(parents=True, exist_ok=True)
+        fm.write_text(json.dumps({"unit": victim["shard_id"], "reason": "r",
+                                  "tier": "t2"}), encoding="utf-8")
+        # default: the failed shard is terminal (excluded, counted)
+        code, out, _ = self.a.run("--node", "t2", "--budget", "4500", "--materialize",
+                                  str(self.a.init / "shards"))
+        d = json.loads(out)
+        self.assertNotIn(victim["shard_id"],
+                         [i["shard_id"] for i in d["pending"]])
+        self.assertEqual(d["failed"], 1)
+        # opt-in: canonical re-entry
+        code, out, _ = self.a.run("--node", "t2", "--budget", "4500", "--materialize",
+                                  str(self.a.init / "shards"), "--include-failed")
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        relisted = {i["shard_id"]: i for i in d["pending"]}
+        self.assertIn(victim["shard_id"], relisted)
+        self.assertEqual(relisted[victim["shard_id"]]["failed_marker"],
+                         str(fm))
+        self.assertEqual(d["failed"], 1)
+        self.assertEqual(d["done"], 0)
+
     def test_t2_pending_excludes_terminal_shards_and_counts(self):
         records = [{"category": "authorization", "name": "a", "kind": "auth", "pad": "x" * 2000},
                    {"category": "authorization", "name": "a2", "kind": "auth", "pad": "x" * 2000},

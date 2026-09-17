@@ -1,16 +1,20 @@
 # distribution-purity Specification
 
 ## Purpose
-TBD - created by archiving change purify-distributed-md. Update Purpose after archive.
+
+让 `install.sh` 装进目标项目的每一件产物都是**自足**的:目标环境里不存在的东西(研发态编号、
+变更夹名、上游文档路径、维护者私有文档区)一律不许被引用,否则目标 agent 会去追一个不存在的
+指针。约束由确定性 lint 强制,install 自检 fail-soft、回归测试 fail-loud 闭环。
+
 ## Requirements
-### Requirement: Shipped md artifacts are free of dev-only provenance and dangling references
+### Requirement: Shipped artifacts are free of dev-only provenance and dangling references
 
-Shipped md artifacts MUST be free of dev-only provenance and dangling references.
+Shipped artifacts MUST be free of dev-only provenance and dangling references.
 
-经 `install.sh` 装入目标项目的所有 md 工具产物(命令壳、agent 定义、subagent stage
-提示词、I/O 契约、skills、**面向人类的命令 man 说明**)MUST NOT 携带任何只在本仓研发语境才有意义的引用。在业务项目
+经 `install.sh` 装入目标项目的所有工具产物(命令壳、agent 定义、subagent stage
+提示词、I/O 契约、skills、运行时脚本与插件)MUST NOT 携带任何只在本仓研发语境才有意义的引用。在业务项目
 环境这些是**悬空指针**——浪费 token,且目标项目常有自带 `AGENTS.md` / 无关编号,会误导
-subagent。被禁类别 SHALL 覆盖(经 6-agent 全量审计确认的完整清单):
+subagent。被禁类别 SHALL 覆盖(原 6-agent 全量审计确认的清单 + 后续增补):
 
 1. **研发铁律编号** `R\d`/`R\d.\d`:`R5.2`、`R5.9`、`R5.7`、`R5.4`、`R3`、`R2`、`R1–R4`。
 2. **失败/发现 ID** `\bFD\d+\b`:`FD8`、`FD3`、`FD5`、`FD6`。
@@ -22,10 +26,24 @@ subagent。被禁类别 SHALL 覆盖(经 6-agent 全量审计确认的完整清�
 7. **dev-meta 措辞**:`承 R5.x`、`兑现 R5.x`、`范式锚点`、`本仓`(指本研发仓时)。
 8. **上游溯源行话作归因**:`vvah`/`vvaharness`/`design_controls` 当**作谱系归因**使用时
    (与下面「受保护类」的 `Source:` 头 / Apache 归因 / 操作性 schema 匹配区分——后者保留)。
+9. **本仓根 `docs/` 指针**:维护者私有文档区的任意内容(命令人话说明、术语词典、上游对照表、
+   分析与 review 笔记)。该目录 install **不**拷贝进目标项目,故分发产物里指向它的每一处都是
+   死链,且会把目标 agent 引向一个根本不存在的目录。
 
-本约束的「shipped md」文件集 SHALL 与 `install.sh` 实际拷贝的 source globs 同源(命令壳 /
-agents / skills / `core/prompts/**` / `core/contracts/**` / **`docs/man/**`**),二者不得漂移。脚本
-`.py`、`AGENTS.md` 本身、`openspec/**` SHALL NOT 在本约束范围内。
+**豁免面(与第 9 类同形,机器须放行)**:目标项目里由工具**运行时生成**的 `docs/security-controls/`、
+`docs/test-conventions/`(mgh-init / mgh-ut-init 的输出目录),以及 `core/docs/NOTICE`、
+`core/docs/prompt-provenance.md`(Apache-2.0 归属,随 `core/` 落到 `<dest>/mgh-core/docs/`)。
+`core/prompts/**` 是 R1 冻结的逐字移植正文,其正文提及**上游项目**自己的文档布局且不可编辑,
+故第 9 类对它豁免。
+
+本约束的「shipped」文件集 SHALL 与 `install.sh` 实际拷贝的 source globs 同源(命令壳 /
+agents / skills / `core/prompts/**` / `core/contracts/**` / 运行时脚本 `core/scripts/**` /
+`releases/<platform>/hooks/**` / `releases/opencode/plugins/**`),二者不得漂移。**第 9 类对
+md 与运行时脚本一律生效;第 1–8 类只对 md 生效**——目标 agent 被要求不读叶子脚本源码(报错只
+看 stderr),脚本注释里的规则编号 / 决策 ID 是面向本仓维护者的合法速记,不会误导目标。
+
+**SDD 产物**(`openspec/specs/**` 与 `openspec/changes/**`,已归档的除外)SHALL NOT 出现第 9 类
+引用(承 R5.11);第 1–8 类在 SDD 产物里是**合法**的(spec 本就逐条引用规则编号),不在本约束范围。
 
 #### Scenario: Decision-ID parenthetical is a violation
 
@@ -55,12 +73,17 @@ agents / skills / `core/prompts/**` / `core/contracts/**` / **`docs/man/**`**),�
 #### Scenario: Script provenance comments are exempt
 
 - **WHEN** `core/scripts/*.py` 或 hook `.py` 注释含 `# hardens R5.2`
-- **THEN** 该溯源注释可保留(脚本只被执行,注释面向本仓维护者),不在约束范围
+- **THEN** 该溯源注释可保留(脚本只被执行,注释面向本仓维护者),不在第 1–8 类约束范围
 
-#### Scenario: Man page is shipped and scanned
+#### Scenario: Repo-root docs pointer is a violation
 
-- **WHEN** `docs/man/<cmd>.md` 经 `install.sh` 分发到目标项目
-- **THEN** 它属于 shipped md 文件集,SHALL 被 `check_distributed_purity.py` 扫描;人话措辞自然规避悬空引用,但仍受本 lint 兜底
+- **WHEN** 某 shipped 命令壳含一行「人类读者:通俗说明见 …」指向维护者私有文档区里的命令人话说明
+- **THEN** 该指针 SHALL 被整行删除(不是改写——改写后的指针仍是对私有文档区的引用);命令壳其余纪律原样保留
+
+#### Scenario: Script pointer to a dev-only path is a violation
+
+- **WHEN** 某 shipped 运行时脚本注释含 `glasswing_docs/09 §1.3` 或 `Part of improve-mgh-init-llm-discovery`
+- **THEN** lint 以退出码 2 报出(第 9 类与变更夹名同为「读者会去跟、会扑空」的指针),注释里的规则编号不受影响
 
 ### Requirement: Dangling references resolved by delete-or-graft, never losing operational content
 
@@ -122,21 +145,25 @@ MUST NOT 误伤上述受保护类。
 
 ### Requirement: Distribution purity enforced by a deterministic high-precision lint
 
-SHALL 提供确定性叶脚本 `tools/check_distributed_purity.py`,对 shipped md 文件集扫描**高精度**
-禁用模式(零/低假阳,合法操作性文本不误伤):
+SHALL 提供确定性叶脚本 `tools/check_distributed_purity.py`,对 shipped 文件集与 SDD 产物扫描
+**高精度**禁用模式(零/低假阳,合法操作性文本不误伤):
 
-- 规则编号 `\bR\d+(\.\d+)?\b`
-- 失败/发现 ID `\bFD\d+\b`
-- 决策 ID `\bD\d+\b`
-- 本仓手册交叉引用 `AGENTS\.md\s+R\d`
-- openspec 变更夹名 `\b(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst)-[a-z0-9-]+`
-- 内部上游文档 `glasswing_docs/`
-- 仓根开发态文件 `\btask\.\d+\.md\b`
-- dev-meta 措辞 `范式锚点`、`承\s*R\d+(\.\d+)?`、`兑现\s*R\d+(\.\d+)?`
+- **指针族**(指向目标环境不存在的东西;对 md 与运行时脚本**都**生效):
+  - openspec 变更夹名 `\b(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst|srr|ut-init)-[a-z0-9-]+`
+  - 内部上游文档 `glasswing_docs/`
+  - 仓根开发态文件 `\btask\.\d+\.md\b`
+  - 本仓根 `docs/` 引用(`repo_docs`;按上文「豁免面」三族甄别,并放行上游文档 URL)
+- **词汇族**(研发手册的裸编号;仅对 **md** 生效):
+  - 规则编号 `\bR\d+(\.\d+)?\b`
+  - 失败/发现 ID `\bFD\d+\b`
+  - 决策 ID `\bD\d+\b`
+  - 本仓手册交叉引用 `AGENTS\.md\s+R\d`
+  - dev-meta 措辞 `范式锚点`、`承\s*R\d+(\.\d+)?`、`兑现\s*R\d+(\.\d+)?`
 
 命中任一 SHALL fail-loud(退出码 2)并经 stderr 报具体文件、行号与命中 token;stdout SHALL
 输出结构化 JSON 摘要(`{scanned, violations[], allowlisted}`)。`<target>/AGENTS.md`、
-runtime 脚本路径 `.claude/mgh-core/scripts/*.py`、操作阶段标签 `T1`/`s1`..`s9` MUST NOT 被误报。
+runtime 脚本路径 `.claude/mgh-core/scripts/*.py`、操作阶段标签 `T1`/`s1`..`s9`、
+`<target>/docs/security-controls/` 与 `core/docs/**` MUST NOT 被误报。
 
 **上游溯源行话**(`vvah`/`vvaharness`/`design_controls` 作归因)SHALL NOT 纳入 lint 硬边界
 ——因其与受保护的 `Source:` 头 / skill Apache 归因 / 操作性 `design_controls` 同形,机器

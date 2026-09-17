@@ -65,16 +65,42 @@ confirmed failure). Unparsable stdout → trust the disk markers only.
 
 Per-unit stall detection + surgical tree kill: two reader threads per child
 roll a byte-level last-output timestamp + an 8KB tail per stream; silence >=
-`--stall-timeout-s` (default 900) or total runtime >= `--call-timeout-s` kills
-that unit's WHOLE process tree (`taskkill /pid <pid> /T /F` — the npm `.cmd`
-shim chain's real host-CLI process dies too, never an orphan burning tokens;
-POSIX process group). No ack, no marker → the unit stays pending for
-re-dispatch. Every spawn terminal (ok included) appends the captured
-stdout/stderr tails to `<checkpoints>/<tier>/<unit-id-sanitized>.run.log`;
-non-ok terminals name the run.log absolute path on stderr.
+the run's EFFECTIVE silence window (initial value = `--stall-timeout-s`,
+default 900) or total runtime >= `--call-timeout-s` kills that unit's WHOLE
+process tree (`taskkill /pid <pid> /T /F` — the npm `.cmd` shim chain's real
+host-CLI process dies too, never an orphan burning tokens; POSIX that unit's
+own process group). The kill NEVER reaches the dispatcher: units are spawned
+with `start_new_session`, so each leads its own session. "No ack, no marker" →
+the unit stays pending for re-dispatch.
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/collections/concurrent.futures/
-datetime/json/os/pathlib/shutil/signal/subprocess/sys/tempfile/threading/time).
+The silence criterion means "this unit has produced nothing for that long", NOT
+"this unit is hung": on a rate-limited gateway the usual cause is the call
+sitting in the gateway's queue, which is locally indistinguishable from a real
+hang (the same silence, the same zero output). It is a CONVERGENCE BOUND for
+this run — an upper limit on how long one slot may sit idle — never a health
+diagnosis. A killed unit re-queues at the tail, so a false kill throws away the
+work already done AND re-pays the queue behind the same congestion. Two escape
+hatches: `--stall-timeout-s 0` disables the criterion outright (then
+`--call-timeout-s` alone bounds convergence), and the effective window WIDENS
+within a run the moment a stall-killed unit completes on re-dispatch
+(`W <- min(2W, --call-timeout-s x 0.8)`, stderr-disclosed once per triggering
+unit, always <= `--call-timeout-s`) — self-evidence that the window was too
+tight for this run's contention. Widening is per-run only, never persisted.
+
+Every spawn terminal (ok included) appends the captured stdout/stderr tails to
+`<checkpoints>/<tier>/<unit-id-sanitized>.run.log`; non-ok terminals name the
+run.log absolute path on stderr.
+
+Session isolation boundary: because units lead their own session, an
+interactive Ctrl-C delivered to the dispatcher no longer reaches the in-flight
+units. The dispatcher's exit path tree-kills whatever is still registered
+before deregistering, so a normal Ctrl-C stop leaves nothing behind; a HARD
+kill (SIGKILL, where no exit path runs) leaves orphans disclosed by the
+liveness file and cleared with `--kill-stale`.
+
+Zero runtime deps (Python >=3.10 stdlib: argparse/codecs/collections/
+concurrent.futures/datetime/json/os/pathlib/shutil/signal/subprocess/sys/
+tempfile/threading/time).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py fanout_runner.py --tier scout|t1|t2|t3|sdr [tier flags] [options]
@@ -121,22 +147,51 @@ CLI contract (`--help` is the contract surface, R5.1):
                     better-slow-than-killed — a killed unit leaves no marker,
                     stays pending, and re-dispatch wastes a whole run). The
                     kill path is the whole-tree kill (see stall detection).
-  --stall-timeout-s per-unit output-silence (stall) threshold in seconds
-                    (default 900; < 60 rejected with exit 2). No stdout/stderr
-                    bytes for this long -> the unit's whole process tree is
-                    killed and the unit stays pending for re-dispatch.
-                    Byte-silence is the high-signal hang indicator (healthy
-                    LLM subagents stream continuously; minutes-level observed,
-                    so 900s ~ 5x headroom); a mis-killed unit re-dispatches and
-                    self-heals, its run.log keeps the evidence.
+  --stall-timeout-s per-unit output-silence window in seconds, INITIAL value
+                    (default 900; `0` = disable the criterion; 1..59 rejected
+                    with exit 2). No stdout/stderr bytes for this long -> the
+                    unit's whole process tree is killed and the unit stays
+                    pending for re-dispatch. Byte-silence means the unit
+                    produced NOTHING for that long; it does NOT mean the unit
+                    is hung — on a rate-limited gateway the usual cause is the
+                    call waiting in the gateway's queue, which is locally
+                    indistinguishable from a real hang. The criterion's job is
+                    to bound how long one slot may sit idle (this run's
+                    convergence bound), never to diagnose unit health.
+                    Byte-silence means BOTH streams idle (the clock takes the
+                    newer of the two streams' last-byte stamps), so a unit
+                    whose stderr never emits is not mistaken for silent.
+                    Calibration: default = p99(completed-unit runtime) x 2,
+                    rounded down to the minute and never below 900 (observed
+                    sample n=84: p50 134s / p95 229s / p99 325s / max 325s ->
+                    650s -> 600s -> floor 900s). That sample is the SURVIVING
+                    population only — units killed for gateway queueing are
+                    absent from it by construction — so it is an upper estimate
+                    for healthy units and MUST NOT be read as "past this it
+                    deserves to die". Re-calibrate from the runtime_* fields
+                    every exit reports (see stdout below). The EFFECTIVE window
+                    widens within a run on false-kill self-evidence: if a
+                    stall-killed unit completes on re-dispatch, the window
+                    becomes min(2x current, --call-timeout-s x 0.8) for the
+                    rest of the run and the event is disclosed on stderr.
+                    `0` disables the silence criterion entirely — then
+                    convergence is bounded by `--call-timeout-s` ALONE, so a
+                    host-driven run (where the host hard timeout also applies)
+                    SHOULD tighten that value; the `stall < call` ordering
+                    constraint does not apply in this mode. The kill is
+                    session-scoped: units lead their own session, so it NEVER
+                    terminates the dispatcher.
   --hb-interval-s   stderr in-flight heartbeat period in seconds (default 60).
 
   TIMEOUT INVARIANT (four levels, inner < outer, >=20% headroom per level):
     stall-timeout-s < call-timeout-s < time-budget-ms x 0.8 < host per-call
     timeout
+  `--stall-timeout-s 0` (criterion disabled) drops the innermost level: only
+  `call-timeout-s < time-budget-ms x 0.8` is then checked.
   Spawn-time validation (fail-loud, exit 2 + compliant-values recipe BEFORE
   any spawn or enumerator side effect): passing --time-budget-ms REQUIRES an
-  explicit --call-timeout-s below budget x 0.8, and stall < call always. The
+  explicit --call-timeout-s below budget x 0.8, and stall < call whenever the
+  stall criterion is on (`--stall-timeout-s > 0`). The
   defaults (call 7200 > any hour-level host budget) are for out-of-host
   manual runs only — a host-driven run that kept them is guaranteed to
   degenerate into the host hard-killing the tree first (observed 2026-09-14).
@@ -158,7 +213,11 @@ CLI contract (`--help` is the contract surface, R5.1):
                     children keep burning tokens". Mismatched/dead PIDs are
                     NEVER killed (PID-reuse guard: the cmdline must match —
                     a reused PID is only a stale record, the liveness file is
-                    just removed). DESTRUCTIVE: a real kill REQUIRES a prior
+                    just removed). Needed after a HARD kill only: units lead
+                    their own session, so an interactive Ctrl-C no longer
+                    reaches them through the tty, and the dispatcher's exit
+                    path tree-kills whatever is still registered before
+                    deregistering. DESTRUCTIVE: a real kill REQUIRES a prior
                     `--dry-run` review — invoking `--kill-stale` without
                     `--dry-run` when targets are detected exits 2 + recipe
                     (same guard shape as --purge-audit). Idempotent: no stale
@@ -204,6 +263,16 @@ stdout (structured JSON summary; stderr = diagnostics/progress only, R5.3b):
    "host": "claude|opencode|test", "total": N, "done": M, "failed": F,
    "pending": P, "wave": W, "waves_run": K, "partial": bool,
    "stall_killed": [units stall-killed this run],
+   "runtime_p50_s": S, "runtime_p95_s": S, "runtime_max_s": S
+                     (COMPLETED units' runtimes, integer seconds; all three
+                     omitted — absent, never 0 — when the run completed none),
+   "stall_killed_slots_s": X, "stall_killed_slot_pct": P
+                     (cost visibility, always present: seconds of slot time
+                     burnt by stall kills this run, and that as a share of this
+                     run's slot-seconds = elapsed x --wave; 0 / 0.0 when nothing
+                     was stall-killed),
+   "stall_window_s": W (the run's EFFECTIVE silence window at exit — present
+                     ONLY when the adaptive widening fired this run),
    "stalled": bool,
    "stalled_pending": [{"id", "done_marker_exists", "failed_marker_exists"}]
                      (only when stalled:true),
@@ -242,7 +311,10 @@ init-dir that holds the tier's plan artifact (scout_plan.json / clusters.json /
 controls_inventory.json) — holds {ts, host, tier, total, done, failed,
 pending, wave, waves_run, wave_done_avg_s, eta_batches, state} with state in
 {running, exited-partial, exited-clean} (wave = concurrency cap; waves_run =
-cumulative dispatches; wave_done_avg_s = mean per-unit runtime this run).
+cumulative dispatches; wave_done_avg_s = mean per-unit runtime this run). It
+carries the SAME cost-visibility fields as the stdout summary (runtime_p50_s /
+runtime_p95_s / runtime_max_s / stall_killed_slots_s / stall_killed_slot_pct,
+plus stall_window_s when the window widened) from the same snapshot.
 It is FOR HUMANS: watch it from a second terminal (e.g. `Get-Content -Wait`);
 the orchestrator and any agent NEVER read it (not a truth source, not a
 contract artifact — resume_state.py and init_manifest.json neither read nor
@@ -264,6 +336,7 @@ marked failed with reason=path-drift and NEVER spawned).
 """
 from __future__ import annotations
 import argparse
+import codecs
 import json
 import os
 import shutil
@@ -288,16 +361,38 @@ DEFAULT_WAVE = 5
 # worst case. Better-slow-than-killed: a killed unit leaves NO marker, so it
 # stays pending and re-dispatching it wastes an entire run.
 DEFAULT_CALL_TIMEOUT_S = 7200
-# Per-unit byte-silence (stall) threshold, seconds: healthy LLM subagents
-# stream continuously (tool calls / text deltas), so output silence is the
-# high-signal hang indicator (opencode's LLM request has NO overall timeout —
-# provider.ts timeout:false — an SSE stream stalling mid-flight hangs the
-# child with zero output forever). Observed healthy units run minutes-level,
-# so 900s ~ 5x headroom; a mis-kill costs one re-dispatch (self-heals, and
-# run.log keeps the evidence) vs 8x cheaper than the old call-timeout-only
-# kill. < 60 rejected at spawn time (exit 2): below the floor the false-kill
-# rate dominates.
+# Initial per-unit byte-silence (stall) window, seconds. Calibration: default
+# = p99(completed-unit runtime) x 2, rounded down to the minute, never below
+# STALL_TIMEOUT_FLOOR_S. Substituting the observed sample (n=84 completed
+# units: p50 134s / p95 229s / p99 325s / max 325s) gives 650s -> 600s ->
+# floor -> 900s, i.e. this constant is unchanged; the calibration's value is
+# the two conclusions it forces: (a) 900s is 2.8x the completed population's
+# MAX, so "the default is too tight" is false for healthy units; (b) the
+# killed units ran 600s+ and 1600s+, far outside that population's support —
+# they are NOT the tail of the same distribution, so no higher constant
+# rescues them (measured: raising 600s -> 1600s moved false kills 5 -> 4 while
+# doubling each one's cost). The sample is the SURVIVING population only —
+# units killed for gateway queueing are absent by construction — so it bounds
+# HEALTHY units and MUST NOT be read as "past this it deserves to die".
+# Byte silence means "no output right now"; on a rate-limited gateway the
+# usual cause is the call waiting in the gateway queue, locally
+# indistinguishable from a real hang. Two escape hatches carry what a
+# constant cannot: `--stall-timeout-s 0` disables the criterion (convergence
+# then bounded by --call-timeout-s alone) and the effective window
+# self-widens within a run on false-kill evidence (see
+# _widen_stall_window). Re-calibrate from each exit's runtime_* fields.
 DEFAULT_STALL_TIMEOUT_S = 900
+# Rejection floor for --stall-timeout-s: 1..STALL_TIMEOUT_FLOOR_S-1 exits 2
+# (below the floor the false-kill rate dominates). The other legal value is
+# 0 = the silence criterion is disabled outright.
+STALL_TIMEOUT_FLOOR_S = 60
+# Convergence headroom used by BOTH timeout-invariant checks that keep an
+# outer level exploitable by the inner one: the soft deadline must fire below
+# the host per-call timeout (time-budget-ms x this < host), and the adaptive
+# silence window must stay below the absolute per-call kill
+# (stall-window <= --call-timeout-s x this). One constant so the two cannot
+# drift apart.
+CONVERGENCE_HEADROOM = 0.8
 # Periodic in-flight heartbeat period, seconds: one stderr line per running
 # unit disclosing its seconds-since-last-output so a human watching the host
 # TUI distinguishes "slow" from "hung" (the 2026-09-14 incident ran 57 silent
@@ -340,6 +435,33 @@ _OVERFLOW_RECIPE = ("context-overflow signature matched — the request exceeded
                     "model context; recipe: narrow --budget (--max-aggregate-bytes) "
                     "and re-run")
 
+# Fast-fail storm resilience (design D1/D2/D4: event-driven cooldown = self-heal
+# layer; crash-tail rate-limit signatures = fast-stop + disclosure layer; the
+# signature layer is NEVER the only defense — signature drift degrades to the
+# event path).
+# Sliding window (implementation constants, not flags): requeue events
+# (crash/timeout/stall/spawn-error units returning to the queue tail) within
+# this window arm a cooldown. failed: acks and pre-spawn anchor failures
+# terminate WITHOUT requeueing — deliberately never counted (a deterministic
+# config error must not fake a provider storm).
+REQUEUE_WINDOW_S = 120
+REQUEUE_THRESHOLD = 3
+DEFAULT_COOLDOWN_S = 300
+# Rate-limit crash-tail signatures (case-insensitive substrings over BOTH
+# output tails; crash terminal states only — ok/failed/timeout/stall are never
+# classified). A hit marks the crash detail with _RATELIMIT_MARK (same ride-
+# along pattern as _OVERFLOW_MARK); append new gateway wordings as real run.log
+# evidence surfaces them.
+RATE_LIMIT_SIGS = ("429", "too many requests", "rate limit", "quota")
+_RATELIMIT_MARK = "reason:rate-limit"
+_RATELIMIT_RECIPE = (
+    "rate-limit crash storm truncated — every crash tail in the window matched "
+    "a quota signature; recipe: wait one full quota window (gateway-configured, "
+    "e.g. 10 min) before resuming via --resume; calibrate --wave per "
+    "floor(quota-calls-per-minute x 0.8 / per-unit calls-per-minute); a "
+    "liveness/stall tree-kill is NOT a crash and never counts here; disable "
+    "this truncation with --no-rate-limit-stop")
+
 # ---------------------------------------------------------------------------
 # Tier mapping (single point of tier variation, design D1/D2). The wave loop,
 # ack state machine, timeouts, sidecar, and audit copies read from this table;
@@ -362,10 +484,13 @@ _T3_PATH_FIELDS = ("input_path", "rule_path", "done_marker", "failed_marker")
 TIERS = {
     "scout": {
         "list_script": "list_scout_batches.py",
-        # forwarded flags appended after the tier artifacts (fn(args) -> [str])
+        # forwarded flags appended after the tier artifacts (fn(args) -> [str]);
+        # --retry-failed implies the enumerator's --include-failed (identity
+        # always from the enumerator, never filename-derived).
         "list_args": lambda a: ["--scout-plan", a.scout_plan,
                                 "--checkpoints", a.checkpoints,
-                                "--materialize", a.inputs_dir],
+                                "--materialize", a.inputs_dir]
+            + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
         "required_args": ("scout_plan", "checkpoints", "inputs_dir"),
         # artifact whose dir = init-dir (sidecar home + run_config neighbor)
         "plan_arg": "scout_plan",
@@ -385,7 +510,8 @@ TIERS = {
         "list_args": lambda a: ["--clusters", a.clusters,
                                 "--candidates", a.candidates,
                                 "--checkpoints", a.checkpoints,
-                                "--materialize", a.inputs_dir],
+                                "--materialize", a.inputs_dir]
+            + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
         "required_args": ("clusters", "candidates", "checkpoints", "inputs_dir"),
         "plan_arg": "clusters",
         "template_rel": Path("prompts") / "fragments" / "fanout" / "t1-task.md",
@@ -415,7 +541,8 @@ TIERS = {
         # it (else plan_aggregate's own DEFAULT_BUDGET applies).
         "list_args": lambda a: ["--node", "t2", "--init-dir", a.init_dir]
             + (["--budget", str(a.budget)] if a.budget is not None else [])
-            + ["--materialize", a.inputs_dir],
+            + ["--materialize", a.inputs_dir]
+            + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
         "required_args": ("init_dir", "inputs_dir"),
         # plan_arg attr whose dir = init-dir; the main() special case below
         # re-anchors plan_path onto <init-dir>/run_config.json (D5) so the
@@ -438,7 +565,8 @@ TIERS = {
                                 "--rules-dir", a.rules_dir,
                                 "--target", a.target,
                                 "--checkpoints", a.checkpoints,
-                                "--materialize", a.inputs_dir],
+                                "--materialize", a.inputs_dir]
+            + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
         "required_args": ("inventory", "fmt", "rules_dir", "target",
                           "checkpoints", "inputs_dir"),
         "plan_arg": "inventory",
@@ -459,7 +587,8 @@ TIERS = {
                                 "--base", a.base,
                                 "--branch", a.branch or "",
                                 "--checkpoints", a.checkpoints,
-                                "--materialize", a.inputs_dir],
+                                "--materialize", a.inputs_dir]
+            + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
         "required_args": ("repo", "base", "checkpoints", "inputs_dir"),
         "plan_arg": "repo",
         # plan_path = the repo root: `grouping.json` lives at <run-dir>/grouping.json =
@@ -639,6 +768,59 @@ def _context_overflow(err_tail: str) -> bool:
     return any(sig in low for sig in CONTEXT_OVERFLOW_SIGS)
 
 
+def _rate_limited_tail(out_tail: str, err_tail: str) -> bool:
+    """True when either output tail carries a rate-limit signature
+    (case-insensitive substring, both streams — the provider's rejection can
+    surface on either). Crash-terminal classification only; the caller never
+    consults this for ok/failed/timeout/stall outcomes."""
+    low_o, low_e = (out_tail or "").lower(), (err_tail or "").lower()
+    return any(sig in low_o or sig in low_e for sig in RATE_LIMIT_SIGS)
+
+
+def _cooldown_cap_s(cooldown_s: float, deadline: float | None, now: float,
+                    unit_durations: list[float], inflight_count: int) -> float:
+    """Max cooldown seconds the remaining time budget allows (design D3):
+    remaining budget minus an in-flight convergence margin (observed avg unit
+    duration x in-flight count — the slots should get the chance to converge
+    after the wait); <= 0 = no budget for any cooldown (degrade to continuing
+    immediately + stderr disclosure). No deadline (out-of-host manual run) =
+    uncapped. Pure function; the seam keeps the arithmetic micro-testable."""
+    if deadline is None:
+        return float(cooldown_s)
+    remaining = deadline - now
+    margin = ((sum(unit_durations) / len(unit_durations)) * inflight_count
+              if unit_durations and inflight_count else 0.0)
+    return remaining - margin
+
+
+def _widened_stall_window(current: int, call_timeout_s: int) -> int:
+    """The effective silence window after ONE false-kill self-evidence event:
+    double it, clamped to the `--call-timeout-s` convergence margin (design
+    D3 — the absolute per-call kill must stay reachable with >=20% headroom, so
+    the silence kill can never be scheduled at or past it). Returning
+    `current` unchanged means "already at the ceiling": the caller reads that
+    as "no widening left to disclose", which is also what keeps a run from
+    announcing the same ceiling repeatedly. Pure; the arithmetic is
+    micro-testable without a run."""
+    cap = int(call_timeout_s * CONVERGENCE_HEADROOM)
+    return min(current * 2, cap)
+
+
+def _percentile_int(values: list[float], pct: int) -> int:
+    """Nearest-rank percentile of `values` in whole seconds.
+
+    Nearest-rank (sorted[ceil(pct/100 x n) - 1]) rather than an interpolating
+    variant: the result is always an OBSERVED value, so every figure the
+    summary discloses is a real unit's wall time — which is the entire point
+    (calibrating the silence window against observed runtimes). Integer
+    ceiling arithmetic keeps the script free of a `math` import. Caller
+    guarantees `values` is non-empty."""
+    s = sorted(values)
+    n = len(s)
+    rank = (pct * n + 99) // 100        # ceil(pct/100 x n)
+    return int(round(s[max(0, min(n - 1, rank - 1))]))
+
+
 def _elapsed_prefix(t0: float) -> str:
     """`+HH:MM:SS` elapsed since t0 (monotonic), for stderr heartbeat lines."""
     el = max(0, int(time.monotonic() - t0))
@@ -651,12 +833,24 @@ def _tail_stream(stream, sink: dict) -> None:
     """Reader-thread body: roll `sink["ts"]` (monotonic ts of the last byte on
     this stream — the stall-detection signal) and `sink["tail"]` (last
     _TAIL_CAP chars — run.log evidence). Exits at EOF or on any stream error
-    (a dead child's pipes simply close)."""
+    (a dead child's pipes simply close).
+
+    Reads through the BINARY buffer with `read1()`, which returns as soon as
+    ANY byte lands. `TextIOWrapper.read(4096)` blocks until 4096 characters
+    accumulate (or EOF), so `ts` would only advance once per 4096-char chunk —
+    a low-volume but perfectly healthy unit would then look silent and be
+    stall-killed at spawn + threshold. Incremental decoding keeps multi-byte
+    UTF-8 sequences split across reads intact."""
+    dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    reader = getattr(stream, "buffer", stream)
+    read1 = getattr(reader, "read1", None)
     try:
         while True:
-            chunk = stream.read(4096)
+            chunk = read1(4096) if read1 is not None else reader.read(4096)
             if not chunk:
                 break
+            if isinstance(chunk, bytes):
+                chunk = dec.decode(chunk)
             with sink["lock"]:
                 sink["ts"] = time.monotonic()
                 sink["tail"] = (sink["tail"] + chunk)[-_TAIL_CAP:]
@@ -709,13 +903,24 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     run_log_path: when set, one evidence block (stdout/stderr tails) is
     appended at every terminal, ok included. stall_killed=True only for the
     silence-triggered kill (the stdout summary discloses these in
-    stall_killed[])."""
+    stall_killed[]). `stall_timeout_s` is the run's EFFECTIVE silence window
+    for THIS attempt (the caller snapshots it at dispatch, so a mid-run
+    widening applies to units dispatched afterwards) — 0 means the criterion
+    is disabled and the silence branch never fires."""
     proc = None
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, cwd=str(cwd), text=True,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace",
+            # POSIX: setsid() so the unit leads its OWN session/process group.
+            # `_kill_tree`'s killpg then scopes to this unit's tree — without
+            # it the child shares the dispatcher's group and the kill would
+            # take the dispatcher down with it (the kill happens before the
+            # stall evidence is written, so there is not even a trace).
+            # POSIX-only parameter; passing False on Windows keeps that
+            # branch's behavior byte-identical (it kills via taskkill /T /F).
+            start_new_session=(os.name != "nt"))
     except OSError as e:
         return "spawn-error", None, f"spawn failed: {e}", None, False
     if on_spawn is not None:
@@ -757,7 +962,12 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
             pass
         now = time.monotonic()
         with lock:
-            last_out = min(out_sink["ts"], err_sink["ts"])
+            # max = the NEWER of the two last-output stamps = "both streams
+            # emitted no bytes for this long". An idle stream MUST NOT make a
+            # healthy unit look stalled: both sinks start at t_start and only
+            # advance on real bytes, so `min` would read "one stream silent"
+            # as "the unit is silent" and kill it at spawn + stall-timeout.
+            last_out = max(out_sink["ts"], err_sink["ts"])
         if stall_timeout_s and now - last_out >= stall_timeout_s:
             _kill_tree(proc.pid)
             status, was_stalled = "stall", True
@@ -793,6 +1003,11 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
                 # and the stdout summary classification all carry it. Never
                 # changes the outcome — the unit still stays pending.
                 detail = f"{_OVERFLOW_MARK} ({_OVERFLOW_RECIPE}); {detail}"
+            elif _rate_limited_tail(out_tail, err_tail):
+                # rate-limit classification rides the detail the same way; the
+                # dispatcher's storm window consumes it. Disjoint from overflow
+                # (elif): an overflow crash is never also a rate-limit crash.
+                detail = f"{_RATELIMIT_MARK}; {detail}"
         else:
             status = "spawn-ok"
             detail = out_tail.strip().splitlines()[-1] if out_tail.strip() else ""
@@ -972,13 +1187,21 @@ def _hb(t0: float, tier: str, seq: int, uid: str, event: str,
 
 
 def _hb_inflight(t0: float, tier: str, k: int, uid: str, idle_s: int,
-                 done: int, total: int) -> None:
+                 done: int, total: int, stall_window_s: int) -> None:
     """One periodic stderr in-flight disclosure line (--hb-interval-s): unit
     id + seconds since its child's last output — a human watching the host TUI
     distinguishes "slow" from "hung" live (the 2026-09-14 incident ran 57
-    silent minutes unreadable). stdout's single-JSON-line contract untouched."""
+    silent minutes unreadable). stdout's single-JSON-line contract untouched.
+
+    `stall_window_s` = the silence window THIS unit is being judged against
+    (its dispatch-time snapshot of the run's effective window; 0 = criterion
+    disabled this run, disclosed as `off`). Without it an adaptive window
+    makes `idle` unreadable: the same `idle=1000s` means "kill is imminent"
+    under W=900 and "nothing to see" under W=1800."""
+    win = f"{stall_window_s}s" if stall_window_s else "off"
     _eprint(f"[fanout_runner {tier}] {_elapsed_prefix(t0)} "
-            f"inflight={k} unit={uid} idle={idle_s}s done={done}/{total}")
+            f"inflight={k} unit={uid} idle={idle_s}s stall_window={win} "
+            f"done={done}/{total}")
 
 
 # Host-CLI cmdline markers for the PID-reuse guard: a child PID is only killed
@@ -1039,11 +1262,11 @@ def _pid_cmdline(pid: int) -> str:
 def _kill_tree(pid: int) -> bool:
     """Kill a whole process tree. Windows: `taskkill /pid <pid> /T /F` (/T is
     the only reliable whole-tree kill — the host CLIs are npm `.cmd` shim
-    chains). POSIX: kill the process group; the runner's dispatch spawns are
-    NOT started in a new session (start_new_session would change existing
-    spawn behavior), so children share the runner's process group — this kill
-    therefore also hits the (already dying) runner side of the tree; orphaned
-    grandchildren are reaped by the host process group (disclosed limit)."""
+    chains). POSIX: kill the process group — the dispatch spawns run with
+    `start_new_session`, so each unit child leads its OWN session/process
+    group and `killpg` scopes to that unit's tree alone, NEVER the caller's.
+    Callers (the stall/timeout path and the exit-path cleanup) therefore
+    survive the kill they issue."""
     if os.name == "nt":
         try:
             r = subprocess.run(["taskkill", "/pid", str(pid), "/T", "/F"],
@@ -1056,6 +1279,10 @@ def _kill_tree(pid: int) -> bool:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
         return True
     except (OSError, ProcessLookupError):
+        # Fallback kept: a unit is a session leader (start_new_session) so
+        # getpgid normally cannot fail, but a PID that is already reaped or
+        # never became a group leader still deserves the direct-child attempt
+        # rather than a silent no-op.
         try:
             os.kill(pid, signal.SIGTERM)
             return True
@@ -1289,7 +1516,8 @@ def main() -> int:
                          "MUST stay BELOW the host per-call timeout (soft deadline "
                          "fires before the host hard kill; four-level invariant: "
                          "stall-timeout-s < call-timeout-s < time-budget-ms x 0.8 < "
-                         "host per-call timeout, >=20%% per level). When passed, "
+                         "host per-call timeout, >=20%% per level — the innermost "
+                         "level is dropped when --stall-timeout-s 0). When passed, "
                          "--call-timeout-s MUST be passed explicitly and stay below "
                          "budget x 0.8 (spawn-time validation, exit 2 otherwise)")
     ap.add_argument("--call-timeout-s", type=int, default=None,
@@ -1302,16 +1530,53 @@ def main() -> int:
                          f"explicitly and stay below budget x 0.8. The kill path is "
                          f"the whole-tree kill (see --stall-timeout-s)")
     ap.add_argument("--stall-timeout-s", type=int, default=None,
-                    help=f"per-unit output-silence (stall) threshold in seconds "
-                         f"(default {DEFAULT_STALL_TIMEOUT_S}; < 60 rejected with "
-                         f"exit 2): no stdout/stderr bytes for this long -> that "
-                         f"unit's whole process tree is killed (taskkill /T /F - "
-                         f"the .cmd shim chain's real host-CLI process dies too) "
-                         f"and the unit stays pending for re-dispatch. Byte-silence "
-                         f"is the high-signal hang indicator (healthy LLM subagents "
-                         f"stream continuously, minutes-level, ~5x headroom); a "
-                         f"mis-killed unit re-dispatches and self-heals, its "
-                         f"<checkpoints>/<tier>/<unit>.run.log keeps the evidence")
+                    help=f"per-unit output-silence window in seconds, INITIAL "
+                         f"value (default {DEFAULT_STALL_TIMEOUT_S}; 0 = disable "
+                         f"the criterion; 1..{STALL_TIMEOUT_FLOOR_S - 1} rejected "
+                         f"with exit 2): no stdout/stderr bytes for this long -> "
+                         f"that unit's whole process tree is killed (taskkill "
+                         f"/T /F - the .cmd shim chain's real host-CLI process "
+                         f"dies too) and the unit stays pending for re-dispatch. "
+                         f"Byte-silence means the unit produced NOTHING for that "
+                         f"long; it does NOT mean the unit is hung - on a "
+                         f"rate-limited gateway the usual cause is the call "
+                         f"waiting in the gateway's queue, which is locally "
+                         f"indistinguishable from a real hang (same silence, same "
+                         f"zero output). The criterion's job is to bound how long "
+                         f"one slot may sit idle in this run - a convergence "
+                         f"bound - never to diagnose unit health. Silence means "
+                         f"BOTH streams idle (the clock takes the newer of the "
+                         f"two streams' last-byte stamps), so a unit whose stderr "
+                         f"never emits is not mistaken for silent. Default "
+                         f"calibration: p99(completed-unit runtime) x 2, rounded "
+                         f"down to the minute and never below "
+                         f"{DEFAULT_STALL_TIMEOUT_S} (observed sample n=84: p50 "
+                         f"134s / p95 229s / p99 325s / max 325s -> 650s -> 600s "
+                         f"-> floor {DEFAULT_STALL_TIMEOUT_S}s). That sample is "
+                         f"the SURVIVING population only - units killed for "
+                         f"gateway queueing are absent from it by construction - "
+                         f"so it bounds healthy units and MUST NOT be read as "
+                         f"'past this it deserves to die'. Re-calibrate from the "
+                         f"runtime_* fields every exit reports. The EFFECTIVE "
+                         f"window widens within a run on false-kill "
+                         f"self-evidence: if a stall-killed unit then completes "
+                         f"on re-dispatch in the same run, the window becomes "
+                         f"min(2x current, --call-timeout-s x "
+                         f"{CONVERGENCE_HEADROOM}) for the rest of the run "
+                         f"(stderr-disclosed, once per triggering unit). 0 "
+                         f"disables the criterion outright - convergence is then "
+                         f"bounded by --call-timeout-s ALONE, so a host-driven run "
+                         f"SHOULD tighten that value; the 'stall < call' ordering "
+                         f"constraint does not apply in this mode. A mis-killed "
+                         f"unit re-dispatches and its "
+                         f"<checkpoints>/<tier>/<unit>.run.log keeps the evidence, "
+                         f"but it also loses the work already done AND its queue "
+                         f"position. Kill scope is the unit's own session (units "
+                         f"are spawned with start_new_session) - it NEVER "
+                         f"terminates the dispatcher, and an interactive Ctrl-C no "
+                         f"longer reaches in-flight units (the exit path "
+                         f"tree-kills them; a hard kill's orphans are cleared with "
+                         f"--kill-stale)")
     ap.add_argument("--hb-interval-s", type=int, default=DEFAULT_HB_INTERVAL_S,
                     help=f"stderr in-flight heartbeat period in seconds (default "
                          f"{DEFAULT_HB_INTERVAL_S}): one line per running unit "
@@ -1333,11 +1598,67 @@ def main() -> int:
     ap.add_argument("--resume", action="store_true",
                     help="re-derive pending from disk markers (same entry point as a "
                          "fresh call; kept for call-shape parity)")
+    ap.add_argument("--cooldown-s", type=int, default=DEFAULT_COOLDOWN_S,
+                    help=f"fast-fail storm cooldown in seconds (default "
+                         f"{DEFAULT_COOLDOWN_S}; 0 = off): when >= "
+                         f"{REQUEUE_THRESHOLD} requeue events (crash/timeout/stall/"
+                         f"spawn-error units returning to the queue tail; failed "
+                         f"acks and pre-spawn anchor failures NEVER count — they "
+                         f"terminate without requeueing) accumulate within a "
+                         f"{REQUEUE_WINDOW_S}s sliding window, new dispatch pauses "
+                         f"for this many seconds while in-flight units keep "
+                         f"running and harvesting. The wait is capped by the "
+                         f"remaining --time-budget-ms minus an in-flight "
+                         f"convergence margin (observed avg unit duration x "
+                         f"in-flight count); when the budget cannot cover it the "
+                         f"cooldown degrades to continuing immediately with a "
+                         f"stderr disclosure. Also arms the pre-breaker backoff: "
+                         f"when the zero-progress breaker is about to exit 2, one "
+                         f"single 'cooldown -> full disk re-derivation -> re-"
+                         f"observe' round runs first (disk growth disarms the "
+                         f"breaker; still zero growth exits 2 stalled) — never "
+                         f"more than once per call. 0 disables the cooldown AND "
+                         f"the pre-breaker backoff. stdout summary carries "
+                         f"cooldowns:<n>")
+    ap.add_argument("--no-rate-limit-stop", dest="rate_limit_stop",
+                    action="store_false",
+                    help="disable the rate-limit crash-storm fast-path truncation "
+                         "(default: ON). With it on, every crashed unit's output "
+                         "tails are classified against quota signatures "
+                         "(429 / too many requests / rate limit / quota, "
+                         "case-insensitive, crash terminal states only); when >= "
+                         "--wave crashes since the last disk terminal advance are "
+                         "ALL rate-limit, dispatch stops immediately (fast path, "
+                         "ahead of any new cooldown) and the runner exits 2 with "
+                         "stdout rate_limited:true + rate_limited_crashes:[ids] "
+                         "and a stderr wait-one-quota-window recipe. Signature "
+                         "drift (all crashes classify unknown) degrades gracefully: "
+                         "no truncation, the event-driven cooldown and the breaker "
+                         "still backstop. Non-rate-limit crashes never count "
+                         "toward the threshold")
+    ap.add_argument("--retry-failed", action="store_true",
+                    help="re-dispatch units the tier enumerator re-lists as failed "
+                         "(it is invoked with --include-failed when this flag is "
+                         "set — unit identity ALWAYS comes from the enumerator, "
+                         "never from filename stems). At claim the unit's .failed "
+                         "marker is deleted (the failure evidence stays in the "
+                         "unit's *.run.log) and the unit dispatches normally; a "
+                         "re-failure writes a fresh marker (naturally bounded — "
+                         "failed acks never requeue) and each unit is retried at "
+                         "most once per call. stdout summary carries "
+                         "retried_failed:<n>. Orchestrator discipline: at most "
+                         "one --retry-failed round per tier wrap-up (failed>0 "
+                         "with provider-transient run.log shape), then accept the "
+                         "gap and disclose it in the report")
     ap.add_argument("--kill-stale", action="store_true",
                     help="orphan-tree cleanup: inspect <init-dir>/fanout_runner.<tier>.pid "
                          "liveness files and kill what they record (runner tree; or, when "
-                         "the runner is dead, recorded host-CLI child trees). DESTRUCTIVE: "
-                         "run with --dry-run first - a real kill with detected targets and "
+                         "the runner is dead, recorded host-CLI child trees). Needed after "
+                         "a HARD kill only: units lead their own session, so an "
+                         "interactive Ctrl-C no longer reaches in-flight units through "
+                         "the tty, and the dispatcher's exit path tree-kills whatever is "
+                         "still registered before deregistering. DESTRUCTIVE: run with "
+                         "--dry-run first - a real kill with detected targets and "
                          "no prior dry-run review exits 2 + recipe. Idempotent; "
                          "tier-agnostic")
     ap.add_argument("--pending-file", metavar="<list-stdout.json>",
@@ -1375,16 +1696,36 @@ def main() -> int:
         return 2
     if args.stall_timeout_s is None:
         args.stall_timeout_s = DEFAULT_STALL_TIMEOUT_S
-    if args.stall_timeout_s < 60:
-        _eprint("error: --stall-timeout-s must be >= 60 (byte-silence floor: "
-                "healthy LLM units run minutes-level — below 60s the false-kill "
-                "rate dominates; raise it instead)")
+    # Value domain: 0 (criterion disabled) or >= STALL_TIMEOUT_FLOOR_S. The
+    # 1..floor-1 band is rejected rather than silently clamped: it is the
+    # shape of a typo'd calibration, and a value that low false-kills
+    # everything. The recipe names BOTH legal exits (raise it, or turn the
+    # criterion off) — hiding the off-switch behind `--call-timeout-s - 1`
+    # made it undiscoverable.
+    if 0 < args.stall_timeout_s < STALL_TIMEOUT_FLOOR_S:
+        _eprint(f"error: --stall-timeout-s {args.stall_timeout_s} is below the "
+                f"floor: legal values are 0 (disable the silence criterion) or "
+                f">= {STALL_TIMEOUT_FLOOR_S} (byte-silence floor — healthy LLM "
+                f"units run minutes-level, so below {STALL_TIMEOUT_FLOOR_S}s "
+                f"the false-kill rate dominates). Recipe: pass "
+                f"--stall-timeout-s 0 to turn the criterion off (convergence is "
+                f"then bounded by --call-timeout-s alone), or a value >= "
+                f"{STALL_TIMEOUT_FLOOR_S} such as --stall-timeout-s 300")
+        return 2
+    if args.stall_timeout_s < 0:
+        _eprint(f"error: --stall-timeout-s must be >= 0 (0 disables the silence "
+                f"criterion; any other legal value is >= "
+                f"{STALL_TIMEOUT_FLOOR_S})")
         return 2
     if args.hb_interval_s < 1:
         _eprint("error: --hb-interval-s must be >= 1")
         return 2
     if args.stall_waves < 1:
         _eprint("error: --stall-waves must be >= 1")
+        return 2
+    if args.cooldown_s < 0:
+        _eprint("error: --cooldown-s must be >= 0 (0 disables the fast-fail "
+                "cooldown and the pre-breaker backoff)")
         return 2
 
     tier = TIERS[args.tier]
@@ -1442,7 +1783,9 @@ def main() -> int:
             invariant_problems.append(
                 f"--call-timeout-s {args.call_timeout_s} must be < "
                 f"time-budget-ms x 0.8 ({budget_s * 0.8:.0f}s)")
-    if args.stall_timeout_s >= args.call_timeout_s:
+    # Only checked when the criterion is ON: with --stall-timeout-s 0 there is
+    # no silence kill to order against the absolute one (design D2).
+    if args.stall_timeout_s > 0 and args.stall_timeout_s >= args.call_timeout_s:
         invariant_problems.append(
             f"--stall-timeout-s {args.stall_timeout_s} must be < "
             f"--call-timeout-s {args.call_timeout_s} (a unit must hit the "
@@ -1454,7 +1797,10 @@ def main() -> int:
                 "budget): --time-budget-ms 720000 --call-timeout-s 540 "
                 "--stall-timeout-s 300  (four levels, >=20% headroom per "
                 "level: stall-timeout-s < call-timeout-s < time-budget-ms x "
-                "0.8 < host per-call timeout; see --help)")
+                "0.8 < host per-call timeout; see --help). To turn the silence "
+                "criterion off instead, pass --stall-timeout-s 0 — the "
+                "stall < call level then does not apply and --call-timeout-s "
+                "alone bounds convergence")
         return 2
     if budget is None:
         _eprint(f"hint: no --time-budget-ms (out-of-host manual run): "
@@ -1531,8 +1877,40 @@ def main() -> int:
     stall_killed: list[str] = []
     overflow_units: list[str] = []  # crashes whose stderr matched an overflow signature
     unit_durations: list[float] = []
+    # Cost visibility (design D4): durations split by OUTCOME, so the runtime
+    # distribution the window is calibrated against holds COMPLETED units only
+    # — a killed unit's runtime is an artifact of the window itself, not a
+    # sample of the population the window is supposed to sit above, and mixing
+    # the two would inflate every reported percentile. (unit_durations stays
+    # the all-outcomes list the cooldown's convergence margin and the sidecar's
+    # wave_done_avg_s already consume.)
+    done_durations: list[float] = []
+    stall_kill_durations: list[float] = []
+    # Adaptive silence window (design D3): the run's EFFECTIVE window, with the
+    # flag supplying only its initial value. Widened by false-kill
+    # self-evidence, discarded with the run (NEVER persisted, NEVER written
+    # back onto args), and read at each dispatch so a widening reaches the
+    # units dispatched afterwards.
+    stall_window_s = int(args.stall_timeout_s)
+    stall_widened = False          # did a widening actually happen this run?
+    widen_units: set[str] = set()  # units that already contributed evidence
+    stall_lock = threading.Lock()  # guards stall_window_s + widen_units
     skipped_terminal = 0     # units lazy-skipped: marker already terminal on disk
     stalled = False
+    # Fast-fail storm state (design D1/D2/D4). Three counters that NEVER share
+    # a window: (1) requeue_times — the cooldown's sliding time window;
+    # (2) storm_state["crashes"] — the storm truncation's window, anchored on
+    # disk terminal advance (ok/failed marker landing clears it), not on time;
+    # (3) the breaker's dispatch-window counter below.
+    storm_lock = threading.Lock()
+    requeue_times: list[float] = []   # monotonic ts of crash/timeout/stall/spawn-error requeues
+    storm_state = {"rate_limited": False, "crashes": [], "units": []}
+    cooldown_until = 0.0     # monotonic ts until which new dispatch is paused
+    cooldowns = 0            # cooldowns performed this run (stdout `cooldowns`)
+    backoff_used = False     # pre-breaker backoff: at most once per call
+    backoff_pending = False  # armed backoff awaiting its post-cooldown re-derivation
+    retried_once: set[str] = set()   # --retry-failed: per-unit once-per-call bound
+    retried_failed = 0       # markers deleted at claim this run (stdout `retried_failed`)
     # Zero-progress circuit breaker, dispatch-window anchored: every K =
     # --stall-waves x --wave newly dispatched units, re-derive the disk
     # terminal count once; --stall-waves consecutive zero-growth re-derivations
@@ -1543,9 +1921,94 @@ def main() -> int:
     last_terminal_count = None
     last_window_snap: dict = {}
 
-    def _sidecar_payload(state: str, snap_dict: dict, pending_now: list) -> dict:
+    def _rate_limited() -> bool:
+        with storm_lock:
+            return storm_state["rate_limited"]
+
+    def _cooldown_budget_cap() -> float:
+        """Max cooldown seconds the remaining time budget allows (design D3);
+        arithmetic lives in the module-level pure `_cooldown_cap_s`."""
+        return _cooldown_cap_s(args.cooldown_s, deadline, time.monotonic(),
+                               unit_durations, len(inflight))
+
+    def _start_cooldown(why: str) -> None:
+        """Arm one gate-based cooldown: pause NEW dispatch until
+        cooldown_until (in-flight units keep running and harvesting); budget-
+        capped, disclosed on stderr, and it consumes the requeue window (the
+        next cooldown needs fresh events). NEVER sleeps here — the dispatch
+        loop's gates do the waiting so harvesting is never blocked."""
+        nonlocal cooldown_until, cooldowns
+        cap = _cooldown_budget_cap()
+        dur = min(float(args.cooldown_s), cap)
+        if dur <= 0:
+            _eprint(f"[fanout_runner] cooldown skipped ({why}): remaining time "
+                    f"budget cannot cover it (cap {cap:.0f}s) — continuing "
+                    f"immediately")
+            return
+        with storm_lock:
+            requeue_times.clear()
+            cooldown_until = time.monotonic() + dur
+            cooldowns += 1
+            nth = cooldowns
+        _eprint(f"[fanout_runner] cooldown #{nth} ({why}): fast-fail requeue "
+                f"threshold hit — pausing NEW dispatch for {dur:.0f}s"
+                + (f" (capped from {args.cooldown_s}s by remaining time budget)"
+                   if dur < args.cooldown_s else "")
+                + "; in-flight units keep running and harvesting")
+
+    def _maybe_cooldown() -> None:
+        """Arm a storm cooldown iff the sliding window holds enough requeue
+        events. Runs on the dispatch (main) thread only; the storm-truncation
+        fast path takes priority over arming a new cooldown."""
+        with storm_lock:
+            if storm_state["rate_limited"]:
+                return
+            now = time.monotonic()
+            recent = [t for t in requeue_times if now - t <= REQUEUE_WINDOW_S]
+            requeue_times[:] = recent
+            armed = (args.cooldown_s > 0 and now >= cooldown_until
+                     and len(recent) >= REQUEUE_THRESHOLD)
+        if armed:
+            _start_cooldown(f">={REQUEUE_THRESHOLD} requeues in "
+                            f"{REQUEUE_WINDOW_S}s window")
+
+    def _cost_payload() -> dict:
+        """Cost-visibility fields (design D4), derived ONCE for both the stdout
+        summary and the sidecar so the two can never disagree.
+
+        Omissions are deliberate: `runtime_*` is absent (never 0) when the run
+        completed no unit, because 0 seconds would read as "instant units"
+        rather than "no data"; `stall_window_s` is absent unless the window
+        actually widened. The always-present pair answers "what did this run's
+        window cost me": `stall_killed_slots_s` = slot-seconds spent on units
+        that were silence-killed, and the pct denominator is this run's total
+        slot-seconds (elapsed x --wave = the parallel capacity the window had
+        to work with), i.e. the share of capacity the kills burnt."""
+        slots_s = round(sum(stall_kill_durations), 1)
+        capacity_s = max(0.0, time.monotonic() - t0) * args.wave
+        body = {
+            "stall_killed_slots_s": slots_s,
+            "stall_killed_slot_pct": (round(slots_s / capacity_s * 100, 1)
+                                      if capacity_s > 0 else 0.0),
+        }
+        if done_durations:
+            body["runtime_p50_s"] = _percentile_int(done_durations, 50)
+            body["runtime_p95_s"] = _percentile_int(done_durations, 95)
+            body["runtime_max_s"] = int(round(max(done_durations)))
+        if stall_widened:
+            body["stall_window_s"] = stall_window_s
+        return body
+
+    def _sidecar_payload(state: str, snap_dict: dict, pending_now: list,
+                         cost: dict | None = None) -> dict:
         """Sidecar body — counts derive from the SAME snapshot as the stdout
-        summary (single source; test asserts the two agree)."""
+        summary (single source; test asserts the two agree). `cost` lets the
+        terminal caller pass the one `_cost_payload()` dict the stdout summary
+        also uses: the slot-time percentage divides by a LIVE elapsed-time
+        measurement, so two separate calls would not agree bit-for-bit and the
+        sidecar/stdout equality guarantee would be lost to rounding."""
+        if cost is None:
+            cost = _cost_payload()
         done_n = int(snap_dict.get("done", done0))
         failed_n = int(snap_dict.get("failed", failed0)) + len(set(failed_written))
         pending_n = len(pending_now)
@@ -1565,6 +2028,7 @@ def main() -> int:
             # number, precision NOT promised.
             "eta_batches": pending_n,
             "state": state,
+            **cost,
         }
 
     def _snapshot() -> dict:
@@ -1613,18 +2077,40 @@ def main() -> int:
         """Pop the next dispatchable unit from the in-memory queue; marker
         lazy-check first (disk truth, O(1)): a unit whose .done/.failed marker
         already exists is skipped, never re-spawned — the queue snapshot may be
-        stale by the time a slot frees."""
-        nonlocal skipped_terminal
+        stale by the time a slot frees. With --retry-failed a .failed marker is
+        instead DELETED at claim (once per unit per call; the failure evidence
+        stays in the unit's *.run.log) and the unit dispatches normally."""
+        nonlocal skipped_terminal, retried_failed
         while True:
             try:
                 unit = queue.popleft()
             except IndexError:
                 return None
             dm, fm = unit.get("done_marker"), unit.get("failed_marker")
+            uid = unit.get(id_field, "?")
             try:
-                if (dm and Path(dm).is_file()) or (fm and Path(fm).is_file()):
+                if dm and Path(dm).is_file():
                     skipped_terminal += 1
-                    _eprint(f"[fanout_runner] unit {unit.get(id_field, '?')}: "
+                    _eprint(f"[fanout_runner] unit {uid}: "
+                            f"marker already terminal on disk — skip (lazy check)")
+                    continue
+                if fm and Path(fm).is_file():
+                    if args.retry_failed and uid not in retried_once:
+                        retried_once.add(uid)
+                        try:
+                            Path(fm).unlink()
+                        except OSError as e:
+                            _eprint(f"warn: cannot delete failed marker for "
+                                    f"{uid} at {fm}: {e} — skip (lazy check)")
+                            skipped_terminal += 1
+                            continue
+                        retried_failed += 1
+                        _eprint(f"[fanout_runner] unit {uid}: --retry-failed — "
+                                f".failed marker deleted at claim, re-dispatching "
+                                f"(evidence kept in the unit's run.log)")
+                        return unit
+                    skipped_terminal += 1
+                    _eprint(f"[fanout_runner] unit {uid}: "
                             f"marker already terminal on disk — skip (lazy check)")
                     continue
             except OSError:
@@ -1651,6 +2137,40 @@ def main() -> int:
             _update_liveness_children(liveness_path, liveness_body,
                                       list(children_now))
 
+    def _maybe_widen_window(uid: str) -> None:
+        """False-kill self-evidence (design D3): a unit that was stall-killed
+        (no ack, no marker) and then COMPLETED on re-dispatch within this same
+        run is hard proof that the window was too tight for this run's
+        contention — the unit was never hung, it was waiting. Relax the window
+        for the units dispatched from here on.
+
+        Bounded by the same convergence margin the timeout invariant uses
+        (`--call-timeout-s x CONVERGENCE_HEADROOM`), so the absolute per-call
+        kill always stays reachable. Counted once per unit: a unit that is
+        killed-and-succeeds repeatedly is ONE piece of evidence, not N —
+        otherwise a single flaky unit would ratchet the window to the ceiling.
+        No-op when the criterion is off (nothing to widen) or when the window
+        is already at the ceiling (nothing to disclose)."""
+        nonlocal stall_window_s, stall_widened
+        if args.stall_timeout_s <= 0:
+            return
+        with stall_lock:
+            if uid in widen_units or uid not in stall_killed:
+                return
+            widen_units.add(uid)
+            new_w = _widened_stall_window(stall_window_s, args.call_timeout_s)
+            if new_w <= stall_window_s:
+                return  # already at the ceiling: no event, no disclosure
+            old_w, stall_window_s = stall_window_s, new_w
+            stall_widened = True
+        cap = int(args.call_timeout_s * CONVERGENCE_HEADROOM)
+        _eprint(f"[fanout_runner] stall window widened {old_w}s -> {new_w}s "
+                f"(unit {uid} was stall-killed and then completed on "
+                f"re-dispatch in this run — evidence the window was too tight "
+                f"here; ceiling = --call-timeout-s {args.call_timeout_s} x "
+                f"{CONVERGENCE_HEADROOM} = {cap}s; applies to units dispatched "
+                f"from here on)")
+
     def _dispatch(unit: dict, seq: int) -> None:
         uid = unit.get(id_field, "?")
         # Anchor-tree interception BEFORE spawn (path-drift never spawns).
@@ -1660,6 +2180,10 @@ def main() -> int:
             failed_written.append(uid)
             _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
             _eprint(f"[fanout_runner] unit {uid}: FAILED pre-spawn ({reason})")
+            # pre-spawn failed terminal = disk terminal advance → clears the
+            # storm window
+            with storm_lock:
+                storm_state["crashes"].clear()
             return
         task = _fill_template(tier, template, unit, repo_str, codegraph)
         audit = inputs_dir / f"{_safe_name(uid)}.task.md"
@@ -1677,21 +2201,31 @@ def main() -> int:
             _eprint(f"[fanout_runner] unit {uid}: dry-run — no spawn")
             return
         cmd = _spawn_cmd(tier, host)
+        # Snapshot the run's effective silence window for THIS attempt (design
+        # D3): the unit is judged against one fixed window for the whole
+        # attempt, so a mid-flight widening never retroactively moves the
+        # criterion of a unit already running — it reaches the next dispatch.
+        # The same snapshot is what this unit's heartbeat lines disclose.
+        window = stall_window_s
         out_sink = {"ts": time.monotonic(), "tail": ""}
         err_sink = {"ts": out_sink["ts"], "tail": ""}
         sink_lock = threading.Lock()
         out_sink["lock"] = sink_lock
         err_sink["lock"] = sink_lock
         with sinks_lock:
-            sinks[uid] = (out_sink, err_sink)
+            sinks[uid] = (out_sink, err_sink, window)
         _hb(t0, args.tier, seq, uid, "spawn", _hb_count(), total)
         spawn_t0 = time.monotonic()
         run_log = (Path(args.checkpoints) / args.tier /
                    f"{_safe_name(uid)}.run.log").resolve()
         status, ack, detail, child_pid, was_stalled = _run_unit(
             host, cmd, task, repo, args.call_timeout_s,
-            args.stall_timeout_s, run_log, uid, _register_child(uid))
-        unit_durations.append(time.monotonic() - spawn_t0)
+            window, run_log, uid, _register_child(uid))
+        elapsed = time.monotonic() - spawn_t0
+        unit_durations.append(elapsed)
+        if was_stalled:
+            # slot-seconds burnt by a silence kill (design D4 cost visibility)
+            stall_kill_durations.append(elapsed)
         with sinks_lock:
             sinks.pop(uid, None)
         if was_stalled:
@@ -1701,6 +2235,9 @@ def main() -> int:
             failed_written.append(uid)
             _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
             _eprint(f"[fanout_runner] unit {uid}: failed ack → .failed marker")
+            # failed terminal = disk terminal advance → clears the storm window
+            with storm_lock:
+                storm_state["crashes"].clear()
             _terminal_children_rm(child_pid)
         elif status in ("timeout", "crash", "spawn-error", "stall"):
             _hb(t0, args.tier, seq, uid,
@@ -1718,21 +2255,64 @@ def main() -> int:
             # for in-run re-dispatch. The dispatch-window breaker is what
             # truncates a deterministically hung unit's kill→re-dispatch cycle.
             queue.append(unit)
+            # requeue event → the cooldown's sliding time window counts it
+            # (failed acks and pre-spawn anchor failures never get here).
+            with storm_lock:
+                requeue_times.append(time.monotonic())
+            if status == "crash":
+                # crash-tail rate-limit classification (the mark rode the
+                # detail out of _run_unit); crash terminal states only.
+                rl = detail.startswith(_RATELIMIT_MARK)
+                _eprint(f"[fanout_runner] unit {uid}: crash_cause="
+                        f"{'rate-limit' if rl else 'unknown'}")
+                with storm_lock:
+                    storm_state["crashes"].append((uid, rl))
+                    truncated = (args.rate_limit_stop
+                                 and not storm_state["rate_limited"]
+                                 and len(storm_state["crashes"]) >= args.wave
+                                 and all(r for _, r in storm_state["crashes"]))
+                    if truncated:
+                        storm_state["rate_limited"] = True
+                        storm_state["units"] = list(dict.fromkeys(
+                            u for u, _ in storm_state["crashes"]))
+                if truncated:
+                    # storm fast path: takes priority over arming a new
+                    # cooldown — the dispatch loop stops and exits 2.
+                    _eprint(f"[fanout_runner] unit {uid}: rate-limit crash "
+                            f"storm ({args.wave} quota-signature crash(es) "
+                            f"since the last disk advance) — stopping dispatch")
+                    _eprint(f"[fanout_runner] {_RATELIMIT_RECIPE}")
             _terminal_children_rm(child_pid)
         else:
             _hb(t0, args.tier, seq, uid, "ok", _hb_count(1), total)
             _eprint(f"[fanout_runner] unit {uid}: {ack or 'marker-only'} ({detail[:120]})")
+            # ok terminal = disk terminal advance → clears the storm window
+            with storm_lock:
+                storm_state["crashes"].clear()
             _terminal_children_rm(child_pid)
+            done_durations.append(elapsed)
+            # False-kill self-evidence (design D3): completing after having
+            # been stall-killed earlier in this run is what widens the window.
+            # Ordered after the terminal bookkeeping so stderr reads
+            # "unit ok" and then "window widened".
+            _maybe_widen_window(uid)
 
     def _fill() -> bool:
         """Top up in-flight slots from the queue (slot backfill). Returns True
-        when the soft deadline stopped new dispatches."""
+        when the soft deadline stopped new dispatches. A storm truncation or
+        an active cooldown also stops NEW dispatches but returns False — they
+        are not soft stops; the loop's gates own the wait."""
         nonlocal waves_run, dispatched_since_window
         stopped = False
         while len(inflight) < args.wave:
+            if _rate_limited():
+                break  # storm fast path: no new dispatch, no cooldown arming
             if deadline is not None and time.monotonic() >= deadline:
                 stopped = True
                 break
+            _maybe_cooldown()
+            if time.monotonic() < cooldown_until:
+                break  # cooldown: pause new dispatch; in-flight keep harvesting
             unit = _next_unit()
             if unit is None:
                 break
@@ -1749,9 +2329,14 @@ def main() -> int:
         """One zero-progress breaker observation (design D7, both points):
         advance the zero-growth window from a fresh disk re-derivation; True =
         tripped (stalled) with units still to dispatch. Growth, or the first
-        observation ever, resets the window."""
+        observation ever, resets the window. The trip arms the one bounded
+        pre-breaker backoff (design D3) when it has not been used and the
+        time budget still allows a cooldown; only a still-zero-growth backoff
+        re-derivation (resolved at the top of the dispatch loop) finally sets
+        stalled."""
         nonlocal dispatched_since_window, last_window_snap
         nonlocal last_terminal_count, window_left, stalled
+        nonlocal backoff_used, backoff_pending
         dispatched_since_window = 0
         last_window_snap = wsnap
         terminal_count = (int(wsnap.get("done", 0))
@@ -1766,6 +2351,16 @@ def main() -> int:
         _write_sidecar(plan_path.parent, args.tier,
                        _sidecar_payload("running", wsnap, list(queue)))
         if window_left <= 0 and (queue or inflight):
+            if (not backoff_used and args.cooldown_s > 0
+                    and _cooldown_budget_cap() > 0):
+                backoff_used = True
+                backoff_pending = True
+                _start_cooldown("pre-breaker backoff")
+                _eprint("[fanout_runner] zero-progress breaker armed — one "
+                        "bounded backoff before failing: cooldown, then a "
+                        "full disk re-derivation decides (growth resumes "
+                        "dispatch, zero growth exits)")
+                return False
             stalled = True
         return stalled
 
@@ -1791,7 +2386,37 @@ def main() -> int:
         # in-flight both drain, the drain re-list (breaker observation point
         # b) decides: more pending on disk → one more in-run round; nothing →
         # clean exit.
-        while not (stalled or stopped):
+        while not (stalled or stopped or _rate_limited()):
+            # Backoff resolution (design D3): the armed pre-breaker backoff's
+            # deciding re-derivation, once its cooldown has expired and
+            # nothing is in flight. Disk growth disarms the breaker; zero
+            # growth exits stalled (at most one backoff per call).
+            if (backoff_pending and not inflight
+                    and time.monotonic() >= cooldown_until):
+                backoff_pending = False
+                wsnap = _snapshot()
+                grown = (int(wsnap.get("done", 0)) + int(wsnap.get("failed", 0))
+                         + len(set(failed_written))) > last_terminal_count
+                if grown:
+                    window_left = args.stall_waves
+                    _eprint("[fanout_runner] backoff re-derivation shows disk "
+                            "progress — breaker disarmed, resuming dispatch")
+                else:
+                    last_window_snap = wsnap
+                    stalled = True
+                    _stall_diag("pre-breaker backoff re-derivation is still "
+                                "zero-growth")
+                    break
+            # Cooldown gate: with nothing in flight, idle-wait the cooldown
+            # out (1s chunks) — an intentional pause must not burn breaker
+            # observations or re-list subprocesses. With in-flight units the
+            # harvest loop below keeps running (cooldown only pauses NEW
+            # dispatch, via _fill).
+            if (time.monotonic() < cooldown_until and (queue or inflight)
+                    and not inflight):
+                time.sleep(min(1.0, max(0.001,
+                                        cooldown_until - time.monotonic())))
+                continue
             while inflight:
                 ready, _ = wait(list(inflight), timeout=1.0,
                                 return_when=FIRST_COMPLETED)
@@ -1824,23 +2449,38 @@ def main() -> int:
                     next_hb = now + args.hb_interval_s
                     with sinks_lock:
                         live = list(sinks.items())
-                    for uid, (o, e) in live:
-                        idle = max(0, int(now - min(o["ts"], e["ts"])))
+                    for uid, (o, e, w) in live:
+                        # Same source as the stall criterion (_run_unit): the
+                        # NEWER of the two stamps, so the disclosed idle never
+                        # disagrees with the value that would trigger a kill —
+                        # and `w` is that same attempt's window, so the
+                        # disclosed idle is readable against it.
+                        idle = max(0, int(now - max(o["ts"], e["ts"])))
                         _hb_inflight(t0, args.tier, len(live), uid, idle,
-                                     _hb_count(), total)
-            if stalled or stopped:
+                                     _hb_count(), total, w)
+            if stalled or stopped or _rate_limited():
                 break
+            if backoff_pending:
+                # a backoff is armed: its deciding re-derivation at the top of
+                # the loop owns the next decision — never re-list/observe
+                # (point b) while it is pending.
+                continue
             # Observation point (b) — drain re-list (design D7): queue empty
             # and in-flight zero. Re-derive pending from disk; units still
             # pending get one more zero-growth-bounded attempt round in THIS
             # run (the lone-poison-unit tail "kill → re-dispatch → kill" is
             # truncated in-run instead of bouncing partial:true to the
-            # orchestrator forever).
+            # orchestrator forever). A post-cooldown pass can reach this point
+            # with a non-empty in-memory queue (crash requeues waiting out the
+            # cooldown) — de-duplicate against it so a unit is never queued
+            # twice.
             wsnap = _snapshot()
             pending_now = wsnap.get("pending") or []
             if not pending_now:
                 break  # clean drain: nothing left to dispatch
-            queue.extend(pending_now)
+            queued_ids = {u.get(id_field) for u in queue}
+            queue.extend(u for u in pending_now
+                         if u.get(id_field) not in queued_ids)
             if _breaker_observe(wsnap):
                 _stall_diag("queue drained but the disk re-list still shows "
                             "pending units")
@@ -1870,12 +2510,16 @@ def main() -> int:
         if failed_written:
             failed_now = max(failed_now, failed0 + len(set(failed_written)))
         partial = bool(pending_units)
+        # Cost visibility (design D4) computed ONCE and shared by the terminal
+        # sidecar write and the stdout summary below, so the two agree by
+        # construction rather than by rounding.
+        cost = _cost_payload()
         # Terminal sidecar state (counts consistent with the stdout summary below
         # by construction — both derive from {snap, failed_written}).
         _write_sidecar(plan_path.parent, args.tier,
                        _sidecar_payload(
                            "exited-partial" if partial else "exited-clean",
-                           snap, pending_units))
+                           snap, pending_units, cost))
         result = {
             "runner": "fanout_runner",
             "tier": args.tier,
@@ -1890,6 +2534,10 @@ def main() -> int:
             "partial": partial,
             "stall_killed": stall_killed,
             "stalled": stalled,
+            # Cost visibility (design D4) — literally the same dict the
+            # terminal sidecar was written from, so a second-terminal watcher
+            # and the exit summary agree by construction.
+            **cost,
         }
         if stalled:
             # per-stuck-unit diagnosis: id + ACTUAL on-disk marker existence (the
@@ -1911,13 +2559,45 @@ def main() -> int:
             result["context_overflow"] = list(dict.fromkeys(overflow_units))
         if args.dry_run:
             result["dry_run"] = True
+        # Fast-fail storm resilience disclosures (additive keys; existing
+        # fields zero add/remove). rate_limited_crashes is present only when
+        # the truncation fired (same conditional-disclosure shape as
+        # context_overflow).
+        rate_limited_trig = _rate_limited()
+        result["cooldowns"] = cooldowns
+        result["retried_failed"] = retried_failed
+        result["rate_limited"] = rate_limited_trig
+        if rate_limited_trig:
+            with storm_lock:
+                result["rate_limited_crashes"] = list(storm_state["units"])
         _eprint(f"[fanout_runner] done ({args.tier}): {result['done']}/{total} done, "
                 f"{result['failed']} failed, {result['pending']} pending, partial={partial}"
-                + (", STALLED" if stalled else ""))
+                + (", STALLED" if stalled else "")
+                + (", RATE-LIMIT STORM" if rate_limited_trig else ""))
         print(json.dumps(result, ensure_ascii=False))
-        return 2 if stalled else 0
+        return 2 if (stalled or rate_limited_trig) else 0
     finally:
         pool.shutdown(wait=True)
+        # Exit-path cleanup of STILL-REGISTERED children, BEFORE deregistering
+        # them. Units run in their own session (start_new_session), so an
+        # interrupt (Ctrl-C) no longer reaches them through the tty's process
+        # group; the normal path has already converged the pool
+        # (shutdown(wait=True)), but an interrupt leaves live children behind.
+        # Killing them here keeps them from becoming UNTRACKABLE orphans —
+        # clearing children_now and deleting the liveness file is exactly what
+        # would hide them from a later `--kill-stale`. This call never hits the
+        # dispatcher itself (see _kill_tree). A hard kill (SIGKILL) skips this
+        # finally entirely: the liveness file stays on disk and `--kill-stale`
+        # still detects the residue — that path is intentionally unchanged.
+        with children_lock:
+            leftover = list(children_now)
+        for c in leftover:
+            try:
+                if not _kill_tree(c["pid"]):
+                    _eprint(f"warn: exit cleanup could not tree-kill child "
+                            f"pid {c['pid']} (unit {c.get('unit', '?')})")
+            except Exception as e:  # never let cleanup break the exit path
+                _eprint(f"warn: exit cleanup error for pid {c['pid']}: {e}")
         # Liveness deregistration on ANY exit path (incl. partial early-exit,
         # list-CLI sys.exit, unexpected exception). Hard-kill leaves the file
         # behind — a legal residual state disambiguated by --kill-stale.

@@ -4,30 +4,29 @@
 
 人类面的 `/mgh-init` 阶段产物**字段级参考文档**:按 `.mgh-init/` 下的每个产物文件逐一解释字段名
 与取值语义(含 `shape: centralized|distributed` 等枚举),让维护者不读脚本源码就能判断运行状态与
-产物健康度。纯文档交付物,不改变任何脚本行为 / 契约 / schema。
+产物健康度。纯文档交付物,不改变任何脚本行为 / 契约 / schema;文档住在维护者私有文档区,
+不随包分发,其路径不出现在任何分发产物或 SDD 产物里(承 R5.11)。
 
 ## Requirements
 
-### Requirement: 阶段产物字段参考文档的受众、路径与边界
+### Requirement: 阶段产物字段参考文档的受众与边界
 
-系统 SHALL 在仓库维护一份人类面文档 `docs/man/mgh-init-artifacts.md`,受众 = **人类**(维护者 /
-首次读产物的人)。它 SHALL 按流水线阶段组织 `.mgh-init/` 下每个产物文件的字段参考,并 SHALL
-与既有文档划清边界:用法讲 `docs/man/mgh-init.md`、节点流程讲 `docs/mgh-init-工作流程详解.md`,
-本文档只讲**产物文件的字段与取值**。文档 SHALL 与上述两份互相链到,不复述其内容。
+系统 SHALL 在维护者私有文档区维护一份人类面文档,受众 = **人类**(维护者 / 首次读产物的人)。
+它 SHALL 与 `/mgh-init` 同名系列,按流水线阶段组织 `.mgh-init/` 下每个产物文件的字段参考,并 SHALL
+与同族的两份文档划清边界:命令用法说明讲「怎么跑」、节点流程详解讲「每步做什么」,本文档只讲
+**产物文件的字段与取值**。三份 SHALL 互相链到,不复述其内容。
 
 #### Scenario: 文档入口可定位且受众声明
 - **WHEN** 人类维护者需要查 `clusters.json` 的字段含义
-- **THEN** 能在 `docs/man/mgh-init-artifacts.md` 找到按阶段组织的产物字段章节,且文件开头声明
-  受众 = 人类
+- **THEN** 能在该字段参考文档里找到按阶段组织的产物字段章节,且文件开头声明受众 = 人类
 
 #### Scenario: 与既有文档边界清晰
 - **WHEN** 维护者想查「这步怎么跑」而非「这步产物字段」
-- **THEN** `mgh-init-artifacts.md` 只做字段参考,不展开步骤细节,并链到
-  `docs/mgh-init-工作流程详解.md` / `docs/man/mgh-init.md`
+- **THEN** 字段参考只做字段参考,不展开步骤细节,并链到节点流程详解 / 命令用法说明
 
 ### Requirement: 产物覆盖清单与逐字段解释
 
-`docs/man/mgh-init-artifacts.md` SHALL 覆盖 `.mgh-init/` 下这些产物文件(每文件一个章节):控制侧
+该字段参考文档 SHALL 覆盖 `.mgh-init/` 下这些产物文件(每文件一个章节):控制侧
 `run_config.json`、`.active` 哨兵、`controls_candidates.json`、`clusters.json`、`skeleton.json`、
 `i1_enriched.json`(advisory)、`scout_plan.json`、`checkpoints/scout/*.json`、`scout_candidates.json`、
 `checkpoints/t1/*.json`、`controls_inventory.json`、`checkpoints/t3/*.<fmt>.json`、
@@ -51,19 +50,19 @@ wrapper 结构、**字段表**(字段名 + 取值语义)、枚举取值说明、
 
 ### Requirement: 操作性词补进术语词典
 
-系统 SHALL 在 `docs/glossary.md` 增补本文档用到的操作性词条,至少含:`centralized` / `distributed`
+系统 SHALL 在维护者私有的术语词典中增补本文档用到的操作性词条,至少含:`centralized` / `distributed`
 (簇 shape 含义)、`cluster_id`(组成形态与用途)。词典自由增补,不设准入审批(承 R3)。
 
 #### Scenario: 人类面用词前词典有据
-- **WHEN** `mgh-init-artifacts.md` 使用 `centralized`、`distributed`、`cluster_id` 等词
-- **THEN** 这些词在 `docs/glossary.md` 中均有条目,释义与文档正文一致
+- **WHEN** 字段参考文档使用 `centralized`、`distributed`、`cluster_id` 等词
+- **THEN** 这些词在术语词典中均有条目,释义与文档正文一致
 
 ### Requirement: 字段解释以源码为准的维护约定
 
-本 spec SHALL 规定:`docs/man/mgh-init-artifacts.md` 的字段解释以 `core/scripts/` 下对应产出者的
-源码 / `--help` 契约为唯一依据;脚本字段变更时文档 SHALL 同步更新,不得漂移。文档不引入机器校验
-(纯人类面,受众声明制),维护约定靠 spec 明文约束。
+本 spec SHALL 规定:字段参考文档的字段解释以 `core/scripts/` 下对应产出者的源码 / `--help` 契约为
+唯一依据;脚本字段变更时文档 SHALL 同步更新,不得漂移。文档不引入机器校验(纯人类面,受众声明制),
+维护约定靠 spec 明文约束。
 
 #### Scenario: 字段语义变更时文档同步
 - **WHEN** `list_clusters.py` 的 stdout 字段(如 pending[] 增加字段)在后续 change 中变化
-- **THEN** `mgh-init-artifacts.md` 对应章节 SHALL 同步更新,维持与源码一致
+- **THEN** 该字段参考文档对应章节 SHALL 同步更新,维持与源码一致

@@ -34,10 +34,15 @@ dispatcher 以之为锚树校验与子进程 cwd 的依据。
 **四级超时关系确定性化 + 启动校验**:自内向外四级 SHALL 满足不变式
 `--stall-timeout-s(失活)< --call-timeout-s(绝对兜底)× 收敛余量 < time-budget-ms <
 宿主 per-call timeout`,且每级留 ≥20% 余量。`--call-timeout-s` 默认值 SHALL 为 7200
-(宁慢勿杀依据不变);新增 `--stall-timeout-s` 默认 900(字节级失活判定,见失活检测
-requirement;healthy 单元分钟级,5× 余量)。**dispatcher SHALL 在 spawn 任何单元前校验**:
-调用方传 `--time-budget-ms` 时 MUST 同时显式传 `--call-timeout-s` 且其值 `< time-budget-ms × 0.8`,
-且 `--stall-timeout-s < --call-timeout-s`——违反 SHALL 退出码 2 + 可操作 recipe(给出合规
+(宁慢勿杀依据不变);`--stall-timeout-s` 默认值 SHALL 由**实测的完成单元运行时分布**标定
+(口径:`p99(完成单元运行时)× 2`,向下取整到分钟,且 SHALL NOT 低于 900),标定所用样本与
+取整结果 SHALL 记入本 change 的 design Decisions,并在 `--help` 文案中给出该口径。取值域 SHALL
+为 `0` 或 `≥ 60`:**`0` = 显式关闭失活判据**,此时排序不变式中的 `--stall-timeout-s <
+--call-timeout-s` 一级 SHALL NOT 适用(仅剩 `--call-timeout-s < time-budget-ms × 0.8`),
+`--call-timeout-s` 单独承担收敛有界;`1..59` SHALL 退出码 2 + 可操作 recipe。**dispatcher
+SHALL 在 spawn 任何单元前校验**:调用方传 `--time-budget-ms` 时 MUST 同时显式传
+`--call-timeout-s` 且其值 `< time-budget-ms × 0.8`,且(仅当 `--stall-timeout-s > 0`)
+`--stall-timeout-s < --call-timeout-s`——违反 SHALL 退出码 2 + 可操作 recipe(给出合规
 取值示例),NEVER 带违例不变式进入派发(默认 `--call-timeout-s 7200` 大于任何小时级宿主
 预算,静默错配必然退化为宿主硬杀循环);未传 `--time-budget-ms`(宿主外手动直跑)时
 默认值组合 SHALL 可用,stderr 打一次性提示。当调用方传 `--time-budget-ms` 时,dispatcher
@@ -72,14 +77,22 @@ SHALL 保证在宿主硬超时之前软时限触发(停发新补位、等在飞�
 #### Scenario: 超时不变式违例 spawn 前 fail-loud
 
 - **WHEN** 调用传 `--time-budget-ms 720000` 但未显式传 `--call-timeout-s`(默认 7200 ≥
-  budget×0.8),或 `--stall-timeout-s ≥ --call-timeout-s`
+  budget×0.8),或 `--stall-timeout-s ≥ --call-timeout-s`(两者皆 > 0),或
+  `--stall-timeout-s` 取 1..59
 - **THEN** dispatcher 退出码 2,stderr recipe 给出合规取值示例(如
-  `--call-timeout-s 540 --stall-timeout-s 300`);零单元被 spawn、零枚举副作用
+  `--call-timeout-s 540 --stall-timeout-s 300`,或关闭态 `--stall-timeout-s 0`);零单元被
+  spawn、零枚举副作用
+
+#### Scenario: `--stall-timeout-s 0` 显式关闭失活判据且不触发排序违例
+
+- **WHEN** 调用传 `--stall-timeout-s 0 --call-timeout-s 2000 --time-budget-ms 2700000`
+- **THEN** 校验通过(不再要求 `stall < call`),无单元因静默被判失活;收敛有界由
+  `--call-timeout-s` 单独承担;stdout 摘要 `stall_killed` 为空数组,`--help` 文案列出关闭态语义
 
 #### Scenario: 手动直跑(无 budget)默认组合可用
 
 - **WHEN** 人开终端直跑 `fanout_runner.py --tier t1`(不传 `--time-budget-ms`)
-- **THEN** 默认 `--stall-timeout-s 900 < --call-timeout-s 7200` 校验通过,正常运行;
+- **THEN** 默认 `--stall-timeout-s < --call-timeout-s 7200` 校验通过,正常运行;
   stderr 一次性提示(宿主外直跑无宿主超时钳制)
 
 #### Scenario: T1 在 scout 未完成时闸门 fail-loud
@@ -99,8 +112,10 @@ SHALL 保证在宿主硬超时之前软时限触发(停发新补位、等在飞�
 
 - **WHEN** 审阅 `py fanout_runner.py --help` 的 `--call-timeout-s`/`--stall-timeout-s`
   默认值与文案
-- **THEN** 默认 7200s / 900s,文案注明四级超时不变式与「宁慢勿杀」依据(被杀单批无 marker
-  留 pending,重派浪费一整跑)、失活判定的低误杀余量(healthy 单元分钟级 ×5)
+- **THEN** `--call-timeout-s` 默认 7200s;`--stall-timeout-s` 默认值 SHALL 等于实测标定结果
+  (`p99(完成单元运行时)× 2`,向下取整到分钟,不低于 900);文案 SHALL 注明四级超时不变式与
+  「宁慢勿杀」依据(被杀单批无 marker 留 pending,重派浪费一整跑)、该判据的**失效面**
+  (字节静默不区分「等网关排队」与「真卡死」)、关闭取值(`0`)与标定口径
 
 ### Requirement: 任务消息由固定模板与逐字字段填充构造
 
@@ -501,14 +516,32 @@ pending 收缩;`summary_paths`/`shards` 仍为全集)。dispatcher 据此锚树�
 
 ### Requirement: 在飞单元失活检测与外科手术式树杀(运行留痕)
 
-dispatcher SHALL 对每个在飞子进程跟踪其 stdout/stderr 的**字节级最后输出时刻**:静默时长
-≥ `--stall-timeout-s`(默认 900;`< 60` 拒识退出码 2)→ 判定该单元失活,**仅杀该单元的整个
-进程树**(Windows `taskkill /pid <pid> /T /F`——`.cmd` shim 链下的真实 host-CLI 进程 SHALL
-一并终止,NEVER 留孤儿继续烧 token;POSIX 进程组 SIGTERM),无 ack 无 marker → 单元留
-pending 重派。`--call-timeout-s` 绝对兜底超时的杀路径 SHALL 使用同一树杀机制(取代仅杀直接
-子进程的 `proc.kill()`——Windows 上那是 shim 层,真进程必成孤儿)。失活判定 SHALL 对全部
-tier 一致;误杀边界由余量承担(healthy 单元分钟级,默认阈值 ~5×),被误杀单元重派自愈且
-run.log 留痕可查。
+dispatcher SHALL 对每个在飞子进程分别跟踪其 stdout 与 stderr 的**字节级最后输出时刻**;
+当且仅当**两条流都没有新字节**已经过本轮生效的静默窗口(初值 `--stall-timeout-s`,见下
+「本轮生效静默窗口」)才判定该单元失活(等价表述:静默时长取两条流最后输出时刻中的
+**较新者**;任一条流有字节即重置,NEVER 以任一条流的陈旧时刻单独判失活——空流的路
+MUST NOT 使健康单元被判失活),→ **仅杀该单元的整个进程树**(Windows
+`taskkill /pid <pid> /T /F`——`.cmd` shim 链下的真实 host-CLI 进程 SHALL 一并终止,NEVER
+留孤儿继续烧 token;POSIX 杀该单元自己的进程组 SIGTERM),无 ack 无 marker → 单元留 pending
+重派。**树杀的作用域 SHALL 严格收敛于被杀单元**:杀一个失活单元 NEVER 导致 dispatcher 自身
+终止——POSIX 下单元子进程 SHALL 在 spawn 时自成会话/进程组(`start_new_session`),使
+`killpg` 只命中该单元自己的树;Windows 分支不受影响。`--call-timeout-s` 绝对兜底超时的杀
+路径 SHALL 使用同一树杀机制(取代仅杀直接子进程的 `proc.kill()`——Windows 上那是 shim 层,
+真进程必成孤儿)。失活判定 SHALL 对全部 tier 一致;误杀边界由余量承担(healthy 单元分钟级,
+默认阈值 ~5×),被误杀单元重派自愈且 run.log 留痕可查,并另有下述自适应宽限以假杀自证收敛。
+
+**判据语义与失效面**:字节静默 SHALL 被解释为「该单元此刻无产出」,**SHALL NOT** 被当作
+「该单元卡死」的充分证据——在限流网关上静默的常见成因是调用排在网关队列里等待,与真卡死在
+本地信号上不可分。`--help` 文案 SHALL 明写该语义与失效面,并披露该判据的正当用途是**为本 run
+的收敛设上界**,而非诊断单元健康度。
+
+**本轮生效静默窗口(假杀自证 + 有界自适应宽限)**:窗口初值 SHALL 为 `--stall-timeout-s`;
+同一次 run 内,若某单元曾因静默被判失活(树杀,**无 ack 无 marker**),且其后**在同一次 run 的
+重派中成功完成**(`.done` marker 落盘或 ok ack),dispatcher SHALL 将该证据视为「本轮窗口过紧」,
+把本轮生效窗口放宽为 `min(当前生效窗口 × 2, --call-timeout-s × 0.8)`,并 SHALL 在 stderr 披露
+一次放宽事件(旧值 → 新值 + 触发单元 id)。放宽 SHALL 有界(以 `--call-timeout-s × 0.8` 为上限)
+且 SHALL 只影响本 run 后续的静默判定,NEVER 改写 `--stall-timeout-s` 的入参语义、NEVER 跨 run 持久化。
+`--stall-timeout-s 0`(关闭态)下本段 SHALL NOT 适用。
 
 **每单元运行留痕**:dispatcher SHALL 将每单元子进程的 stdout/stderr 尾部(各自截断上限)落盘
 `<checkpoints>/<tier>/<单元 id 文件名安全形>.run.log`(文件名净化规则与 audit 副本同源,
@@ -516,12 +549,24 @@ run.log 留痕可查。
 stderr 诊断行 SHALL 附 run.log 绝对路径——事后定位以证据为准,NEVER 依赖事后猜测。
 
 **stdout/心跳披露**:stdout 摘要 SHALL 新增 `stall_killed:[<unit>…]`(本次 run 失活树杀的
-单元,既有字段不变);派发循环 SHALL 以默认 60s 周期向 stderr 打在飞披露行(在飞单元 id +
-距其子进程上次输出的秒数),人从宿主 TUI 实时区分「正常慢」与「卡死」。
+单元,既有字段不变),并 SHALL 新增**代价可视字段**:① 本次 run 已完成单元运行时的
+`runtime_p50_s`/`runtime_p95_s`/`runtime_max_s`(秒,整数;无完成单元时省略该三键);
+② `stall_killed_slots_s`(本次 run 因失活被杀的单元累计占用槽位秒数)与
+`stall_killed_slot_pct`(该秒数 ÷ 本次 run 的槽位总秒数,保留一位小数);③ 若本轮发生自适应
+放宽,`stall_window_s` SHALL 报出本轮**生效**窗口终值(未放宽时省略)。派发循环 SHALL 以默认
+60s 周期向 stderr 打在飞披露行(在飞单元 id + 距其子进程上次输出的秒数),人从宿主 TUI 实时
+区分「正常慢」与「卡死」;该披露的静默秒数 SHALL 与失活判据同源(取两条流最后输出时刻的
+较新者),NEVER 把从未产生字节的那条流的 spawn 时刻当成静默起点。进度侧车 SHALL 同步携带
+上述代价可视字段。
+
+**进程组隔离的边界披露**:单元子进程自成会话后,交互式终端向 dispatcher 发送的中断信号
+(如 Ctrl-C)SHALL NOT 再连带终止在飞单元子进程;这些进程成为孤儿,但 SHALL 由既有 liveness
+登记(`<init-dir>/fanout_runner.<tier>.pid` 的 `children[]`)覆盖,并可由既有 `--kill-stale`
+检出清理。`--kill-stale` 与失活段的 `--help` 文案 SHALL 明示该边界及补偿路径。
 
 #### Scenario: 失活单元被外科树杀,其余单元不受影响
 
-- **WHEN** 某在飞子进程静默超过 `--stall-timeout-s`,同批其余单元正常推进
+- **WHEN** 某在飞子进程两条输出流均静默超过本轮生效窗口,同批其余单元正常推进
 - **THEN** 仅该单元进程树被终止(含 shim 链真进程),其余单元与后续补位照常;该单元无
   marker 留 pending;stdout 摘要 `stall_killed` 含其 id
 
@@ -542,6 +587,51 @@ stderr 诊断行 SHALL 附 run.log 绝对路径——事后定位以证据为准
 - **WHEN** 某在飞单元子进程已静默 5 分钟,其余单元在跑
 - **THEN** stderr 每分钟出现该单元的在飞披露行(unit id + 距上次输出秒数),静默秒数单调
   增长直至失活判定;stdout 单行 JSON 契约不变
+
+#### Scenario: 单路静默的健康单元不被判失活
+
+- **WHEN** 某单元子进程持续向 stdout 输出、而 stderr 自 spawn 起从未产生任何字节,时间
+  超过本轮生效窗口
+- **THEN** 该单元 MUST NOT 被判失活(其静默时长按两条流中较新者计 = 最近一次 stdout 字节的
+  时刻);单元正常推进至终态
+
+#### Scenario: 树杀不终止 dispatcher 自身
+
+- **WHEN** POSIX 下 dispatcher 对某失活单元执行树杀,同批其余单元仍在飞
+- **THEN** 只有该单元的进程树被终止,dispatcher 进程 MUST 继续存活并照常补位派发;该轮
+  运行 SHALL 能继续到软时限或队列耗尽,并打印 stdout 汇总(退出码 0 或按既有语义)
+
+#### Scenario: 双路皆静默仍判失活
+
+- **WHEN** 某在飞子进程的 stdout 与 stderr 均超过本轮生效窗口未产生字节
+- **THEN** 仍按本 requirement 判失活并树杀,该单元留 pending 重派——判据放宽 MUST NOT
+  变成永不判定
+
+#### Scenario: 被杀单元重派成功即放宽本轮窗口(假杀自证)
+
+- **WHEN** 单元 A 因静默被判失活并树杀(无 ack 无 marker),其后在同一 run 的重派中完成
+  (`.done` 落盘),此时本轮生效窗口为 W 且 `2W ≤ --call-timeout-s × 0.8`
+- **THEN** stderr 打一条放宽披露行(旧值 W → 新值 2W,触发单元 id = A);此后在飞单元的静默
+  判定改用 2W;stdout 摘要 `stall_window_s` 报 `2W`
+
+#### Scenario: 自适应放宽有界,不越过 call-timeout 余量
+
+- **WHEN** 本轮已多次因假杀自证而放宽,`2W > --call-timeout-s × 0.8`
+- **THEN** 生效窗口收敛为 `--call-timeout-s × 0.8` 并不再上调;`--call-timeout-s` 仍为绝对
+  兜底,任何单元 SHALL NOT 存活超过 `--call-timeout-s`
+
+#### Scenario: 代价可视字段随每次退出落盘
+
+- **WHEN** 一次 run 正常结束(退出码 0,含 `partial:true` 早退)
+- **THEN** stdout 摘要含已完成单元的 `runtime_p50_s`/`runtime_p95_s`/`runtime_max_s` 与
+  `stall_killed_slots_s`/`stall_killed_slot_pct`;进度侧车同名字段同步;无任何单元完成时三个
+  runtime 键省略而非报 0
+
+#### Scenario: 关闭态不再误杀且判据不发散
+
+- **WHEN** 以 `--stall-timeout-s 0` 运行,某单元长时间无输出
+- **THEN** 该单元 SHALL 被保留至 `--call-timeout-s` 到达(或被其重派收敛),NEVER 因静默被杀;
+  stdout `stall_killed` 为空数组;`runtime_*` 与 `stall_killed_slots_s` 字段照常披露
 
 ### Requirement: headless fanout agent 无问询钉扎
 
@@ -565,3 +655,126 @@ claude 侧 spawn 面不变(`-p` headless + `--allowedTools` 白名单外自动�
 - **WHEN** fanout 子代理尝试读项目目录之外的路径(旧版 opencode 下该触发曾表现为权限问询挂死)
 - **THEN** 该工具调用被显式 deny 规则立即拒绝(工具报错),agent 按任务模板纪律留在
   `{{repo}}` 树内继续;子进程不挂死、不等待任何应答者
+
+### Requirement: 快败冷却与熔断前有界退避
+
+`fanout_runner.py` SHALL 维护一个**快败滑动窗口**（120s，实现常量）统计 **requeue 事件**——
+单元以 crash/timeout/stall/spawn-error 终态且回到 pending 队尾的事件；显式 `failed:` ack 与
+spawn 前锚校验失败 SHALL NOT 计入（两者终态化不回队，无风暴形状，计入会让确定性配置错误
+假触发冷却）。窗口内 requeue 事件 ≥ 3（实现常量）时，dispatcher SHALL 暂停派发新单元
+`--cooldown-s` 秒（默认 300；`0` = 关闭；取值 SHALL 按「剩余时间预算 − 在飞收敛余量」封顶，
+预算不足时冷却退化为立即继续并如实 stderr 披露）；冷却期间在飞单元照常运行、照常收割——
+冷却只停**新派发**。每次冷却 SHALL 向 stderr 打一行披露（触发原因 + 实际冷却秒数），stdout
+摘要新增 `cooldowns:<n>`（本 run 冷却次数；既有字段零增删）。
+
+**熔断前有界退避**：零推进熔断准备以退出码 2 收束时，若剩余时间预算允许，dispatcher SHALL
+执行**至多一次**「冷却 `--cooldown-s` → 全量重列磁盘终态 → 再观察」——重列有推进（done+failed
+计数增加）则撤销熔断、恢复派发；仍零推进才以退出码 2 fail-loud（既有 `stalled` 契约逐字不变）。
+NEVER 无限退避（跨配额窗口的收敛 SHALL 仍归编排器 `--resume` 重派循环，不塞进单次调用）。
+
+#### Scenario: 快败风暴触发冷却，新派发暂停而在飞照常
+
+- **WHEN** 配额耗尽，120s 滑动窗口内第 3 个单元 crash 回队
+- **THEN** dispatcher 暂停派发 `--cooldown-s` 秒（stderr 披露一行），已 spawn 的在飞单元继续
+  运行并正常收割；冷却结束后恢复派发；stdout 摘要 `cooldowns:1`
+
+#### Scenario: failed-ack 与 pre-spawn 失败不触发冷却
+
+- **WHEN** 窗口内 3 个单元全部以显式 `failed:` ack 终态（写 `.failed`，不回队）
+- **THEN** 不触发冷却（非 requeue 事件）；failed 终态语义不变
+
+#### Scenario: 冷却受剩余时间预算封顶
+
+- **WHEN** 冷却触发时剩余时间预算 < `--cooldown-s` + 在飞收敛余量
+- **THEN** 冷却时长被截到预算允许值；预算耗尽则跳过等待立即继续，stderr 如实披露截断
+
+#### Scenario: 熔断前一次退避自愈
+
+- **WHEN** 零推进熔断条件满足且剩余时间预算允许
+- **THEN** 执行一次「冷却 → 全量重列 → 再观察」；重列有推进 → 熔断撤销、继续派发；
+  仍零推进 → 退出码 2 + `stalled:true`（契约不变）；本路径在单次调用内至多发生一次
+
+### Requirement: crash 原因分类与限流 crash 风暴截断
+
+`fanout_runner.py` SHALL 在单元以 **crash 终态**(非零退出或无 ack 回执)结束后,对该单元的
+输出尾部(stdout/stderr 缓存尾,数据源 = 失活检测/运行留痕机制)做**确定性限流特征分类**:
+命中特征集 `429`/`too many requests`/`rate limit`/`quota`(大小写不敏感,子串匹配)→ 该单元记
+`crash_cause:"rate-limit"`,否则 `"unknown"`。分类 SHALL 对全部 tier 一致(共享派发循环,一处
+生效);ok/failed/timeout/stall 终态 SHALL NOT 参与分类(仅 crash)。
+
+**限流 crash 风暴截断(快路径止损)**:dispatcher SHALL 维护一个**crash 风暴观察窗口**(自上次
+磁盘终态推进〔任一单元 ok/failed marker 落盘〕起累计的 crash 事件);当窗口内 crash 计数
+≥ `--wave` **且全部** `crash_cause:"rate-limit"` 时,SHALL 立即停止派发剩余单元并**优先于新一轮
+冷却**直接截断,以退出码 2 fail-loud:stdout 摘要报 `rate_limited:true` +
+`rate_limited_crashes:[<unit>…]`,stderr 给**冷却 recipe**——等满一个配额窗口再 resume(窗口
+时长以网关配置为准,如 10 分钟)、wave 校准公式(`wave = floor(8 ÷ 每子每分钟调用数)`,8 =
+配额每分钟上限 × 80% 安全余量)、提示失活树杀不属 crash、提及本截断可经
+`--no-rate-limit-stop` 禁用。截断 SHALL 先于零推进熔断触发(快路径);零推进熔断(慢路径,含
+其熔断前一次退避)行为不变,仍是兜底。`--no-rate-limit-stop` 传入时 SHALL 完全跳过本截断。
+**优雅退化**:特征集漂移(新网关措辞)→ 分类全 unknown → 本截断不触发,快败冷却路径照常
+自愈兜底——文本签名仅是快停与披露层,NEVER 是唯一防线。非限流 crash(unknown)SHALL NEVER
+计入风暴判定。
+
+#### Scenario: 限流 crash 风暴被立即截断
+
+- **WHEN** 配额耗尽,一个观察窗口内 `--wave 5` 个单元相继 crash 且输出尾部均含 `429`/
+  `Too Many Requests` 特征
+- **THEN** 第 5 个 crash 终态判定完成后 dispatcher 停止派发(优先于再等一轮冷却),退出码 2,
+  stdout `rate_limited:true` + `rate_limited_crashes` 含 5 个单元 id,stderr 冷却 recipe 给出
+  等窗与 wave 公式;零推进熔断未被等待触发(快路径先停)
+
+#### Scenario: 特征漂移时优雅退化到冷却路径
+
+- **WHEN** 网关换用新错误措辞,窗口内 5 个 crash 输出尾部均不含任何特征串
+- **THEN** 分类全 unknown → 风暴截断不触发;快败冷却(事件驱动)照常触发自愈,熔断兜底不变
+
+#### Scenario: 单次偶发限流 crash 不触发截断
+
+- **WHEN** 窗口内仅 1 个单元 crash 且带限流特征,其余单元正常终态推进
+- **THEN** crash 计数 < `--wave`,不截断;该单元留 pending 照常重派,后续磁盘推进把窗口清零
+
+#### Scenario: 混入非限流 crash 不触发截断
+
+- **WHEN** 窗口内 5 个 crash 中 4 个带限流特征、1 个 `unknown`(如脚本缺陷)
+- **THEN** 风暴条件不满足(须全部 rate-limit),不截断;unknown crash 走既有语义(留 pending/
+  零推进熔断兜底)
+
+#### Scenario: 禁用 flag 回退
+
+- **WHEN** 调用传 `--no-rate-limit-stop` 且发生限流 crash 风暴
+- **THEN** 无快路径截断,冷却与熔断路径行为与未引入本机制逐字一致
+
+#### Scenario: ok/failed/timeout/stall 终态不参与分类
+
+- **WHEN** 某单元 output 尾部含 `429` 字样但以 ok 终态收尾(如子代理在报告文本里引用了 429)
+- **THEN** 不产生任何 crash_cause 记录,不进风暴计数;仅 crash 终态参与分类
+
+### Requirement: failed 终态单元的有界重派
+
+五个 tier 枚举器(`list_scout_batches.py`/`list_clusters.py`/`plan_aggregate.py`/
+`list_rule_jobs.py`/`diff_group.py`)SHALL 各增 `--include-failed` 布尔 flag(缺省关闭):开启时,
+failed 单元 SHALL 以 **canonical 身份**重进 `pending[]`——身份与 `failed_marker` 绝对路径均来
+自枚举器自身的 forward 谓词与既有 item 字段,NEVER 经文件名 stem 反推;缺省(不传 flag)stdout
+逐字节不变。`fanout_runner.py` SHALL 增 `--retry-failed`:认领携带 `failed_marker` 的单元时
+SHALL 先删除该 `.failed` marker(失败证据已留存在该单元的 `*.run.log`)再正常派发;stdout 摘要
+新增 `retried_failed:<n>`。重派后再失败 SHALL 写回新 marker(天然有界:ack 终态不回队,无
+重派循环)。编排器纪律(调用面文案,非机制强制):tier 收尾 `failed>0` 且 run.log 呈 provider
+瞬断形态 → **至多一次** `--retry-failed` 重派;再失败 → 接受缺口并在报告披露。
+
+#### Scenario: include-failed 重列 failed 单元
+
+- **WHEN** 某单元有 `.failed` marker,枚举器以 `--include-failed` 运行
+- **THEN** 该单元以 canonical id 出现在 `pending[]` 且携带 `failed_marker` 绝对路径;
+  不传 flag 时它仍被排除,stdout 其余字段逐字节不变
+
+#### Scenario: retry-failed 认领时删除 marker
+
+- **WHEN** dispatcher 以 `--retry-failed` 认领一枚举出的 failed 单元
+- **THEN** 该单元 `.failed` marker 先被删除再 spawn;成功 → 写 `.done`,失败 → 写回新
+  `.failed`(无自动循环);stdout `retried_failed` 计数 +1
+
+#### Scenario: 身份永远来自枚举器
+
+- **WHEN** 某 failed 单元的 id 超长(文件名 stem 被截断)
+- **THEN** `--include-failed` 重进 `pending[]` 的身份仍是完整 canonical id(与既有 forward
+  谓词同源);NEVER 出现「按截断 stem 反查身份」的路径

@@ -75,7 +75,7 @@ opencode(`--format opencode`)SHALL 使用**单个**受管块 `<!-- security-cont
 
 #### Scenario: Existing user content preserved
 
-- **WHEN** 目标已有用户手写的 `AGENTS.md` / `docs/` 内容
+- **WHEN** 目标项目已有用户手写的 `<target>/AGENTS.md` / `<target>/docs/` 内容
 - **THEN** 用户内容原样保留,init 仅替换自己的受管块(opencode,现为索引)/ 对应 category 详述文件,其余不动
 
 #### Scenario: Re-run is idempotent

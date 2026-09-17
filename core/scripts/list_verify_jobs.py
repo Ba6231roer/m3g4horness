@@ -5,8 +5,8 @@ list_verify_jobs — deterministic s6 work-list producer for /mgh-sast.
 
 Reads the s5 product `s5_filtered.json` (prefilter wrapper {kept[], dropped[], stats})
 and the s6 per-finding checkpoint dir, then prints the authoritative pending work-list
-as JSON on stdout. Closes the s6 fan-out asymmetry (harden-mgh-sast-orchestration-
-discipline FD2): s4 has list_chunks.py, s6 now has this. Replaces hand-rolled
+as JSON on stdout. Closes the s6 fan-out asymmetry: s4 has list_chunks.py,
+s6 now has this. Replaces hand-rolled
 `py -c "import json..."` introspection of s5_filtered.json and the
 `_aggregate_verify.py` micro-script reflex in the orchestrator (R5.2).
 

@@ -91,9 +91,8 @@
   披露/failed-ack 不触发冷却）；`tests/test_list_clusters.py` 等枚举测试（`--include-failed`
   缺省不变 + 重进 pending 身份正确）。
 - **调用面与文档**：`core/scripts/discipline_core.py` path_recipes、`core/prompts/fragments/
-  init-stage/{scout,t1,t3}.md` 与 sdr 派发段（stalled 分支 + retry-failed 纪律）、
-  `docs/man/{mgh-init,mgh-sdr}.md`（配额/慢画像配置段）、`docs/opencode-fanout-runner-guide.md`
-  §6、glossary。
+  init-stage/{scout,t1,t3}.md` 与 sdr 派发段（stalled 分支 + retry-failed 纪律）、维护者私有
+  文档区里的命令人话说明（配额/慢画像配置段）、fan-out 运行手册、术语词典。
 - **兼容性**：stdout 既有字段零增删（四个新键）；新 flag 均有安全缺省（冷却 300s 仅风暴形态
   生效、截断可禁用、`--include-failed`/`--retry-failed` 显式 opt-in）；退出码 2 新增「风暴截断」
   形态（与既有熔断同族 fail-loud）；零新依赖。

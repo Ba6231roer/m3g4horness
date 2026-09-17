@@ -3,6 +3,9 @@
 > **任何在本仓库做的事之前,先完整读本文件。** 它是 m3g4h⊿rness 的操作手册与研发铁律。
 > 仓库根的 `README.md` 面向使用者;本文件面向**开发和维护者**。
 
+## 项目调研开发阶段最高优先级约束
+**CRITICAL**: 本项目研发过程，有需要和人类沟通确认的会话内容，以及所有面向人类读者的项目说明类文档产出，严格要求：假定是在面向完全不了解该主题的人进行讲解，通过举例、mermaid图等方式说明、待拍板事项还要通过对比优缺点的方式陈述供我选择，不允许出现"02 §7.3 的"xxx""这样的引用，文档稍微修改引用就失效，必须使用简短总结式说明而不是让人类到处去翻引用来源，如果确实由于内容过长需要跨文档翻阅，指明文档名与章节全名，并使用markdown引用跳转方式。
+
 ## 这是什么
 
 **m3g4h⊿rness**(读作 *megahorn-ness*;双重语义:宝可梦招式「超级角击 / Megahorn」,
@@ -88,7 +91,8 @@ flowchart LR
 
 | 受众 | 文件 |
 | --- | --- |
-| 人类 | `docs/man/**`、`docs/glossary.md`、proposal 人话序、终端报告(`report.md`/详述文件) |
+| 人类·随包分发 | 终端报告(`report.md`/详述文件);proposal 人话序 |
+| 人类·仅研发仓 | `docs/man/**`、`docs/glossary.md` —— 本仓根 `docs/` 是开发者私人资料,装进用户项目时**不落地**,故其中的文件**不得被任何分发内容引用**(详见下方 R5.10 第 ⑨ 类) |
 | agent | 命令壳纪律段、stage 提示词、`core/contracts/**`、JSON schema、`NEVER` 链、flag 表 |
 | 双受众 | `proposal.md`(人话序 + 结构化 why/what/capabilities/impact) |
 
@@ -126,6 +130,7 @@ flowchart LR
 | R5.8 自检 + 回归 | install 自检 + 回归测 | `install.sh` + `tests/` |
 | R5.9 边界校验 | `--check` fail-loud(退出码 2) | 各产出者 `--check` |
 | R5.10 分发纯净 | purity lint | `tools/check_distributed_purity.py` |
+| R5.11 SDD 产物不指私档 | 同一 purity lint 的 SDD 扫描面 | `tools/check_distributed_purity.py` |
 
 - **R5.1 契约单一真相源 + 机械化 lint**:脚本 `argparse`/`Usage:` docstring 是 CLI **唯一契约**,
   命令壳调用示例**逐字镜像**,不得出现脚本未声明的 flag(agent 经 `--help` 学接口,故 `--help`
@@ -226,6 +231,16 @@ flowchart LR
 - **R5.8 安装自检 + 回归单测**:`install.sh` 镜像后校验脚本族同目录共存 + fail-soft(自检失败只
   warn 不阻断 install,CI 必 fail);任何 `.md`/脚本改动 bump 版本号;回归测覆盖 契约等价 / 导入
   鲁棒(非脚本目录 cwd 子进程)/ 性能不退化 / 零依赖 AST 扫描 / R5.1 CLI lint。
+  - **定向跑优先,全量是闸门**:改哪面跑哪面(「改动面 → 测试文件」映射表见
+    [快速命令](#快速命令));`tests/` 全量(1223 测 / ~185s)SHALL 仅在发布前或**跨面改动**
+    (碰 `core/contracts/`、`install.sh`、hook 双端接线、跨脚本公共 helper)时跑。理由〔全量耗时
+    集中在 3 个真·I/O 面(`test_diff_group` 真建 git 仓 / `test_fanout_runner` 真子进程与计时器 /
+    `test_sdr_context` 真 codegraph 探针),其余 54 个文件均 <10s;把它当每次改动的习惯会挤掉
+    真正该做的实机验证〕。
+  - **回归测 NEVER 吃 300s 级墙钟默认值**:in-process harness 跑 `fanout_runner.main()` MUST 显式
+    传 `--cooldown-s 0`——理由〔`--cooldown-s` 默认 300 是**真实等待**,harness 漏传 = 单测静默
+    挂 5 分钟(实测:单测 300.8s → 1.0s);`test_fanout_stale.py::_Env.main` 与
+    `test_fanout_runner.py::_FakeDispatchBase` 均在 harness 层设该缺省,新增 tier 测试同此约〕。
 - **R5.9 边界校验泛化(承 openspec validate-at-boundary)**:每个 stage 产物的产出者 MUST 暴露
   `--check`(或独立 validator,如 `validate_inventory.py`);编排器跑完一步、进下一步前 MUST 运行之,
   失败 fail-loud(退出码 2)回退重跑,**不带着破损产物继续**。范式源头:`assemble_rules.py --check`。
@@ -238,14 +253,36 @@ flowchart LR
   (`(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst|srr|ut-init)-…`);⑤ 内部上游文档(`glasswing_docs/`);
   ⑥ 仓根开发态文件指针(`task.*.md`,install 不分发);⑦ dev-meta 措辞(`承/兑现 R5.x`、`范式锚点`、
   指本研发仓时的「本仓」);⑧ 上游溯源行话作谱系归因(`vvah`/`design_controls` 当归因词,非操作性
-  schema 字段)。按「删或嫁接」处理(design D8):目标不需要 → 删标记/引用句;目标必需 → 把最简 1–2 行
+  schema 字段);⑨ **本仓根 `docs/` 指针**(`docs/man/**`、`docs/glossary.md`、`docs/upstream-index.md`、
+  `docs/upstream/**` 及各类分析与 review 笔记)——该目录是开发者私人资料,`install.sh` **不**把它拷进
+  目标项目,故分发内容里指向它的每一处都是死链,且会让目标 agent 去找一个根本不存在的目录。
+  **豁免面(与禁引同形,机器须放行)**:目标项目里由工具**运行时生成**的 `docs/security-controls/`、
+  `docs/test-conventions/`(mgh-init / mgh-ut-init 的输出目录),以及 `core/docs/NOTICE`、
+  `core/docs/prompt-provenance.md`(Apache-2.0 归属,随 `core/` 落到 `<dest>/mgh-core/docs/`)。按「删或嫁接」处理(design D8):目标不需要 → 删标记/引用句;目标必需 → 把最简 1–2 行
   内容内联到恰当位置再删指针(省 token 优先,NEVER 整段搬运)。**保留**操作语义与输出产物路径
   (`--check`/退出码 2/`<target>/AGENTS.md`/runtime 脚本调用 `.claude/mgh-core/scripts/*.py`/阶段标签
   `T1`/`s1`..`s9`)。**受保护归因**(`core/prompts/**` 头的 `Source: vvaharness/...`、skills Apache 归因、
   `core/docs/prompt-provenance.md`、操作性 `design_controls`、`CVE-*`)不在禁列,NEVER 当 dev-only 溯源剥除。
-  理由〔省 token + 防目标项目误读 + 平台无关〕。前 7 类 + dev-meta(`承/兑现`/`范式锚点`)由
-  `tools/check_distributed_purity.py` 确定性强制;第 8 类与「本仓」与受保护归因同形、机器难辨,
-  由提示词护栏 + 人工清理覆盖(install 自检 fail-soft、CI 测 `tests/test_distributed_md_purity.py` 必 fail,承 R5.8)。
+  理由〔省 token + 防目标项目误读 + 平台无关〕。第 ①②③④⑤⑥⑦ 类 + dev-meta(`承/兑现`/`范式锚点`)
+  + 第 ⑨ 类(本仓根 `docs/`)由 `tools/check_distributed_purity.py` 确定性强制,扫描面 = **分发的
+  全部文件**(md 命令壳/agent/提示词/契约 + 分发脚本 `.py`/`.ts` + 敏感词模板 json),不只是 md;
+  第 8 类与「本仓」与受保护归因同形、机器难辨,由提示词护栏 + 人工清理覆盖。
+  第 ⑨ 类的反向守卫承 `tests/test_distributed_md_purity.py`(install 自检 fail-soft,承 R5.8)。
+- **R5.11 SDD 产物不得指向本仓 `docs/`**:用 openspec 等规格驱动工具做设计/研发时产出的**全部
+  产物**(`proposal.md` / `design.md` / `tasks.md` / `specs/**` / delta spec),SHALL NOT 出现
+  本仓根 `docs/` 下的任何路径或文件名 —— **连「本文档定义了一个住在 `docs/` 下的产物」这种主题
+  性命名也不行**。理由〔该目录是维护者私人资料:是否 git 跟踪由维护者自定,别人 clone 到的可能
+  根本没有;SDD 产物是**被跟踪、会被未来 agent 读**的共享记录,一份写着「去 `docs/xxx` 看」的
+  spec/任务清单会把每一个后来者引向一个可能不存在的文件;把私有目录的名字从共享记录里摘干净,
+  规则才不依赖「谁的机器上有什么」〕。**替代写法**:按**角色**称呼,不按路径 —— 「维护者私有
+  文档区里的命令人话说明」「术语词典」「fan-out 运行手册」「上游对照表」。**唯一豁免**:
+  需求本身就是「在 `docs/` 下写文件」的那份 change(此时路径是交付物本身);`openspec/changes/archive/**`
+  是冻结历史记录,不回溯改写。**范围**:上面 R5.10 那八类禁用词(**研发铁律编号 / 失败 ID /
+  决策 ID / 变更夹名 / 上游文档路径 / 开发态文件指针 / dev-meta / 上游行话归因**)在这里**不适用**
+  —— spec 本来就逐条引用规则编号,那是合法的。R5.11 只禁**一件事**:本仓 `docs/` 下的路径或
+  文件名。**强制**:由 `tools/check_distributed_purity.py` 的 SDD 扫描面确定性强制(扫
+  `openspec/specs/**` 与 `openspec/changes/**`,跳过 archive 与上述豁免 change),回归测在
+  `tests/test_distributed_md_purity.py`。
 
 ## 目录布局
 
@@ -267,8 +304,9 @@ m3g4horness/
 ├── releases/opencode/        # opencode shell → 装入 .opencode/
 │   ├── command/{mgh-sast,mgh-init,mgh-sra,mgh-blst}.md
 │   └── agent/sast-*.md
-├── docs/                     # 分发指南 + upstream-index(原项目引用) + opencode 机制参考
-│   ├── upstream/             # 逐功能分析分文档
+├── docs/                     # 开发者私人资料:man 页 / 术语表 / 上游对照 / 分析与 review 笔记
+│   ├── man/                  #   给维护者本人读的命令通俗说明(不随包分发,见 R5.10 第 ⑨ 类)
+│   ├── upstream/             #   逐功能分析分文档
 │   └── opencode-context-mechanics.md  # opencode 上下文/压缩机制(开发涉及压缩时先读)
 ├── tools/                    # 构建期工具(extract_prompts / gen_*),不随安装分发
 └── tests/                    # 确定性阶段单测
@@ -284,12 +322,55 @@ m3g4horness/
 # 零依赖自检(应无输出)
 grep -rnE "^[[:space:]]*(import[[:space:]]+vvaharness|from[[:space:]]+vvaharness[[:space:]]+import)" --include=*.py .
 
-# 确定性阶段单测
-py tests/test_deterministic.py
+# 定向回归测(默认姿势:改哪面跑哪面,见下表)
+py tests/test_fanout_runner.py    # 单一文件 = 一套测试;多文件逐个跑
+
+# 全量回归测(仅发布前 / 跨面改动时)
+for f in tests/test_*.py; do py "$f" || exit 1; done
 
 # 上游提示词重抽(原项目更新时)
 py tools/extract_prompts.py --out ./core/prompts
 ```
+
+### 改动面 → 测试文件(定向跑映射表)
+
+**默认只跑命中行**;跨面改动(碰 `core/contracts/`、`install.sh`、hook 双端接线、跨脚本公共
+helper)或发布前才跑全量。
+
+| 改动面 | 跑这些测试文件 |
+| --- | --- |
+| `fanout_runner.py`(全 tier 调度/杀树/breaker/cooldown/storm) | `test_fanout_runner` `test_fanout_stale` |
+| `resume_state.py` / `list_steps.py` / 中止自愈 | `test_resume_state` `test_list_steps` `test_stuck_run_selfheal` |
+| `block_adhoc_scripts.py` / hook 双端接线 | `test_block_adhoc_scripts` `test_opencode_hook_parity` `test_install_hook` `test_install_opencode_plugin` |
+| init 发现面 `discover_controls.py` / 分簇 / 骨架 | `test_init_discover` `test_init_clusters` `test_skeleton` `test_discover_resilience` `test_init_runtime` |
+| init 扇出面 `plan_scout` / `merge_scout` / `list_*` 枚举 / `describe_artifact` | `test_scout_plan` `test_merge_scout` `test_list_clusters` `test_scout_batches` `test_list_scout_batches` `test_describe_artifact` |
+| init 归纳与出 rules `plan_aggregate` / `assemble_rules` / T1 记录 | `test_plan_aggregate` `test_assemble_rules` `test_validate_t1_records` |
+| init 起始态 `write_runconfig.py` / ack 契约 | `test_write_runconfig` `test_init_ack_contract` |
+| sdr 面(`diff_group` / `sdr_context` / 报告 / launcher / 读根 / 敏感目录) | `test_diff_group` `test_sdr_context` `test_render_sdr_report` `test_mgh_sdr_launch` `test_read_roots_config` `test_sensitive_catalog` |
+| sra / srr 面 | `test_sra_prepare` `test_sra_merge` `test_sra_memory` `test_srr_ingest` `test_srr_report` |
+| ut-init 面 | `test_ut_init_runtime` `test_ut_init_ack_contract` `test_resume_ut_init_state` `test_write_ut_runconfig` `test_classify_tests` `test_test_rules_purity` |
+| sast 确定性阶段 | `test_deterministic` `test_sast_runtime` `test_chunk_sources` `test_list_chunks` `test_list_verify_jobs` `test_stage_check` `test_load_controls` `test_focus_scope` |
+| 命令壳 / 提示词 / 分发产物 | `test_distributed_md_purity` `test_plain_language` `test_mgh_init_codegraph_parity` `test_mgh_sra_codegraph_parity` `test_mgh_srr_codegraph_parity` + `py tools/check_contracts.py` |
+| 任意 `core/scripts/*.py` / `tools/*.py` | `test_zero_deps` `test_no_compile_warnings`(各 ~0.5s,建议顺手带上) |
+
+### 慢测清单(真·墙钟等待;非必要不单独跑)
+
+除下表外,全仓无长等待测试;**文件级慢**是量的堆积不是等待——`test_diff_group`(44s/37 测,
+每测真建一次 git 仓)、`test_sdr_context`(18s)、`test_fanout_runner`(41s/107 测)。
+
+| 测试 | ~秒 | 为什么慢 |
+| --- | --- | --- |
+| `test_ut_init_ack_contract::test_shell_flags_all_declared_in_help` | 7.1 | 对每个脚本真跑一次 `py <script> --help`(~40 次子进程) |
+| `test_fanout_runner::TestFastFailCooldown::test_in_flight_units_keep_harvesting_during_cooldown` | 5.0 | 显式 `time.sleep(2.5)` 必须活过 cooldown 窗口 |
+| `test_fanout_runner::TestRateLimitStorm::test_signature_drift_degrades_to_cooldown_path` | 2.7 | `--cooldown-s 1` 真实计时器 |
+| `test_fanout_runner::TestRateLimitStorm::test_mixed_unknown_crash_blocks_truncation` | 2.6 | 同上 |
+| `test_fanout_runner::TestFastFailCooldown::test_third_requeue_triggers_cooldown_then_bounded_backoff` | 2.6 | 同上 + 一次退避 |
+| `test_fanout_runner::TestRunUnitTreeKill::test_stall_silence_kills_child_and_writes_run_log` | 2.5 | 真起子进程 + 2s 静默阈值 + 真树杀/回收 |
+| `test_fanout_runner::TestRunUnitTreeKill::test_call_timeout_kills_child` | 2.5 | 真起子进程 + 2s call timeout + 真杀/回收 |
+
+> **陷阱(已修,勿重犯)**:in-process harness 调 `fanout_runner.main()` 若漏传 `--cooldown-s 0`,
+> 会吃到默认 300s 真实等待——`test_fanout_stale.py::test_children_registered_at_spawn_removed_at_terminal`
+> 曾因此单测挂 300.8s(占全套 62%)。新增 tier 测试 MUST 在 harness 层设该缺省,见 R5.8。
 
 ## 诚实边界(写进每个对用户输出的总结)
 

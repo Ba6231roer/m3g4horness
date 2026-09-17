@@ -1497,8 +1497,14 @@ def _enumerate(args) -> dict:
             "status": ("failed" if u.unit_id in failed
                        else "done" if u.unit_id in done else "pending"),
         })
-        if u.unit_id in done or u.unit_id in failed:
+        if u.unit_id in done or (u.unit_id in failed
+                                 and not args.include_failed):
             continue  # .done: skip re-materialization; .failed: terminal
+        # (--include-failed: a failed unit falls through — its slice is
+        # re-materialized and it re-enters pending[] under its canonical
+        # unit_id with the same forward-derived failed_marker path, for the
+        # dispatcher's --retry-failed flow. The all_units status row above
+        # still reports the marker truth "failed".)
         slice_text = _render_slice(repo, base, branch, u, r.stdout)
         spath = (slices_dir / f"{u.unit_id}.slice.md") if slices_dir else None
         if spath is not None:
@@ -1745,6 +1751,13 @@ def main():
     ap.add_argument("--resume", action="store_true",
                     help="call-shape parity: disk markers are ALWAYS the truth source "
                          "(.done units skipped, .failed terminal)")
+    ap.add_argument("--include-failed", action="store_true",
+                    help="re-list failed units into pending[] under their canonical "
+                         "unit_id with their existing .failed marker path (slices "
+                         "re-materialized; identity from this enumerator's forward "
+                         "derivation, never filename stems; opt-in for the "
+                         "dispatcher's --retry-failed flow). Default off keeps "
+                         "stdout byte-identical")
     ap.add_argument("--check", metavar="<run-dir>",
                     help="validate a run dir's grouping.json + slices + markers "
                          "(fail-loud exit 2; R5.9)")

@@ -4,8 +4,6 @@ description: Run a security design review on a branch diff: git diff base..branc
 
 # /mgh-sdr — 需求分支安全设计符合性复核(security design review)
 
-> 人类读者:通俗说明见 `docs/man/mgh-sdr.md`。
-
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / 子任务 / Read / Write)把流水线
 > **跑出来**,而非写成代码。确定性逻辑已在 `diff_group.py` / `sdr_context.py` /
 > `render_sdr_report.py` / `fanout_runner.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,
@@ -95,6 +93,12 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
      `<run-dir>/markers/sdr/<unit>.run.log`。
    · 软时限早退(stdout `partial:true`)→ 同参重派(resume 语义);STALLED(退出码 2)→
      停止重派,报告 degraded(诚实披露)。gate 形退出码 2 → 转述 stderr recipe,停止。
+   · **快败风暴三层(配额限流形态)**:① `stalled:true` 且 `resume_state.py --check` 无磁盘异常 →
+     provider 拥塞形态 → 直接同参重派(runner 已内建快败冷却与熔断前一次退避),NEVER 改写输入/
+     删 marker/写微脚本;② stdout `rate_limited:true` + `rate_limited_crashes[]` → 等满一个配额
+     窗口(如 10 分钟)再同参重派;③ 收尾 `failed>0` 且该单元 run.log(`markers/sdr/<unit>.run.log`)
+     呈 provider 瞬断(429/rate limit/quota)→ **至多一次** 同参重派加 `--retry-failed`(自动携
+     枚举器 `--include-failed`,认领删 marker),再失败接受缺口并在报告 degraded 披露。
 4. render(Bash,确定性):
      py .opencode/mgh-core/scripts/render_sdr_report.py --run-dir <abs-run-dir> --repo <abs>
    → `<project>/mgh-sdr-<branch>-<ts>.md`(结构:章节一简报表(行=单元,列=入口/调用链/

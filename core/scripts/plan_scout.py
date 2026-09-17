@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-plan_scout — deterministic scout batch planner for /mgh-init (D4 of
-improve-mgh-init-llm-discovery).
+plan_scout — deterministic scout batch planner for /mgh-init.
 
 Reads skeleton.json (lossless per-file metadata from discover_controls.py) and
 controls_candidates.json (regex hits), then produces byte-bounded, package-co-located

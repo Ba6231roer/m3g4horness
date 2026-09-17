@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 merge_scout — fold scout_candidates.json (+ audit_found) into controls_candidates.json
-and append scout clusters to clusters.json. Part of improve-mgh-init-llm-discovery.
+and append scout clusters to clusters.json.
 
 Reuses discover_controls.form_clusters (D2: import, no rewrite) with an empty reverse
 graph: scout clusters carry no graph-derived usage_sites, but T1 reads evidence_files

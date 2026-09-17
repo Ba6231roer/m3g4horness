@@ -42,6 +42,19 @@ def _pr(id, desc, source):
     return {"id": id, "desc": desc, "source": source}
 
 
+# Shared fan-out resilience recipes (fast-fail storm layer, design D1/D3/D6):
+# appended to every fan-out dispatcher step (scout/t1/t3) so a post-resume /
+# post-compaction orchestrator re-derives both branches from disk.
+_STALLED_PROVIDER_RECIPE = (
+    "stalled:true 且 `resume_state.py --check` 无磁盘异常(marker 与 stalled_pending 互洽)"
+    "→ provider 拥塞形态:直接重派同一命令(fanout_runner 已内建快败冷却与熔断前一次退避自愈);"
+    "NEVER 据此改写单元输入/删 marker/写微脚本")
+_RETRY_FAILED_RECIPE = (
+    "tier 收尾 failed>0 且单元 run.log(<checkpoints>/<tier>/<unit>.run.log)呈 provider 瞬断形态"
+    "(429/rate limit/quota 特征)→ 至多一次 fanout_runner --retry-failed 重派(runner 自动携枚举器 "
+    "--include-failed,单元身份永远来自枚举器,认领时先删 .failed marker);再失败接受缺口并在报告披露")
+
+
 _EMPTY = {"gates": [], "path_recipes": [], "nevers": []}
 
 # step key ∈ resume_state.py enum: not-started|discover|survey|scout|resolve|
@@ -91,6 +104,10 @@ _DISCIPLINE = {
             _pr("scout-fanout-path",
                 "scout 批输出路径 = list_scout_batches stdout pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path + touch done_marker;失败 ack → 编排器写 failed_marker(终态,不重试不阻断)",
                 "list_scout_batches --step 契约"),
+            _pr("scout-fanout-stalled-provider", _STALLED_PROVIDER_RECIPE,
+                "fanout_runner 快败冷却契约"),
+            _pr("scout-fanout-retry-failed", _RETRY_FAILED_RECIPE,
+                "fanout_runner --retry-failed 契约"),
         ],
         "nevers": [
             "NEVER 手挖 scout_plan.json",
@@ -131,6 +148,10 @@ _DISCIPLINE = {
             _pr("t1-pack",
                 "配额受限(网关按调用数限流)时 list_clusters 枚举行加 --pack-bytes 16384(--pack-max 8)启用小簇打包:枚举单元 = 包(cluster_id 载包 id、members[] 载成员绝对路径清单,逐字透传;成员级 .done marker 仍是唯一真相源,重派跳过已完成成员);包级 .failed 恢复 recipe:删除该包的 .failed marker(<checkpoints>/t1/<safe(pack id)>.json.failed)→ 重跑枚举 → 包回 pending → 已 done 成员被任务模板跳过,仅缺失成员重归纳",
                 "list_clusters --pack-bytes 契约"),
+            _pr("t1-fanout-stalled-provider", _STALLED_PROVIDER_RECIPE,
+                "fanout_runner 快败冷却契约"),
+            _pr("t1-fanout-retry-failed", _RETRY_FAILED_RECIPE,
+                "fanout_runner --retry-failed 契约"),
         ],
         "nevers": [
             "NEVER 整份 Read clusters.json",
@@ -169,6 +190,10 @@ _DISCIPLINE = {
             _pr("t3-fanout-path",
                 "T3 category 输出路径 = list_rule_jobs stdout pending[].rule_path,绝对逐字透传;成功恰好写 rule_path + touch done_marker;失败 ack → 编排器写 failed_marker(终态)",
                 "list_rule_jobs --step 契约"),
+            _pr("t3-fanout-stalled-provider", _STALLED_PROVIDER_RECIPE,
+                "fanout_runner 快败冷却契约"),
+            _pr("t3-fanout-retry-failed", _RETRY_FAILED_RECIPE,
+                "fanout_runner --retry-failed 契约"),
         ],
         "nevers": [
             "NEVER 整份 Read controls_inventory.json",

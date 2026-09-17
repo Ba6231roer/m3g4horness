@@ -353,6 +353,50 @@ class TestListClustersPacking(unittest.TestCase):
         self.assertEqual(data["failed"], 1)
         self.assertEqual(data["done"], 0)                     # NOT done
 
+    def test_include_failed_relists_failed_pack_canonical(self):
+        # --include-failed: the failed pack re-emits as the pack unit (canonical
+        # pack id + the same pack-level failed_marker path); failed stays counted
+        clusters, cands = _pack_clusters(n_per_cat=2, cats=("crypto",))
+        p = self._write(clusters, cands)
+        _, out, _ = self._run(p, "--pack-bytes", "100000")
+        (pack,) = json.loads(out)["pending"]
+        Path(pack["failed_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(pack["failed_marker"]).write_text(
+            json.dumps({"unit": pack["cluster_id"], "reason": "member boom",
+                        "tier": "t1"}), encoding="utf-8")
+        _, out2, _ = self._run(p, "--pack-bytes", "100000", "--include-failed")
+        data = json.loads(out2)
+        self.assertEqual([it["cluster_id"] for it in data["pending"]],
+                         [pack["cluster_id"]])
+        self.assertEqual(data["pending"][0]["failed_marker"], pack["failed_marker"])
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["done"], 0)
+
+    def test_include_failed_overlong_id_keeps_canonical_identity(self):
+        # a failed cluster whose sanitized FILENAME stem is truncated still
+        # re-enters pending[] under its FULL canonical id — identity comes
+        # from the forward derivation, never a stem reverse lookup
+        long_id = "crypto::LONG::" + "x" * 200
+        clusters = [{"cluster_id": long_id, "category": "crypto", "kind": "other",
+                     "shape": "centralized", "evidence_files": ["l.java"],
+                     "usage_sites": ["l.java"], "candidate_ids": ["crypto-C-9"]}]
+        cands = [{"id": "crypto-C-9", "file": "l.java", "line": 1, "category": "crypto",
+                  "kind": "other", "snippet": "S" * 60}]
+        p = self._write(clusters, cands)
+        _, out, _ = self._run(p)                               # unpacked path
+        (item,) = json.loads(out)["pending"]
+        self.assertEqual(item["cluster_id"], long_id)
+        self.assertLess(len(Path(item["failed_marker"]).stem), len(long_id))
+        Path(item["failed_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(item["failed_marker"]).write_text(
+            json.dumps({"unit": long_id, "reason": "r", "tier": "t1"}), encoding="utf-8")
+        _, out2, _ = self._run(p, "--include-failed")
+        data = json.loads(out2)
+        (relisted,) = data["pending"]
+        self.assertEqual(relisted["cluster_id"], long_id)      # full canonical id
+        self.assertEqual(relisted["failed_marker"], item["failed_marker"])
+        self.assertEqual(data["failed"], 1)
+
     # -- pack materialize-failure isolation (batch continues, exit code unchanged) --
 
     def test_pack_materialize_failure_excludes_pack_exit0(self):

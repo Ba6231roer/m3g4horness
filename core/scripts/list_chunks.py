@@ -6,8 +6,7 @@ list_chunks — deterministic s4 work-list producer for /mgh-sast.
 Reads the s3 product `s3_chunks.json` (vvah wrapper {rationale, chunks[]}) and the
 s4 per-chunk checkpoint dir, then prints the authoritative pending work-list as JSON
 on stdout. Closes the s4 fan-out asymmetry: mgh-init has list_clusters.py /
-list_scout_batches.py / list_rule_jobs.py, sast s4 now has this
-(harden-mgh-sast-orchestration-discipline FD2). Replaces hand-rolled
+list_scout_batches.py / list_rule_jobs.py, sast s4 now has this. Replaces hand-rolled
 `py -c "import json..."` introspection of checkpoints/s4_candidates.json and the
 `_prep_chunks.py` micro-script reflex in the orchestrator (R5.2: orchestrator invokes
 leaf scripts via Bash; MUST NOT hand-roll JSON mining, MUST NOT `len()` the wrapper —

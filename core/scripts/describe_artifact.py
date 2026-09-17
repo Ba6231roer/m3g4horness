@@ -4,7 +4,7 @@
 describe_artifact — sanctioned "glance at artifact structure" primitive for /mgh-init.
 
 The one legitimate outlet for the orchestrator's / subagent's "understand the structure
-before acting" reflex (harden-mgh-init-orchestration-discipline FD5). Replaces
+before acting" reflex. Replaces
 `py -c "import json; print(json.load(open(...))['x'][0])"` and `Read`-the-whole-big-JSON.
 Cross-artifact generic, so one script beats adding `--describe` to every producer.
 

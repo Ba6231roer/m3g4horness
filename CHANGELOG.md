@@ -16,6 +16,235 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — fanout silence is no longer proof of a hang: explicit off-switch + false-kill self-evidence + cost disclosure (0.1.48)
+
+`--stall-timeout-s` was the only defense against a hung unit, and it silently doubled as a health
+verdict. Under a rate-limited gateway that verdict is simply wrong: a unit with no output is
+usually a call **sitting in the gateway queue**, which is byte-for-byte identical to a real hang.
+Killing it does not shorten the queue — it discards the work already done and re-queues behind the
+same congestion. Raising the constant does not fix it either (measured: 600s killed 5 units, 1600s
+still killed 4, at 2.7x the cost each — 4 x 1600s = 6400 slot-seconds, 40-60% of that run's 5-slot
+capacity).
+
+- **Semantics rewritten wherever it is stated.** Byte silence now reads as "this unit has produced
+  nothing for this long"; `--help`, the module docstring and both command guides say explicitly
+  that it is NOT hang evidence, that the criterion's only legitimate job is bounding how long one
+  slot may sit idle in this run, and that it cannot locally distinguish queueing from a hang. The
+  old "high-signal hang indicator" wording is gone, along with the glossary entry that repeated it.
+- **`--stall-timeout-s 0` = explicit off.** The value domain is now `0` or `>= 60`; `1..59` still
+  exits 2, and both that error and the invariant recipe name BOTH exits (raise it, or pass 0).
+  With the criterion off the `stall < call` ordering constraint does not apply and
+  `--call-timeout-s` alone bounds convergence (so a host-driven run should tighten it). The only
+  previous off-switch was `--call-timeout-s - 1` — an undocumented hack the old `--help` text
+  argued against.
+- **False-kill self-evidence + bounded widening.** If a unit the window killed then completes on
+  re-dispatch in the same run, that is the one hard local proof the silence was not fatal: the
+  effective window becomes `min(2W, --call-timeout-s x 0.8)` for units dispatched afterwards
+  (stderr-disclosed once per triggering unit; per-unit, so one flaky unit cannot ratchet it to the
+  ceiling; per-run, never persisted, never written back onto the flag). Each attempt snapshots the
+  window at spawn, so a widening never retroactively moves the criterion of a unit already running.
+- **Cost visibility.** Every exit's stdout summary and progress sidecar now carry
+  `runtime_p50_s` / `runtime_p95_s` / `runtime_max_s` (COMPLETED units only — a killed unit's
+  runtime is an artifact of the window, not a sample of the population the window sits above; all
+  three are omitted, never 0, when nothing completed), `stall_killed_slots_s` and
+  `stall_killed_slot_pct` (slot-seconds burnt by silence kills, and that as a share of the run's
+  slot-seconds = elapsed x `--wave`), plus `stall_window_s` when the window actually widened.
+  Existing fields are unchanged; the sidecar values are literally the same dict the summary is
+  built from, so the two cannot drift apart on rounding.
+- **Default value: unchanged at 900, now with a stated calibration.** `p99(completed-unit
+  runtime) x 2`, rounded down to the minute, floor 900. Substituting the observed sample (n=84:
+  p50 134s / p95 229s / p99 325s / max 325s) gives 650s -> 600s -> 900s. The calibration's value
+  is the two conclusions it forces, both disclosed in `--help`: 900s is 2.8x the completed
+  population's MAX (so "the default is too tight" is false for healthy units), and the killed
+  units ran 600s+ / 1600s+ — outside that population's support, NOT its tail, so no higher
+  constant rescues them. The sample is the SURVIVING population only, so it MUST NOT be read as
+  "past this it deserves to die" — which is exactly why the adaptive widening exists instead.
+- **Heartbeat discloses the window.** The in-flight line gains `stall_window=<w>s` (or `off` in
+  disabled mode): with an adaptive window, `idle=1000s` is unreadable on its own — it means "kill
+  is imminent" at W=900 and "nothing to see" at W=1800.
+
+Tests: 20 added/updated across `tests/test_fanout_runner.py` and `tests/test_fanout_stale.py` —
+the two pure helpers (`_widened_stall_window`, `_percentile_int`), the widening and its ceiling,
+per-unit evidence dedup, the disabled mode at both the dispatch level (every attempt handed window
+0) and the `_run_unit` level (the same silent child stall-killed at window 2, left to the call
+timeout at window 0), the value-domain rejections with both recipe exits, the cost fields'
+presence/omission and sidecar/stdout equality, and the widened heartbeat line format. Two existing
+contract assertions were updated because this change is what they assert (the exact stdout key set,
+and the below-floor rejection wording). No new flags, no dependency changes.
+
+### Fixed — fanout stall handling killed the dispatcher itself, and mis-read "silence" twice (0.1.47)
+
+Running the `/mgh-init` scout dispatcher directly on Linux (nohup, own terminal) died at
+**~10 minutes** on three consecutive runs — no stdout summary, progress sidecar stuck at
+`"running"`, `--kill-stale` reporting no orphans: the shape of a hard kill that never reached a
+normal exit. Three defects, all on the stall-handling path:
+
+- **The tree kill killed the caller.** POSIX tree kill is `os.killpg(os.getpgid(pid))`, and unit
+  children were spawned **without a new session** — so they shared the dispatcher's process group,
+  and killing a stalled unit killed the dispatcher. The kill also happens before the stall
+  evidence is written, so nothing was logged at all. Units now spawn with `start_new_session`, so
+  `killpg` scopes to that unit's own tree. Windows (`taskkill /T /F`) was never affected and is
+  unchanged.
+- **The silence criterion pointed the wrong way.** Both stream timestamps start at the spawn
+  instant and only advance on real bytes, so `min(out_ts, err_ts)` meant "**at least one** stream
+  has been quiet this long". Any child that never writes to stderr (common) was therefore judged
+  stalled at `spawn + --stall-timeout-s` — which is exactly the 600s / 10-minute death. Now
+  `max(...)`: silence means **both** streams went quiet, matching the flag's own
+  "no stdout/stderr bytes for this long" wording. The heartbeat's `idle` disclosure uses the same
+  source so it can never disagree with the kill criterion.
+- **Reads were not byte-level.** Found while locking the fix with a test. `_tail_stream` used
+  `TextIOWrapper.read(4096)`, which **blocks until 4096 characters accumulate or EOF**, so the
+  "last output" stamp advanced once per 4096-char chunk rather than per byte — a low-volume but
+  perfectly healthy unit kept both stamps parked at spawn and was still stall-killed after the
+  `max` fix. Now `stream.buffer.read1(4096)` (returns as soon as any byte lands) plus an
+  incremental UTF-8 decoder, which is what the function's own docstring ("ts of the last byte on
+  this stream") already claimed.
+
+**Boundary change — Ctrl-C no longer propagates to in-flight units.** Because units now lead their
+own session, an interactive interrupt reaches only the dispatcher. Its exit path therefore
+tree-kills whatever is still registered *before* clearing the registry and deleting the liveness
+file — otherwise those children would become orphans that nothing could later find (not even
+`--kill-stale`). A hard kill (SIGKILL, where no exit path runs) still leaves the liveness file
+behind for `--kill-stale`, and that path is deliberately unchanged. The boundary is disclosed in
+the `--stall-timeout-s` / `--kill-stale` `--help` text and in the `/mgh-init` and `/mgh-sdr`
+command guides.
+
+Four regression tests added (single-stream silence does not stall-kill; both-stream silence still
+does; `_kill_tree` does not terminate its caller, asserted from a child process so a regression
+surfaces as an exit code instead of silently killing the test runner; the exit path tree-kills
+still-registered children and removes the liveness file). No new flags, no stdout field changes,
+no dependency changes.
+
+### Changed — SDD artifacts (openspec) must not point at the private `docs/` tree (0.1.46)
+
+The repo-root `docs/` tree is the maintainer's private workspace: whether it is even committed is
+the maintainer's call, so another clone may simply not have it. Distribution was already fenced
+off; the *tracked* openspec record was not. A `proposal.md` / spec / task list saying "see the
+rationale in that private file" is read by every later agent, and sends them to a file that may
+not exist. New rule **R5.11** closes that:
+
+- **Prohibited**: any path under the repo-root `docs/` tree in `openspec/specs/**` or
+  `openspec/changes/**` — including the case where that path is the artifact's *subject* (a spec
+  defining a doc that lives there). Bare mentions of the directory with no entry after it are
+  prose, not pointers, and stay legal.
+- **Exempt**: `openspec/changes/archive/**` (frozen history — retro-editing it would be busywork
+  that also falsifies the record) and the docs-writing change whose deliverable IS a file there.
+- **Replacement style**: name the role, not the path — "维护者私有文档区里的命令人话说明",
+  "术语词典", "fan-out 运行手册".
+- `check_distributed_purity.py` gained a third scan surface (`openspec/specs/**` +
+  `openspec/changes/**`, archive skipped) that applies **pattern 9 only** — SDD artifacts
+  legitimately cite rule ids / decision ids / change names on nearly every line, so the other
+  families would be pure noise there. Scan set 228 → 272.
+- Two false-positive bugs surfaced and were fixed while wiring this up: `glasswing_docs/09`
+  matched as if it contained a `docs/09` path entry (a `docs` tail inside a longer word is not a
+  path segment), and a bare `docs/` with nothing after it was treated as a pointer.
+- Six active specs and two active changes de-referenced. Two of them
+  (`distribution-purity`, `plain-language-doctrine`) had also become **factually stale** from the
+  previous entry — they still described man pages as shipped and `docs/man/**` as part of the
+  purity scan set — and were corrected to match the code.
+- `tests/test_distributed_md_purity.py` covers the new surface: the three-way scan-mode dispatch,
+  the archive + carve-out skips, and the pointer/exempt matrix (29 tests).
+
+### Changed — repo-root `docs/` dropped from distribution; man pages no longer installed (0.1.45)
+
+The repo-root `docs/` tree (man pages, glossary, upstream index, review/analysis notes) is
+the maintainer's private workspace and was never meant to ship. It had drifted: `install.sh`
+copied `docs/man/` into `<target>/docs/man/`, and all 12 command shells carried a
+`> 人类读者:通俗说明见 docs/man/<cmd>.md。` pointer. Both are dead ends for anyone but this
+working copy — `docs/man/mgh-sdr.md` was not even git-tracked, so a fresh clone installed the
+tree without the very page two shells pointed at. Fixed in both directions:
+
+- `install.sh` no longer lands `docs/man/`; the 12 shell pointers are deleted outright (not
+  reworded — a reworded pointer is still a reference to a non-shipped tree). `install.ps1`
+  never had the step, so the two installers now agree instead of silently diverging.
+- `check_distributed_purity.py` gained pattern 9 (**repo-root `docs/` reference**:
+  `docs/man/*`, `docs/glossary.md`, `docs/upstream-index.md`, `docs/upstream/**`, …) and now
+  scans the shipped runtime surface too — `core/scripts/**`, `releases/*/hooks/**`,
+  `releases/opencode/plugins/**`, `*.py`/`*.ts`/`*.json` — not just md (scan set 185 → 228).
+  Nine script comments citing an upstream doc path or an openspec change-folder name were
+  cleaned (e.g. `discover_controls.py` cited the upstream design-doc path).
+- Patterns split into two families by who can hit them: **pointers** (change-folder names,
+  upstream doc paths, repo-root docs) are scanned in every shipped file; **dev-manual
+  vocabulary** (`R5.x`/`FDn`/`Dn`/dev-meta) only in shipped md. The host agent is required to
+  run the scripts without reading their source, so an `R5.9` in a script comment never reaches
+  the target, while the pointer a reader might follow is exactly what must not dangle.
+- Two families sharing the `docs/` prefix stay legal and are pinned by tests: the target
+  project's **runtime-generated** `docs/security-controls/` + `docs/test-conventions/`, and
+  the `core/docs/` Apache-2.0 attribution records (ships as `<dest>/mgh-core/docs/`).
+  `core/prompts/**` is skipped for pattern 9 — it is an R1-frozen verbatim port whose body
+  mentions the *upstream* project's own doc layout (`docs/manifests/tree`,
+  `docs/config/non-code files`), so flagging it would be an unfixable failure. That prose is
+  the one known residual: it still ships, because R1 forbids editing it.
+- Docs corrected where they described `docs/` as shippable: AGENTS.md R5.10 gained the 9th
+  prohibited class, the R3 audience table split `人类·随包分发` from `人类·仅研发仓`, and the
+  directory-tree comments in AGENTS.md + README.md no longer call `docs/` a "分发指南".
+- `tests/test_distributed_md_purity.py` guard **inverted**. It used to assert the opposite
+  (man pages MUST ship; every shell MUST carry the pointer) — a guard that would have actively
+  blocked this fix. It now asserts `docs/` is not a scan root, no shipped file points at it,
+  the two exempt families stay clean, and the script-family split holds (21 → 26 tests).
+
+### Added — fanout crash-storm resilience: fast-fail cooldown + rate-limit storm truncation + bounded failed re-dispatch (0.1.44)
+
+Quota-limited intranet gateways (observed: 100 calls / 10 min) turn a full quota
+into a **fast-fail storm**: units die in seconds (opencode retries a 429 twice,
+source-verified `retries: 2`), the runner requeues them with zero delay, the next
+wave hits the quota again — a full storm cycle (1–2 min) runs far faster than the
+10-minute quota window recovers, burning the night on
+storm → breaker → resume → storm. Worse, a polite `failed:` ack after a provider
+error writes a terminal `.failed` marker that enumerators exclude — the tier
+"completes" with a coverage hole. Builds on the landed stall-containment
+prerequisite (output-tail buffers / run.log evidence + slot-backfill loop are the
+classification data source and cooldown mount point)
+(`harden-mgh-fanout-crash-storm-resilience`):
+
+- **Fast-fail cooldown** (`fanout_runner.py --cooldown-s`, default 300; `0` = off,
+  also disables the pre-breaker backoff): ≥3 requeue events (crash/timeout/stall/
+  spawn-error units returning to the queue tail; failed acks and pre-spawn anchor
+  failures never count — they terminate without requeueing) within a 120s sliding
+  window pause NEW dispatch while in-flight units keep running and harvesting.
+  The wait is capped by remaining `--time-budget-ms` minus an in-flight convergence
+  margin (pure `_cooldown_cap_s`); budget-starved cooldowns degrade to continuing
+  immediately with a stderr disclosure. stdout adds `cooldowns:<n>`.
+- **Pre-breaker bounded backoff**: when the zero-progress breaker is about to exit
+  2 and the budget allows, one single "cooldown → full disk re-derivation →
+  re-observe" round runs first — disk growth disarms the breaker, still-zero-growth
+  exits stalled. At most once per call; the `stalled` contract is byte-identical.
+- **Rate-limit crash classification + storm truncation** (`--no-rate-limit-stop`
+  disables): every crash terminal's output tails (reader-thread buffers, the
+  stall-containment data source) are classified against `429` / `too many
+  requests` / `rate limit` / `quota` (case-insensitive; crash terminals only —
+  ok/failed/timeout/stall never classified; overflow-marked crashes stay
+  overflow). Crashes ≥ `--wave` since the last disk terminal advance that are ALL
+  rate-limit stop dispatch immediately (fast path, ahead of any new cooldown) and
+  exit 2 with `rate_limited:true` + `rate_limited_crashes:[ids]` + a wait-one-
+  quota-window recipe. Signature drift (all unknown) degrades gracefully to the
+  cooldown + breaker path; non-rate-limit crashes never count toward the threshold.
+- **Bounded failed re-dispatch**: the five tier enumerators
+  (`list_scout_batches`/`list_clusters`/`plan_aggregate`/`list_rule_jobs`/
+  `diff_group`) gain `--include-failed` (default off = byte-identical stdout):
+  failed units re-enter `pending[]` under their canonical ids with their existing
+  `failed_marker` absolute paths (identity always from the enumerator's forward
+  derivation, never filename stems; done counts stay marker-truth via a
+  re-inclusion add-back). `fanout_runner.py --retry-failed` forwards
+  `--include-failed` to the enumerator and deletes a claimed unit's `.failed`
+  marker at claim (evidence stays in the unit's `*.run.log`); a re-failure writes
+  a fresh marker and each unit is retried at most once per call. stdout adds
+  `retried_failed:<n>`.
+- **Call-surface discipline**: `discipline_core.py` + `init-stage/{scout,t1,t3}.md`
+  + both sdr shells gain two recipe branches — `stalled:true` with a clean
+  `resume_state --check` → provider congestion → re-dispatch the same command
+  (NEVER rewrite inputs / delete markers / write micro-scripts); tier wrap-up
+  `failed>0` with a provider-transient run.log shape → at most one `--retry-failed`
+  round, then accept the gap and disclose. Contract lint
+  (`tools/check_contracts.py`) asserts the three new runner flags and the five
+  enumerator `--include-failed` flags.
+- **Diagnostics invariants**: three counters that never share a window (cooldown
+  requeue-time window / storm disk-advance window / breaker dispatch window); the
+  post-cooldown drain re-list de-duplicates against the in-memory queue so a unit
+  is never queued twice; summary keys are additive only
+  (`cooldowns`/`retried_failed`/`rate_limited` always; `rate_limited_crashes`
+  conditional, same shape as `context_overflow`).
+
 ### Added — `/mgh-init` T1 deterministic small-cluster packing — quota amortization, opt-in (0.1.43)
 
 Quota-constrained intranet LLM gateways bill per call (observed: 100 calls / 10 min),

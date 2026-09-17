@@ -362,7 +362,7 @@ m3g4horness/
 │   ├── agent/{sast-*,sra-*}.md
 │   ├── hooks/block_adhoc_scripts.py        # 同一守卫(与 claude 端字节级 parity)
 │   └── plugins/block_adhoc_scripts.ts      # tool.execute.before 插件 → 归一化后管道喂守卫
-├── docs/                     # 分发指南 + upstream-index(原项目引用)
+├── docs/                     # 开发者私人资料(man 页 / 术语表 / 上游对照 / 分析笔记)—— 不随包分发
 ├── tests/                    # 确定性阶段单测
 └── tools/                    # 构建期工具(extract_prompts / gen_*)，不随安装分发
 ```

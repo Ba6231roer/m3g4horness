@@ -210,6 +210,12 @@ def main():
     ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES,
                     help=f"orchestrator single-request page byte cap (default "
                          f"{DEFAULT_ORCH_BUDGET_BYTES}; page auto-tightened + shrunk:true)")
+    ap.add_argument("--include-failed", action="store_true",
+                    help="re-list confirmed-failed batches into pending[] under their "
+                         "canonical batch_id with their existing .failed marker path "
+                         "(identity from this enumerator's forward derivation, never "
+                         "filename stems; opt-in for the dispatcher's --retry-failed "
+                         "flow). Default off keeps stdout byte-identical")
     args = ap.parse_args()
 
     if args.offset < 0:
@@ -257,6 +263,7 @@ def main():
 
     all_units = []
     failed_count = 0
+    reincluded = 0
     for batch in batches:
         if not isinstance(batch, dict):
             continue
@@ -265,7 +272,12 @@ def main():
             continue
         if bid in failed:  # confirmed failure (terminal; NOT retried on --resume)
             failed_count += 1
-            continue
+            if not args.include_failed:
+                continue
+            # --include-failed: the failed batch re-enters pending under its
+            # canonical batch_id (fm path below is the same forward-derived
+            # marker path; the dispatcher's --retry-failed deletes it at claim)
+            reincluded += 1
         base = checkpoints_dir / f"{bid}.json"
         cp = str(base)
         dm = str(base.with_name(base.name + ".done"))
@@ -303,7 +315,9 @@ def main():
             })
 
     total = len(batches)
-    done_count = total - len(all_units) - failed_count
+    # re-included failed batches sit in BOTH all_units and failed_count — add
+    # them back so done stays the marker-truth count under --include-failed
+    done_count = total - len(all_units) - failed_count + reincluded
     req_limit = args.limit if args.limit is not None else len(all_units)
     page = all_units[args.offset: args.offset + max(0, req_limit)]
     page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)

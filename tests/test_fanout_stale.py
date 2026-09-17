@@ -74,6 +74,12 @@ class _Env:
             + list(extra)
         if argv_extra:
             argv += argv_extra
+        if "--cooldown-s" not in argv:
+            # Same harness default as _FakeDispatchBase in test_fanout_runner.py:
+            # this file's subjects are liveness/--kill-stale, never the storm
+            # cooldown, so the layer stays OFF (a wall-clock cooldown here would
+            # be a real wait the assertions do not measure).
+            argv += ["--cooldown-s", "0"]
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -427,16 +433,29 @@ class TestHeartbeatAndStdoutContract(unittest.TestCase):
 
     def test_inflight_heartbeat_line_format(self):
         # periodic in-flight disclosure (--hb-interval-s): unit id + idle
-        # seconds since its child's last output — the "slow vs hung" signal
+        # seconds since its child's last output — the "slow vs hung" signal —
+        # plus the silence window THIS unit is judged against. The window is
+        # part of the line because it is adaptive: the same `idle=300s` means
+        # "kill is imminent" under a 900s window and "nothing to see" under
+        # 1800s, so idle alone would be unreadable.
         buf = io.StringIO()
         t0 = FR.time.monotonic() - 125.0
         with contextlib.redirect_stderr(buf):
-            FR._hb_inflight(t0, "t1", 2, "clst-aa", 300, 45, 830)
+            FR._hb_inflight(t0, "t1", 2, "clst-aa", 300, 45, 830, 1800)
         line = buf.getvalue().strip()
         self.assertRegex(
             line,
             r"^\[fanout_runner t1\] \+\d{2}:\d{2}:\d{2} inflight=2 unit=clst-aa "
-            r"idle=300s done=45/830$")
+            r"idle=300s stall_window=1800s done=45/830$")
+
+    def test_inflight_heartbeat_discloses_disabled_window_as_off(self):
+        # --stall-timeout-s 0: there is no window at all, so the line must NOT
+        # print `stall_window=0s` (which reads as "kills at zero seconds").
+        buf = io.StringIO()
+        t0 = FR.time.monotonic() - 125.0
+        with contextlib.redirect_stderr(buf):
+            FR._hb_inflight(t0, "t1", 1, "clst-bb", 4000, 1, 2, 0)
+        self.assertIn("stall_window=off", buf.getvalue())
 
     def test_stdout_exactly_one_json_line_last(self):
         lp = self.env.tmp / "pending.json"

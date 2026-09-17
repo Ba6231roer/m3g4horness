@@ -20,6 +20,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -388,7 +389,8 @@ class TestStateMachineCli(unittest.TestCase):
                      "--time-budget-ms", "--call-timeout-s", "--stall-timeout-s",
                      "--hb-interval-s", "--stall-waves",
                      "--resume", "--pending-file",
-                     "--purge-audit", "--dry-run", "--template"):
+                     "--purge-audit", "--dry-run", "--template",
+                     "--cooldown-s", "--no-rate-limit-stop", "--retry-failed"):
             self.assertIn(flag, r.stdout, flag)
 
     def test_call_timeout_default_7200_and_invariant_documented(self):
@@ -649,7 +651,8 @@ class _FakeDispatchBase(unittest.TestCase):
                       for i in range(1, self.N_UNITS + 1)]
         for u in self.units:
             Path(u["input_path"]).write_text("{}", encoding="utf-8")
-        self.calls = []  # (uid, status, ack) per fake _run_unit invocation
+        self.calls = []    # (uid, status, ack) per fake _run_unit invocation
+        self.windows = []  # the silence window _run_unit was handed, per call
 
     def tearDown(self):
         import shutil
@@ -663,6 +666,8 @@ class _FakeDispatchBase(unittest.TestCase):
             fake.state[uid] = nth
             status, ack = behavior(uid, nth)
             self.calls.append((uid, status, ack))
+            # the EFFECTIVE silence window this attempt was judged against
+            self.windows.append(stall_timeout_s)
             if ack == "ok":
                 unit = next(u for u in self.units if u.get("batch_id") == uid)
                 Path(unit["done_marker"]).write_text("done", encoding="utf-8")
@@ -694,11 +699,15 @@ print(json.dumps({{'repo': {str(self.repo)!r}, 'total': len(UNITS),
         saved_run = self.fr._run_unit
         self.fr.TIERS["scout"]["list_script"] = str(stub)  # absolute → join keeps it
         self.fr._run_unit = self._fake_run(behavior)
+        # --cooldown-s 0 harness default: the storm-resilience cooldown/backoff
+        # layer stays OFF unless a test opts in explicitly (its default 300s
+        # gate would stall every breaker test); cooldown tests pass their own
+        # --cooldown-s after these.
         argv = ["fanout_runner.py",
                 "--scout-plan", str(self.init / "scout_plan.json"),
                 "--checkpoints", str(self.init / "checkpoints" / "scout"),
                 "--inputs-dir", str(self.init / "inputs" / "scout"),
-                "--host", "claude", "--wave", wave, *extra]
+                "--host", "claude", "--wave", wave, "--cooldown-s", "0", *extra]
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -876,7 +885,8 @@ class TestContextOverflowClassification(_FakeDispatchBase):
                 "--scout-plan", str(self.init / "scout_plan.json"),
                 "--checkpoints", str(self.init / "checkpoints" / "scout"),
                 "--inputs-dir", str(self.init / "inputs" / "scout"),
-                "--host", "claude", "--wave", "1"]
+                "--host", "claude", "--wave", "1",
+                "--cooldown-s", "0"]  # storm layer off: pure breaker semantics
         old, sys.argv = sys.argv, argv
         out, err = io.StringIO(), io.StringIO()
         try:
@@ -1014,6 +1024,169 @@ class TestRunUnitTreeKill(unittest.TestCase):
         self.assertLessEqual(len(block), 8192 + 2)  # cap + trailing newline
         self.assertIn("END-MARK", block)
 
+    def test_single_stream_silence_does_not_stall_kill(self):
+        """Stall = BOTH streams silent (design D3). A child that keeps writing
+        stdout while stderr NEVER emits a byte must survive well past
+        --stall-timeout-s; under the old `min` criterion it was killed at
+        spawn + threshold (the exact field shape: healthy units dying at 600s)."""
+        cmd = [sys.executable, "-c",
+               "import time\n"
+               "for _ in range(10):\n"
+               "    print('tick', flush=True)\n"
+               "    time.sleep(0.5)\n"]
+        t0 = time.monotonic()
+        status, _, _, pid, was_stalled = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 60, 2, self.tmp / "u8.run.log", "u8")
+        elapsed = time.monotonic() - t0
+        self.assertFalse(was_stalled, "one idle stream must not read as a stall")
+        self.assertNotEqual(status, "stall")
+        self.assertGreaterEqual(elapsed, 3.5,
+                                "child outlived the 2s stall threshold")
+        self.assertFalse(self.fr._pid_alive(pid))
+        self.assertNotIn("status: stall",
+                         (self.tmp / "u8.run.log").read_text(encoding="utf-8"))
+
+    def test_both_streams_silent_still_stall_kills(self):
+        """The relaxed criterion MUST NOT become 'never stall': a child that
+        emits nothing at all on either stream from spawn is still tree-killed."""
+        cmd = [sys.executable, "-c", "import time; time.sleep(300)"]
+        t0 = time.monotonic()
+        status, ack, _, pid, was_stalled = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 300, 2, self.tmp / "u9.run.log", "u9")
+        self.assertEqual(status, "stall")
+        self.assertTrue(was_stalled)
+        self.assertIsNone(ack)
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertFalse(self.fr._pid_alive(pid))
+        self.assertIn("status: stall",
+                      (self.tmp / "u9.run.log").read_text(encoding="utf-8"))
+
+    def test_zero_window_disables_the_silence_criterion(self):
+        """`--stall-timeout-s 0` (task 1.3) is an OFF-SWITCH, not a very large
+        number: the SAME silent child is stall-killed at window 2 and left
+        alone at window 0, where --call-timeout-s alone bounds convergence.
+        The window is the only difference between the two legs — which is what
+        makes the disabled mode a real mode."""
+        cmd = [sys.executable, "-c", "import time; time.sleep(300)"]
+        s1, _, _, pid1, killed1 = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 60, 2, None, "u11a")
+        self.assertEqual((s1, killed1), ("stall", True))
+        self.assertFalse(self.fr._pid_alive(pid1))
+        t0 = time.monotonic()
+        s2, ack2, _, pid2, killed2 = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 2, 0, None, "u11b")
+        self.assertEqual((s2, killed2), ("timeout", False))
+        self.assertIsNone(ack2)
+        self.assertGreaterEqual(time.monotonic() - t0, 2.0)
+        self.assertFalse(self.fr._pid_alive(pid2))
+
+    @unittest.skipIf(os.name == "nt",
+                     "POSIX session isolation: Windows has no setsid")
+    def test_unit_child_leads_its_own_session(self):
+        """The POSIX fix in one assertion: the unit child is a session leader
+        (sid == its own pid) leading its own process group, and NOT a member of
+        the dispatcher's session — that isolation is what scopes _kill_tree's
+        killpg to the unit's own tree instead of the caller's."""
+        cmd = [sys.executable, "-c",
+               "import os; print(os.getsid(0), os.getpid(), os.getpgrp())"]
+        status, _, detail, _, _ = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 60, 0, None, "u10")
+        self.assertEqual(status, "spawn-ok", detail)
+        sid, pid, pgid = (int(x) for x in detail.split())
+        self.assertEqual(sid, pid, "child must be a session leader (setsid)")
+        self.assertEqual(pgid, pid, "child must lead its own process group")
+        self.assertNotEqual(sid, os.getsid(0),
+                            "child must not share the dispatcher's session")
+
+    def test_kill_tree_does_not_terminate_caller(self):
+        """The dispatcher tree-kills a stalled unit from inside its own process.
+        POSIX units run in their OWN session (start_new_session), so killpg
+        scopes to that unit alone — before the fix the child shared the
+        caller's process group and the kill took the caller down with it
+        (no stall log, no stdout summary: the field-death shape).
+
+        The probe runs in a CHILD process so a regression surfaces as an exit
+        code / missing marker, instead of silently killing the test runner.
+        Windows never had this defect (taskkill /T is tree-scoped) — there the
+        probe is a liveness smoke check, never a false red."""
+        probe = self.tmp / "probe_kill_tree.py"
+        probe.write_text(
+            "import importlib.util, os, subprocess, sys, time\n"
+            f"spec = importlib.util.spec_from_file_location('fr_probe', "
+            f"{str(SCRIPT)!r})\n"
+            "fr = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(fr)\n"
+            "p = subprocess.Popen([sys.executable, '-c',\n"
+            "                      'import time; time.sleep(300)'],\n"
+            "                     start_new_session=(os.name != 'nt'))\n"
+            "time.sleep(1.0)\n"
+            "fr._kill_tree(p.pid)\n"
+            "time.sleep(1.0)\n"
+            "print('alive')\n", encoding="utf-8")
+        r = subprocess.run([sys.executable, str(probe)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("alive", r.stdout,
+                      "the caller of _kill_tree MUST survive (POSIX session "
+                      "isolation); stderr: " + r.stderr)
+
+
+class TestExitPathChildCleanup(_FakeDispatchBase):
+    """main()'s finally tree-kills children STILL registered at exit (design
+    D2). Units now run in their own session, so an interrupt (Ctrl-C) no
+    longer reaches them through the tty's process group — and clearing
+    children_now / deleting the liveness file is precisely what would turn a
+    live child into an untrackable orphan (invisible to --kill-stale)."""
+
+    N_UNITS = 1
+
+    def setUp(self):
+        super().setUp()
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:  # never leave a probe child behind on failure
+            try:
+                p.kill()
+            except OSError:
+                pass
+            try:
+                p.wait(timeout=10)
+            except Exception:
+                pass
+        super().tearDown()
+
+    def _fake_run(self, behavior):
+        """Registers a REAL non-converging child at spawn, then returns
+        child_pid=None so the terminal branch's _terminal_children_rm(None) is
+        a no-op — the registration deliberately LEAKS, which is the in-flight
+        shape an interrupt leaves behind."""
+        def fake(host, cmd, task, cwd, call_timeout_s, stall_timeout_s=0,
+                 run_log_path=None, uid="", on_spawn=None):
+            p = subprocess.Popen([sys.executable, "-c",
+                                  "import time; time.sleep(300)"],
+                                 start_new_session=(os.name != "nt"))
+            self.procs.append(p)
+            if on_spawn is not None:
+                on_spawn(p.pid)
+            unit = next(u for u in self.units if u["batch_id"] == uid)
+            Path(unit["done_marker"]).write_text("done", encoding="utf-8")
+            self.calls.append((uid, "spawn-ok", "ok"))
+            return ("spawn-ok", "ok", "ok", None, False)
+        return fake
+
+    def test_exit_path_tree_kills_still_registered_children(self):
+        code, out, err = self._run_main(lambda uid, nth: ("spawn-ok", "ok"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.procs), 1)
+        for p in self.procs:
+            p.wait(timeout=30)
+            self.assertFalse(self.fr._pid_alive(p.pid),
+                             "child still registered at exit must be tree-killed")
+        self.assertFalse((self.init / "fanout_runner.scout.pid").exists(),
+                         "liveness file must be removed on the normal exit path")
+
 
 class TestTimeoutInvariantCli(unittest.TestCase):
     """Four-level timeout invariant, spawn-time fail-loud (design D5):
@@ -1063,10 +1236,42 @@ class TestTimeoutInvariantCli(unittest.TestCase):
         self.assertIn("must be < --call-timeout-s", r.stderr)
 
     def test_stall_below_floor_rejected(self):
+        # 1..59 is the typo'd-calibration band (below the floor the false-kill
+        # rate dominates). The recipe must name BOTH legal exits: the >= 60
+        # compliant minimum AND the 0 off-switch — the off-switch is the whole
+        # point of widening the value domain (it used to be hidden behind the
+        # `--call-timeout-s - 1` hack).
         r = _run_cli(self.tmp, self._listing_file(), "--stall-timeout-s", "30",
                      "--call-timeout-s", "3600")
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("--stall-timeout-s must be >= 60", r.stderr)
+        self.assertIn("below the floor", r.stderr)
+        self.assertIn(">= 60", r.stderr)                 # compliant minimum
+        self.assertIn("--stall-timeout-s 0", r.stderr)   # off-switch exit
+        self._assert_no_side_effects()
+
+    def test_stall_zero_disables_and_drops_the_ordering_constraint(self):
+        # --stall-timeout-s 0 = explicit off. It deliberately violates
+        # `stall < call`, so that check MUST be skipped for it (otherwise the
+        # only legal off-switch would be rejected by the invariant).
+        r = _run_cli(self.tmp, self._listing_file(), "--stall-timeout-s", "0",
+                     "--call-timeout-s", "300")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["stall_killed"], [])
+        self.assertFalse(data["stalled"])
+
+    def test_stall_negative_rejected(self):
+        r = _run_cli(self.tmp, self._listing_file(), "--stall-timeout-s", "-1")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--stall-timeout-s must be >= 0", r.stderr)
+
+    def test_invariant_recipe_offers_the_off_switch(self):
+        # The compliant-values recipe accompanies every invariant violation and
+        # must disclose the alternative exit (0), not just "raise it".
+        r = _run_cli(self.tmp, self._listing_file(), "--stall-timeout-s", "9999")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--stall-timeout-s 300", r.stderr)  # compliant example
+        self.assertIn("--stall-timeout-s 0", r.stderr)    # off-switch example
 
     def test_compliant_combination_passes(self):
         r = _run_cli(self.tmp, self._listing_file(), "--time-budget-ms", "720000",
@@ -1161,6 +1366,20 @@ class TestProgressSidecar(unittest.TestCase):
         self.assertIn("wave_done_avg_s", sc)
         self.assertIn("eta_batches", sc)
         self.assertEqual(sc["tier"], "scout")
+
+    def test_sidecar_carries_the_cost_visibility_fields(self):
+        # design D4: the second-terminal watcher sees exactly the cost figures
+        # the exit summary reports — both written from one computed dict, so
+        # the live-elapsed-time denominator cannot make them drift apart.
+        lp = self.tmp / "pending.json"
+        lp.write_text(json.dumps(_listing(self.tmp, [])), encoding="utf-8")
+        r = _run_cli(self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sc = json.loads(self._sidecar_path().read_text(encoding="utf-8"))
+        out = json.loads(r.stdout)
+        for k in ("stall_killed_slots_s", "stall_killed_slot_pct"):
+            self.assertIn(k, sc)
+            self.assertEqual(sc[k], out[k], f"sidecar/{k} must equal stdout/{k}")
 
     def test_sidecar_partial_state_after_soft_deadline(self):
         # pending units + a zero time budget → immediate clean early-exit with
@@ -1588,6 +1807,578 @@ class TestT1PackedPendingZeroChange(unittest.TestCase):
         out = json.loads(r.stdout)
         self.assertEqual(out["pending"], 0)
         self.assertEqual(out["waves_run"], 1)                 # only the pending pack spawned
+
+
+class TestCooldownCapArithmetic(unittest.TestCase):
+    """_cooldown_cap_s pure arithmetic (design D3): the cooldown wait is capped
+    by remaining time budget minus the in-flight convergence margin; <= 0 =
+    no budget for any cooldown (degrade to immediate continue + disclosure);
+    no --time-budget-ms = uncapped."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_cap")
+
+    def test_no_budget_uncapped(self):
+        self.assertEqual(self.fr._cooldown_cap_s(300, None, 0.0, [], 0), 300.0)
+
+    def test_generous_budget_returns_ceiling_above_cooldown(self):
+        # the cap is a ceiling; the caller applies min(cooldown_s, cap)
+        self.assertEqual(self.fr._cooldown_cap_s(300, 600.0, 0.0, [], 0), 600.0)
+
+    def test_tight_budget_shrinks_cooldown(self):
+        self.assertEqual(self.fr._cooldown_cap_s(300, 100.0, 0.0, [], 0), 100.0)
+
+    def test_inflight_convergence_margin_shrinks_cap(self):
+        # remaining 100, observed avg unit 30s x 2 in-flight = 60 margin -> 40
+        self.assertEqual(self.fr._cooldown_cap_s(300, 100.0, 0.0, [30.0, 30.0], 2),
+                         40.0)
+
+    def test_exhausted_budget_skips_cooldown(self):
+        self.assertEqual(self.fr._cooldown_cap_s(300, 50.0, 50.0, [], 0), 0.0)
+        self.assertLessEqual(self.fr._cooldown_cap_s(300, 10.0, 50.0, [], 0), 0.0)
+
+
+class TestWidenedStallWindowArithmetic(unittest.TestCase):
+    """_widened_stall_window pure arithmetic (design D3): one false-kill
+    self-evidence event doubles the effective silence window, clamped at the
+    `--call-timeout-s` convergence margin so the absolute per-call kill always
+    stays reachable. Returning the input unchanged (== at the ceiling) is what
+    the caller reads as "no event to disclose"."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_widen")
+
+    def test_doubles_below_the_ceiling(self):
+        self.assertEqual(self.fr._widened_stall_window(900, 7200), 1800)
+
+    def test_overflow_lands_exactly_on_the_ceiling_not_skipped(self):
+        # 3600 x 2 = 7200 > 7200 x 0.8 = 5760 -> land ON 5760 (task 2.4: an
+        # overflowing doubling takes the cap, it never aborts the widening)
+        self.assertEqual(self.fr._widened_stall_window(3600, 7200), 5760)
+
+    def test_at_the_ceiling_is_a_no_op(self):
+        self.assertEqual(self.fr._widened_stall_window(5760, 7200), 5760)
+
+    def test_result_never_reaches_the_call_timeout(self):
+        for call in (300, 540, 2000, 7200):
+            w = 60
+            for _ in range(20):            # ratchet hard at the ceiling
+                w = self.fr._widened_stall_window(w, call)
+            self.assertLess(w, call, f"window {w} must stay below call {call}")
+            self.assertLessEqual(w, int(call * 0.8))
+
+
+class TestPercentileInt(unittest.TestCase):
+    """_percentile_int pure arithmetic (design D4): nearest-rank, so every
+    reported runtime is an OBSERVED value rather than an interpolated one."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_pct")
+
+    def test_nearest_rank_over_a_known_population(self):
+        v = [float(x) for x in range(1, 101)]   # 1..100
+        self.assertEqual(self.fr._percentile_int(v, 50), 50)
+        self.assertEqual(self.fr._percentile_int(v, 95), 95)
+        self.assertEqual(self.fr._percentile_int(v, 99), 99)
+        self.assertEqual(self.fr._percentile_int(v, 100), 100)
+
+    def test_degenerate_populations(self):
+        self.assertEqual(self.fr._percentile_int([7.4], 50), 7)
+        self.assertEqual(self.fr._percentile_int([1.0, 9.0], 50), 1)
+        self.assertEqual(self.fr._percentile_int([1.0, 9.0], 99), 9)
+
+    def test_rounds_to_whole_seconds(self):
+        self.assertEqual(self.fr._percentile_int([133.6], 50), 134)
+
+
+class TestAdaptiveStallWindow(_FakeDispatchBase):
+    """False-kill self-evidence + bounded adaptive silence window (design D3).
+
+    The trigger is the only hard evidence this environment can produce that a
+    silence was NOT fatal: the unit the window killed then completed on
+    re-dispatch within the same run. A run with no such event keeps the
+    configured window exactly (TestRunUnitTreeKill holds the unchanged path)."""
+
+    N_UNITS = 3
+
+    @staticmethod
+    def _behavior(stall_units):
+        def behavior(uid, nth):
+            return ("stall", None) if (nth == 1 and uid in stall_units) \
+                else ("spawn-ok", "ok")
+        return behavior
+
+    def test_stall_killed_then_completed_widens_the_window(self):
+        code, out, err = self._run_main(self._behavior({"scout-001"}))
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["stall_killed"], ["scout-001"])
+        # default 900 doubles to 1800; the summary reports the EFFECTIVE value
+        self.assertEqual(data["stall_window_s"], 1800)
+        self.assertIn("stall window widened 900s -> 1800s", err)
+        widened = [ln for ln in err.splitlines() if "stall window widened" in ln]
+        self.assertEqual(len(widened), 1, err)
+        self.assertIn("unit scout-001", widened[0])
+        # the window is snapshotted AT SPAWN, so the re-dispatch that TRIGGERS
+        # the widening was itself still judged at the old value — the widening
+        # reaches dispatches after it, never retroactively the one running
+        self.assertEqual(self.windows, [900, 900, 900, 900])
+        self.assertEqual(data["waves_run"], 4)
+
+    def test_widening_is_bounded_by_the_call_timeout_margin(self):
+        # 60 -> 120 -> 240 (= --call-timeout-s 300 x 0.8, the ceiling). The
+        # third success has nothing left to widen, so it stays silent: exactly
+        # two disclosure lines, and the window never reaches --call-timeout-s
+        # itself (the absolute kill must remain reachable above it).
+        code, out, err = self._run_main(
+            self._behavior({"scout-001", "scout-002", "scout-003"}),
+            "--stall-timeout-s", "60", "--call-timeout-s", "300")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["waves_run"], 6)
+        self.assertEqual(data["stall_window_s"], 240)
+        self.assertLess(data["stall_window_s"], 300)
+        widened = [ln for ln in err.splitlines() if "stall window widened" in ln]
+        self.assertEqual(len(widened), 2, err)
+        self.assertIn("60s -> 120s", widened[0])
+        self.assertIn("120s -> 240s", widened[1])
+        # every attempt is judged at the window in force AT ITS SPAWN: the three
+        # opening (killed) attempts and the one that triggers the first
+        # widening at 60, the next at 120, the last at 240
+        self.assertEqual(self.windows, [60, 60, 60, 60, 120, 240])
+
+    def test_repeated_kills_of_one_unit_still_count_once(self):
+        # scout-001 is silence-killed TWICE and completes on the third attempt:
+        # one success, therefore ONE widening event. (Reachability note: a unit
+        # cannot be re-dispatched after it succeeds — its marker ends it — so
+        # the per-unit dedup guard is exercised here as "N kills of one unit
+        # are one piece of evidence", not as a second success.)
+        def behavior(uid, nth):
+            if uid == "scout-001" and nth <= 2:
+                return ("stall", None)
+            return ("spawn-ok", "ok")
+        code, out, err = self._run_main(behavior)
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["waves_run"], 5)
+        self.assertEqual(data["stall_killed"], ["scout-001", "scout-001"])
+        self.assertEqual(data["stall_window_s"], 1800)
+        self.assertEqual(
+            len([ln for ln in err.splitlines() if "stall window widened" in ln]),
+            1, err)
+
+    def test_no_event_keeps_the_window_and_omits_the_field(self):
+        # Clean run: the summary must NOT carry stall_window_s at all (an
+        # always-present key reporting the configured value would read as
+        # "this run widened", which is the opposite of the truth).
+        code, out, err = self._run_main(self._behavior(set()))
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertNotIn("stall_window_s", data)
+        self.assertNotIn("stall window widened", err)
+
+    def test_disabled_criterion_never_widens(self):
+        # --stall-timeout-s 0: there is no window to widen, and no window to
+        # exceed — so no stall event exists to self-certify against. Every
+        # dispatch must be handed 0 (which is what makes _run_unit's silence
+        # branch unreachable; the behavioural half of this lives in
+        # TestRunUnitTreeKill.test_zero_window_disables_the_silence_criterion).
+        code, out, err = self._run_main(self._behavior(set()),
+                                        "--stall-timeout-s", "0",
+                                        "--call-timeout-s", "300")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertTrue(self.windows, "the run dispatched something")
+        self.assertEqual(set(self.windows), {0})
+        self.assertNotIn("stall_window_s", data)
+        self.assertNotIn("stall window widened", err)
+        self.assertEqual(data["stall_killed"], [])
+
+    def test_cost_visibility_fields(self):
+        # A stall kill burns slot-seconds; a run with completed units reports
+        # their runtime distribution. Both are what makes the threshold
+        # re-calibratable from data instead of guesswork (design D4).
+        code, out, err = self._run_main(self._behavior({"scout-001"}))
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        for k in ("runtime_p50_s", "runtime_p95_s", "runtime_max_s",
+                  "stall_killed_slots_s", "stall_killed_slot_pct"):
+            self.assertIn(k, data)
+        for k in ("runtime_p50_s", "runtime_p95_s", "runtime_max_s"):
+            self.assertIsInstance(data[k], int, k)
+        self.assertGreaterEqual(data["stall_killed_slots_s"], 0)
+        self.assertGreaterEqual(data["stall_killed_slot_pct"], 0.0)
+        self.assertLessEqual(data["stall_killed_slot_pct"], 100.0)
+        self.assertLessEqual(data["runtime_p50_s"], data["runtime_p95_s"])
+        self.assertLessEqual(data["runtime_p95_s"], data["runtime_max_s"])
+        self.assertEqual(data["stall_killed"], ["scout-001"])
+
+
+class TestCostVisibilityOmission(unittest.TestCase):
+    """Design D4 omission semantics: with no completed unit the three runtime
+    keys are ABSENT, not 0 — 0 seconds would read as "units are instant"
+    rather than "no data", which is exactly the misreading that would poison a
+    later calibration."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_cost_"))
+        self.units = [_unit(self.tmp, f"scout-{i:03d}") for i in range(1, 3)]
+        _setup_repo(self.tmp, self.units)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_runtime_keys_absent_when_nothing_completed(self):
+        lp = self.tmp / "pending.json"
+        lp.write_text(json.dumps(_listing(self.tmp, self.units)), encoding="utf-8")
+        # zero time budget -> soft-stop before any dispatch: no unit completes
+        r = _run_cli(self.tmp, lp, "--time-budget-ms", "0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertTrue(data["partial"])
+        for k in ("runtime_p50_s", "runtime_p95_s", "runtime_max_s"):
+            self.assertNotIn(k, data)
+        self.assertEqual(data["stall_killed_slots_s"], 0)
+        self.assertEqual(data["stall_killed_slot_pct"], 0.0)
+
+    def test_empty_run_still_carries_the_cost_pair(self):
+        lp = self.tmp / "pending.json"
+        lp.write_text(json.dumps(_listing(self.tmp, [])), encoding="utf-8")
+        r = _run_cli(self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["waves_run"], 0)
+        self.assertEqual(data["stall_killed_slots_s"], 0)
+        self.assertEqual(data["stall_killed_slot_pct"], 0.0)
+        self.assertNotIn("runtime_p50_s", data)
+
+
+class _StormBase(_FakeDispatchBase):
+    """Shared harness for cooldown/storm/retry tests: like _fake_run but the
+    behavior returns (status, ack, detail) so a crash's detail can carry the
+    rate-limit mark the way the real _run_unit leaves it."""
+
+    def _fake_run3(self, behavior):
+        def fake(host, cmd, task, cwd, call_timeout_s, stall_timeout_s=0,
+                 run_log_path=None, uid="", on_spawn=None):
+            nth = fake.state.get(uid, 0) + 1
+            fake.state[uid] = nth
+            status, ack, detail = behavior(uid, nth)
+            self.calls.append((uid, status, ack))
+            if ack == "ok":
+                unit = next(u for u in self.units if u.get("batch_id") == uid)
+                Path(unit["done_marker"]).write_text("done", encoding="utf-8")
+            pid = 700000 + len(self.calls)
+            if on_spawn is not None:
+                on_spawn(pid)
+            return (status, ack if status == "spawn-ok" else None, detail,
+                    pid, status == "stall")
+        fake.state = {}
+        return fake
+
+    def _run_main3(self, behavior, *extra, wave="1"):
+        stub = self._disk_stub()
+        saved_list = dict(self.fr.TIERS["scout"])
+        saved_run = self.fr._run_unit
+        self.fr.TIERS["scout"]["list_script"] = str(stub)
+        self.fr._run_unit = self._fake_run3(behavior)
+        argv = ["fanout_runner.py",
+                "--scout-plan", str(self.init / "scout_plan.json"),
+                "--checkpoints", str(self.init / "checkpoints" / "scout"),
+                "--inputs-dir", str(self.init / "inputs" / "scout"),
+                "--host", "claude", "--wave", wave, "--cooldown-s", "0", *extra]
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.fr.main()
+        finally:
+            sys.argv = old
+            self.fr._run_unit = saved_run
+            self.fr.TIERS["scout"].update(saved_list)
+        return code, out.getvalue(), err.getvalue()
+
+    def _rl_crash(self, uid):
+        return ("crash", None,
+                f"{self.fr._RATELIMIT_MARK}; exit=1; "
+                f"stderr tail: 429 Too Many Requests for unit {uid}")
+
+
+class TestFastFailCooldown(_StormBase):
+    """Fast-fail storm cooldown (design D2/D3): requeue events (crash/timeout/
+    stall/spawn-error re-queues; failed acks and pre-spawn failures never
+    count) within the sliding window arm a budget-capped cooldown that pauses
+    NEW dispatch only; before the breaker exits, at most one bounded backoff
+    (cooldown -> disk re-derivation -> re-observe) may disarm it."""
+
+    def test_third_requeue_triggers_cooldown_then_bounded_backoff(self):
+        code, out, err = self._run_main3(lambda uid, nth: ("crash", None, "crash"),
+                                         "--cooldown-s", "1")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertTrue(data["stalled"])
+        self.assertGreaterEqual(data["cooldowns"], 2)   # storm + pre-breaker backoff
+        self.assertIn("cooldown #1", err)
+        self.assertIn("pausing NEW dispatch", err)
+        self.assertIn("pre-breaker backoff", err)
+
+    def test_in_flight_units_keep_harvesting_during_cooldown(self):
+        # scout-002 sleeps well past the cooldown while scout-001's re-crashes
+        # arm it: the ok ack must still land (harvest never pauses), and its
+        # ok line lands on stderr AFTER the cooldown line.
+        def behavior(uid, nth):
+            if uid == "scout-002":
+                time.sleep(2.5)
+                return ("spawn-ok", "ok", "done")
+            return ("crash", None, "crash")
+        code, out, err = self._run_main3(behavior, "--cooldown-s", "1", "--wave", "2")
+        data = json.loads(out)
+        self.assertEqual(data["done"], 1)
+        u2 = next(u for u in self.units if u.get("batch_id") == "scout-002")
+        self.assertTrue(Path(u2["done_marker"]).is_file())
+        self.assertGreaterEqual(data["cooldowns"], 1)
+        self.assertLess(err.index("cooldown #1"), err.index("unit scout-002: ok"))
+
+    def test_cooldown_zero_disables_layer(self):
+        code, out, err = self._run_main3(lambda uid, nth: ("crash", None, "crash"),
+                                         "--cooldown-s", "0")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(out)["cooldowns"], 0)
+        self.assertNotIn("cooldown #", err)
+        self.assertNotIn("pre-breaker backoff", err)
+
+    def test_negative_cooldown_rejected(self):
+        code, _, err = self._run_main3(lambda uid, nth: ("crash", None, "crash"),
+                                       "--cooldown-s", "-1")
+        self.assertEqual(code, 2)
+        self.assertIn("--cooldown-s must be >= 0", err)
+
+    def test_help_documents_storm_mechanisms(self):
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        flat = " ".join(r.stdout.split())
+        for needle in ("requeue", "--cooldown-s", "--no-rate-limit-stop",
+                       "--retry-failed", "retried_failed", "rate_limited",
+                       "rate limit", "pre-breaker backoff"):
+            self.assertIn(needle, flat, needle)
+
+
+class TestRateLimitStorm(_StormBase):
+    """Crash-tail rate-limit classification + storm truncation (design D1/D4):
+    quota-signature crashes within the since-last-disk-advance window at >=
+    --wave ALL rate-limit -> immediate exit 2 fast path (ahead of any new
+    cooldown); drift/mixed/unknown degrade to the cooldown + breaker path."""
+
+    N_UNITS = 5
+
+    def test_all_rate_limit_storm_truncates_fast(self):
+        # worker-side barrier: both units must crash before either future is
+        # harvested, so both crash events accumulate in one dispatch round and
+        # no re-dispatch can race ahead of the truncation flag (deterministic
+        # waves_run == 2)
+        barrier = threading.Barrier(2, timeout=30)
+
+        def behavior(uid, nth):
+            barrier.wait()
+            return self._rl_crash(uid)
+        code, out, err = self._run_main3(behavior, "--wave", "2",
+                                         "--cooldown-s", "0")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertTrue(data["rate_limited"])
+        self.assertEqual(sorted(data["rate_limited_crashes"]),
+                         ["scout-001", "scout-002"])
+        self.assertFalse(data["stalled"])                  # fast path, not the breaker
+        self.assertNotIn("stalled_pending", data)
+        self.assertEqual(data["cooldowns"], 0)             # truncation precedes cooldown
+        self.assertEqual(data["waves_run"], 2)
+        self.assertIn("rate-limit crash storm", err)
+        self.assertIn("--no-rate-limit-stop", err)         # recipe discloses the opt-out
+        self.assertIn("crash_cause=rate-limit", err)
+
+    def test_signature_drift_degrades_to_cooldown_path(self):
+        code, out, err = self._run_main3(lambda uid, nth: ("crash", None, "crash"),
+                                         "--wave", "5", "--cooldown-s", "1")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertNotIn("rate_limited_crashes", data)
+        self.assertTrue(data["stalled"])                   # breaker still bounds the loop
+        self.assertGreaterEqual(data["cooldowns"], 1)      # event path backstops
+        self.assertIn("crash_cause=unknown", err)
+
+    def test_mixed_unknown_crash_blocks_truncation(self):
+        def behavior(uid, nth):
+            if uid == "scout-003":
+                return ("crash", None, "crash")            # script defect, no signature
+            return self._rl_crash(uid)
+        code, out, err = self._run_main3(behavior, "--wave", "5", "--cooldown-s", "1")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertTrue(data["stalled"])
+
+    def test_no_rate_limit_stop_disables_truncation(self):
+        code, out, err = self._run_main3(lambda uid, nth: self._rl_crash(uid),
+                                         "--wave", "5", "--no-rate-limit-stop")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertNotIn("rate_limited_crashes", data)
+        self.assertNotIn("rate-limit crash storm", err)
+
+    def test_ok_terminal_with_429_in_output_never_classified(self):
+        def behavior(uid, nth):
+            return ("spawn-ok", "ok", "report cites 429 / rate limit / quota")
+        code, out, err = self._run_main3(behavior, "--wave", "2")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertNotIn("crash_cause", err)
+
+    def test_timeout_terminal_not_classified(self):
+        def behavior(uid, nth):
+            return ("timeout", None, "reason:rate-limit; output silent")
+        code, out, err = self._run_main3(behavior, "--wave", "2")
+        self.assertEqual(code, 2, err)
+        self.assertNotIn("crash_cause", err)
+        self.assertFalse(json.loads(out)["rate_limited"])
+
+
+class TestRateLimitStormTwoUnits(_StormBase):
+    """Storm scenarios that need an exact small unit set for deterministic
+    threshold/clearing traces."""
+
+    N_UNITS = 2
+
+    def test_below_wave_threshold_never_truncates(self):
+        # isolated quota crashes with disk advances in between keep the window
+        # count (max 2) below --wave 5: no truncation, the run completes, the
+        # event cooldown still fires on the 3 sparse requeues
+        def behavior(uid, nth):
+            if uid == "scout-001":
+                return self._rl_crash(uid) if nth < 4 else ("spawn-ok", "ok", "done")
+            return ("spawn-ok", "ok", "done")
+        code, out, err = self._run_main3(behavior, "--wave", "5", "--cooldown-s", "1")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertNotIn("rate_limited_crashes", data)
+        self.assertFalse(data["stalled"])
+        self.assertGreaterEqual(data["cooldowns"], 1)
+
+    def test_disk_advance_clears_storm_window(self):
+        # scout-002's ok-advance clears the window between scout-001's quota
+        # crashes: truncation fires on the 3rd (not 2nd) crash — proof the
+        # window re-anchors on disk terminal advance.
+        def behavior(uid, nth):
+            if uid == "scout-001":
+                return self._rl_crash(uid) if nth < 4 else ("spawn-ok", "ok", "done")
+            return ("spawn-ok", "ok", "done")
+        code, out, err = self._run_main3(behavior, "--wave", "2", "--cooldown-s", "0")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertTrue(data["rate_limited"])
+        self.assertEqual(data["rate_limited_crashes"], ["scout-001"])
+        n001 = sum(1 for uid, status, _ in self.calls
+                   if uid == "scout-001" and status == "crash")
+        self.assertEqual(n001, 3)   # 2 would mean the ok-advance never cleared
+
+
+class TestRetryFailed(_StormBase):
+    """--retry-failed claim semantics: a claimed failed unit's .failed marker
+    is deleted at claim (evidence stays in run.log), the unit dispatches
+    normally, a re-failure writes a fresh marker, and each unit is retried at
+    most once per call."""
+
+    N_UNITS = 2
+
+    def _mark_failed(self, bid):
+        u = next(u for u in self.units if u.get("batch_id") == bid)
+        Path(u["failed_marker"]).write_text(
+            json.dumps({"unit": bid, "reason": "provider blip", "tier": "scout"}),
+            encoding="utf-8")
+
+    def test_claim_deletes_marker_and_retries_to_done(self):
+        self._mark_failed("scout-001")
+        code, out, err = self._run_main3(lambda uid, nth: ("spawn-ok", "ok", "done"),
+                                         "--retry-failed")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["retried_failed"], 1)
+        u1 = next(u for u in self.units if u.get("batch_id") == "scout-001")
+        self.assertFalse(Path(u1["failed_marker"]).exists())   # deleted at claim
+        self.assertTrue(Path(u1["done_marker"]).is_file())
+        self.assertIn("--retry-failed — .failed marker deleted at claim", err)
+
+    def test_without_flag_failed_marker_lazy_skips(self):
+        # without the flag the pre-failed unit is lazy-skipped forever (never
+        # spawned); scout-002 still completes, so the skipped unit surfaces as
+        # the documented stalled_pending drift (exit 2), not a retry
+        self._mark_failed("scout-001")
+        code, out, err = self._run_main3(lambda uid, nth: ("spawn-ok", "ok", "done"))
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertEqual(data["retried_failed"], 0)
+        self.assertTrue(data["stalled"])
+        u1 = next(u for u in self.units if u.get("batch_id") == "scout-001")
+        self.assertTrue(Path(u1["failed_marker"]).exists())    # untouched
+        n001 = sum(1 for uid, _, _ in self.calls if uid == "scout-001")
+        self.assertEqual(n001, 0)                              # never spawned
+
+    def test_retry_is_bounded_once_per_call_and_refails_writes_marker(self):
+        # scout-001 re-fails after its one retry: the fresh failed ack rewrites
+        # the marker and the once-per-call bound blocks a second claim
+        self._mark_failed("scout-001")
+
+        def behavior(uid, nth):
+            if uid == "scout-001":
+                return ("spawn-ok", "failed:still-broken", "failed:still-broken")
+            return ("spawn-ok", "ok", "done")
+        code, out, err = self._run_main3(behavior, "--retry-failed")
+        self.assertEqual(code, 2, err)                         # breaker ends the loop
+        data = json.loads(out)
+        self.assertEqual(data["retried_failed"], 1)
+        n001 = sum(1 for uid, _, _ in self.calls if uid == "scout-001")
+        self.assertEqual(n001, 1)                              # claimed exactly once
+        u1 = next(u for u in self.units if u.get("batch_id") == "scout-001")
+        self.assertTrue(Path(u1["failed_marker"]).exists())    # re-failure rewrote it
+
+
+class TestStdoutContractKeys(_FakeDispatchBase):
+    """Summary contract: existing fields zero add/remove; the three always-on
+    storm-resilience keys (cooldowns/retried_failed/rate_limited) ride every
+    summary, plus the two always-on cost-visibility keys
+    (stall_killed_slots_s / stall_killed_slot_pct); rate_limited_crashes /
+    context_overflow / stalled_pending / stall_window_s and the runtime_*
+    trio stay conditional disclosures."""
+
+    N_UNITS = 2
+
+    def test_clean_run_exact_key_set(self):
+        code, out, err = self._run_main(lambda uid, nth: ("spawn-ok", "ok"))
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(
+            set(data.keys()),
+            {"runner", "tier", "repo", "host", "total", "done", "failed",
+             "pending", "wave", "waves_run", "partial", "stall_killed",
+             "stalled", "cooldowns", "retried_failed", "rate_limited",
+             # cost visibility (design D4): the always-on pair, plus the
+             # runtime_* trio (present because this run completed units) and
+             # the ABSENT stall_window_s (nothing widened here)
+             "stall_killed_slots_s", "stall_killed_slot_pct",
+             "runtime_p50_s", "runtime_p95_s", "runtime_max_s"})
+        self.assertEqual(data["cooldowns"], 0)
+        self.assertEqual(data["retried_failed"], 0)
+        self.assertFalse(data["rate_limited"])
+        self.assertEqual(data["stall_killed_slots_s"], 0)
+        self.assertEqual(data["stall_killed_slot_pct"], 0.0)
+        self.assertNotIn("stall_window_s", data)
+        for k in ("runtime_p50_s", "runtime_p95_s", "runtime_max_s"):
+            self.assertIsInstance(data[k], int, k)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ __pycache__/
 # 安装/运行产物(装入目标项目时生成,不属于本仓库)
 batch-workspace/
 security-scan/
+nul
 
 # 本地环境
 .env

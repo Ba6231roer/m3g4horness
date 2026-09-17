@@ -4,7 +4,7 @@
 discover_controls — deterministic discovery of existing security controls.
 
 Zero runtime deps (Python >=3.10 stdlib). The Semgrep/CodeQL "control inventory"
-idea (glasswing_docs/09 §1.3) downgraded to text patterns + textual call graph,
+idea downgraded to text patterns + textual call graph,
 reusing expand_scope's per-language primitives (DEF_CALL / FRAMEWORK_RX /
 SOURCE_EXT / walk_sources) — see D2 (import, no rewrite) + D11 (no silent cap).
 
@@ -152,7 +152,7 @@ CLASS_RX = {
 }
 
 # ── per-language import/include patterns (mechanical; feeds skeleton.json only) ──
-# Used by the scout discovery layer (improve-mgh-init-llm-discovery) to give the LLM
+# Used by the scout discovery layer to give the LLM
 # cheap "what does this file depend on" metadata. Multi-group patterns coalesced.
 IMPORTS_RX = {
     "java":   re.compile(r"^\s*import\s+(?:static\s+)?([\w.\*]+)\s*;", re.M),

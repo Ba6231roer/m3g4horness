@@ -100,12 +100,12 @@ bootstrap.md` 加载 bootstrap 正文(run_config 原子写 + 哨兵 + MGH_TARGET
 在 `stage_flow_files[]` 中结构性不存在——not-started 返回 `[]`、run_config 前 exit 1,故由壳直达)。
 
 **壳 token 预算**(自本变更起):mgh-init 两壳经 `tools/measure_prompts.py` 实测 `mid_tokens` 各
-**SHALL ≤ 5,000 tok**(R5.6 硬上限;壳 = 触发轮 USER 首条消息、primacy 区,lost-in-the-middle + 防回归,
-据 `docs/opencode-context-mechanics.md` §1/§6)。**编排器 fragments**(init-stage 12 个 per-step +
+**SHALL ≤ 5,000 tok**(R5.6 硬上限;壳 = 触发轮 USER 首条消息、primacy 区,lost-in-the-middle + 防回归)。
+**编排器 fragments**(init-stage 12 个 per-step +
 orchestrator-discipline)SHALL **逐个评估**单次 Read 轮尺寸是否结构良好(**不**强制求和 ≤ N;实测平均
 ~0.44K/步,重步 scout ~1.0K / t1 ~0.86K,轻步 merge 75 / t4 96);磁盘 `mid_tokens` 合计 SHALL ≤ ~10,000
 作**防漂移** lint 上限(标注根据 = 磁盘大小防漂移,**非**运行时叠加占用——opencode 下壳与各 fragment
-均为单次 lazy Read 的 USER 历史项、非每轮 system 税,见 `docs/opencode-context-mechanics.md` §1/§6)。
+均为单次 lazy Read 的 USER 历史项、非每轮 system 税)。
 
 #### Scenario: 两壳引用 orchestrator-discipline + per-step fragment 集而非内联
 

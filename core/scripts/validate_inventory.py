@@ -3,9 +3,9 @@
 """
 validate_inventory — boundary validator for controls_inventory.json (R5.9).
 
-The cross-product inventory (vvah `design_controls`-compatible) gets its own validator
-(harden-mgh-init-orchestration-discipline FD7): single-product `--check` lives on each
-producer; the inventory is consumed downstream by /mgh-sra / /mgh-blst / mgh-sast, so a
+The cross-product inventory (vvah `design_controls`-compatible) gets its own validator:
+single-product `--check` lives on each producer; the inventory is consumed downstream
+by /mgh-sra / /mgh-blst / mgh-sast, so a
 corrupt one must fail loud at the T2 boundary, not silently propagate.
 
 Asserts:

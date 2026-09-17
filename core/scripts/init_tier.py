@@ -26,7 +26,7 @@ from pathlib import Path
 # NTFS 255 − ".input.json"(11) → worst stem 200 → 211 ≤ 255. Enumeration scripts
 # (list_clusters/list_scout_batches) encode checkpoint/input filenames with it; the
 # done/failed forward predicates below decode NOTHING — they recompute the same
-# encoding forward, so judgment survives any truncation (see fix-mgh-init-done-marker-identity).
+# encoding forward, so judgment survives any truncation.
 MAX_UNIT_FILENAME_STEM = 200
 
 

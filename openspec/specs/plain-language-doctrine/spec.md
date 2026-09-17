@@ -36,30 +36,35 @@
 
 ### Requirement: Terminology glossary precedes usage
 
-仓库 SHALL 维护 `docs/glossary.md` 术语词典,种子含 ~30–50 条(取自 AGENTS.md 与 `docs/r5-plain-language.md` 术语表)。人类面产物使用的术语 SHALL 在词典中有条目;缺则先补词典再使用。词典 SHALL 允许自由增补,不做准入审批。
+仓库 SHALL 维护一份**面向维护者本人**的术语词典(住在维护者私有文档区,不随包分发、不在任何分发产物里出现路径),种子含 ~30–50 条(取自 AGENTS.md 与 R5 大白话配套文档的术语表)。人类面产物使用的术语 SHALL 在词典中有条目;缺则先补词典再使用。词典 SHALL 允许自由增补,不做准入审批。
 
 #### Scenario: New term requires a glossary entry
 
 - **WHEN** 作者在人类面产物中引入一个新术语(如「锚」)
-- **THEN** `docs/glossary.md` SHALL 新增该术语的中文释义,之后产物方可使用
+- **THEN** 该词典 SHALL 新增该术语的中文释义,之后产物方可使用
 
 #### Scenario: Glossary is a living seed
 
 - **WHEN** 词典初次创建
-- **THEN** 至少覆盖 AGENTS.md 与 r5-plain-language.md 术语表中反复出现的核心术语,后续可随迭代自由增补
+- **THEN** 至少覆盖 AGENTS.md 与 R5 大白话配套文档中反复出现的核心术语,后续可随迭代自由增补
 
-### Requirement: Each distributed command has a human-readable man page
+### Requirement: Each command has a maintainer-facing plain-language walkthrough
 
-每个对外分发命令(mgh-sast / mgh-init / mgh-sra / mgh-srr / mgh-ut-init)SHALL 在 `docs/man/<cmd>.md` 有一个人话版说明,覆盖:这命令做什么 / 会动目标项目哪些文件 / 产出什么 / 风险边界。man 页面向人类读者,SHALL NOT 携带本仓研发态悬空引用(承 distribution-purity)。
+每个命令(mgh-sast / mgh-init / mgh-sra / mgh-srr / mgh-ut-init / mgh-sdr)SHALL 有一份**面向维护者本人**的人话版说明,与命令同名,覆盖:这命令做什么 / 会动目标项目哪些文件 / 产出什么 / 风险边界。该说明 SHALL NOT 随 `install.sh` 分发到目标项目,分发产物 SHALL NOT 指向它(承 distribution-purity)。
 
-#### Scenario: A user understands a command from its man page
+#### Scenario: The maintainer understands a command from its walkthrough
 
-- **WHEN** 目标项目用户打开 `docs/man/mgh-init.md`
-- **THEN** 无需读命令壳或源码,即可知道 mgh-init 做什么、会写哪些目录、产出什么、有哪些诚实边界
+- **WHEN** 维护者打开某个命令的人话说明
+- **THEN** 无需读命令壳或源码,即可知道该命令做什么、会写哪些目录、产出什么、有哪些诚实边界
 
-#### Scenario: Man page is plain but pure
+#### Scenario: Walkthroughs stay out of the install
 
-- **WHEN** `docs/man/<cmd>.md` 随 `install.sh` 分发到目标项目
+- **WHEN** `install.sh` 把工具族装进目标项目
+- **THEN** 目标项目里不出现人话说明,命令壳里也不出现指向它的指针——维护者私有文档区的任何内容都不得被分发产物引用
+
+#### Scenario: Walkthrough is plain but pure
+
+- **WHEN** 维护者撰写或修订一份人话说明
 - **THEN** 它不含 `R5.x`/`FDn`/`Dn`/变更夹名等悬空引用(人话措辞自然规避,distribution-purity lint 兜底)
 
 ### Requirement: Proposal opens with a plain-language preamble
@@ -88,4 +93,4 @@
 #### Scenario: Lint is scoped to human-facing files
 
 - **WHEN** 执行 `check_plain_language.py`
-- **THEN** 黑名单 / 密度检查仅覆盖人类面文件(proposal 人话序 / docs/man / docs/glossary),不扫 agent 操作面(stage 提示词 / 契约 md / JSON schema)
+- **THEN** 黑名单 / 密度检查仅覆盖人类面文件(proposal 人话序 / 维护者私有文档区的人话说明与词典 / 终端报告),不扫 agent 操作面(stage 提示词 / 契约 md / JSON schema)

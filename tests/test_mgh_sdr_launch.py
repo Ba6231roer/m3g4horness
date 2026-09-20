@@ -234,6 +234,111 @@ class TestLauncherDryRun(unittest.TestCase):
             sys.argv = old_argv
         return code, out.getvalue(), err.getvalue()
 
+    # --- script-owned run state + idempotent sentinel refresh (add-mgh-sdr-resume-surface) ---
+
+    def _sentinel_body(self):
+        return json.loads((self.repo / ".mgh-sdr" / ".active").read_text(encoding="utf-8"))
+
+    def test_dry_run_keeps_the_sentinel(self):
+        self._approve_front()
+        code, _, err = self._launch(["--repo", str(self.repo),
+                                     "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.repo / ".mgh-sdr" / ".active").is_file(),
+                        "--dry-run must KEEP the sentinel (the next real run reuses it)")
+
+    def test_repeat_launch_refreshes_one_identical_sentinel(self):
+        self._approve_front()
+        code1, _, err1 = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code1, 0, err1)
+        first = (self.repo / ".mgh-sdr" / ".active").read_text(encoding="utf-8")
+        code2, _, err2 = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code2, 0, err2)
+        # idempotent refresh: same single sentinel file, byte-identical content
+        self.assertEqual((self.repo / ".mgh-sdr" / ".active").read_text(encoding="utf-8"),
+                         first)
+        sentinels = list((self.repo / ".mgh-sdr").glob(".active*"))
+        self.assertEqual(len(sentinels), 1, f"sentinel copies left behind: {sentinels}")
+
+    def test_run_config_is_script_written_and_carries_only_the_signal(self):
+        self._approve_front()
+        code, _, err = self._launch(["--repo", str(self.repo),
+                                     "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        rc = run_dir / "run_config.json"
+        self.assertTrue(rc.is_file(), "sdr_context did not write the codegraph signal")
+        body = json.loads(rc.read_text(encoding="utf-8"))
+        self.assertEqual(set(body), {"no_codegraph"})
+        # the launcher passes no flag here, so this is sdr_context's DERIVED value: the
+        # temp repo has no `.codegraph/`, so an honest signal is off
+        self.assertEqual(body, {"no_codegraph": True})
+
+    def test_launcher_signal_matches_the_grouping_predicate(self):
+        """The launcher entry must reach the SAME signal as the host-shell entry, with no
+        flag on either: the probe sinks into sdr_context.py — the one step both pass
+        through — so an indexed repo reports on. The launcher's earlier flag-only default
+        would have claimed `on` here even unindexed, telling reviewers their slice carried
+        a whole call chain that the grouping stage never merged."""
+        (self.repo / ".codegraph").mkdir(exist_ok=True)
+        fake_bin = self.repo / "tools" / "codegraph.cmd"
+        fake_bin.parent.mkdir(parents=True, exist_ok=True)
+        fake_bin.write_text("@echo off\n", encoding="utf-8")
+        old = os.environ.get("MGH_CODEGRAPH_BIN")
+        os.environ["MGH_CODEGRAPH_BIN"] = str(fake_bin)
+        try:
+            self._approve_front()
+            code, _, err = self._launch(["--repo", str(self.repo),
+                                         "--branch", "feature-pay", "--dry-run"])
+            self.assertEqual(code, 0, err)
+            run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+            rc = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(rc, {"no_codegraph": False})
+        finally:
+            if old is None:
+                os.environ.pop("MGH_CODEGRAPH_BIN", None)
+            else:
+                os.environ["MGH_CODEGRAPH_BIN"] = old
+
+    def test_no_codegraph_flag_reaches_the_run_config(self):
+        self._approve_front()
+        code, _, err = self._launch(["--repo", str(self.repo), "--branch", "feature-pay",
+                                     "--dry-run", "--no-codegraph"])
+        self.assertEqual(code, 0, err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        rc = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(rc, {"no_codegraph": True})
+
+    def test_sentinel_refresh_re_judges_roots_before_spawning(self):
+        # Second authorization gate: sdr_context retrieved a root, but the project
+        # config no longer approves it by spawn time (version skew / revoked grant).
+        # The launcher's refresh MUST drop it rather than inherit it verbatim.
+        def fake_context(repo, run_dir, base, branch, dims, read_roots, no_codegraph=False):
+            return {"external_repos": [{"path": str(self.front), "slug": "front"}],
+                    "external_skipped": [], "pending_approval": [],
+                    "baseline_path": str(self.tmp / "baseline.md"),
+                    "baseline_truncated": False,
+                    "sensitive_catalog_source": "default-template",
+                    "sensitive_catalog": {}}
+
+        saved = self.m._run_context
+        self.m._run_context = fake_context
+        try:
+            ok, outcome, _ = self.m._run_one(self.repo, "feature-pay", "master",
+                                             "claude", None, [], True)
+            self.assertTrue(ok, outcome)
+            self.assertEqual(self._sentinel_body()["read_roots"], [],
+                             "an unapproved root leaked into read_roots[]")
+            self._approve_front()
+            ok, outcome, _ = self.m._run_one(self.repo, "feature-pay", "master",
+                                             "claude", None, [], True)
+            self.assertTrue(ok, outcome)
+            self.assertEqual(self._sentinel_body()["read_roots"], [str(self.front)])
+        finally:
+            self.m._run_context = saved
+
     def test_dry_run_multi_branch_serial(self):
         _git(self.repo, "checkout", "-qb", "feature-b2")
         (self.repo / "src" / "B2.java").write_text("class B2 {}\n", encoding="utf-8")

@@ -1101,7 +1101,7 @@ MUST NOT 自行用 `<target>` / `<batch_id>` / `<cluster_id>` 占位符拼路径
 - **THEN** PreToolUse hook 以退出码 2 拒绝,并在 stderr 给出「路径须取自 `list_*` stdout 的 `checkpoint_path`」recipe
 
 #### Scenario: Existing on-disk artifact schema unchanged
-- **WHEN** 本变更生效后审阅 `checkpoints/scout/<safe(batch_id)>.json` 与 `checkpoints/t1/<safe(cluster_id)>.json`
+- **WHEN** 审阅 `checkpoints/scout/<safe(batch_id)>.json` 与 `checkpoints/t1/<safe(cluster_id)>.json`
 - **THEN** 其磁盘**内容** schema 与变更前一致(记录内 `unit` = canonical id、`status`、`out`、`bytes` 等);
   文件名经 `_safe_name` 消毒(含 stem 长度截断);`checkpoint_path`/`done_marker` 仅存在于 `list_*` stdout,不写入产物文件内容
 
@@ -1140,7 +1140,7 @@ LLM subagent 产出的 scout 候选 JSON SHALL 是合法 JSON,每条 candidate S
 - **THEN** 每份显式声明:每条 candidate `category` 必带(S4 合并 NEVER 丢弃)、`evidence_snippet` 为单行且以 `'` 代 `"`、去 `\` 的安全子串
 
 #### Scenario: form_clusters untouched by the robustness fix
-- **WHEN** 本变更生效后审阅 `discover_controls.py::form_clusters`
+- **WHEN** 审阅 `discover_controls.py::form_clusters`
 - **THEN** 其 `category` 取值方式与变更前一致(未改为 `.get`);缺 `category` 的 scout 候选在 `merge_scout._normalize` 即被跳过,不进入 `form_clusters`
 
 ### Requirement: Detect optional codegraph index and gate enrichment (fail-soft)
@@ -1166,7 +1166,7 @@ SHALL 提供 `--no-codegraph` opt-out(语义对齐既有 `--no-scout`),传该 fl
 - **THEN** codegraph 富化与 `init-resolve` stage 均不执行,行为等价于引入 codegraph 前
 
 #### Scenario: Detection introduces no runtime dependency
-- **WHEN** 对本变更新增/改动的任何 `.md` 或既有 `.py` 做 AST/文本扫描
+- **WHEN** 对引入 codegraph 消费的任何 `.md` 或既有 `.py` 做 AST/文本扫描
 - **THEN** 不存在 `import codegraph` 或对 codegraph 的 Python 运行时依赖;codegraph 仅经 MCP/Bash 消费
 
 ### Requirement: Optional codegraph context backend for scout/induct/survey subagents
@@ -1199,7 +1199,7 @@ MUST NOT 改动任一确定性 `.py` 的契约(R5.3);codegraph 调用 SHALL 由 
 - **THEN** 其措辞为「codegraph 在场 SHALL 优先 codegraph_explore,仅 … 回退 Read」,而非「you may use codegraph」
 
 #### Scenario: No deterministic-script contract change
-- **WHEN** 本变更生效后审阅 `discover_controls.py` / `plan_scout.py` / `merge_scout.py` 的 CLI 与 I/O 契约
+- **WHEN** 审阅 `discover_controls.py` / `plan_scout.py` / `merge_scout.py` 的 CLI 与 I/O 契约
 - **THEN** 与变更前逐字一致;codegraph 从不被 `.py` import 或 subprocess 调用
 
 ### Requirement: Resolve unresolved controls via codegraph when an index is present
@@ -1583,7 +1583,7 @@ map-reduce 产物同样适用。
 
 - **WHEN** 全部 scout 批记录 > `--max-aggregate-bytes`
 - **THEN** `plan_aggregate.py --node scout-merge` 按 batch 簇分桶,编排器逐 shard 手派一个 bounded
-  partial-merge subagent,再 rollup;每请求有界(本 change 不将其切到 dispatcher)
+  partial-merge subagent,再 rollup;每请求有界(不经 dispatcher)
 
 #### Scenario: Rollup operates on summaries only
 

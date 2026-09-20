@@ -10,15 +10,23 @@ JSON / stderr=诊断严格分流、退出码 `0` 成功 · `1` 输入错误(文�
 
 ```
 <repo>/.mgh-sdr/
-├── .active                          # 运行域哨兵 {domain:"mgh-sdr", target, out_roots[], read_roots[]?, v:1}
+├── .active                          # 运行域哨兵 {domain:"mgh-sdr", target, out_roots[], read_roots[], v:1}
 └── runs/<ts>/                       # 一次评审 run(ts = YYYYMMDD_HHMMSS 本地时区)
+    ├── context.json                 # sdr_context 产出(base/branch/baseline_path/external_repos[]);起始态唯一真相源
+    ├── run_config.json              # 脚本写出,**唯一载荷** {"no_codegraph": bool};起始态字段 NEVER 写入
     ├── slices/                      # diff_group 物化的只读单元 slice(<unit_id>.slice.md)
     ├── drafts/                      # fan-out 单元 draft JSON(<unit_id>.json)+ .done/.failed 落 markers/
     ├── external/<repo-slug>/        # sdr_context 物化的外部仓结论文件(summary.json + hits.md)
     ├── baseline.md                  # 存量安全设计基线投影(≤32KB 默认,优先级截断)
     ├── markers/                     # <unit_id>.done / <unit_id>.failed(磁盘真相,resume 锚)
-    └── sdr_manifest.json            # render 产出 counts + boundaries + failed_units[]
+    └── sdr_manifest.json            # render 产出 counts + boundaries + failed_units[];整条 run 的终止凭证
 ```
+
+**运行目录里没有起始态文件**:repo / base / branch 由 `context.json`(及 `grouping.json`)承载,
+恢复时从它们重派生;`run_config.json` 只承载 codegraph 信号。`<repo>/.mgh-sdr/.active` 与
+`run_config.json` **都由脚本副作用写出**(`sdr_context.py`),不是编排器手执行的 `printf` 配方——
+命令壳里**不存在**写它们的步骤。恢复入口见
+[`resume-state.md`](resume-state.md)。
 
 ## `diff_group.py` — diff 采集与接口维度分组
 
@@ -48,6 +56,7 @@ py diff_group.py --check <run-dir>
 ```
 py sdr_context.py --repo <abs> --run-dir <abs> [--dimensions <inline-json|@path>]
                   [--baseline-budget-bytes B] [--external-budget-bytes B] [--read-root <abs>]...
+                  [--no-codegraph] [--no-external]
 py sdr_context.py --check <run-dir>
 ```
 
@@ -58,6 +67,7 @@ py sdr_context.py --check <run-dir>
 | 降级 | 声明缺失 / 路径不可达 / 非 git 目录 → `external_repos: []` + `external_skipped: "<原因>"`,流程继续不失败 |
 | stdout | `{repo, run_dir, baseline_path, baseline_bytes, baseline_truncated, sensitive_catalog, sensitive_catalog_source, external_repos[], external_skipped}`;`external_repos[]` 每项 `{path, branch_sync_note, summary_path}`——`path` 供编排器/launcher 写哨兵 `read_roots[]`(**只收实际检索过的根**,NEVER 透传任意路径) |
 | 敏感目录 | 解析优先级:① `<repo>/.mgh-sra/sensitive_catalog.json` 存在 → sibling import `sensitive_catalog` 复用解析 + 闭集校验(`sensitive_catalog_source:"project"`;非法 → 退出码 2 早停);② 不存在 → 加载 `sensitive_catalog.json.example` 默认模板(`sensitive_catalog_source:"default-template"`,与 sra/srr 的显式行为分歧) |
+| 运行级状态 co-write | 本步同时**原子写出**两样(脚本副作用;失败退出码 2,**不静默**):哨兵 `<repo>/.mgh-sdr/.active`(`target` = 本脚本 stdout 的 Windows 原生 `repo`;`read_roots[]` = **实际检索过的根** ∪ 操作者 `--read-root`,最小化、NEVER 透传任意路径)与 `<run-dir>/run_config.json`(`{"no_codegraph": bool}`,取自 `--no-codegraph`;**起始态字段 NEVER 写入**)。二者同源同落点——都由「这一步实际发生了什么」决定 |
 | `--check` | run 目录自洽:baseline.md 存在且 ≤ 预算、external 结论文件齐备、`sensitive_catalog` 对象 shape 合法;违例退出 2 |
 
 ## `render_sdr_report.py` — 汇总渲染
@@ -102,5 +112,11 @@ py render_sdr_report.py --check <run-dir>
   模板 `core/prompts/fragments/fanout/sdr-task.md`;agent `sdr-review-fanout`。
 - 编排器(双壳):step 链 sdr_context → diff_group → fanout_runner → render,每步后跑
   产出者 `--check`,失败(退出码 2)回退重跑。
+- `resume_sdr_state.py`:恢复入口(崩溃 / 压缩 / 新会话)——从运行目录磁盘产物重派生
+  `step` / `next_action` / 纪律子集;`list_sdr_steps.py` 给任一步的确切调用。详见
+  [`resume-state.md`](resume-state.md)。
 - launcher(`mgh_sdr_launch.py`):调 `sdr_context` 完成外部仓先期检索(主进程内),
-  写哨兵(含 `read_roots[]`),spawn 宿主 CLI。
+  在 spawn 宿主编排器**之前**对已确认根再做一次项目配置复核并刷新哨兵(幂等,内容与
+  `sdr_context` 同源,是版本错配的第二道闸门),spawn 宿主 CLI,退出后移除哨兵。
+  每次调用**新建**一个时间戳运行目录(无 `--resume` / `--run-dir`),故「重跑 launcher
+  = 续跑」**不成立**;续跑须带着**同一个**运行目录经 `resume_sdr_state.py` 进行。

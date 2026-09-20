@@ -40,21 +40,38 @@ is the DELIBERATE sdr-vs-sra/srr divergence (code-diff review falls back to the 
 default template instead of narrowing to 6 facets); the resolved object + source
 (project|default-template) ride stdout verbatim into subagent task messages.
 
+(d) Run-level state co-write — this step is the ONE place both entries (launcher and
+host shell) pass through, so it owns the two run-level state files, as a script side
+effect rather than an orchestrator-executed `printf` recipe: the runtime-guard sentinel
+`<repo>/.mgh-sdr/.active` (`target` = the Windows-native resolved repo, `read_roots[]` =
+the ACTUALLY SEARCHED external roots — minimization, never an arbitrary path) and
+`<run-dir>/run_config.json` (`{"no_codegraph": <bool>}`, the codegraph signal carrier
+consumed by `fanout_runner._codegraph_signal()`; start state is deliberately NOT written
+there). Both are atomic; a write failure is fail-loud (exit 2), never silent. The
+codegraph value is PROBED here (`sdr_tier.codegraph_available`, the same predicate
+`diff_group.py` groups with) rather than taken from the caller's flag alone: this step
+is the one both entries pass through, so probing here is what keeps the reviewer's task
+message and the grouping that produced its slice describing the same run.
+
 Exit codes (R5.3b): 0 ok · 1 input error (--repo/--run-dir missing) · 2 misuse (argparse)
-or closed-set violation (project catalog invalid / --check violations).
+or closed-set violation (project catalog invalid / --check violations) or an unwritable
+run-level state file.
 --check <run-dir>: baseline.md exists within budget, external conclusion files complete,
 sensitive_catalog object shape valid, pending_approval[] shape + skip-consistency (R5.9).
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/json/re/sys/pathlib).
+Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/re/sys/pathlib).
 """
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from sdr_tier import codegraph_available, codegraph_probe_reason  # noqa: E402
 
 DEFAULT_BASELINE_BUDGET = 32 * 1024   # 32KB
 DEFAULT_EXTERNAL_BUDGET = 64 * 1024   # 64KB per external repo
@@ -92,6 +109,44 @@ _BASELINE_SECTIONS_RX = re.compile(
 
 def _eprint(*a):
     print(*a, file=sys.stderr)
+
+
+def _write_json_atomic(path: Path, body: dict) -> None:
+    """tempfile-in-same-dir + os.replace: a mid-write kill never leaves a truncated
+    file behind (the guard and the dispatcher both read these)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _write_run_state(repo: Path, run_dir: Path, external: list, no_codegraph: bool) -> tuple:
+    """Co-write the two run-level state files as ONE script side effect.
+
+    Both are decided by what THIS step actually did, so they share a single write
+    site and a single failure semantic (fail-loud, never silent):
+
+      * `<repo>/.mgh-sdr/.active` — the runtime-guard sentinel. `target` is the
+        Windows-native resolved repo (NEVER a shell MSYS form); `read_roots[]` is the
+        ACTUALLY SEARCHED external roots (the ones that exist as directories) — the
+        minimization rule, no arbitrary path is ever propagated.
+      * `<run-dir>/run_config.json` — the codegraph signal carrier consumed by
+        `fanout_runner._codegraph_signal()`. Its ONLY payload is `no_codegraph`;
+        start state (repo/base/branch) is deliberately NOT written here (it is
+        re-derived from context.json/grouping.json by `resume_sdr_state.py`).
+
+    Returns (sentinel_path, run_config_path, read_roots_count)."""
+    roots = []
+    for e in external:
+        p = e.get("path") if isinstance(e, dict) else None
+        if p and Path(p).is_dir() and str(Path(p)) not in roots:
+            roots.append(str(Path(p)))
+    sentinel = repo / ".mgh-sdr" / ".active"
+    _write_json_atomic(sentinel, {"domain": "mgh-sdr", "target": str(repo),
+                                  "out_roots": [], "read_roots": roots, "v": 1})
+    rc = run_dir / "run_config.json"
+    _write_json_atomic(rc, {"no_codegraph": bool(no_codegraph)})
+    return sentinel, rc, len(roots)
 
 
 def _safe_slug(name: str) -> str:
@@ -565,6 +620,29 @@ def _run(args) -> dict:
     }
     (run_dir / "context.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    # The codegraph signal is DERIVED, never assumed: this step is the one both entries
+    # (launcher and host shell) pass through, so probing here is what makes the signal
+    # identical on both — and what keeps it equal to the fact `diff_group.py` will act
+    # on. A signal that merely echoed the caller's flag would claim "the slice carries
+    # the whole chain" on an unindexed repo, where no chain was ever merged.
+    codegraph_on = codegraph_available(repo)
+    no_codegraph = bool(args.no_codegraph) or not codegraph_on
+    # Run-level state co-write (guard sentinel + codegraph signal). Fail-loud: a
+    # silent failure here would leave the guard asleep for the whole run, which is
+    # exactly the failure shape this step exists to prevent.
+    try:
+        sentinel, rc_path, roots_n = _write_run_state(repo, run_dir, external,
+                                                      no_codegraph)
+    except OSError as e:
+        _eprint(f"error: cannot write run-level state (sentinel / run_config.json): {e}\n"
+                f"recipe: ensure {repo / '.mgh-sdr'} and {run_dir} are writable, then "
+                f"re-run this command (it is deterministic and idempotent).")
+        sys.exit(2)
+    _eprint(f"[sdr_context] guard sentinel written: {sentinel} (read_roots={roots_n})")
+    _eprint(f"[sdr_context] codegraph signal written: {rc_path} "
+            f"(no_codegraph={no_codegraph}; "
+            f"{'forced by --no-codegraph' if args.no_codegraph else 'probe'}: "
+            f"{codegraph_probe_reason(repo) or 'available'})")
     _eprint(f"[sdr_context] baseline={result['baseline_bytes']}B truncated={truncated}; "
             f"external={len(external)} repo(s) skipped={skipped or 'none'}; "
             f"pending_approval={pending_approval or 'none'}; "
@@ -671,6 +749,17 @@ def main():
     ap.add_argument("--read-root", action="append", metavar="<abs>",
                     help="extra confirmed read-only root for the sentinel read_roots[] "
                          "(repeatable; only explicitly confirmed roots)")
+    ap.add_argument("--no-codegraph", action="store_true",
+                    help="mark the codegraph SIGNAL off in <run-dir>/run_config.json "
+                         "(the dispatcher derives the per-unit `{{codegraph}}` placeholder "
+                         "from it). The signal is normally DERIVED, not declared: the "
+                         "run-config value is off whenever the repo is not indexed "
+                         "(`<repo>/.codegraph/` absent) or no `codegraph` binary resolves "
+                         "— the same predicate `diff_group.py` groups with. This flag "
+                         "affects the SIGNAL ONLY: `diff_group.py` always probes for "
+                         "itself, so passing it makes reviewers judge conservatively "
+                         "('the unit may be split') without changing how units were "
+                         "actually grouped")
     ap.add_argument("--no-external", action="store_true",
                     help="skip external-repo retrieval entirely")
     ap.add_argument("--check", metavar="<run-dir>",

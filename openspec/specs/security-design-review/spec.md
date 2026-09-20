@@ -333,23 +333,45 @@ manifest `failed_units[]` 计入,不阻断渲染),按 `{dimension, route, file}`
   名:方法名,如 `OrderController.submit → OrderServiceImpl.submit`,真仓试用后由「包段
   首字母 + 类名」形态收敛,完整包路径可由 file 列还原,`·` 同类延续、`⤷` 分支(`branch_of` 宿主)、`⇢` mapper XML 终端、
   `†` 未变更节点;`chain[]` 为空(standalone/codegraph off)= 该单元方法定义短形;入口
-  = 方法定义时链写到分析可达处);前端两列 = 按 route join context.json
-  `external_repos[].route_hits[]`(声明 ∧ 命中 >0 = `是`+`N 处`;声明 ∧ 0 命中 = `否`+`—`;
-  无声明/不可达 = `未知`+`—`;多路由单元仅按主路由(分号串第一段)join,次路由命中不抬升
-  主路由状态);维度列 = `否` 或 `是 [P-NN]`
+  = 方法定义时链写到分析可达处);**入口列与调用链列的每个「类名.方法名」短形 SHALL 渲染为
+  指向仓内源文件的 markdown 链接**(见本需求「源文件链接渲染」段);前端两列 = 按 route join
+  context.json `external_repos[].route_hits[]`(声明 ∧ 命中 >0 = `是`+`N 处`;声明 ∧ 0 命中 =
+  `否`+`—`;无声明/不可达 = `未知`+`—`;多路由单元仅按主路由(分号串第一段)join,次路由命中
+  不抬升主路由状态);维度列 = `否` 或 `是 [P-NN]`
   (该单元该维度的合并 findings 编号列表,**纯文本编号**,SHALL NOT 产出任何 md 内部锚点/
-  HTML anchor——目标编辑器(obsidian/Zed)不支持内嵌锚点跳转,编号即可定位);
+  HTML anchor——目标编辑器(obsidian/Zed)不支持报告**内部**锚点跳转,编号即可定位;本约束
+  SHALL NOT 及于指向仓内源文件的链接,后者是本需求的交付内容);
 - **章节二「问题详述」**:合并去重后的每条 finding 一小节,统一 `P-NN` 编号(全局递增),
   标题形态 `### P-01 · <维度中文标签> · <route 或独立方法> · <severity 中文>`;正文含位置
   (`file:line`——line 取 draft 新增 `line` 字段(问题锚定行号,数值);draft 缺 `line` 时
-  降级为 `file`(不硬失败,旧 draft 兼容))、风险、建议、control_ref;排序 severity 升序
+  降级为 `file`(不硬失败,旧 draft 兼容);位置文本 SHALL 渲染为指向该源文件的 markdown
+  链接(见「源文件链接渲染」段))、风险、建议、control_ref;排序 severity 升序
   (高→提示)、同 severity 按 P-NN;
 - **章节三「分支调用链图」**:仅含带真实分支(`chain[]` 存在 **非 external** 节点携带
   `branch_of`——即 java 调用扇出;mapper 终端节点按 D3 编码也带 `branch_of`,但不构成真实
   分支)的单元,每单元一张 mermaid `flowchart LR`(入口 → 逐节点 → mapper 终端虚线边);
-  线性链单元(含仅 ⇢ 终端带 `branch_of` 的直连 dao 短链)SHALL NOT 入本节;
+  线性链单元(含仅 ⇢ 终端带 `branch_of` 的直连 dao 短链)SHALL NOT 入本节;mermaid 节点
+  标签 SHALL NOT 嵌入链接(mermaid 锚点语法跨编辑器兼容性差,跳转由章节一表格承担);
 - **「无问题单元」清单**(保留,供 merge 前放行参考)+ **诚实边界节**(≥7 条,含排除集披
   露,保留现行)。
+
+**源文件链接渲染**(本需求新增的渲染规则,报告写在目标仓根目录 ⇒ 链接目标 = 源文件相对
+仓根的相对路径):
+
+- 链接形态 `[显示文本](<相对路径>#L<line>)`;`line` 缺失或为 `null` 时 SHALL 退化为
+  `[显示文本](<相对路径>)`(不带锚点;不支持锚点的编辑器对 `#L<line>` 自动退化为只打开
+  文件,故有 line 就带上)。
+- 路径解析:chain 节点 `file` 与 finding `file` 为相对路径(相对 `--repo`)时直接作链接
+  目标(输出统一 `/` 分隔);为绝对路径时,resolve 后在 `--repo` 子树内 → 转为相对路径,
+  在子树外 → **不产链接**(降级纯文本,报告里没有指向仓外的死链);字段缺失/空 → 纯文本。
+  路径解析 SHALL NOT 依赖文件真实存在(diff 分支的源文件可能未检出到工作树;链接坏与否由
+  编辑器呈现,渲染器只做词法判定,NEVER 因此 stat 目标文件)。
+- 显示文本 = 现行短形(`fqn_short` 等,含 `†` 前缀)逐字不变;`·`/`⤷`/`⇢`/`→` 分隔符不
+  入链接;mapper XML 终端(`change=external`)与普通节点同等对待(有 `file` 即链)。
+- 显示文本含 `]` 等会破坏 md 链接语法的字符时,SHALL 对其做最小转义(`\]`/`\[`)或退化为
+  纯文本,NEVER 产出语法破损的链接单元格。
+- `sdr_manifest.json` `rows[]` 的 `entry`/`chain` 字段 SHALL 保持**纯文本短形**(不含链接
+  markdown 语法)——manifest 是机器消费面;表格链接是同一数据的渲染投影。
 
 同名报告文件已存在 SHALL 原子覆盖(时间戳到秒内重跑)。`sdr_manifest.json` SHALL 新增
 `rows[]`(简报表逐行结构化投影:`{unit_id, entry, chain, frontend_is, frontend_count,
@@ -382,8 +404,30 @@ schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)�
 
 - **WHEN** 渲染任意带 findings 的报告
 - **THEN** 简报表格维度列与章节二标题均为纯文本 `P-NN` 编号;报告全文 SHALL NOT 出现
-  `<a id=`、`{#...}`、`[text](#...)` 形态(md 内部锚点);`P-NN` 编号全局唯一且章节二可按
-  编号定位
+  `<a id=`、`{#...}`、`[text](#...)` 形态(md **内部**锚点,即 `(` 后紧跟 `#` 的跳转);
+  指向仓内源文件的 `[text](relative/path#L42)` 形态链接不在此禁列;`P-NN` 编号全局唯一且
+  章节二可按编号定位
+
+#### Scenario: 链节点渲染为源文件链接
+
+- **WHEN** 某单元 `chain[]` 含节点 `{fqn_short: "OrderController.submit", file:
+  "src/main/java/com/x/controller/OrderController.java", line: 42}` 与节点 `{fqn_short:
+  "OrderMapper.insertOrder", file: "src/main/java/com/x/mapper/OrderMapper.java", line: null}`
+- **THEN** 调用链列依次渲染 `[OrderController.submit](src/main/java/com/x/controller/OrderController.java#L42)`
+  与 `[OrderMapper.insertOrder](src/main/java/com/x/mapper/OrderMapper.java)`(无锚点退化);
+  分隔符不入链接,链的阅读顺序与短形文本不变
+
+#### Scenario: 仓外与异常路径降级纯文本
+
+- **WHEN** 某 finding 的 `file` 为仓外绝对路径,另一 chain 节点 `file` 为空串
+- **THEN** 前者位置、后者链节点均保持现行纯文本形态,报告不含仓外路径链接;渲染退出码 0,
+  `--check` 不报不一致
+
+#### Scenario: manifest rows 保持纯文本
+
+- **WHEN** 渲染完成产 manifest,表格调用链列含 markdown 链接
+- **THEN** `rows[]` 对应行 `chain`/`entry` 字段为纯文本短形(不含 `[`/`]( ` 链接语法),
+  与去链接化前的表格单元格文本一致
 
 #### Scenario: 报告文件名与内容可追溯
 
@@ -394,7 +438,8 @@ schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)�
 #### Scenario: draft 缺 line 字段降级
 
 - **WHEN** 某 `.done` draft 的 finding 无 `line` 字段(旧格式 draft)
-- **THEN** 章节二该条位置写 `file`(无行号),渲染不失败,`--check` 不视为不一致
+- **THEN** 章节二该条位置写 `file`(无行号),有链接时渲染为不带 `#L` 锚点的文件链接,
+  渲染不失败,`--check` 不视为不一致
 
 #### Scenario: 部分单元 failed 不阻断渲染
 
@@ -414,7 +459,8 @@ schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)�
 
 - **WHEN** 渲染完成产 manifest
 - **THEN** `rows[]` 长度 = 章节一表格数据行数,逐行 `unit_id`/`entry`/`chain`/`frontend_is`/
-  `frontend_count` 与表格单元格一致;`issue_refs[]` 展平该行全部问题编号
+  `frontend_count` 与表格单元格一致(链接按「去链接化后的短形文本」比对);`issue_refs[]`
+  展平该行全部问题编号
 
 #### Scenario: 报告披露排除集与分组统计
 
@@ -543,19 +589,201 @@ stderr);每次实际变更打印 stderr(变更前后条目);stdout 结构化 JSO
 
 `/mgh-sdr` SHALL 为第 6 个运行域:env `MGH_SDR_ACTIVE=1` 或磁盘哨兵 `<repo>/.mgh-sdr/.active`
 (向上 walk 发现,承既有激活契约)激活守卫;哨兵 `read_roots[]` 声明的外部只读根按 `runtime-hook-enforcement`
-的 read_roots 扩展要求生效。流程 SHALL 幂等可恢复:`diff_group.py --materialize` 对已存在 `.done`
-marker 的单元跳过物化重复工作;`fanout_runner.py --resume` 按磁盘 marker 重派 pending(既有语义);
-`render_sdr_report.py` 对 draft 齐备的 run 目录可重复执行(重跑覆盖同名报告)。编排器每步完成后
-SHALL 跑对应产出者 `--check`,失败(退出码 2)回退重跑,不带着破损产物继续(承 R5.9)。
+的 read_roots 扩展要求生效。哨兵的写入 SHALL 为**确定性脚本副作用**(`sdr_context.py` 完成基线投影与
+外部仓检索后 co-write),SHALL NOT 依赖编排器手执行的 `Bash printf` 配方。
+
+流程 SHALL 幂等可恢复,分**产物层**与**入口层**两件事:
+
+- **产物层**(既有语义不变):`diff_group.py --materialize` 对已存在 `.done` marker 的单元跳过物化重复工作;
+  `fanout_runner.py --resume` 按磁盘 marker 重派 pending;`render_sdr_report.py` 对 draft 齐备的 run 目录
+  可重复执行(重跑覆盖同名报告)。
+- **入口层**(既有语义):`resume_sdr_state.py`(见 `resume-step-discipline`)SHALL 从 `<run-dir>/`
+  磁盘产物重派生 `step` / `next_action` / `discipline_reminders[]`,使压缩 / 崩溃 / 新会话三态坍缩为同一条
+  恢复路径(**读磁盘 → 继续**)。恢复 SHALL 复用**既有 run 目录**(同一 `<run-dir>`),SHALL NOT 另起一个新的
+  时间戳 run 目录——新建目录 = 已完成单元的 marker 不在新目录里 = 全部重做(零复用即全损)。
+
+编排器每步完成后 SHALL 跑对应产出者 `--check`,失败(退出码 2)回退重跑,不带着破损产物继续(承 R5.9)。
+
+**恢复指引 MUST 域内可执行**:命令壳给出的恢复、排障与"磁盘状态是否正常"判定指引,SHALL 只引用
+在 sdr 运行目录下可实际执行的脚本——即接受 `--run-dir <sdr run dir>`(或等价的 `<run-dir>` 位置参数)
+且不依赖其它运行域目录布局的产出者(如 `diff_group.py --check <run-dir>`)。命令壳 SHALL NOT 让
+编排器调用以 `<target>/.mgh-init` 为默认状态根、在 sdr 运行目录下必然以"目录不存在"失败的脚本
+(如 `resume_state.py`,其运行目录解析为 `--init-dir > <target>/<run-root=默认 .mgh-init>`);此类
+跨域引用 SHALL 在 sdr 场景视为坏指引,因为它百分之百失败并使编排器在真实拥塞形态下失去判据。
+该约束 SHALL NOT 被读成"指引只能有一个":`resume_sdr_state.py`(入口层状态重派生,域内可执行)与
+`diff_group.py --check <run-dir>`(产物层完整性)是**两件不同的事**,SHALL 并存——前者回答"我做到哪一步、
+下一步跑什么",后者回答"分组产物有没有坏"。二者语义不同,SHALL NOT 互相替代:产物完好而以产物检查
+代替状态查询会丢失"下一步";状态可派生而产物已坏时,状态查询本身不校验产物。
+
+**已披露的入口层缺口(既有披露,本 change 不修)**:`mgh_sdr_launch.py` 每次调用按当前时刻**新建**
+`<repo>/.mgh-sdr/runs/<ts>-<branch>/`,且无 `--resume` / `--run-dir` 参数;故「经 launcher 同样参数重跑即续跑」
+**目前不成立**(会落到新目录、从头再跑)。续跑入口为:由调用方已知 run 目录时,经命令壳的显式
+`--run-dir` + `resume_sdr_state.py --run-dir <abs>` 继续。launcher 侧的 run 目录复用 SHALL 由后续 change 补齐。
 
 #### Scenario: 崩溃后 resume 零全损推进
 
-- **WHEN** fan-out 中途宿主中断(部分单元 `.done`、部分 pending)后重新运行 launcher 同参数
-- **THEN** `diff_group.py` 复用既有 run 目录(按 resume 语义),dispatcher 仅重派未 `.done` 单元,
-  已完成单元零重复消耗;最终报告覆盖全部单元
+- **WHEN** fan-out 中途宿主中断(部分单元 `.done`、部分 pending),调用方带着**同一个** run 目录路径回来
+- **THEN** `resume_sdr_state.py --run-dir <abs>` 报 `step="fanout"` 与确切重派命令;`diff_group.py --materialize`
+  复用既有 run 目录(按 resume 语义),dispatcher 仅重派未 `.done` 单元,已完成单元零重复消耗;最终报告覆盖全部单元
+
+#### Scenario: launcher 重跑会新建 run 目录(缺口如实成立)
+
+- **WHEN** 对同一 branch 再次运行 `mgh_sdr_launch.py`(同参数)
+- **THEN** 产生一个新的 `<repo>/.mgh-sdr/runs/<ts>-<branch>/` 目录,上一次 run 的 marker 不被复用;
+  该行为 SHALL 在命令壳的恢复指引与 `/mgh-sdr` 的诚实边界中披露(不得宣称「重跑 launcher 即续跑」)
 
 #### Scenario: 完成/干净停止后哨兵移除
 
 - **WHEN** 流程跑完(报告渲染完成)或用户干净停止(含 `--dry-run` 早退之外的正常退出路径)
 - **THEN** `<repo>/.mgh-sdr/.active` 被移除;残留哨兵的 run(宿主被硬杀)由下次 launcher 启动时
   检测并复用/清理,不静默锁死日常开发
+
+#### Scenario: 壳内恢复指引在真实 sdr 运行目录可执行
+
+- **WHEN** 审阅命令壳的恢复/排障段并按其中逐字给出的命令实跑(工作目录为任意 sdr 运行目录)
+- **THEN** 每条被引用的检查命令以退出码 0(状态正常)或 2(状态异常,fail-loud)返回,NEVER 因
+  "状态根目录不存在"以退出码 1 失败;命令中出现的脚本参数与 sdr 运行目录的实际布局一致
+  (`--check <run-dir>` 形态在册)
+
+#### Scenario: 拥塞形态的产物自检是域内命令
+
+- **WHEN** 编排器遇到 `stalled:true` 需要先判定"磁盘上分组产物有没有坏"再同参重派
+- **THEN** 它跑 `diff_group.py --check <run-dir>`(域内可执行,退出码 0/2),NEVER 跑在 sdr 运行目录下
+  必然以退出码 1 失败的跨域脚本;该命令的语义边界(校验产物完整性、非运行进度自洽性)SHALL 在该指引
+  处就近披露,使编排器不会把它读成完整的恢复面
+
+### Requirement: sdr 运行目录无起始态文件;codegraph 信号由脚本确定性写出
+
+`/mgh-sdr` 的运行目录 SHALL NOT 携带**起始态**文件:`run_config.json` 内的起始态字段
+(repo / base / branch / 维度相关开关)SHALL NOT 由任何一方写入,亦 SHALL NOT 被任何一方读取。
+起始态 SHALL 从既有磁盘产物重派生:repo / base / branch 由 `sdr_context.py` 产出的
+`<run-dir>/context.json` 承载(`diff_group.py` 亦将其写进 `grouping.json`);run 目录布局本身
+(`<repo>/.mgh-sdr/runs/<…>`)给出 repo。两处记录冲突时以 `context.json` 为准并在 `notes[]` 披露。
+
+`<run-dir>/run_config.json` 作为**codegraph 信号载体**保留,但其唯一载荷 SHALL 为
+`{"no_codegraph": <bool>}`(dispatcher 的 `{{codegraph}}` 占位符来源,见 `fanout-dispatch`),
+且 SHALL 由**确定性脚本副作用**写出——`sdr_context.py` 完成基线投影与外部仓检索后 co-write
+(与其哨兵写入同一副作用位置,取 `--no-codegraph` flag)。命令壳 SHALL NOT 再手执行 `Bash printf`
+配方写该文件;launcher SHALL 经 `_run_context` 透传 `--no-codegraph`,使两条入口写出同源内容。
+缺失 / 不可解析一律落 `off`(既有 legacy 语义不变)。
+
+唯一在磁盘上**无**起始态可派生的步是 `not-started`(context.json 尚未写出),而该步也是**零已完成工作**的
+步:重新给参(`--base` / `--branch`)重跑即完整恢复,不构成恢复面缺口——这一条 SHALL 由
+`resume-step-discipline` 的「起始态不可重派生时的显式退化披露」断言。
+
+#### Scenario: 运行目录里没有起始态字段
+
+- **WHEN** 一次完整的 `/mgh-sdr` run 结束,审阅 `<run-dir>/run_config.json`
+- **THEN** 该文件(若存在)只含 `no_codegraph` 一个字段;无 repo / base / branch / 维度字段;
+  repo/base/branch 可从 `context.json` 与 `grouping.json` 读出
+
+#### Scenario: 壳中不再有手执行的写入配方
+
+- **WHEN** 审阅 `mgh-sdr.md` 双壳的 Orchestration flow
+- **THEN** 两壳都不含写 `run_config.json` 或哨兵的 `printf` 配方(两者都改由 `sdr_context.py` 写出);
+  两壳关于该点的措辞一致
+
+#### Scenario: 两条入口写出同源的 codegraph 信号
+
+- **WHEN** 分别经 launcher 与经宿主会话的 `sdr_context.py` 启动同一 branch 的 run
+- **THEN** 两条路径产生的 `<run-dir>/run_config.json` 内容同构(同一 `--no-codegraph` 取值 →
+  同一载荷),均由脚本写出而非编排器手执行
+
+### Requirement: sdr 双壳恢复指引接上状态查询
+
+`releases/claude-code/commands/mgh-sdr.md` 与 `releases/opencode/command/mgh-sdr.md` SHALL 在恢复/中断段
+指引编排器**首调** `resume_sdr_state.py --run-dir <abs>`,从 stdout 读 `step` / `next_action` /
+`discipline_reminders[]`,再按该步纪律执行(闸门 → 路径配方 → 硬边界)。壳中指向 init 域脚本
+(`resume_state.py`)的调用 SHALL 被移除——该脚本只认 init 运行目录,在 sdr 下必然失败(不可执行指引)。
+
+该段 SHALL 陈述续跑的前置条件(**带着同一个 run 目录路径**),并如实披露 launcher 重跑会新建 run 目录。
+壳 SHALL 声明恢复路径的抗压缩性:进度与纪律纯从磁盘重派生,与对话记忆是否保留无关。
+
+#### Scenario: 壳的恢复指引可执行
+
+- **WHEN** 编排器在 sdr 中断后按壳的恢复段执行第一步
+- **THEN** 该步给出的是 `resume_sdr_state.py --run-dir <abs>`(sdr 域脚本)而非 init 域的 `resume_state.py`;
+  按其 stdout 的 `next_action` 继续即接上流水线
+
+#### Scenario: 双壳恢复段文案一致
+
+- **WHEN** 比对 claude 壳与 opencode 壳的恢复段
+- **THEN** 两者对同一恢复路径的措辞同构(宿主差异只留在工具名/路径前缀层)
+
+### Requirement: 切片物化的字节闸门与超预算三级处置
+
+`diff_group.py` 的字节预算 SHALL 以**物化出去的切片文件的实际字节数**为判据,而非打包期的估算量。测量
+SHALL 复用与物化同一个渲染逻辑(单一真相源),**NEVER** 并行维护第二套尺寸估算;测量值 SHALL 为渲染文本
+的 utf-8 编码字节数。打包期的成员大小(standalone 目录簇归并、interface 成分贪心打包)SHALL 一律改用该
+实测值判定,既有「路由序排序确定性」与「**不切文件中部**」两条规则不变。
+
+实测超预算时,处置 SHALL 按以下固定顺序进行,前者可解则不进下一级:
+
+1. **无损重切**:单元含多个文件且实测超预算 → 按既有贪心打包规则再切为续单元(`unit_id` 沿用既有
+   `-partN` 形态命名,`chain[]` 随每一份续单元携带,与既有规则一致),每份续单元实测 ≤ 其适用上限。
+   本级的 `SHALL NOT` 丢失任何 hunk、`SHALL NOT` 截断任何内容——单元数增加是唯一代价。
+2. **上下文瘦身**:仅当单元**已不可再切**(单文件原子残渣)且仍超预算时,SHALL 对该单元的描述性上下文块
+   按确定性上限截断(字符串与列表两种形态均须处理)。**证据锚点 MUST NOT 被截断**——diff 正文、文件
+   清单、hunk 定位头(`@@ <path> @@ new-file lines N+C`)、以及被下游校验器检查的字段全部保留。截断
+   MUST 在切片文件内以可见标记呈现(形如 `… (截断:K 行 / 原 N 字节)`),使子代理知晓其上下文不完整;
+   被截字段与原始字节数 MUST 记入产出。
+3. **fail-loud 零派发**:瘦身后仍超预算 → 退出码 2,stderr MUST 报出该单元的 `unit_id`、适用上限、实测
+   字节数与最大贡献文件。判定 SHALL 发生在写出任何切片文件与待办清单**之前**(零副作用),使
+   `fanout_runner --tier sdr` 对枚举脚本退出码 2 的原样透传即等价于零派发。
+
+三级处置 SHALL NOT 引入任何新增 CLI flag:`--max-standalone-bytes`(standalone 簇归并上限)与
+`--max-interface-bytes`(interface 单元上限)仍是唯二的预算调节杆,两级内部瘦身上限为脚本内模块常量。
+适用上限的选取 SHALL 为:standalone 单元用前者,interface 单元(含其续单元)用后者。
+
+`grouping.json` SHALL 新增顶层预算记录(本次运行实际生效的两个上限)与每单元瘦身痕迹
+(`slimmed{字段名: 原始字节数}`;未截断为空对象)。`--check <run-dir>` SHALL 在相应字段存在时断言
+`pending[]` 每项的 `unit_bytes` ≤ 其适用上限、且 `slimmed` 结构合法(值为整数映射);字段缺失(旧
+`grouping.json`)SHALL 跳过该断言,不得因此判违规——向后兼容与既有 `excluded`/`codegraph_stats`/
+`chain[]` 的增量字段同例。人读报告的诚实边界 SHALL 在本次运行发生过瘦身时披露被瘦身单元及其降低的
+输入完整度(重切本身不降低完整度,不属披露面)。
+
+预算内路径 SHALL 逐字节不变:切片文本、`pending[]` 既有字段、退出码与既有 stderr 行均与引入本要求前
+一致。
+
+#### Scenario: 多文件单元实测超预算时无损重切
+
+- **WHEN** 一个含多个文件的 standalone 单元(或一个 interface 单元的多个成分)渲染后实测字节 > 其适用上限,
+  而其中任一文件单独渲染 ≤ 上限
+- **THEN** 该单元按既有贪心规则切成多个续单元,每份续单元实测 ≤ 上限;所有 hunk 与上下文一份不少地分布
+  在续单元中(并集与切分前等价),不触发瘦身、不 fail-loud
+
+#### Scenario: 单文件原子残渣经瘦身仍可复核
+
+- **WHEN** 一个单元只剩单文件且渲染实测 > 上限,但其超出量可由截断描述性上下文块(注解上下文 / 符号表)
+  消除
+- **THEN** 该单元被物化,切片内的上下文块带可见截断标记、diff 正文与文件清单与 hunk 定位头完整保留;
+  `grouping.json` 该项 `slimmed` 记录被截字段与原始字节数;运行不 fail-loud
+
+#### Scenario: 单文件原子残渣瘦身仍超预算则零副作用终止
+
+- **WHEN** 单个文件的 diff 正文本身即超过上限(截断上下文块无法把实测降到上限内)
+- **THEN** `diff_group.py` 退出码 2,stderr 报出该单元 `unit_id`、适用上限、实测字节数与最大贡献文件;
+  该次运行不写出任何切片文件、不写出可被派发器消费的待办清单;`fanout_runner --tier sdr` 透传退出码 2,
+  零子代理被派出
+
+#### Scenario: 闸门判据与切片产物同源
+
+- **WHEN** 任一单元被物化,`pending[]` 项携带 `unit_bytes`
+- **THEN** 该值等于其切片文件的实际字节数,且 ≤ 该单元的适用上限(瘦身单元亦同——判据与产物出自同一渲染)
+
+#### Scenario: 预算内路径逐字节不变
+
+- **WHEN** 一次运行的每个单元实测均 ≤ 适用上限
+- **THEN** 每份切片文本与 `pending[]` 既有字段与引入本要求前逐字节一致;退出码与既有 stderr 行不变;
+  新增的预算记录与空 `slimmed` 是仅有的增量
+
+#### Scenario: 旧 grouping.json 仍是 --check 合规产物
+
+- **WHEN** `--check <run-dir>` 面对一份不含预算记录与 `slimmed` 的旧 `grouping.json`
+- **THEN** 预算断言被跳过,退出码 0(旧产物逐字兼容);含新字段时断言生效,超上限或结构非法则退出码 2
+
+#### Scenario: 瘦身痕迹进入报告边界声明
+
+- **WHEN** 一次运行中有单元被瘦身后派发
+- **THEN** 渲染报告的诚实边界列出被瘦身单元及其"上下文经截断、输入完整度低于常规单元"的说明;未发生
+  瘦身时该条目不出现

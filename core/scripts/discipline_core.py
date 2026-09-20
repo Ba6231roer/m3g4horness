@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-discipline_core — shared static per-step discipline table for /mgh-init.
+discipline_core — shared static per-step discipline table, PER RUN DOMAIN.
 
 Single source of truth for the "how to execute THIS step" reminders that the
 orchestrator re-derives from disk after --resume / compaction: gate shapes
@@ -10,18 +10,30 @@ orchestrator re-derives from disk after --resume / compaction: gate shapes
 boundaries. Consumed by `resume_state.py` (stdout `discipline_reminders[]`,
 current step) and `list_steps.py --step` (stdout `discipline`, same key) — the
 two scripts MUST stay byte-identical for the same step (D5 test asserts it).
+The sdr domain uses the same contract via `resume_sdr_state.py` /
+`list_sdr_steps.py`.
+
+One table per domain, selected by `get_discipline(step, domain=...)`:
+
+  * `init` — the /mgh-init step graph (default; existing callers unchanged).
+  * `sdr`  — the /mgh-sdr step graph (`not-started|group|fanout|render|done`).
+
+Tables live in ONE module (not one file per domain) so "is sdr's defense line
+still adjacent to init's?" stays answerable at a glance, and so a rename on
+either side cannot silently collide across a shared namespace. Unknown/
+missing domain → EMPTY, so a newer caller against an older module degrades to
+"no reminders" instead of crashing.
 
 Content mirrors the load-bearing defenses in the per-step fragments
-`core/prompts/fragments/init-stage/*.md` (scout-incomplete-gate / T1→T2
-shape-gate / fan-out path verbatim-pass / `.failed` terminal ack / NEVER
-subset) — the table is a self-contained resume reminder; the fragment is the
-full reference. Steps with
-no discipline (`done`, `not-started`) and unknown steps yield the EMPTY
+(`core/prompts/fragments/init-stage/*.md`) and, for sdr, the dual command
+shells' Orchestration flow (same step → same wording) — the table is a
+self-contained resume reminder; fragment/shell is the full reference. Steps
+with no discipline (`done`, `not-started`) and unknown steps yield the EMPTY
 structure (field恒存在, shape stable).
 
 Pure data + one pure function: NO argparse, NO IO, no side effects. Sibling
-imported by resume_state/list_steps (R5.3a self-locate retained for uniform
-install copies; zero runtime deps, R2).
+imported by resume_state/list_steps/resume_sdr_state/list_sdr_steps (R5.3a
+self-locate retained for uniform install copies; zero runtime deps, R2).
 """
 from __future__ import annotations
 import sys
@@ -57,7 +69,9 @@ _RETRY_FAILED_RECIPE = (
 
 _EMPTY = {"gates": [], "path_recipes": [], "nevers": []}
 
-# step key ∈ resume_state.py enum: not-started|discover|survey|scout|resolve|
+# =====================================================================
+# init domain — step key ∈ resume_state.py enum:
+# not-started|discover|survey|scout|resolve|
 # t1|t2|t3|assemble|t4|merge|done. Each entry carries ONLY the subset needed to
 # execute that step after a resume — the fragment remains the full reference.
 _DISCIPLINE = {
@@ -238,10 +252,138 @@ _DISCIPLINE = {
 }
 
 
-def get_discipline(step: str) -> dict:
+# ---------------------------------------------------------------------
+# sdr domain — step key ∈ resume_sdr_state.py enum:
+# not-started|group|fanout|render|done (step name = the CURRENT TODO step).
+#
+# Wording deliberately mirrors the dual command shells' Orchestration flow
+# (`releases/{claude-code/commands,opencode/command}/mgh-sdr.md`): the two
+# MUST describe the same step the same way, so a post-compaction orchestrator
+# gets the same defense line whether it re-reads the shell or the disk state.
+# ---------------------------------------------------------------------
+
+# sdr-domain resilience recipes. NOTE the integrity check is the sdr-domain
+# executable one (`diff_group.py --check <run-dir>`); the init-domain
+# `resume_state.py --check` resolves its run dir under `.mgh-init` and therefore
+# CANNOT address an sdr run dir (it exits 1 there — that dead pointer is exactly
+# what this domain's table exists to replace).
+_SDR_STALLED_PROVIDER_RECIPE = (
+    "stalled:true 且 `diff_group.py --check <run-dir>` 退出码 0(分组产物完好:grouping.json + "
+    "slices + markers;该检查校验**产物完整性**、**非**运行进度自洽性)→ provider 拥塞形态:直接"
+    "同参重派(runner 已内建快败冷却与熔断前一次退避);NEVER 据此改写单元输入/删 marker/写微脚本")
+_SDR_RETRY_FAILED_RECIPE = (
+    "收尾 failed>0 且该单元 run.log(<checkpoints>/sdr/<unit>.run.log)呈 provider 瞬断形态"
+    "(429/rate limit/quota 特征)→ **至多一次** `fanout_runner.py --tier sdr --retry-failed` 重派"
+    "(runner 自动携枚举器 --include-failed,认领时先删 .failed marker);再失败接受缺口并在报告 "
+    "degraded 披露")
+_SDR_FANOUT_DISPATCHER_RECIPE = (
+    "主路径 = 一次 Bash 跑 fanout_runner.py --tier sdr(带 --time-budget-ms < 宿主 per-call "
+    "timeout × 0.8,且 MUST 显式传 --call-timeout-s < budget×0.8、--stall-timeout-s < "
+    "--call-timeout-s,四级不变式违反 spawn 前退出码 2;合规 480000/360/300(claude)或 "
+    "720000/540/300(opencode));partial:true 重派同一命令,重派传 per-call timeout > "
+    "--time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);单元输出静默 ≥ "
+    "--stall-timeout-s → 树杀重派(不增磁盘终态计数);退出码 2(宿主 CLI 不可用)→ 回退手派路径;"
+    "NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息")
+_SDR_FANOUT_PATH_RECIPE = (
+    "单元输入切片 / 草稿 / 完成标记 / 失败标记 = `diff_group.py` stdout "
+    "`pending[].input_path|draft_path|done_marker|failed_marker`(**绝对**、逐字透传给 dispatcher,"
+    "dispatcher 逐字填进 subagent task);`baseline_path` / `external_dir` 同源;成功恰好写 "
+    "draft_path + touch done_marker,失败 ack → 编排器写 failed_marker(终态,不重试不阻断);"
+    "NEVER 自拼 <run-dir>/<unit_id>、NEVER `py -c` 算路径、NEVER 相对路径")
+_SDR_RUN_LOG_RECIPE = (
+    "非 ok 单元的诊断证据 = <checkpoints>/sdr/<unit>.run.log(绝对路径由 runner 在 stderr 报出);"
+    "判断 provider 瞬断形态读它,**NEVER** 靠重跑整 tier 复现")
+_SDR_RENDER_MANIFEST_RECIPE = (
+    "终态凭证 = <run-dir>/sdr_manifest.json(renderer 先写报告再写 manifest ⟹ manifest 存在即"
+    "报告已产出);收尾 counts 读 manifest stdout 字段,**NEVER** `py -c` 挖 JSON")
+
+# step keys are exactly resume_sdr_state.py's closed set.
+_DISCIPLINE_SDR = {
+    # step `group` — deterministic diff collection + interface grouping. Reached
+    # once context.json exists (so the context step's own product is validated
+    # here, before the enumeration it feeds is trusted).
+    "group": {
+        "gates": [
+            _g("sdr-context-check",
+               "上一步产物校验:baseline.md 在预算内 + 外部仓结论齐备 + 敏感目录形状"
+               "(退出码 2 → 回退重跑 sdr_context)",
+               "sdr_context.py --check <run-dir>"),
+            _g("sdr-diff-group-check",
+               "本步产物校验:grouping.json + 切片 + marker 一致(退出码 2 → 回退重跑 diff_group,"
+               "NEVER 带破损 work-list 进 fan-out)",
+               "diff_group.py --check <run-dir>"),
+        ],
+        "path_recipes": [
+            _pr("sdr-fanout-path", _SDR_FANOUT_PATH_RECIPE, "diff_group --step 契约"),
+        ],
+        "nevers": [
+            "NEVER 自拼 <run-dir>/<unit_id> 路径",
+            "NEVER 用 `py -c` 内省 grouping.json",
+            "NEVER Read 叶子脚本源码(报错看 stderr)",
+        ],
+    },
+    # step `fanout` — per-unit design-compliance review (the run's only fan-out).
+    "fanout": {
+        "gates": [
+            _g("sdr-diff-group-check",
+               "派发前产物完整性(grouping.json + slices + markers;退出码 2 → 先修产物)"
+               "兼「stalled 是拥塞还是本地损坏」的判据(退出码 0 = 本地没坏)",
+               "diff_group.py --check <run-dir>"),
+        ],
+        "path_recipes": [
+            _pr("sdr-fanout-dispatcher", _SDR_FANOUT_DISPATCHER_RECIPE, "fanout_runner --step 契约"),
+            _pr("sdr-fanout-path", _SDR_FANOUT_PATH_RECIPE, "diff_group --step 契约"),
+            _pr("sdr-fanout-stalled-provider", _SDR_STALLED_PROVIDER_RECIPE,
+                "fanout_runner 快败冷却契约"),
+            _pr("sdr-fanout-retry-failed", _SDR_RETRY_FAILED_RECIPE,
+                "fanout_runner --retry-failed 契约"),
+            _pr("sdr-fanout-run-log", _SDR_RUN_LOG_RECIPE, "fanout_runner run.log 契约"),
+        ],
+        "nevers": [
+            "NEVER 自拼 <run-dir>/<unit_id> 路径",
+            "NEVER 用 `py -c` 内省 grouping.json",
+            "NEVER 写 wrapper .py 循环",
+            "NEVER 手动翻页 / 逐次撰写 subagent 任务消息",
+            "NEVER Read 叶子脚本源码(报错看 stderr)",
+        ],
+    },
+    # step `render` — deterministic report + terminal manifest.
+    "render": {
+        "gates": [
+            _g("sdr-render-check",
+               "报告与 manifest 校验(draft 齐备 + 报告已写出;退出码 2 → 回退重跑 renderer)",
+               "render_sdr_report.py --check <run-dir>"),
+        ],
+        "path_recipes": [
+            _pr("sdr-render-manifest", _SDR_RENDER_MANIFEST_RECIPE,
+                "render_sdr_report --step 契约"),
+        ],
+        "nevers": [
+            "NEVER 把报告 / manifest 写进 openspec/",
+            "NEVER 用 `py -c` 挖 JSON",
+        ],
+    },
+    # done / not-started → empty structure (field恒存在, shape stable).
+    "done": dict(_EMPTY),
+    "not-started": dict(_EMPTY),
+}
+
+_DOMAINS = {
+    "init": _DISCIPLINE,
+    "sdr": _DISCIPLINE_SDR,
+}
+
+
+def get_discipline(step: str, domain: str = "init") -> dict:
     """Return the discipline subset for `step` as {gates, path_recipes, nevers}.
 
-    Unknown / no-discipline steps → EMPTY structure (all three keys present,
-    empty lists) so the stdout field shape is stable across every step.
+    `domain` selects the run domain's table (default `init` — the pre-existing
+    callers are unchanged by this parameter's arrival). Unknown domain, unknown
+    step, and no-discipline steps (`done`, `not-started`) all → EMPTY structure
+    (all three keys present, empty lists) so the stdout field shape is stable
+    everywhere.
     """
-    return _DISCIPLINE.get(step, dict(_EMPTY))
+    table = _DOMAINS.get(domain)
+    if table is None:
+        return dict(_EMPTY)
+    return table.get(step, dict(_EMPTY))

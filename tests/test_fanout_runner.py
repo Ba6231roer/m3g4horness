@@ -1285,6 +1285,29 @@ class TestTimeoutInvariantCli(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("hint: no --time-budget-ms", r.stderr)
 
+    def test_omitted_stall_on_host_driven_run_rejected_with_recipe(self):
+        """A host-driven call that omits --stall-timeout-s silently takes the
+        out-of-host default (900), which is >= the host-driven --call-timeout-s —
+        so it MUST be refused at spawn time, and the recipe MUST carry all three
+        exits: pass it explicitly, a compliant pair, and the off-switch. This
+        pins the contract against the tempting "just drop the flag" edit, which
+        would make every host-driven tier unstartable (exit 2)."""
+        r = _run_cli(self.tmp, self._listing_file(), "--time-budget-ms", "480000",
+                     "--call-timeout-s", "360")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--stall-timeout-s 900 must be < --call-timeout-s 360", r.stderr)
+        self.assertIn("explicitly", r.stderr)             # pass it explicitly
+        self.assertIn("--stall-timeout-s 300", r.stderr)  # compliant example
+        self.assertIn("--stall-timeout-s 0", r.stderr)    # off-switch exit
+        self._assert_no_side_effects()
+
+    def test_omitted_stall_still_works_out_of_host(self):
+        # ...and the same omission is CORRECT when there is no host clamp: the
+        # default 900 sits below the out-of-host --call-timeout-s 7200.
+        r = _run_cli(self.tmp, self._listing_file())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--stall-timeout-s 900s apply", r.stderr)
+
 
 class TestListGatePassthrough(unittest.TestCase):
     """_list_pending exit-code semantics (design D4): the enumerator's exit 2
@@ -1329,6 +1352,46 @@ class TestListGatePassthrough(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self.fr._list_pending(cfg, args)
         self.assertEqual(cm.exception.code, 1)
+
+    def test_sdr_gate_refusal_passes_through_and_dispatches_nothing(self):
+        """The slice byte gate refusing (exit 2) IS "do not enter this tier": the real
+        diff_group.py runs against a real repo whose single changed file's diff body
+        exceeds the standalone cap, and the dispatcher must pass 2 through with ZERO
+        side effects — no slice, no grouping.json, hence nothing any subagent could be
+        handed. This is the end-to-end half of "fail-loud 零派发"."""
+        import subprocess as sp
+        repo = self.tmp / "sdrrepo"
+        repo.mkdir(parents=True, exist_ok=True)
+
+        def git(*a):
+            return sp.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (repo / "big.sql").write_text("CREATE TABLE t(id INT);\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+        git("checkout", "-qb", "feat")
+        # one file whose own diff body alone blows the 64KB default standalone cap: no
+        # context block can give that budget back, so level 3 is the only disposition
+        (repo / "big.sql").write_text(
+            "CREATE TABLE t(id INT, x VARCHAR(9));\n-- " + "z" * (70 * 1024) + "\n",
+            encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "feat")
+
+        run_dir = repo / ".mgh-sdr" / "runs" / "gate"
+        cfg = dict(self.fr.TIERS["sdr"])
+        args = type("A", (), {"repo": str(repo), "base": "master", "branch": "feat",
+                              "checkpoints": str(run_dir / "markers"),
+                              "inputs_dir": str(run_dir / "slices"),
+                              "retry_failed": False})()
+        with self.assertRaises(SystemExit) as cm:
+            self.fr._list_pending(cfg, args)
+        self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(list(run_dir.glob("**/*.slice.md")), [])
+        self.assertFalse((run_dir / "grouping.json").exists())
 
 
 class TestProgressSidecar(unittest.TestCase):
@@ -1716,11 +1779,116 @@ class TestSdrTier(unittest.TestCase):
             self.assertTrue(audit.is_file(), audit)
             self.assertNotIn("{{", audit.read_text(encoding="utf-8"))
 
-    def test_sdr_codegraph_signal_off_in_dispatcher(self):
-        # the sdr tier derives codegraph=off in the dispatcher (the shell decides the
-        # real signal); this is the documented divergence from init tiers
-        self.assertEqual(self.fr._codegraph_signal(self.run_dir / "grouping.json", "sdr"),
-                         "off")
+    def _write_run_config(self, **fields) -> Path:
+        p = self.run_dir / "run_config.json"
+        p.write_text(json.dumps(fields), encoding="utf-8")
+        return p
+
+    def test_sdr_codegraph_signal_three_states(self):
+        """sdr reads the run dir's run_config.json like every other tier: no
+        `no_codegraph` → on; `no_codegraph: true` → off; missing/unparseable → off
+        (legacy) with zero stderr noise."""
+        plan = self.run_dir / "grouping.json"
+        self._write_run_config(base="master", branch="feature-pay")
+        self.assertEqual(self.fr._codegraph_signal(plan, "sdr"), "on")
+
+        self._write_run_config(no_codegraph=True)
+        self.assertEqual(self.fr._codegraph_signal(plan, "sdr"), "off")
+
+        (self.run_dir / "run_config.json").unlink()
+        self.assertEqual(self.fr._codegraph_signal(plan, "sdr"), "off")
+
+        (self.run_dir / "run_config.json").write_text("{not json", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.fr._codegraph_signal(plan, "sdr"), "off")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_sdr_task_message_codegraph_follows_run_config(self):
+        """End-to-end through the CLI: the `{{codegraph}}` placeholder is filled from
+        the SAME fact the grouping stage uses. The plan anchor is
+        `<run-dir>/grouping.json`, whose parent IS the run dir — so the read lands on
+        `<run-dir>/run_config.json` with zero path change."""
+        unit = self._sdr_unit()
+        Path(unit["input_path"]).write_text("slice", encoding="utf-8")
+        audit = self.run_dir / "slices" / f"{unit['unit_id']}.task.md"
+
+        self._write_run_config(base="master", branch="feature-pay")
+        r = self._run_cli(self._write_listing(self._listing([unit])))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("codegraph=on", audit.read_text(encoding="utf-8"))
+
+        self._write_run_config(no_codegraph=True)
+        r = self._run_cli(self._write_listing(self._listing([unit])))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("codegraph=off", audit.read_text(encoding="utf-8"))
+
+    def test_sdr_codegraph_signal_spares_init_run_config(self):
+        """The sdr run dir's own config decides, not a neighbouring init run: an
+        unrelated `<init-dir>/run_config.json` is never consulted for sdr."""
+        self._write_run_config(base="master")
+        elsewhere = self.repo / ".mgh-init" / "run_config.json"
+        elsewhere.parent.mkdir(parents=True, exist_ok=True)
+        elsewhere.write_text(json.dumps({"no_codegraph": True}), encoding="utf-8")
+        self.assertEqual(
+            self.fr._codegraph_signal(self.run_dir / "grouping.json", "sdr"), "on")
+
+
+class TestInitTierCodegraphSignalUnchanged(unittest.TestCase):
+    """Guard against drift: sharing the run_config.json read across all tiers MUST NOT
+    change the four init tiers, which already read it. Every init tier's plan artifact
+    (or t2's re-anchor) is a file whose parent is the init dir — the same neighbour the
+    sdr tier now resolves to."""
+
+    PLAN_NAME = {"scout": "scout_plan.json", "t1": "clusters.json",
+                 "t2": "run_config.json", "t3": "controls_inventory.json"}
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_codegraph_init_test")
+        self.tmp = Path(tempfile.gettempdir()) / f"mgh_fanout_cg_{id(self)}"
+        self.init = self.tmp / "repo" / ".mgh-init"
+        self.init.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _plan(self, tier: str) -> Path:
+        p = self.init / self.PLAN_NAME[tier]
+        p.write_text("{}", encoding="utf-8")
+        return p
+
+    def test_init_tiers_read_the_same_carrier(self):
+        for tier, name in self.PLAN_NAME.items():
+            plan = self._plan(tier)
+            (self.init / "run_config.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(self.fr._codegraph_signal(plan, tier), "on", tier)
+            (self.init / "run_config.json").write_text(
+                json.dumps({"no_codegraph": True}), encoding="utf-8")
+            self.assertEqual(self.fr._codegraph_signal(plan, tier), "off", tier)
+
+    def test_init_tiers_degrade_off_on_missing_or_bad_file(self):
+        for tier in self.PLAN_NAME:
+            plan = self._plan(tier)
+            rc = self.init / "run_config.json"
+            rc.unlink(missing_ok=True)
+            self.assertEqual(self.fr._codegraph_signal(plan, tier), "off", tier)
+            rc.write_text("{not json", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.fr._codegraph_signal(plan, tier), "off", tier)
+            self.assertEqual(err.getvalue(), "")
+
+    def test_tier_key_argument_no_longer_branches(self):
+        """`tier_key` is kept for call-site stability only: an unknown/absent tier
+        behaves exactly like a known one (no hidden per-tier branch crept back)."""
+        plan = self._plan("t1")
+        (self.init / "run_config.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self.fr._codegraph_signal(plan, "no-such-tier"), "on")
+        self.assertEqual(self.fr._codegraph_signal(plan), "on")
+        (self.init / "run_config.json").write_text(
+            json.dumps({"no_codegraph": True}), encoding="utf-8")
+        self.assertEqual(self.fr._codegraph_signal(plan, "no-such-tier"), "off")
 
 
 class TestT1PackedPendingZeroChange(unittest.TestCase):

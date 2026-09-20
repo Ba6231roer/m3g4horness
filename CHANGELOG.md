@@ -16,6 +16,238 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — the sdr report's three locate-points became clickable source-file links; unlocatable paths degrade to the exact old text (0.1.50)
+
+`/mgh-sdr` reports solved "readable" (the chain short forms) but not "reachable" — a human
+reviewing a suspicious hop had to hunt the class through the repo by hand, several hops per
+finding, every review. The data was already on disk: chain nodes carry `file` + `line` from
+grouping, and the report lands at the repo root, so a repo-relative path IS the link.
+
+- **Three render points, one helper.** `render_sdr_report.py` gains `_source_link(text, file,
+  line, repo)`, used by the 简报表 entry column (standalone method-def forms; route strings
+  never link), every chain node, and the 章节二 position line — `[Ctl.submit](src/…#L42)`,
+  anchor omitted when no line (mapper XML terminals are the natural case). Short-form
+  construction and link wrapping stay two layers: `†` rides inside the text, `→`/`·`/`⤷`/`⇢`
+  separators stay outside the link.
+- **Purely lexical resolution, zero broken links by construction.** Absolute paths are
+  rebased onto `--repo` (`normcase` absorbs the Windows case-insensitive drive); outside the
+  subtree, empty/missing, leading `..`, or a path with spaces/parens → the plain-text form,
+  byte-identical to the old report. The renderer NEVER stats the target (a diff branch's file
+  may not be checked out; stat-based judgment would make the report depend on checkout state).
+  Display-text `[`/`]` get minimal escapes; finding `line_hint` info is NEVER dropped to buy a
+  link.
+- **Machine surface untouched.** `sdr_manifest.json` `rows[].entry/chain` stay plain short
+  forms (link wrapping is a render projection); the `--check` internal-anchor ban (`](#`)
+  cannot misfire on `](src/…#L42)` — the `#` there is preceded by a path segment — now stated
+  as a comment. The `P-NN` dimension columns remain pure text as decided.
+- **Verified**: 11 new `_source_link` unit cases + a 3-unit end-to-end (anchored links,
+  no-anchor mapper terminal, `†` inside the link, out-of-repo/empty-file degradations,
+  manifest-vs-table equality after de-linking) in `tests/test_render_sdr_report.py` (29 tests);
+  a springBootTemplate dry-run (grouping-only env + hand drafts, reused from the report-structure
+  change) rendered 59 links, all targets present on disk, spot-checked anchors landing exactly
+  on their method declarations, and a timestamp-normalised diff against the pre-change renderer
+  confirmed the ONLY changed lines are the three render points (head / 章节三 mermaid /
+  no-issue list / honesty boundary byte-identical). `--check` passes on both render outputs;
+  contract and purity lints clean; command shells unchanged (they never carried the
+  plain-short-form wording).
+
+### Added — the sdr run domain gains a disk-derived resume surface; run-level state stops being an orchestrator recipe (0.1.49)
+
+`/mgh-sdr` could already avoid redoing finished work (a `.done` unit is skipped, `--resume`
+re-dispatches only what is missing, the renderer overwrites its own report), but it could not
+answer **"which step am I on / what do I run next"**. After a crash, after a context
+compaction, or in a fresh session the orchestrator had only the conversation to go on — and
+the conversation is a cache, not a source of truth. `/mgh-init` has had the other half for a
+long time (re-derive the step from the run dir, re-inject that step's defenses); sdr never got
+it. Two related gaps came with it: the sentinel guarding the run was written by a shell recipe
+the orchestrator had to read and execute correctly, and the run dir carried a start-state file
+nothing consumed.
+
+- **`resume_sdr_state.py`** — the single sanctioned outlet for the sdr reflex "where am I /
+  what next". `step` is derived purely from `<run-dir>/` disk products (`context.json` /
+  `grouping.json` / unit markers / `sdr_manifest.json`) over the closed set
+  `not-started|group|fanout|render|done`, where the step name is the **current TODO step**.
+  It never reads conversation memory and never guesses from a damaged product (an unreadable
+  `context.json`/`grouping.json` exits 2 with a recipe). stdout carries `step`, `resumable`,
+  `tiers`, `next_action{kind,desc,absolute_paths[]}` with verbatim absolute paths, `notes[]`,
+  `discipline_reminders`, and a `stale_fanout[]` scan of leftover `fanout_runner.*.pid`
+  liveness files. `--check` fail-louds on the states that matter; `--rearm-sentinel` rebuilds
+  the guard sentinel deterministically.
+- **Per-step discipline travels with the resume.** `discipline_core.get_discipline(step,
+  domain="init")` gained a `domain` parameter and an sdr table (default domain output is
+  byte-identical, so the existing callers are untouched). A resumed run is handed the same
+  gates, path recipes (unit paths come from the enumerator's stdout, verbatim) and `NEVER`
+  boundaries it would have had at the start — the defense line is re-injected from disk rather
+  than remembered.
+- **`list_sdr_steps.py`** answers the complementary question ("the exact invocation for any
+  step") with zero disk preconditions, mirroring the init/ut-init siblings; its `--step`
+  discipline is asserted byte-identical to `resume_sdr_state.py`'s for the same step.
+- **One rule for unit identity.** New `sdr_tier.py` holds the forward marker-path predicate,
+  imported by BOTH the writer (`diff_group.py`, which was concatenating marker paths inline)
+  and the resume reader. A second copy of that concatenation is how "the enumerator says
+  pending while the disk holds a marker" becomes an infinite re-dispatch loop. Marker paths are
+  reproduced verbatim — no sanitizing or truncation is added, because the id is already
+  sanitized when the unit is built and re-encoding it would rename every existing marker.
+- **Run-level state is now a script side effect.** `sdr_context.py` — the one step both
+  entries (launcher and host session) pass through — co-writes the guard sentinel
+  `<repo>/.mgh-sdr/.active` and `<run-dir>/run_config.json` atomically. The shell's three
+  hand-executed `printf` recipes are gone; the orchestrator no longer has to read and execute a
+  write recipe correctly for the guard to be armed. The launcher keeps its own sentinel write as
+  an **idempotent refresh**, because it is the second authorization judgment (roots are
+  re-checked against the project config immediately before the host CLI is spawned, so a
+  version-skewed sibling cannot leak an unapproved root).
+- **`run_config.json` keeps one job, script-written.** Its only payload is the codegraph signal
+  `{"no_codegraph": bool}`; the shell's auto-detection result is passed to `sdr_context.py` as
+  `--no-codegraph` (the launcher gained the same flag) instead of being written by hand. The
+  start state (repo/base/branch) is deliberately NOT written there — it is re-derived from
+  `context.json` / `grouping.json`, and the resume script does not read the file at all. Legacy
+  run dirs carrying start-state fields are ignored, not deleted.
+- **The start state is disclosed, never guessed.** The one step with no on-disk start state is
+  `not-started`, and that is also the one step with zero completed work — so re-supplying
+  `--base`/`--branch` restores it losslessly. The script says so in `notes[]`, gives an
+  executable call with defaults, and refuses to run `git` to guess a branch (using the wrong
+  branch for a diff costs more than typing one flag).
+- **Both command guides' recovery section now points somewhere that runs.** It names
+  `resume_sdr_state.py --run-dir <abs>`, states the precondition (recovery must carry the SAME
+  run dir — a fresh timestamped dir loses every marker), and says the progress and the defenses
+  are disk-derived, so whether the conversation survived is irrelevant. The init-domain
+  `resume_state.py` pointer (which resolves to `.mgh-init` and exits 1 against an sdr run dir) is
+  gone. Two honesty boundaries were added: re-running the launcher creates a NEW run dir (never
+  claim "re-run the launcher and it resumes"), and `--dimensions` narrowing is closed-set
+  validated but **not** dispatched to review units.
+
+Tests: 29 new cases for the resume state machine over synthetic run dirs (empty dir, context
+only, grouping only, partial terminals, all-terminal, rendered, zero-diff, all-excluded, a
+stale `status` field that must NOT be trusted, a legacy `run_config.json` that must be ignored,
+a sentinel missing at each of the three guard-window steps, re-arm idempotence, and two calls
+against one disk state producing byte-identical stdout), 7 for the shared marker predicate
+including a real-git end-to-end assertion that the predicate reproduces `diff_group`'s emitted
+paths byte-for-byte, 8 for the step manifest (including the cross-script discipline equality),
+and 11 extending the existing sdr context / launcher suites (sentinel presence and
+minimalism on every run, vanished roots dropped, the signal payload carrying only
+`no_codegraph`, idempotent refresh, and the launcher's pre-spawn re-judgment still rejecting an
+unapproved root). `tools/check_contracts.py` now asserts the new scripts' flags, that each shell
+names the sdr-domain resume entry, and that a hand-executed `printf` write recipe cannot
+reappear. `install.sh`'s co-location self-check covers the three new scripts. The two command
+guides stay byte-mirrored apart from host-specific lines; each is ~3.4K tokens, within budget.
+
+### Fixed — the sdr codegraph switch had three write ends and no reader; its recovery pointer could never run (0.1.49)
+
+`/mgh-sdr` handed the shared dispatcher a codegraph switch that nothing consumed, and a
+troubleshooting step that failed every single time.
+
+- **The switch was dead.** The command shells exported `MGH_SDR_CODEGRAPH`, wrote a
+  `no_codegraph` field into the run dir's `run_config.json`, and advertised `--no-codegraph` —
+  none of it read by any script. The dispatcher's `_codegraph_signal()` returned `off` early for
+  the sdr tier, so every review sub-agent's task message said `codegraph=off` ("this unit may be
+  split at an interface boundary") while the grouping stage in the SAME run had already merged
+  those units along the call chain and loaded the whole chain into the slice. Two stages of one
+  run disagreeing about the same fact, and the disagreement told the reviewer to ignore exactly
+  the cross-layer information grouping had just given it.
+- **One carrier, and a real consumer.** `MGH_SDR_CODEGRAPH` is deleted rather than wired up: an
+  environment variable has no consumers today and, on the opencode host, is unreliable anyway
+  (the plugin process does not inherit mid-session `export`s). The signal now rides the run dir's
+  `run_config.json` alone, written by `sdr_context.py` (the one step both entries pass through)
+  and read by the dispatcher. The sdr plan anchor is already `<run-dir>/grouping.json`, so its
+  parent IS the run dir: the sdr tier falls into the exact same read path as the init tiers with
+  zero path changes, which is what makes the two stages agree by construction rather than by two
+  logics kept in sync.
+- **The signal is probed, not declared.** Closing the reader exposed the same defect one layer
+  down: the value written into `run_config.json` was still whatever the caller happened to
+  assert. The launcher asserted `on` unconditionally (its flag defaulted to off-by-absence, and
+  nothing on that path ever looked at the repo), so on an unindexed repo the grouping stage
+  degraded to no chain while every task message still promised "this slice already carries the
+  whole changed chain: judge cross-layer inside it, do NOT re-derive" — a false instruction, and
+  precisely the side-disagreement this change exists to remove. The availability predicate now
+  lives once, in `sdr_tier.py`, and `sdr_context.py` derives the signal from it (repo indexed AND
+  a `codegraph` binary resolves), exactly as `diff_group.py` decides whether to merge units along
+  the chain. `--no-codegraph` survives as an explicit force-off **of the signal**; the shells no
+  longer carry a second probe of their own. Note what that flag does and does not do: measured on
+  an indexed repo, passing it flips the task message to `off` while `diff_group` still reports
+  `codegraph: true` and still merges along the chain. That is deliberate and now stated as such
+  everywhere the flag appears — it buys reviewers a conservative reading, it does NOT re-run the
+  grouping without the index. (The earlier text claimed "zero codegraph calls, behaviour
+  equivalent", which was never true of the grouping path.)
+- **The recovery pointer was cross-domain.** The "fast-fail storm" step asked the orchestrator to
+  run `resume_state.py --check` as proof that the disk was healthy before re-dispatching a
+  stalled wave. That script resolves its state root to `<target>/.mgh-init` and has no form that
+  accepts an sdr run dir, so against an sdr run it exits 1 ("dir not found") 100% of the time —
+  turning the orchestrator's judgment into noise. It is replaced by `diff_group.py --check
+  <run-dir>`, which does run in that domain (exit 0/2). Its meaning is narrower and is stated
+  next to the command: it validates the **grouping artifacts** (grouping.json + slices +
+  markers), not **run-progress consistency**. A full sdr resume surface is out of scope here.
+- **Timeout wording pinned, zero values changed.** `--stall-timeout-s` has two numbers that are
+  easy to confuse: `60` is the hard rejection floor (`1..59` exits 2) and `900` is the
+  out-of-host manual-run default. `--help` now states the four-segment domain and labels each
+  number explicitly, and says that a host-driven call MUST pass the flag explicitly below
+  `--call-timeout-s`, NEVER rely on the default. The spawn-time recipe for a violated
+  `stall < call` ordering now names the usual cause (an omitted flag) alongside its two exits.
+  **No value changed**: the constants, the validation logic and the `300` used by every
+  `/mgh-init` tier and by `/mgh-sdr` are untouched. Dropping the flag to "use the default" would
+  make every host-driven tier unstartable (exit 2 before any spawn).
+
+Tests: the sdr signal's three states (no field → `on`, `no_codegraph: true` → `off`,
+missing/unparseable → `off` with no stderr noise) plus an end-to-end CLI case proving the
+`{{codegraph}}` placeholder flips with the run dir's config; a guard that the four init tiers
+still read the same carrier and that `tier_key` no longer branches; the probe's both-halves and
+degradation cases, and that an indexed repo reports `on` through the launcher with no flag
+(the case the old default got wrong); the omitted-stall rejection with all three recipe exits.
+`tools/check_contracts.py` now fails the build if the dead env var returns, if a shell declares
+`--no-codegraph` without the carrier it rides, if a shell points at a cross-domain script, if
+the dispatcher's sdr early-return is reinstated, or if either consumer re-inlines the probe
+instead of importing the shared predicate.
+
+### Changed — the sdr slice budget is judged on the rendered slice, and an over-budget unit is re-split, slimmed, or refused — never dispatched (0.1.50)
+
+`/mgh-sdr` promised "one unit input ≤ the byte budget", but the packing layer judged that
+budget with an **estimate** — the sum of each file's diff-text length plus a flat 64 bytes per
+file — while the subagent actually reads the **rendered slice**, which also carries a header, a
+file list, an annotation-context block, a symbol table and one `@@` locator line per hunk. Two
+paths escaped with no check at all: a multi-file unit that estimated under but rendered over,
+and a single file whose own diff exceeded the cap (the source admitted it in a comment:
+*"one oversize file may still exceed it (merged-capped, never split mid-file)"*). This is the
+same tolerated gap `/mgh-init` closed in its T2 aggregation, where "warn and send anyway"
+produced a real request-context overflow that killed the whole unit.
+
+The judge is now the artifact: one measurement function renders the unit with the very renderer
+that materializes it and takes the utf-8 byte count. Packing-time member sizes, the
+`pending[].unit_bytes` field and the `--check` assertion all read that one number. Over budget,
+three dispositions run in order, and the first that resolves it wins:
+
+1. **Lossless re-split** — a multi-file unit is greedy-packed by path into `-partN` continuation
+   units, each measured ≤ cap. No hunk is dropped, no content truncated; more units is the only
+   cost. This is the existing greedy rule finally running on the right judge, not a new splitter.
+2. **Context slim** — only for an atomic residue (one file left; a file is never split
+   mid-file). The descriptive blocks (`ann_ctx` / `sym_ctx`) are truncated to module-constant
+   caps with a visible `… (截断:K 行 / 原 N 字节)` marker in the slice and a `slimmed{}` record in
+   the run record. The evidence anchors — diff bodies, the file list, the hunk locators, the
+   header fields — are never touched: truncating the diff would make the review reach
+   conclusions on partial evidence, which on a pre-merge security gate is worse than not running.
+3. **Fail-loud, zero dispatch** — still over cap → exit 2 naming the unit id, its cap, the
+   measured bytes and the largest contributing file, with a recipe (raise the cap / narrow the
+   diff range / review that file out-of-band). The judgement happens **before** any slice or
+   `grouping.json` is written, so with nothing on disk for the dispatcher to consume, "the
+   enumerator refused" and "no subagent was spawned" are the same statement.
+
+Disclosure is not optional: the run record gains a top-level `budget{}` and a per-unit
+`slimmed{}`, `--check` asserts `unit_bytes ≤ cap` when those fields are present (an old
+`grouping.json` without them still exits 0 — same incremental-field contract as `excluded` /
+`codegraph_stats` / `chain[]`), and the report's honesty boundary names every slimmed unit so a
+"no finding" from one is not read with the same weight as from a normal unit.
+
+No new flags: `--max-standalone-bytes` / `--max-interface-bytes` remain the only levers; the two
+slim caps are module constants. In-budget runs are byte-identical apart from the new `budget{}`
+and empty `slimmed{}` fields.
+
+Tests: the multi-file over-budget case re-splits with the parts' hunk-locator set equal to an
+un-split run's (lossless), with the old `cap + 1024` tolerance tightened to `cap`; an atomic
+residue whose overage is carried by the symbol table is slimmed (marker visible, diff body and
+locators intact, `slimmed` recorded, exit 0); an atomic residue whose own diff body is over
+refuses with exit 2 and **zero** slices, zero `grouping.json` and empty stdout; `unit_bytes`
+equals the landed file's byte count for every unit; a pinned slice text guards the in-budget
+no-regression line; `--check` covers the new-field assertions and the old-record skip; and the
+dispatcher passes the refusal through as exit 2 against a real repo with nothing written.
+
 ### Changed — fanout silence is no longer proof of a hang: explicit off-switch + false-kill self-evidence + cost disclosure (0.1.48)
 
 `--stall-timeout-s` was the only defense against a hung unit, and it silently doubled as a health

@@ -147,9 +147,19 @@ CLI contract (`--help` is the contract surface, R5.1):
                     better-slow-than-killed — a killed unit leaves no marker,
                     stays pending, and re-dispatch wastes a whole run). The
                     kill path is the whole-tree kill (see stall detection).
-  --stall-timeout-s per-unit output-silence window in seconds, INITIAL value
-                    (default 900; `0` = disable the criterion; 1..59 rejected
-                    with exit 2). No stdout/stderr bytes for this long -> the
+  --stall-timeout-s per-unit output-silence window in seconds, INITIAL value.
+                    FOUR-segment value domain: `0` = disable the criterion
+                    outright; 1..59 = rejected with exit 2 (this is the HARD
+                    REJECTION FLOOR = 60); 60.. = a valid silence window. The
+                    default 900 is the OUT-OF-HOST MANUAL-RUN default ONLY —
+                    it is NEVER the rejection floor and MUST NOT be called one;
+                    a host-driven run (one that passes --time-budget-ms) MUST
+                    pass this flag explicitly with a value < --call-timeout-s,
+                    NEVER relying on the default (the host-driven
+                    --call-timeout-s is far smaller, so the stall < call
+                    spawn-time check would exit 2 and make the tier unusable);
+                    recommended host-driven value: 300.
+                    No stdout/stderr bytes for this long -> the
                     unit's whole process tree is killed and the unit stays
                     pending for re-dispatch. Byte-silence means the unit
                     produced NOTHING for that long; it does NOT mean the unit
@@ -162,7 +172,9 @@ CLI contract (`--help` is the contract surface, R5.1):
                     newer of the two streams' last-byte stamps), so a unit
                     whose stderr never emits is not mistaken for silent.
                     Calibration: default = p99(completed-unit runtime) x 2,
-                    rounded down to the minute and never below 900 (observed
+                    rounded down to the minute and never below the calibrated
+                    900 (a property of the DEFAULT, not of the accepted value
+                    domain — see the four-segment domain above) (observed
                     sample n=84: p50 134s / p95 229s / p99 325s / max 325s ->
                     650s -> 600s -> floor 900s). That sample is the SURVIVING
                     population only — units killed for gateway queueing are
@@ -646,12 +658,12 @@ def _load_template(tier: dict, template_arg: str | None) -> str:
 def _codegraph_signal(plan_path: Path, tier_key: str = "") -> str:
     """Derive `codegraph=on|off` from run_config.json (no_codegraph flag),
     sibling of the tier plan artifact. Missing/unparseable → off (legacy).
-    sdr tier: the plan artifact is <run-dir>/grouping.json (no run_config.json in an
-    sdr run dir) → always off here; the sdr orchestrator shell decides the signal
-    (repo .codegraph/ + PATH detection, D8) and the launcher/shell pass it via the
-    grouping-side run config when that lands — until then sdr = off in the dispatcher."""
-    if tier_key == "sdr":
-        return "off"
+    All tiers share this ONE source: the sdr tier binds its plan artifact to
+    `<run-dir>/grouping.json`, so `plan_path.parent` IS the sdr run dir — the same
+    neighbour semantics as init's `<init-dir>/run_config.json`. `tier_key` is kept
+    for signature stability (the call site passes it) and is NOT consulted;
+    `run_config.json` is the sole carrier of the signal for every tier, so the
+    grouping stage and the task-fill stage read the same fact."""
     rc = plan_path.parent / "run_config.json"
     try:
         cfg = json.loads(rc.read_text(encoding="utf-8"))
@@ -1531,9 +1543,24 @@ def main() -> int:
                          f"the whole-tree kill (see --stall-timeout-s)")
     ap.add_argument("--stall-timeout-s", type=int, default=None,
                     help=f"per-unit output-silence window in seconds, INITIAL "
-                         f"value (default {DEFAULT_STALL_TIMEOUT_S}; 0 = disable "
-                         f"the criterion; 1..{STALL_TIMEOUT_FLOOR_S - 1} rejected "
-                         f"with exit 2): no stdout/stderr bytes for this long -> "
+                         f"value. FOUR-segment value domain: 0 = disable the "
+                         f"criterion outright; 1..{STALL_TIMEOUT_FLOOR_S - 1} = "
+                         f"rejected with exit 2 (this is the HARD REJECTION "
+                         f"FLOOR = {STALL_TIMEOUT_FLOOR_S}); {STALL_TIMEOUT_FLOOR_S}"
+                         f".. = a valid silence window. The default "
+                         f"{DEFAULT_STALL_TIMEOUT_S} is the OUT-OF-HOST MANUAL-RUN "
+                         f"default ONLY - it is NEVER a rejection floor and MUST "
+                         f"NOT be described as one (the floor is "
+                         f"{STALL_TIMEOUT_FLOOR_S}). When --time-budget-ms is "
+                         f"passed (a host-driven run) this flag MUST be passed "
+                         f"explicitly and stay below --call-timeout-s (the same "
+                         f"four-level invariant) - NEVER omit it and rely on the "
+                         f"default {DEFAULT_STALL_TIMEOUT_S}: the host-driven "
+                         f"--call-timeout-s is far smaller, so the "
+                         f"stall < call spawn-time check would refuse to start "
+                         f"with exit 2 and make the tier unusable. Recommended "
+                         f"host-driven value: 300. Semantics: no "
+                         f"stdout/stderr bytes for this long -> "
                          f"that unit's whole process tree is killed (taskkill "
                          f"/T /F - the .cmd shim chain's real host-CLI process "
                          f"dies too) and the unit stays pending for re-dispatch. "
@@ -1785,7 +1812,9 @@ def main() -> int:
                 f"time-budget-ms x 0.8 ({budget_s * 0.8:.0f}s)")
     # Only checked when the criterion is ON: with --stall-timeout-s 0 there is
     # no silence kill to order against the absolute one (design D2).
+    stall_problem = False
     if args.stall_timeout_s > 0 and args.stall_timeout_s >= args.call_timeout_s:
+        stall_problem = True
         invariant_problems.append(
             f"--stall-timeout-s {args.stall_timeout_s} must be < "
             f"--call-timeout-s {args.call_timeout_s} (a unit must hit the "
@@ -1793,6 +1822,14 @@ def main() -> int:
     if invariant_problems:
         _eprint("error: timeout invariant violated:\n  - "
                 + "\n  - ".join(invariant_problems))
+        if stall_problem:
+            # The commonest cause is a host-driven call that OMITTED the flag and
+            # silently took the out-of-host default — say so, or the reader "fixes"
+            # it by raising --call-timeout-s (which breaks the budget level instead).
+            _eprint(f"recipe: pass --stall-timeout-s explicitly and keep it below "
+                    f"--call-timeout-s — NEVER omit it and rely on the default "
+                    f"{DEFAULT_STALL_TIMEOUT_S}s (a host-driven --call-timeout-s is "
+                    f"far smaller, so the default is refused here by construction)")
         _eprint("recipe (compliant example for a 900000ms host / 720000ms "
                 "budget): --time-budget-ms 720000 --call-timeout-s 540 "
                 "--stall-timeout-s 300  (four levels, >=20% headroom per "

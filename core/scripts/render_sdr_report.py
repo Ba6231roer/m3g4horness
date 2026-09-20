@@ -46,14 +46,21 @@ capture stats (route anchors / upstream anchors / chain merges / edges), exclusi
 counts — grouping quality is observable without opening grouping.json. The stats ride
 grouping.json in the run dir (older layouts: the section is simply absent).
 
+Source links: the 入口/调用链/位置 render points are markdown links to repo-relative
+source files (`[text](rel/path#Lline)`, anchor omitted when no line); a path that
+cannot be resolved inside the repo (outside it, empty/missing, spaces or parens)
+degrades to the plain-text form — never a broken link. Resolution is purely lexical
+(NEVER stats the target), so the report is reproducible across checkout states.
+
 Exit codes (R5.3b): 0 ok · 1 input error (run dir/drafts missing) · 2 misuse (argparse)
 or --check violation (manifest/draft/counts inconsistency; R5.9).
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/json/re/sys/pathlib).
+Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/re/sys/pathlib).
 """
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -173,11 +180,14 @@ def _merge_findings(drafts: list) -> dict:
     return by_dim
 
 
-def _render_chain(chain: list) -> str:
+def _render_chain(chain: list, repo: Path | None = None) -> str:
     """chain[] -> abbreviated one-cell chain text (Plan C): `·` same-class continuation,
     `⤷` branch (branch_of host), `⇢` mapper XML terminal, `†` unchanged node. A linear
     chain reads as A → B → C → ⇢terminal; branch nodes are appended flat after the main
-    line. Returns "" for an empty/absent chain (the row falls back to the entry form)."""
+    line. Returns "" for an empty/absent chain (the row falls back to the entry form).
+    With `repo` set, each node short form is wrapped as a source link (the `†` prefix
+    stays inside the text, separators stay outside; design D4); without it the plain
+    text form is produced (manifest rows[])."""
     if not chain:
         return ""
     # main line = nodes without branch_of, in array order; branch subtrees = nodes with
@@ -185,21 +195,28 @@ def _render_chain(chain: list) -> str:
     # branch_of always points at a main-line index — asserted by diff_group --check)
     main = [(i, n) for i, n in enumerate(chain) if n.get("branch_of") is None]
     branches = [(i, n) for i, n in enumerate(chain) if n.get("branch_of") is not None]
+
+    def node(n):
+        txt = _node_text(n)
+        if repo is None:
+            return txt
+        return _source_link(txt, n.get("file"), n.get("line"), repo)
+
     parts: list[str] = []
     prev_class = None
     for pos, (i, n) in enumerate(main):
         if pos == 0:
-            parts.append(_node_text(n))
+            parts.append(node(n))
         elif n.get("change") == "external":
-            parts.append(" ⇢" + _node_text(n))   # mapper XML terminal (XML not a graph node)
+            parts.append(" ⇢" + node(n))   # mapper XML terminal (XML not a graph node)
         elif n.get("file") and n.get("file") == prev_class:
-            parts.append(" ·" + _node_text(n))   # same-class continuation
+            parts.append(" ·" + node(n))   # same-class continuation
         else:
-            parts.append(" → " + _node_text(n))
+            parts.append(" → " + node(n))
         prev_class = n.get("file")
     for _i, n in branches:
         sep = " ⇢" if n.get("change") == "external" else " ⤷"
-        parts.append(sep + _node_text(n))
+        parts.append(sep + node(n))
     return "".join(parts)
 
 
@@ -208,6 +225,43 @@ def _node_text(n: dict) -> str:
     if n.get("change") == "unchanged":
         txt = "†" + txt
     return txt
+
+
+_ABS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+_ABS_UNC = re.compile(r"^\\\\[^\\]")
+
+
+def _source_link(text: str, file, line, repo: Path) -> str:
+    """`text` wrapped as a markdown link to the repo-relative source file:
+    `[text](rel#Lline)` (anchor omitted when line is None). PURELY LEXICAL resolution
+    (NEVER stats the filesystem): an absolute path is rebased onto `repo` and only
+    linked when inside its subtree; a relative path is taken as repo-root-relative;
+    empty/missing, subtree-outside, leading `..`, and paths with spaces or
+    parentheses degrade to the plain text — the error direction is "fewer links",
+    never a broken one. Display-text `[`/`]` get minimal backslash escapes."""
+    if not isinstance(file, str) or not file.strip():
+        return text
+    f = file.strip()
+    if _ABS_DRIVE.match(f) or _ABS_UNC.match(f) or f.startswith("/"):
+        nf = os.path.normpath(f)
+        nr = os.path.normpath(str(repo))
+        if os.path.normcase(nf) == os.path.normcase(nr):
+            rel = "."
+        else:
+            try:
+                rel = os.path.relpath(nf, nr)
+            except ValueError:      # different drive (Windows) = outside the repo
+                return text
+        rel = rel.replace("\\", "/")
+    else:
+        rel = os.path.normpath(f.replace("\\", "/")).replace("\\", "/")
+    if not rel or rel.startswith("..") or rel == ".":
+        return text
+    if " " in rel or "(" in rel or ")" in rel:
+        return text
+    disp = text.replace("]", "\\]").replace("[", "\\[")
+    anchor = f"#L{line}" if isinstance(line, int) and not isinstance(line, bool) else ""
+    return f"[{disp}]({rel}{anchor})"
 
 
 def _mermaid_chain(unit_id: str, route: str, chain: list) -> str:
@@ -287,10 +341,12 @@ def _row_dimensions(dims, rows) -> list:
 
 
 def _build_rows(g_units: list, by_dim: dict, pnums: dict, unit_refs: dict,
-                external: list) -> list[dict]:
+                external: list, repo: Path) -> list[dict]:
     """简报表 data rows from grouping.json units[] (the renderer's row truth). Failed
     units NEVER become rows (their coverage is unreviewed — the honesty boundary
-    discloses them instead)."""
+    discloses them instead). `entry`/`chain` stay the plain-text short forms (manifest
+    rows[] = machine consumption); `entry_link`/`chain_link` are the table cells
+    (same data, `_source_link`-wrapped; design D4)."""
     rows = []
     for u in _sorted_units(g_units):
         if u.get("status") == "failed":
@@ -298,14 +354,18 @@ def _build_rows(g_units: list, by_dim: dict, pnums: dict, unit_refs: dict,
         routes = [r for r in str(u.get("route", "")).split(";") if r]
         chain = u.get("chain") or []
         chain_txt = _render_chain(chain)
+        chain_link = _render_chain(chain, repo)
         if routes:
             entry = routes[0] if len(routes) == 1 else routes[0] + f"(+{len(routes) - 1})"
+            entry_link = entry       # route strings never link
             if not chain_txt:
                 chain_txt = entry
+                chain_link = entry_link
         else:
-            entry = _standalone_entry(u)
+            entry, entry_link = _standalone_entry(u, repo)
             if not chain_txt:
                 chain_txt = entry
+                chain_link = entry_link
         refs = unit_refs.get(u.get("unit_id", ""), set())
         dim_refs: dict[str, set] = {}
         for ref in refs:
@@ -317,6 +377,8 @@ def _build_rows(g_units: list, by_dim: dict, pnums: dict, unit_refs: dict,
             "kind": u.get("kind", ""),
             "entry": entry,
             "chain": chain_txt,
+            "entry_link": entry_link,
+            "chain_link": chain_link,
             "frontend_is": "—",
             "frontend_count": "—",
             "dim_refs": dim_refs,
@@ -324,22 +386,29 @@ def _build_rows(g_units: list, by_dim: dict, pnums: dict, unit_refs: dict,
         })
     # frontend two columns need the row route: fill after rows exist
     for r, u in zip(rows, _sorted_units(g_units)):
+        if u.get("status") == "failed":
+            continue
         fis, fcnt = _frontend_pair(str(u.get("route", "")), external)
         r["frontend_is"], r["frontend_count"] = fis, fcnt
     return rows
 
 
-def _standalone_entry(u: dict) -> str:
-    """Entry cell for a no-route unit: the unit's own method-def short form (first chain
-    node, else the unit_id stem)."""
+def _standalone_entry(u: dict, repo: Path | None = None) -> tuple[str, str]:
+    """Entry for a no-route unit: the unit's own method-def short form (first chain
+    node, else the unit_id stem). Returns (plain, linked) — the route-string entry never
+    links, so callers other than this one produce an identical linked form."""
     chain = u.get("chain") or []
     if chain:
-        return _node_text(chain[0])
-    return str(u.get("unit_id", ""))
+        txt = _node_text(chain[0])
+        linked = txt if repo is None else _source_link(
+            txt, chain[0].get("file"), chain[0].get("line"), repo)
+        return txt, linked
+    stem = str(u.get("unit_id", ""))
+    return stem, stem
 
 
 def _boundaries(by_dim, failed, catalog_source, external, dims, baseline_truncated,
-                excluded=None, skipped=None):
+                excluded=None, skipped=None, slimmed=None):
     sk = [s for s in (skipped or []) if isinstance(s, str)]
     unapproved = [s[len("unapproved: "):].strip() for s in sk
                   if s.startswith("unapproved: ")]
@@ -370,6 +439,15 @@ def _boundaries(by_dim, failed, catalog_source, external, dims, baseline_truncat
                  f"{'…' if len(failed) > 5 else ''}),其覆盖范围本次未复核;建议重跑补齐。")
     if baseline_truncated:
         b.append("基线投影发生截断(超字节预算),部分存量设计段落未进入检查基线。")
+    # Only when this run actually slimmed something: the unit's diff body, file list and
+    # hunk locators are intact, but its descriptive context was cut, so a "no finding" from
+    # it is weaker evidence than from a normal unit. Silent degradation is not allowed.
+    if slimmed:
+        shown = "、".join(slimmed[:5]) + ("…" if len(slimmed) > 5 else "")
+        b.append(f"输入完整度披露:本次有 {len(slimmed)} 个复核单元因切片超出字节预算,其辅助"
+                 f"上下文块(注解上下文 / 符号表)被确定性截断({shown})——这些单元的 diff 正文、"
+                 f"文件清单与 hunk 定位头仍完整,但方法/路由的定位信息少于常规单元,"
+                 f"来自它们的「无问题」结论的充分性应据此打折。")
     if external:
         b.append(f"外部仓检索覆盖 {len(external)} 个声明仓;未声明/不可达的外部仓不在本次检查面内。")
     if unapproved:
@@ -414,6 +492,10 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
     grouping = _load_grouping(run_dir)
     excluded = grouping.get("excluded") or ctx.get("excluded") or {}
     cg_stats = grouping.get("codegraph_stats") or ctx.get("codegraph_stats") or {}
+    # units whose descriptive context blocks were truncated to fit the slice byte budget
+    # (diff_group's gate): this run's input-completeness disclaimer, empty when none.
+    slimmed = [str(u.get("unit_id")) for u in (grouping.get("pending") or [])
+               if isinstance(u, dict) and u.get("slimmed")]
 
     # P-NN global numbering: severity asc (high→info), then (route, file) for a
     # deterministic order that is stable across runs.
@@ -491,7 +573,7 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
     g_units = grouping.get("units")
     rows: list[dict] = []
     if g_units:
-        rows = _build_rows(g_units, by_dim, pnums, unit_refs, external)
+        rows = _build_rows(g_units, by_dim, pnums, unit_refs, external, repo)
     L.append("## 章节一 简报表")
     L.append("")
     if rows:
@@ -500,7 +582,8 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
         L.append("| " + " | ".join(cols) + " |")
         L.append("| " + " | ".join(["---"] * len(cols)) + " |")
         for r in rows:
-            cells = [r["entry"].replace("|", "\\|"), r["chain"].replace("|", "\\|"),
+            cells = [r["entry_link"].replace("|", "\\|"),
+                     r["chain_link"].replace("|", "\\|"),
                      r["frontend_is"].replace("|", "\\|"),
                      r["frontend_count"].replace("|", "\\|")]
             for d in _row_dimensions(dims, rows):
@@ -529,11 +612,14 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
             L.append(f"### {f['pnum']} · {label} · "
                      f"{f['route'] or '(独立变更单元)'} · "
                      f"{_SEVERITY_LABEL.get(f['severity'], f['severity'])}")
-            loc = f"`{f['file']}`"
+            # 位置:有 line → `file:line`;无 line → `file`(line_hint)。链接包装现行
+            # 显示文本(不可链化时逐字保持原形态),NEVER 为换取链接丢信息
+            loc_txt = f"`{f['file']}`"
             if f.get("line"):
-                loc += f":{f['line']}"
+                loc_txt += f":{f['line']}"
             elif f.get("line_hint"):
-                loc += f"({f['line_hint']})"
+                loc_txt += f"({f['line_hint']})"
+            loc = _source_link(loc_txt, f["file"], f.get("line"), repo)
             L.append(f"- 位置:{loc}")
             if f["risk"]:
                 L.append(f"- 风险:{f['risk']}")
@@ -576,7 +662,8 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
     L.append("## 诚实边界")
     L.append("")
     for b in _boundaries(by_dim, failed, catalog_source, external, dims,
-                         ctx.get("baseline_truncated", False), excluded, skipped):
+                         ctx.get("baseline_truncated", False), excluded, skipped,
+                         slimmed):
         L.append(f"- {b}")
     L.append("")
 
@@ -611,7 +698,7 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
         },
         "boundaries": _boundaries(by_dim, failed, catalog_source, external, dims,
                                   ctx.get("baseline_truncated", False), excluded,
-                                  skipped),
+                                  skipped, slimmed),
         "failed_units": failed,
         "report": str(report_path),
         "ts": ts,
@@ -697,7 +784,10 @@ def _check(run_dir: Path) -> int:
             violations.append("report missing honesty-boundary section")
         if report.replace("\\", "/").find("/openspec/") >= 0:
             violations.append("report path under openspec/ (NEVER allowed)")
-        # 纯文本 P-NN 引用(目标编辑器不支持 md 内部锚点):any anchor form = violation
+        # 纯文本 P-NN 引用(目标编辑器不支持 md 内部锚点):any anchor form = violation.
+        # The ](#  pattern only matches INTERNAL anchors (`(` immediately followed by
+        # `#`); source-file links ](src/...#L42) carry a path segment before the `#`
+        # and are the intended render form (design D2/D3), so they never match.
         for pat, what in ((r"<a id=", "html anchor <a id="), (r"\{#", "pandoc anchor {#"),
                           (r"\]\(#", "md link anchor ](#")):
             if re.search(pat, text):

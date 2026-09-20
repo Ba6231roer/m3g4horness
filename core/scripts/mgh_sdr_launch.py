@@ -32,8 +32,10 @@ solved OUTSIDE the host CLI session —
 Per-branch flow (single branch, or serially per --multi-branch line):
   gate (repo + host CLI in PATH; --host explicit > opencode > claude; none => exit 2 +
   recipe) -> run dir <repo>/.mgh-sdr/runs/<ts[-branch]>/ -> sdr_context.py (external
-  retrieval + baseline + sensitive catalog, IN THIS PROCESS) -> sentinel write
-  (read_roots = actually-searched roots + --read-root additions) -> orchestrator prompt
+  retrieval + baseline + sensitive catalog, IN THIS PROCESS, which also co-writes the
+  guard sentinel + the run_config.json codegraph signal) -> sentinel refresh
+  (idempotent; read_roots = actually-searched roots + --read-root additions, re-judged
+  against the project config as the second authorization gate) -> orchestrator prompt
   file (verbatim absolute paths from the sdr_context stdout) -> spawn host CLI
   (`opencode run` with the task on stdin / `claude -p` likewise; claude gets a 480000ms
   soft-deadline note — claude Bash per-call cap 600000 x 0.8) -> sentinel removal.
@@ -130,6 +132,14 @@ def _sentinel_body(repo: Path, read_roots: list[str]) -> dict:
 
 
 def _write_sentinel(repo: Path, read_roots: list[str]) -> Path:
+    """Idempotent REFRESH of `<repo>/.mgh-sdr/.active` (same content source as
+    `sdr_context._write_run_state`, which always runs earlier in this process).
+
+    It is kept (rather than deleted as redundant) because it is the second
+    authorization judgment: the roots are re-checked against the project config
+    immediately before the host CLI is spawned, so a version-skewed sibling cannot
+    leak an unapproved root into `read_roots[]`. Same semantics, same content
+    source — not a second truth."""
     sp = repo / SENTINEL_REL
     sp.parent.mkdir(parents=True, exist_ok=True)
     tmp = sp.with_suffix(".tmp")
@@ -207,14 +217,18 @@ def _is_approved(path: str, approved: set[str]) -> bool:
 
 
 def _run_context(repo: Path, run_dir: Path, base: str, branch: str, dims: str | None,
-                 read_roots: list[str]) -> dict:
+                 read_roots: list[str], no_codegraph: bool = False) -> dict:
     """sdr_context.py IN THIS PROCESS (external retrieval happens with the user's
-    explicit authorization — the shell session that launched this command)."""
+    explicit authorization — the shell session that launched this command). It also
+    co-writes the guard sentinel and the `run_config.json` codegraph signal; the
+    launcher's own `_write_sentinel` below is a same-source idempotent refresh."""
     cmd = [sys.executable, _script_path("sdr_context.py"),
            "--repo", str(repo), "--run-dir", str(run_dir),
            "--base", base, "--branch", branch]
     if dims:
         cmd += ["--dimensions", dims]
+    if no_codegraph:
+        cmd += ["--no-codegraph"]
     for rr in read_roots:
         cmd += ["--read-root", rr]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
@@ -325,14 +339,15 @@ def _read_multi_branch(path: Path) -> list[str]:
 
 
 def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
-             read_roots: list[str], dry_run: bool) -> tuple[bool, str, list[str]]:
+             read_roots: list[str], dry_run: bool,
+             no_codegraph: bool = False) -> tuple[bool, str, list[str]]:
     """One complete branch flow. Returns (ok, report_path_or_reason, pending_approval)."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = repo / RUNS_REL / (f"{ts}-{_safe_name(branch)}")
     run_dir.mkdir(parents=True, exist_ok=True)
     _residual_sentinel(repo)
     try:
-        ctx = _run_context(repo, run_dir, base, branch, dims, read_roots)
+        ctx = _run_context(repo, run_dir, base, branch, dims, read_roots, no_codegraph)
     except SystemExit:
         return False, f"sdr_context failed for {branch}", []
     pending = list(ctx.get("pending_approval") or [])
@@ -393,6 +408,15 @@ def main():
     ap.add_argument("--read-root", action="append", metavar="<abs>",
                     help="extra confirmed read-only root for sentinel read_roots[] "
                          "(repeatable)")
+    ap.add_argument("--no-codegraph", action="store_true",
+                    help="mark the codegraph SIGNAL off in the run's run_config.json "
+                         "(dispatcher-side `{{codegraph}}` placeholder becomes off). The "
+                         "signal is otherwise DERIVED by sdr_context.py from the repo "
+                         "(`<repo>/.codegraph/` present AND a `codegraph` binary on PATH) "
+                         "— the same predicate the grouping stage uses, so both entries "
+                         "report the same fact without a flag. This flag affects the "
+                         "SIGNAL ONLY: grouping always probes for itself, so reviewers "
+                         "judge conservatively without the grouping changing")
     ap.add_argument("--dry-run", action="store_true",
                     help="gates + sdr_context + sentinel + prompt file, NO host spawn")
     args = ap.parse_args()
@@ -418,7 +442,8 @@ def main():
     for branch in branches:
         _eprint(f"[launch] === branch {branch} ===")
         ok, outcome, pending = _run_one(repo, branch, args.base, host, args.dimensions,
-                                        args.read_root or [], args.dry_run)
+                                        args.read_root or [], args.dry_run,
+                                        args.no_codegraph)
         pending_all.extend(p for p in pending if p not in pending_all)
         if ok:
             reports.append(outcome)

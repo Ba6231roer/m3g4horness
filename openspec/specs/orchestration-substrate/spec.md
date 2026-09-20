@@ -76,7 +76,7 @@ openspec 变更夹名、dev-meta 措辞。
 `list_*`/`resume_state.py` 调用行、产物清单、`MGH_INIT_ACTIVE`/哨兵、init 边界披露)。两壳引用同一个
 fragment(零正文 drift)。
 
-**stage 流细节的载体**(自本变更起):mgh-init stage 流的**逐步细节正文**(not-started bootstrap 的
+**stage 流细节的载体**:mgh-init stage 流的**逐步细节正文**(not-started bootstrap 的
 run_config 写、哨兵生命周期、codegraph 检测、discover/scout/T1/T2/T3/T4 的 fan-out 刚性三元组与
 `--check` 校验、聚合硬阈值、scout 级联失效落账、fan-out 失败落账等)SHALL 拆进 **per-step fragment 集**
 `core/prompts/fragments/init-stage/{<step>}.md`(12 文件,step 枚举 key 与 `resume_state.py`/
@@ -87,19 +87,19 @@ fragment)」recipe **按需加载当前步单文件**,NEVER 整份加载。壳�
 per-step fragment 集**(零正文 drift;壳体 claude/opencode 差异留在壳,stage 流正文 host-agnostic
 由壳侧的 `.claude/mgh-core` / `.opencode/mgh-core` 前缀覆盖)。
 
-**命名 step id 契约**(自本变更起):壳的 stage-flow recipe SHALL 只使用**命名 step id**(与
+**命名 step id 契约**:壳的 stage-flow recipe SHALL 只使用**命名 step id**(与
 `resume_state.py` stdout `step` 字段一致:not-started/discover/survey/scout/resolve/t1/t2/t3/
 assemble/t4/merge/done);`list_steps.py --step <id>` 只接受命名 id。数字索引(0-based,如 `--step 0`)
 NEVER 出现在壳/fragment 的调用面、NEVER 传给 `list_steps --step`(闭集拒歧义,退出码 2)。壳 SHALL
 不再以「step 0–8」数字标注流程节点(旧 init-stage-flow 编号仅作文档结构,非运行时枚举)。
 
-**fresh-run bootstrap 可达性**(自本变更起):fresh-run(首 run,`<target>/.mgh-init/` 不存在 /
+**fresh-run bootstrap 可达性**:fresh-run(首 run,`<target>/.mgh-init/` 不存在 /
 `resume_state.py` exit 1)SHALL 经壳 **fixed-path Read** `<mgh-core>/prompts/fragments/init-stage/
 bootstrap.md` 加载 bootstrap 正文(run_config 原子写 + 哨兵 + MGH_TARGET + codegraph 检测),再
 `resume_state` → `discover` 进统一循环;NEVER 对 bootstrap 调 `list_steps --step <数字>`(bootstrap
 在 `stage_flow_files[]` 中结构性不存在——not-started 返回 `[]`、run_config 前 exit 1,故由壳直达)。
 
-**壳 token 预算**(自本变更起):mgh-init 两壳经 `tools/measure_prompts.py` 实测 `mid_tokens` 各
+**壳 token 预算**:mgh-init 两壳经 `tools/measure_prompts.py` 实测 `mid_tokens` 各
 **SHALL ≤ 5,000 tok**(R5.6 硬上限;壳 = 触发轮 USER 首条消息、primacy 区,lost-in-the-middle + 防回归)。
 **编排器 fragments**(init-stage 12 个 per-step +
 orchestrator-discipline)SHALL **逐个评估**单次 Read 轮尺寸是否结构良好(**不**强制求和 ≤ N;实测平均
@@ -254,8 +254,7 @@ id **非命名枚举**(如数字索引 `0`)时,stderr SHALL 附带**可操作 hi
 
 两壳顶部编排器声明中的「本仓」措辞(指 m3g4horness 研发仓)SHALL 改为「目标项目」——该措辞出现在
 **分发给目标 agent** 的提示词中,目标 agent 可能误读为「m3g4horness 研发仓」而非其所在的目标项目,
-造成歧义。R5.10 第 7 类 dev-meta(指本研发仓时的「本仓」)由 `tools/check_distributed_purity.py` 守护;
-本变更 SHALL 使该措辞在两壳顶部消失。
+造成歧义。R5.10 第 7 类 dev-meta(指本研发仓时的「本仓」)由 `tools/check_distributed_purity.py` 守护。
 
 #### Scenario: 两壳顶部无「本仓」措辞
 
@@ -292,21 +291,6 @@ id **非命名枚举**(如数字索引 `0`)时,stderr SHALL 附带**可操作 hi
 - **WHEN** 运行 `py resume_state.py --help` / `py write_runconfig.py --help` 与 `tools/check_contracts.py`
 - **THEN** `--run-root` 列于两者 `--help`;双壳中出现的 `resume_state.py`/`write_runconfig.py` 调用 flag
   均在对应 `--help` 中存在
-
-### Requirement: 行为保持——既有回归测全绿 + mgh-init 字节级一致
-
-本变更 SHALL 不改变 mgh-init 流水线的可观测行为。既有回归测全绿;契约 lint、分发纯净性 lint、零依赖 AST
-扫描 SHALL 通过。新增/改动脚本 MUST 仅用 Python ≥3.10 标准库。任一 `.md`/脚本改动 SHALL bump 对应版本号。
-
-#### Scenario: 既有回归测与 lint 全绿
-
-- **WHEN** 运行既有 `tests/` 套件 + 三项 lint(契约 / 分发纯净 / 零依赖)
-- **THEN** 全部通过,无新增失败
-
-#### Scenario: mgh-init 流水线产物路径未漂移
-
-- **WHEN** 默认调用 `resume_state.py`/`write_runconfig.py`(不传 `--run-root`)
-- **THEN** 运行目录、`run_config.json` 路径、stdout schema 与变更前逐字一致(无回归)
 
 ### Requirement: core/scripts 叶脚本编译零告警(stderr 纯净)
 

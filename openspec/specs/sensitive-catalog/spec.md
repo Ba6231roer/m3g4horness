@@ -141,7 +141,7 @@ matching」)与 mgh-init 关联:当 `change_context.candidate_controls[]` 含 `c
 - **THEN** 缺口仍产出(无控制锚点,仅「应满足的安全属性」),不被丢弃
 
 #### Scenario: mgh-init side unchanged
-- **WHEN** 本变更生效后审阅 mgh-init 的 `discover_controls` / `validate_inventory` / inventory schema
+- **WHEN** 审阅 mgh-init 的 `discover_controls` / `validate_inventory` / inventory schema
 - **THEN** 与变更前逐字一致;sra 仅读 `controls_inventory.json`,不反向改它
 
 ### Requirement: PIPL/GB-T 35273 default template shipped, not auto-applied

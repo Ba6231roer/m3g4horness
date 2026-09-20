@@ -95,7 +95,7 @@ stages/*.md` 一字不改,R1);编排器 SHALL 在任务消息 inline fragment
 
 #### Scenario: Ported SYSTEM prompts are not edited
 - **WHEN** 审阅 `core/prompts/stages/s2-threat-model.md` / `s6-verify.md` / `s8-chain.md` 等
-- **THEN** 其正文未被本变更修改(溯源注释 `Source: vvaharness/...` 保留);控制消费走任务消息 + 新增 fragment
+- **THEN** 其正文保持原样(溯源注释 `Source: vvaharness/...` 保留);控制消费走任务消息 + 新增 fragment
 
 ### Requirement: Evidence-grounded control consumption
 
@@ -140,7 +140,7 @@ stages/*.md` 一字不改,R1);编排器 SHALL 在任务消息 inline fragment
 
 ### Requirement: Zero runtime dependencies and no upstream import
 
-`load_controls.py` 及本变更新增的任何脚本 MUST 仅用 Python ≥3.10 标准库;MUST NOT `import` 任何
+`load_controls.py` 及任何新增脚本 MUST 仅用 Python ≥3.10 标准库;MUST NOT `import` 任何
 `vvaharness` 模块;MUST NOT 要求任何 `pip install`(承 R2)。`controls-context.md` fragment 分发
 前 MUST 经 `tools/check_distributed_purity.py` 校验,不携带研发铁律编号 / 失败 ID / 内部路径等
 dev-only 悬空引用(承 R5.10)。

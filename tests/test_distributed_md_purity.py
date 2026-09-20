@@ -109,6 +109,20 @@ class TestDistributedPurity(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["violations"], [])
 
+    def test_sdr_callface_artifacts_scanned_and_clean(self):
+        # The sdr shells gained wording about the codegraph carrier (run_config.json /
+        # no_codegraph) and the in-domain recovery command; the dispatcher gained the
+        # matching consumer. Both ship → both MUST stay free of dev-only provenance.
+        root = HERE.parent
+        files = [root / "releases" / "claude-code" / "commands" / "mgh-sdr.md",
+                 root / "releases" / "opencode" / "command" / "mgh-sdr.md",
+                 root / "core" / "scripts" / "fanout_runner.py"]
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["violations"], [])
+
     def test_ut_init_artifacts_scanned_and_clean(self):
         # ut-init shells + stage prompts + agent defs + contracts (task 9.3 / 10.6) MUST pass
         # distribution-purity (no dev-only provenance / dangling refs).

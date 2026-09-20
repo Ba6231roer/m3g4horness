@@ -22,12 +22,17 @@ description: Run a security design review on a branch diff: git diff base..branc
 - `--dimensions <inline-json|@path>`(可选:收窄检查面,闭集 6 键 + kebab-case 自由文本扩展;
   非法键 → 退出码 2 早停,任何 LLM 之前)
 - `--run-dir <dir>`(可选:显式 run 目录,默认 `<project>/.mgh-sdr/runs/<YYYYMMDD_HHMMSS>/`)
-- `--max-standalone-bytes <N>`(默认 64KB,standalone 簇归并上限)
-- `--max-interface-bytes <N>`(默认 256KB,interface 单元超限确定性拆 `-partN` 续单元)
+- `--max-standalone-bytes <N>`(默认 64KB,standalone 簇归并上限)、
+  `--max-interface-bytes <N>`(默认 256KB,interface 单元上限)——判据是**切片渲染后的实测
+  字节**,非估算。单元超预算按序三级处置:① 多文件单元无损重切为 `-partN` 续单元(内容与
+  hunk 一份不丢);② 单文件残渣截断描述性上下文块(注解上下文 / 符号表,切片内留可见截断标记,
+  diff 正文与定位头绝不截);③ 仍超预算则**退出码 2 且零派发**(不写任何切片与 grouping.json,
+  零子代理被派出,stderr 给出单元 id/上限/实测字节/最大贡献文件与出口)
 - `--include-excluded`(兜底:不套排除集(测试树/构建产物/静态资源/锁文件/构建脚本),
   恢复全量评审;默认排除且 stdout `excluded{count,by_reason}` + 报告诚实边界披露)
-- `--no-codegraph`(可选:跳过 codegraph 减扇出信号;默认 auto:`<project>/.codegraph/` 存在且 PATH
-  有 codegraph 才 on;off 时零 codegraph 调用、行为等价)
+- `--no-codegraph`(可选:把**信号**标为 off——不传时由 `sdr_context.py` 自动探测:仓库有
+  `<project>/.codegraph/` 且 PATH 有 `codegraph` 才 on。该开关**只影响信号**,不改分组:分组阶段
+  恒按仓库实际情况自行探测,故传它之后子评审按「单元可能被切开」的保守口径判,而分组本身不变)
 - `--dry-run`(仅跑 step 0–1(sdr_context + diff_group materialize)+ `--check`,不 fan-out 不渲染)
 
 **无 actionable 参数 / `--help`** → 打印参数表后 **STOP**(零 token、零解析)。
@@ -53,25 +58,29 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
 
 ```
 0. parse + 运行域声明
-   · `Bash: export MGH_SDR_ACTIVE=1`;写磁盘哨兵(opencode 可靠激活兜底;**NEVER** bash pwd 取 target,
-     target 来自脚本 stdout):
-     `mkdir -p .mgh-sdr && printf '%s' '{"domain":"mgh-sdr","target":"","out_roots":[],"v":1}' > .mgh-sdr/.active`
-   · 解析 run 目录(默认 `<project>/.mgh-sdr/runs/<ts>/`;mkdir -p)。
+   · `Bash: export MGH_SDR_ACTIVE=1`;解析 run 目录(默认 `<project>/.mgh-sdr/runs/<ts>/`;
+     `mkdir -p`)。
+   · **本步不写任何文件**:运行域哨兵与 codegraph 信号都由 step 1 的 `sdr_context.py`
+     确定性 co-write(脚本一跑必在)——**NEVER** 手执行 `printf` 配方写它们。
+   · codegraph 信号由 step 1 的 `sdr_context.py` **自行探测**(仓库有 `.codegraph/` 且 PATH 有
+     `codegraph` 才 on;与 `diff_group.py` 分组同一谓词)——本壳**不做**第二份探测、**NEVER** 手写该
+     信号;用户显式要求把信号标 off 时给 step 1 加 `--no-codegraph`(该 flag **只**改信号:分组
+     仍按仓库实际情况走,子评审因此按保守口径判)。
 1. sdr_context(Bash,确定性;外部仓检索在此步、宿主进程内——**可能一次权限确认,诚实披露**):
-     py .opencode/mgh-core/scripts/sdr_context.py --repo <abs> --run-dir <abs-run-dir> [--base <ref>] [--branch <ref>] [--dimensions <json>]
+     py .opencode/mgh-core/scripts/sdr_context.py --repo <abs> --run-dir <abs-run-dir> [--base <ref>] [--branch <ref>] [--dimensions <json>] [--no-codegraph]
    · 读 stdout:`baseline_path`/`baseline_truncated`/`sensitive_catalog`/`sensitive_catalog_source`/
      `external_repos[]`/`external_skipped`/`pending_approval[]`(**NEVER** 自行解析 AGENTS.md 重算;
      NEVER 读外部仓原文)。仅**已配置**于项目 `<repo>/.mgh/read-roots.json` 的声明仓才被检索。
+   · **本步同时写出**(脚本副作用,失败退出码 2,不静默):哨兵 `<repo>/.mgh-sdr/.active`
+     (`target` = 脚本 stdout 的 Windows 原生 `repo`;**read_roots 最小化** = 实际检索过的根 ∪
+     操作者 `--read-root`,**NEVER** 透传任意路径)与 `<run-dir>/run_config.json`
+     (**唯一载荷** `no_codegraph`;起始态字段 NEVER 写入)。
    · **`pending_approval[]` 非空(外部仓待批)→ 宿主会话停下问用户**(逐仓绝对路径 + 用途:
      存量设计声明的外部目录,批准后经脚本持久写入项目配置,只读、以后每次 run 直接放行):
      - 同意 → 逐仓
        `py .opencode/mgh-core/scripts/read_roots_config.py --target <abs> --add <abs-外部仓>`
-       (脚本 stderr 打印变更)后**重跑本步同参**(已配置仓即被检索并进哨兵);
+       (脚本 stderr 打印变更)后**重跑本步同参**(已配置仓即被检索并自动进哨兵);
      - 拒绝 → **NEVER** 写配置,按降级继续(该仓零读取),报告如实披露。
-   · **有 external_repos → 重写哨兵**(把已确认外部根写入 read_roots;subagent 跨树读放行声明根,
-     Bash 搜索动词仍仅限 MGH_TARGET):
-     `printf '%s' '{"domain":"mgh-sdr","target":"<abs>","out_roots":[],"read_roots":["<ext1>","<ext2>"],"v":1}' > .mgh-sdr/.active`
-     (read_roots 最小化:只写 sdr_context 实际检索过的根(=已配置仓),**NEVER** 透传任意路径。)
    · 无 external_repos 且 external_skipped 非空 → 记住该披露(报告会声明)。
    · `export MGH_TARGET=<abs>`;`--dry-run` → 到此处 STOP(跑 `--check` 后移除哨兵)。
 2. diff_group(Bash,确定性;pending 唯一来源):
@@ -81,9 +90,6 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
    · 诊断读 stdout `excluded{count,by_reason}` 与 `codegraph_stats{anchors_changed,
      anchors_upstream,chain_merged,edges_*}`(codegraph 是否生效/锚定多少,从此可观测;
      probe 失败原因在 stderr)。
-   · `export MGH_SDR_CODEGRAPH=on|off`(auto 检测:`test -d "$MGH_TARGET/.codegraph" && command -v codegraph`;
-     `--no-codegraph` 或检测不可用 → off)——信号经 run 目录 `run_config.json`(no_codegraph 字段,
-     printf 写入,确定性)传给 dispatcher,NEVER 拼进 task 消息。
    · 校验:`py .opencode/mgh-core/scripts/diff_group.py --check <run-dir>`(退出码 2 → 回退)。
 3. fan-out(dispatcher;逐字转发调用,**NEVER** 手工循环):
      py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --time-budget-ms <宿主标定,如 opencode 900s 宿主 → 720000> --call-timeout-s <MUST 显式传,< budget×0.8,如 720000→540> --stall-timeout-s <MUST < --call-timeout-s,如 300> [--resume]
@@ -93,7 +99,9 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
      `<run-dir>/markers/sdr/<unit>.run.log`。
    · 软时限早退(stdout `partial:true`)→ 同参重派(resume 语义);STALLED(退出码 2)→
      停止重派,报告 degraded(诚实披露)。gate 形退出码 2 → 转述 stderr recipe,停止。
-   · **快败风暴三层(配额限流形态)**:① `stalled:true` 且 `resume_state.py --check` 无磁盘异常 →
+   · **快败风暴三层(配额限流形态)**:① `stalled:true` 且
+     `py .opencode/mgh-core/scripts/diff_group.py --check <run-dir>` 退出码 0(分组产物完好:
+     grouping.json + slices + markers;该检查校验**产物完整性**、**非**运行进度自洽性) →
      provider 拥塞形态 → 直接同参重派(runner 已内建快败冷却与熔断前一次退避),NEVER 改写输入/
      删 marker/写微脚本;② stdout `rate_limited:true` + `rate_limited_crashes[]` → 等满一个配额
      窗口(如 10 分钟)再同参重派;③ 收尾 `failed>0` 且该单元 run.log(`markers/sdr/<unit>.run.log`)
@@ -108,6 +116,20 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
 5. 收尾:打印报告绝对路径 + counts(stdout manifest 字段,**NEVER** `py -c` 挖 JSON);
    声明诚实边界;`rm .mgh-sdr/.active`(完成态/干净停止)。
 ```
+
+## 中断恢复(崩溃 / 压缩后 / 新会话)
+
+恢复**必须带同一个 run 目录**(新建目录 = 已完成单元的 marker 不在其中 = 全部重做):
+
+     py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir>
+
+读 stdout 的 `step`(语义 = **当前待办步**)/ `next_action` / `discipline_reminders` / `notes`,
+按该步纪律(闸门 → 路径配方 → 硬边界)继续即接上流水线。进度与纪律**纯从磁盘重派生**,与对话
+记忆是否保留无关。`--run-dir` 必填;推不出时脚本 fail-loud,**NEVER** 猜步骤。run 进行中
+(`step ∈ group|fanout|render`)哨兵却缺失 = 守卫休眠 → `--check` 退出码 2 + re-arm recipe:
+
+     py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir> --check
+     py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir> --rearm-sentinel
 
 ### Stage → component map
 
@@ -131,6 +153,9 @@ py .opencode/mgh-core/scripts/diff_group.py --check .mgh-sdr/runs/<ts>
 py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base master --checkpoints .mgh-sdr/runs/<ts>/markers --inputs-dir .mgh-sdr/runs/<ts>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300
 py .opencode/mgh-core/scripts/render_sdr_report.py --run-dir .mgh-sdr/runs/<ts> --repo <abs>
 py .opencode/mgh-core/scripts/render_sdr_report.py --check .mgh-sdr/runs/<ts>
+py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir>
+py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir> --check
+py .opencode/mgh-core/scripts/list_sdr_steps.py --step fanout
 ```
 
 ## Always disclose
@@ -153,3 +178,9 @@ py .opencode/mgh-core/scripts/render_sdr_report.py --check .mgh-sdr/runs/<ts>
 - **基线经字节预算投影**(32KB 默认,优先级截断):低优先级维度的存量设计细节可能未全量投影。
 - **宿主 shell 超时**:opencode 全局 shell 超时 env 须启动前就绪;per-call `timeout` 是跨宿主公共
   杠杆。claude Bash per-call 上限 600000ms。
+- **launcher 重跑会新建 run 目录**:`mgh_sdr_launch.py` 无 `--resume` / `--run-dir`,每次调用按当前
+  时刻新建 `<repo>/.mgh-sdr/runs/<ts>-<branch>/`,上一次 run 的 marker **不被复用**——**NEVER 宣称
+  「重跑 launcher 即续跑」**。续跑由调用方带着**同一个** run 目录路径回来经 `resume_sdr_state.py`
+  进行(见「中断恢复」)。
+- **`--dimensions` 收窄当前不下发**:该开关只在 `sdr_context` 做闭集校验,**不**进入评审单元的任务
+  消息——即收窄后的检查面**未生效**,评审仍按全部 6 维进行。

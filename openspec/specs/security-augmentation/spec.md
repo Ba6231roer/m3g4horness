@@ -295,7 +295,7 @@ augmented_requirements, augmented_tasks, referenced_controls, clarifications_ask
 - **THEN** codegraph 富化(外科式上下文 + call_path 确认 + a2 callers 预解析)均不执行,行为等价于引入 codegraph 前
 
 #### Scenario: Detection introduces no runtime dependency
-- **WHEN** 对本变更新增/改动的任何 `.md` 或既有 `.py` 做 AST/文本扫描
+- **WHEN** 对引入 codegraph 消费的任何 `.md` 或既有 `.py` 做 AST/文本扫描
 - **THEN** 不存在 `import codegraph` 或对 codegraph 的 Python 运行时依赖;codegraph 仅经 MCP/Bash 消费
 
 #### Scenario: Detection runs before any LLM subagent
@@ -323,7 +323,7 @@ augmented_requirements, augmented_tasks, referenced_controls, clarifications_ask
 - **THEN** 其措辞为「codegraph 在场 SHALL 优先 codegraph_explore,仅 … 回退 Read」,而非「you may use codegraph」
 
 #### Scenario: No deterministic-script contract change
-- **WHEN** 本变更生效后审阅 `prepare_augment.py` / `merge_augment.py` / `merge_memory.py` 的 CLI 与 I/O 契约
+- **WHEN** 审阅 `prepare_augment.py` / `merge_augment.py` / `merge_memory.py` 的 CLI 与 I/O 契约
 - **THEN** 与变更前逐字一致;codegraph 从不被 `.py` import 或 subprocess 调用
 
 ### Requirement: Refine control-reuse recommendation via codegraph structural-evidence confirmation

@@ -474,6 +474,16 @@ class DiffGroupTest(unittest.TestCase):
     def _slice_text(self, unit):
         return Path(unit["input_path"]).read_text(encoding="utf-8")
 
+    def _hunk_locators(self, d) -> set:
+        """Every `@@ <path> @@ new-file lines N+C` locator across a run's slices — the
+        coverage fingerprint the lossless re-split must preserve."""
+        import re
+        rx = re.compile(r"^@@ .+ @@ new-file lines \d+\+\d+$")
+        out = set()
+        for u in d["pending"]:
+            out.update(l for l in self._slice_text(u).splitlines() if rx.match(l))
+        return out
+
     def test_cg_probe_states(self):
         repo = self._build(CG_CHAIN_BASE, CG_CHAIN_FEAT, cg_on=False)
         # state (b)/(c): .codegraph absent -> off even with a binary reachable
@@ -892,11 +902,14 @@ public class DeptController {
             self.assertIn("UserService.java", self._slice_text(u))
 
     def test_interface_budget_splits_parts(self):
-        # Scenario: a merged interface unit whose slice exceeds --max-interface-bytes
-        # splits into -partN units, each with its own route segment + independent
-        # paths. Fixture: two changed routes MERGED into one unit (shared downstream),
-        # then a tiny cap forces the split.
-        big = "x" * 4096
+        # Scenario: a merged interface unit whose MEASURED slice exceeds
+        # --max-interface-bytes splits into -partN units, each with its own route segment
+        # + independent paths, and the split is LOSSLESS (the parts' hunk locators equal
+        # the un-split run's set — no hunk dropped, no content truncated). Fixture: two
+        # changed routes MERGED into one unit (shared downstream), then a small cap.
+        # Each file's own diff body sits well under the cap: the MERGED slice is what
+        # overflows, which is precisely the case the old estimate-only judge let through.
+        big = "x" * 1200
         pad = "\n".join(f"    private int pad{i} = {i};" for i in range(20))
         base = {
             "src/BigController.java": f"""@RestController
@@ -962,20 +975,26 @@ public class BigController {{
                                    "--materialize", str(run_dir / "slices"))
         self.assertEqual(code, 0, err)
         d = json.loads(out)
-        # merged routes: one host -> -partN split; every part fits the cap except the
-        # merged-capped exception (a single oversize FILE is never split mid-file).
         self.assertGreaterEqual(d["counts"]["interface"], 2)
-        for u in d["pending"]:
-            if u["unit_bytes"] > 2048 + 1024:
-                t = self._slice_text(u)
-                n_files = len([l for l in t.splitlines()
-                               if l.startswith("- ") and "[" in l and "]" in l])
-                self.assertEqual(n_files, 1, "oversize part must be one file only")
         part_ids = [u["unit_id"] for u in d["pending"] if "-part" in u["unit_id"]]
         self.assertTrue(part_ids, "over-budget unit must split into -partN")
         for u in d["pending"]:
+            # the gate's promise, tightened from `cap + 1024`: EVERY part measures <= cap
+            self.assertLessEqual(u["unit_bytes"], 2048)
+            self.assertEqual(u["slimmed"], {},
+                             "a multi-file over-budget unit is resolved by re-splitting, "
+                             "never by slimming context")
             self.assertTrue(Path(u["input_path"]).is_file())
             self.assertNotIn(":", Path(u["input_path"]).name)
+        # lossless: the same fixture under a cap nothing can reach renders the SAME set of
+        # hunk locators — the split moved hunks between units, it did not drop any
+        wide_dir = repo / ".mgh-sdr" / "runs" / "wide"
+        code, wout, werr = self._run("--repo", str(repo), "--base", "master",
+                                     "--branch", "feat", "--max-interface-bytes",
+                                     "1000000", "--checkpoints", str(wide_dir / "markers"),
+                                     "--materialize", str(wide_dir / "slices"))
+        self.assertEqual(code, 0, werr)
+        self.assertEqual(self._hunk_locators(d), self._hunk_locators(json.loads(wout)))
 
     def test_codegraph_stats_shape_off(self):
         # codegraph off -> stats structure present, all zeros; probe reason on stderr.
@@ -1291,6 +1310,226 @@ public class UserController {
         code, _, err = self._run("--check", str(run_dir))
         self.assertEqual(code, 2)
         self.assertIn("branch_of illegal", err)
+
+
+# --- slice byte gate: judge == artifact, and the over-budget ladder -------------
+
+def _java_residual(n_methods: int, pad: int = 0) -> str:
+    """A route-less java class: `n_methods` one-line methods (so the residual cluster
+    carries a full, 40-entry-capped symbol table) plus `pad` long comment lines. Changing
+    `pad` between base and feat yields ONE file whose diff body and symbol table are both
+    substantial — the atomic-residue shape levels 2/3 exist for."""
+    body = "\n".join(f"    public int paddingMethodName{i}() {{ return {i}; }}"
+                     for i in range(n_methods))
+    lines = [f"    // pad line {i}: " + "y" * 48 for i in range(pad)]
+    return "public class BigUtil {\n" + "\n".join(lines + body.split("\n")) + "\n}\n"
+
+
+class SliceByteGateTest(unittest.TestCase):
+    """harden-mgh-sdr-oversize-slice-gate: (a) the budget judge is the rendered slice's
+    utf-8 byte count — the same number that lands on disk; (b) over budget, the unit is
+    re-split losslessly, then context-slimmed, then refused with zero side effects."""
+
+    RESIDUAL_BASE = {"src/util/BigUtil.java": _java_residual(60, 0)}
+    RESIDUAL_FEAT = {"src/util/BigUtil.java": _java_residual(60, 15)}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_diffgate_"))
+        self._env_backup = {k: v for k, v in os.environ.items()}
+
+    def tearDown(self):
+        import shutil
+        for k in ("MGH_CODEGRAPH_BIN", "CG_STUB_MAP"):
+            os.environ.pop(k, None)
+        for k, v in self._env_backup.items():
+            os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # reuse the main harness (build/run helpers live on DiffGroupTest)
+    _build = DiffGroupTest._build
+    _run_group = DiffGroupTest._run_group
+    _run = DiffGroupTest._run
+    _slice_text = DiffGroupTest._slice_text
+
+    def _run_cap(self, repo, run: str, *extra):
+        run_dir = repo / ".mgh-sdr" / "runs" / run
+        code, out, err = self._run("--repo", str(repo), "--base", "master",
+                                   "--branch", "feat",
+                                   "--checkpoints", str(run_dir / "markers"),
+                                   "--materialize", str(run_dir / "slices"), *extra)
+        return code, out, err, run_dir
+
+    def test_standalone_multifile_cluster_resplit(self):
+        # Scenario (standalone half of level 1): a directory cluster of several files —
+        # one unit, because the clustering merge cap is judged per candidate — measures
+        # over its cap while each file alone fits -> re-split into -partN, losslessly.
+        # Exercises the gate splitter with NO hunk selection (the "render every hunk"
+        # shape), which the interface path never does.
+        base, feat = {}, {}
+        for i in range(3):
+            rel = f"db/m{i}.sql"
+            base[rel] = f"CREATE TABLE m{i}(id INT);\n"
+            feat[rel] = (f"CREATE TABLE m{i}(id INT, x INT);\n"
+                         + "".join(f"-- note {j} {'q' * 60}\n" for j in range(12)))
+        repo = self._build(base, feat, cg_on=False)
+        code, out, err, _ = self._run_cap(repo, "multi",
+                                          "--max-standalone-bytes", "1500")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        parts = [u for u in d["pending"] if "-part" in u["unit_id"]]
+        self.assertEqual(len(parts), 3, d["pending"])
+        for u in d["pending"]:
+            self.assertLessEqual(u["unit_bytes"], 1500)
+            self.assertEqual(u["slimmed"], {})          # lossless: nothing was slimmed
+        # lossless: same hunk locators as the un-split (huge cap) run
+        code, wout, werr, _ = self._run_cap(repo, "multiwide",
+                                            "--max-standalone-bytes", "1000000")
+        self.assertEqual(code, 0, werr)
+        self.assertEqual(DiffGroupTest._hunk_locators(self, d),
+                         DiffGroupTest._hunk_locators(self, json.loads(wout)))
+        self.assertEqual(len(json.loads(wout)["pending"]), 1)   # one cluster, un-split
+
+    def test_oversize_atomic_residue_slimmed(self):
+        # Scenario: one file (cannot be split mid-file) over cap, where the overage is
+        # carried by the descriptive symbol table -> slim it, keep the evidence intact.
+        repo = self._build(self.RESIDUAL_BASE, self.RESIDUAL_FEAT, cg_on=True)
+        code, out, err, run_dir = self._run_cap(repo, "slim",
+                                                "--max-standalone-bytes", "2200")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(len(d["pending"]), 1)
+        u = d["pending"][0]
+        self.assertLessEqual(u["unit_bytes"], 2200)
+        self.assertEqual(u["slimmed"].keys(), {"sym_ctx"})       # recorded, not silent
+        text = self._slice_text(u)
+        self.assertRegex(text, r"… \(截断:\d+ 行 / 原 \d+ 字节\)")  # visible in the slice
+        # evidence面 untouched: the diff body, the file list and every hunk locator
+        self.assertIn("- src/util/BigUtil.java [M]", text)
+        self.assertIn("@@ src/util/BigUtil.java @@ new-file lines", text)
+        self.assertIn("+    // pad line 0:", text)
+        self.assertNotIn("(截断", text.split("## Diff hunks", 1)[1])   # never the diff
+        self.assertEqual(d["budget"], {"max_standalone_bytes": 2200,
+                                       "max_interface_bytes": 262144})
+
+    def test_oversize_atomic_residue_refuses_with_zero_side_effects(self):
+        # Scenario: the file's own diff body is over the cap — no context block can give
+        # that budget back -> exit 2 BEFORE anything is written (zero slices, zero
+        # grouping.json => the dispatcher has nothing to consume => zero subagents).
+        repo = self._build(self.RESIDUAL_BASE, self.RESIDUAL_FEAT, cg_on=True)
+        code, out, err, run_dir = self._run_cap(repo, "refuse",
+                                                "--max-standalone-bytes", "1500")
+        self.assertEqual(code, 2, err)
+        self.assertIn("over their slice byte budget", err)
+        self.assertIn("BigUtil", err)             # unit_id
+        self.assertIn("cap 1500", err)
+        self.assertIn("largest contributing file: src/util/BigUtil.java", err)
+        self.assertIn("recipe:", err)
+        self.assertFalse((run_dir / "slices").exists())
+        self.assertEqual([p for p in run_dir.glob("**/*.slice.md")], [])
+        self.assertFalse((run_dir / "grouping.json").exists())
+        self.assertEqual(out.strip(), "")         # nothing on stdout either
+
+    def test_unit_bytes_is_the_landed_file(self):
+        # the judge and the artifact are one number: `unit_bytes` equals the slice file's
+        # byte count (and the utf-8 length of the text), for every unit
+        repo = self._build(self.RESIDUAL_BASE, self.RESIDUAL_FEAT, cg_on=True)
+        code, out, err, _ = self._run_cap(repo, "same")
+        self.assertEqual(code, 0, err)
+        for u in json.loads(out)["pending"]:
+            p = Path(u["input_path"])
+            self.assertEqual(u["unit_bytes"], p.stat().st_size, u["unit_id"])
+            self.assertEqual(u["unit_bytes"],
+                             len(p.read_text(encoding="utf-8").encode("utf-8")))
+
+    def test_in_budget_output_unchanged(self):
+        # no-regression line: an in-budget run renders the SAME slice text and the same
+        # pending[] fields as before the gate existed — `budget` (top level) and an empty
+        # `slimmed` (per unit) are the only increments.
+        repo = self.tmp / "repo"
+        _init_repo(repo)
+        _write(repo, "src/UserController.java", CONTROLLER)
+        _write(repo, "db/migration.sql", "CREATE TABLE t(id INT);\n")
+        _commit_all(repo, "init")
+        _git(repo, "checkout", "-qb", "feat")
+        _write(repo, "src/UserController.java",
+               CONTROLLER + "    // feature-branch change inside detail method\n")
+        _write(repo, "db/migration.sql", "CREATE TABLE t(id INT, x INT);\n")
+        _commit_all(repo, "feat")
+        code, out, err, _ = self._run_cap(repo, "keep")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["budget"], {"max_standalone_bytes": 65536,
+                                       "max_interface_bytes": 262144})
+        for u in d["pending"]:
+            self.assertEqual(u["slimmed"], {})
+            self.assertNotRegex(self._slice_text(u), r"截断")
+            self.assertTrue(Path(u["input_path"]).name.startswith(f"{u['unit_id']}.slice.md"))
+        # pinned render for the fixed fixture — the byte-for-byte no-regression line
+        by_id = {u["unit_id"]: u for u in d["pending"]}
+        self.assertEqual(
+            self._slice_text(by_id["db"]),
+            "# SDR review unit slice — db\n"
+            "kind: standalone\n"
+            "route: (standalone cluster)\n"
+            f"repo: {repo}\n"
+            "diff range: master..feat\n"
+            "\n"
+            "## Files in this unit\n"
+            "- db/migration.sql [M]\n"
+            "\n"
+            "## Diff hunks (unified, 3-line context)\n"
+            "```diff\n"
+            "@@ db/migration.sql @@ new-file lines 1+1\n"
+            "-CREATE TABLE t(id INT);\n"
+            "+CREATE TABLE t(id INT, x INT);\n"
+            "```\n"
+            "\n"
+            "Read-only slice materialized by diff_group.py; review against the baseline.\n")
+
+    def test_check_budget_assertions_and_backward_compat(self):
+        # --check: the new fields are asserted when present and SKIPPED when absent (an
+        # old grouping.json stays clean) — same incremental contract as chain[].
+        repo = self._build(self.RESIDUAL_BASE, self.RESIDUAL_FEAT, cg_on=True)
+        code, out, err, run_dir = self._run_cap(repo, "ck")
+        self.assertEqual(code, 0, err)
+        code, _, cerr = self._run("--check", str(run_dir))
+        self.assertEqual(code, 0, cerr)
+
+        gp = run_dir / "grouping.json"
+        good = gp.read_text(encoding="utf-8")
+
+        # old product: no budget[], no slimmed{} -> assertions skipped, still exit 0
+        g = json.loads(good)
+        g.pop("budget", None)
+        for u in g["pending"]:
+            u.pop("slimmed", None)
+        gp.write_text(json.dumps(g), encoding="utf-8")
+        code, _, cerr = self._run("--check", str(run_dir))
+        self.assertEqual(code, 0, cerr)
+
+        # new product with a unit past its cap -> exit 2
+        g = json.loads(good)
+        g["pending"][0]["unit_bytes"] = g["budget"]["max_standalone_bytes"] + 1
+        gp.write_text(json.dumps(g), encoding="utf-8")
+        code, _, cerr = self._run("--check", str(run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("cap", cerr)
+
+        # malformed slimmed -> exit 2
+        g = json.loads(good)
+        g["pending"][0]["slimmed"] = {"sym_ctx": "not-an-int"}
+        gp.write_text(json.dumps(g), encoding="utf-8")
+        code, _, cerr = self._run("--check", str(run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("slimmed malformed", cerr)
+
+        # malformed budget -> exit 2
+        g = json.loads(good)
+        g["budget"] = {"max_standalone_bytes": "64KB"}
+        gp.write_text(json.dumps(g), encoding="utf-8")
+        code, _, cerr = self._run("--check", str(run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("budget malformed", cerr)
 
 
 if __name__ == "__main__":

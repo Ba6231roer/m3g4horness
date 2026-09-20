@@ -148,12 +148,19 @@ DIFF_GROUP_REQUIRED_FLAGS = ["--repo", "--base", "--branch", "--checkpoints",
 SDR_CONTEXT_SCRIPT = ROOT / "core" / "scripts" / "sdr_context.py"
 SDR_CONTEXT_REQUIRED_FLAGS = ["--repo", "--run-dir", "--base", "--branch", "--dimensions",
                               "--baseline-budget-bytes", "--external-budget-bytes",
-                              "--read-root", "--check"]
+                              "--read-root", "--no-codegraph", "--check"]
 RENDER_SDR_SCRIPT = ROOT / "core" / "scripts" / "render_sdr_report.py"
 RENDER_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--out-dir", "--check"]
 SDR_LAUNCH_SCRIPT = ROOT / "core" / "scripts" / "mgh_sdr_launch.py"
 SDR_LAUNCH_REQUIRED_FLAGS = ["--repo", "--branch", "--base", "--host", "--dimensions",
-                             "--multi-branch", "--read-root", "--dry-run"]
+                             "--multi-branch", "--read-root", "--no-codegraph", "--dry-run"]
+# /mgh-sdr resume surface: the sdr-domain state query + step manifest MUST declare their
+# flags in --help (R5.1 contract surface), so an agent that learns interfaces from --help
+# can always reach them — the same guarantee the init/ut-init siblings carry.
+RESUME_SDR_SCRIPT = ROOT / "core" / "scripts" / "resume_sdr_state.py"
+RESUME_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--check", "--rearm-sentinel"]
+LIST_SDR_STEPS_SCRIPT = ROOT / "core" / "scripts" / "list_sdr_steps.py"
+LIST_SDR_STEPS_REQUIRED_FLAGS = ["--target", "--step"]
 # /mgh-sdr external-repo authorization gate: the config writer's flags MUST be declared
 # in its --help (R5.1 contract surface), and both shells MUST carry the authorization
 # step (the script invocation + the pending_approval disclosure) — mirrored assertion so
@@ -165,6 +172,40 @@ SDR_SHELLS = [
     ROOT / "releases" / "opencode" / "command" / "mgh-sdr.md",
 ]
 SDR_SHELL_REQUIRED_MARKERS = ["read_roots_config.py", "pending_approval"]
+# /mgh-sdr codegraph signal: the switch MUST NOT go dead again. The carrier is the run dir's
+# `run_config.json` (single source, no env-var middleman) and the dispatcher MUST consume it —
+# so (a) the consumer-less env var MUST NOT reappear, (b) the shell MUST advertise the flag AND
+# the carrier it rides (a declared flag with no carrier = dead switch), and (c) the dispatcher's
+# sdr branch MUST NOT reinstate the early `off` return.
+SDR_CODEGRAPH_DEAD_ENV_VAR = "MGH_SDR_CODEGRAPH"
+SDR_CODEGRAPH_FLAG = "--no-codegraph"
+SDR_CODEGRAPH_CARRIER_MARKERS = ["run_config.json", "no_codegraph"]
+SDR_CODEGRAPH_DEAD_READ = 'tier_key == "sdr"'
+# ...and the signal MUST be DERIVED from the same predicate the grouper acts on, never a
+# second copy of the probe. A re-inlined probe is how "run_config says on" comes apart from
+# "the grouping degraded and merged no chain": the reviewer is then told its slice already
+# carries the whole chain and must not look elsewhere, which is a false instruction, not a
+# cosmetic mismatch. One predicate lives in sdr_tier; both sides import it.
+SDR_CODEGRAPH_PROBE_MODULE = ROOT / "core" / "scripts" / "sdr_tier.py"
+SDR_CODEGRAPH_PROBE_MARKER = "codegraph_available"
+SDR_CODEGRAPH_PROBE_CONSUMERS = [ROOT / "core" / "scripts" / "diff_group.py",
+                                 ROOT / "core" / "scripts" / "sdr_context.py"]
+SDR_CODEGRAPH_RAW_PROBE = 'shutil.which("codegraph")'
+# /mgh-sdr recovery + troubleshooting pointers MUST be executable in the sdr run domain: the
+# shell MUST point at a <run-dir>-shaped producer check, and MUST NOT cross-reference a script
+# whose state root lives in another run domain (resume_state.py resolves to <target>/.mgh-init
+# by default, so against an sdr run dir it exits 1 with "init-dir not found" — 100% failure,
+# and the flag-existence lint below cannot see that).
+SDR_SHELL_FORBIDDEN_SCRIPTS = ["resume_state.py"]
+SDR_SHELL_REQUIRED_CHECK_FORM = "diff_group.py --check"
+# ... and the sdr resume entry MUST be the sdr-domain script (the init-domain one is
+# forbidden above), mirrored across both shells.
+SDR_SHELL_REQUIRED_RESUME_MARKER = "resume_sdr_state.py"
+# Run-level state (guard sentinel + codegraph signal) MUST be written by a SCRIPT side
+# effect, never by an orchestrator-executed shell recipe: a `printf > <path>` write is
+# a command the orchestrator must read and execute correctly, and a mis-read silently
+# disarms the guard / kills the codegraph signal. Assert the recipe shapes are gone.
+SDR_SHELL_FORBIDDEN_WRITE_SHAPES = ["> <run-dir>/run_config.json", "> .mgh-sdr/.active"]
 PLAN_AGG_SCRIPT = ROOT / "core" / "scripts" / "plan_aggregate.py"
 PLAN_AGG_REQUIRED_FLAGS = ["--node", "--init-dir", "--budget", "--materialize",
                            "--offset", "--limit", "--orch-budget-bytes",
@@ -442,7 +483,9 @@ def main():
                               (SDR_CONTEXT_SCRIPT, SDR_CONTEXT_REQUIRED_FLAGS),
                               (RENDER_SDR_SCRIPT, RENDER_SDR_REQUIRED_FLAGS),
                               (SDR_LAUNCH_SCRIPT, SDR_LAUNCH_REQUIRED_FLAGS),
-                              (READ_ROOTS_SCRIPT, READ_ROOTS_REQUIRED_FLAGS)):
+                              (READ_ROOTS_SCRIPT, READ_ROOTS_REQUIRED_FLAGS),
+                              (RESUME_SDR_SCRIPT, RESUME_SDR_REQUIRED_FLAGS),
+                              (LIST_SDR_STEPS_SCRIPT, LIST_SDR_STEPS_REQUIRED_FLAGS)):
         if not script.is_file():
             failures.append(f"script not found: {script}")
             continue
@@ -455,7 +498,10 @@ def main():
                 failures.append(f"{script.name}: --help missing required {flag!r}")
 
     # /mgh-sdr shells MUST carry the external-repo authorization step (both the
-    # read_roots_config.py invocation and the pending_approval disclosure).
+    # read_roots_config.py invocation and the pending_approval disclosure), MUST keep the
+    # codegraph switch attached to a real consumer (carrier present, dead env var absent),
+    # and MUST keep every recovery/troubleshooting pointer executable inside the sdr run
+    # domain (no cross-domain state-root references).
     for shell in SDR_SHELLS:
         if not shell.is_file():
             failures.append(f"shell not found: {shell}")
@@ -465,6 +511,63 @@ def main():
             if marker not in text:
                 failures.append(f"{shell.name}: external-repo authorization step "
                                 f"missing {marker!r}")
+        if SDR_CODEGRAPH_DEAD_ENV_VAR in text:
+            failures.append(f"{shell.name}: {SDR_CODEGRAPH_DEAD_ENV_VAR} has no consumer and "
+                            f"MUST NOT reappear (the signal rides run_config.json)")
+        if SDR_CODEGRAPH_FLAG not in text:
+            failures.append(f"{shell.name}: flag table missing required {SDR_CODEGRAPH_FLAG!r}")
+        for marker in SDR_CODEGRAPH_CARRIER_MARKERS:
+            if marker not in text:
+                failures.append(f"{shell.name}: codegraph signal carrier missing {marker!r} "
+                                f"(declaring {SDR_CODEGRAPH_FLAG} with no carrier = dead switch)")
+        for bad in SDR_SHELL_FORBIDDEN_SCRIPTS:
+            if bad in text:
+                failures.append(f"{shell.name}: references {bad}, whose state root is another "
+                                f"run domain — 100% failure against an sdr run dir")
+        if SDR_SHELL_REQUIRED_CHECK_FORM not in text:
+            failures.append(f"{shell.name}: missing the in-domain recovery check "
+                            f"{SDR_SHELL_REQUIRED_CHECK_FORM!r}")
+        if SDR_SHELL_REQUIRED_RESUME_MARKER not in text:
+            failures.append(f"{shell.name}: missing the sdr-domain resume entry "
+                            f"{SDR_SHELL_REQUIRED_RESUME_MARKER!r} (the orchestrator has no "
+                            f"executable way back into an interrupted run)")
+        for shape in SDR_SHELL_FORBIDDEN_WRITE_SHAPES:
+            if shape in text:
+                failures.append(f"{shell.name}: hand-executed write recipe {shape!r} reappeared "
+                                f"— run-level state (sentinel / run_config.json) MUST be a "
+                                f"script side effect, never a recipe the orchestrator executes")
+
+    # The sdr codegraph signal MUST have a live consumer: reinstating the dispatcher's early
+    # `off` return for sdr would make the shell's switch dead again (R5.1 contract completeness).
+    if not FANOUT_RUNNER_SCRIPT.is_file():
+        failures.append(f"script not found: {FANOUT_RUNNER_SCRIPT}")
+    elif SDR_CODEGRAPH_DEAD_READ in FANOUT_RUNNER_SCRIPT.read_text(encoding="utf-8"):
+        failures.append(f"fanout_runner.py: {SDR_CODEGRAPH_DEAD_READ!r} reinstates the "
+                        f"always-off sdr early return (dead switch for {SDR_CODEGRAPH_FLAG})")
+
+    # The codegraph signal MUST be probed ONCE. The grouper (`diff_group.py`) decides whether
+    # to merge units along the call chain; the signal writer (`sdr_context.py`) decides what
+    # every unit's task message claims about that. Same fact, so same predicate — a re-inlined
+    # `shutil.which("codegraph")` is a second implementation waiting to drift.
+    if not SDR_CODEGRAPH_PROBE_MODULE.is_file():
+        failures.append(f"script not found: {SDR_CODEGRAPH_PROBE_MODULE}")
+    elif f"def {SDR_CODEGRAPH_PROBE_MARKER}(" not in \
+            SDR_CODEGRAPH_PROBE_MODULE.read_text(encoding="utf-8"):
+        failures.append(f"{SDR_CODEGRAPH_PROBE_MODULE.name}: missing the shared "
+                        f"{SDR_CODEGRAPH_PROBE_MARKER}() predicate")
+    for consumer in SDR_CODEGRAPH_PROBE_CONSUMERS:
+        if not consumer.is_file():
+            failures.append(f"script not found: {consumer}")
+            continue
+        src = consumer.read_text(encoding="utf-8")
+        if SDR_CODEGRAPH_PROBE_MARKER not in src:
+            failures.append(f"{consumer.name}: does not use the shared "
+                            f"{SDR_CODEGRAPH_PROBE_MARKER}() — the codegraph signal and the "
+                            f"grouping decision would be computed from different rules")
+        if SDR_CODEGRAPH_RAW_PROBE in src:
+            failures.append(f"{consumer.name}: re-inlines the codegraph probe "
+                            f"({SDR_CODEGRAPH_RAW_PROBE}); import it from "
+                            f"{SDR_CODEGRAPH_PROBE_MODULE.name} instead")
 
     # /mgh-ut-init shells must advertise the shell-level request-context-budget + format flag.
     for shell in UT_INIT_SHELLS:

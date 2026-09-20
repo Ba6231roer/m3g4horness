@@ -12,6 +12,7 @@ Run: py tests/test_render_sdr_report.py
 import contextlib
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -272,26 +273,29 @@ class RenderSdrReportTest(unittest.TestCase):
 
     CHAIN_A = [
         {"fqn_short": "OrderController.submit", "label": "OrderController.submit",
-         "file": "OrderController.java", "line": 42, "change": "changed",
-         "route": "/order/submit"},
+         "file": "src/main/java/com/x/controller/OrderController.java", "line": 42,
+         "change": "changed", "route": "/order/submit"},
         {"fqn_short": "OrderServiceImpl.submit", "label": "OrderServiceImpl.submit",
-         "file": "OrderServiceImpl.java", "line": 60, "change": "changed"},
+         "file": "src/main/java/com/x/service/OrderServiceImpl.java", "line": 60,
+         "change": "changed"},
         {"fqn_short": "OrderDao.insertOrder", "label": "OrderDao.insertOrder",
-         "file": "OrderDao.java", "line": 30, "change": "changed"},
+         "file": "src/main/java/com/x/dao/OrderDao.java", "line": 30, "change": "changed"},
         {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:insertOrder",
-         "file": "resources/mapper/OrderDaoMapper.xml", "line": None, "change": "external",
-         "branch_of": 2},
+         "file": "src/main/resources/mapper/OrderDaoMapper.xml", "line": None,
+         "change": "external", "branch_of": 2},
     ]
     CHAIN_B = [
         {"fqn_short": "UserController.list", "label": "UserController.list",
-         "file": "UserController.java", "line": 12, "change": "unchanged",
-         "route": "/user/list"},
+         "file": "src/main/java/com/x/controller/UserController.java", "line": 12,
+         "change": "unchanged", "route": "/user/list"},
         {"fqn_short": "UserService.queryUser", "label": "UserService.queryUser",
-         "file": "UserService.java", "line": 80, "change": "changed"},
+         "file": "src/main/java/com/x/service/UserService.java", "line": 80,
+         "change": "changed"},
         {"fqn_short": "LogDao.insertLog", "label": "LogDao.insertLog",
-         "file": "LogDao.java", "line": 20, "change": "changed"},
+         "file": "src/main/java/com/x/dao/LogDao.java", "line": 20, "change": "changed"},
         {"fqn_short": "UserDao.findById", "label": "UserDao.findById",
-         "file": "UserDao.java", "line": 25, "change": "changed", "branch_of": 1},
+         "file": "src/main/java/com/x/dao/UserDao.java", "line": 25, "change": "changed",
+         "branch_of": 1},
     ]
 
     def _grouping(self, units):
@@ -351,6 +355,8 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertIn("是 [P-01]", report)
         self.assertNotIn("<a id=", report)
         self.assertNotIn("{#", report)
+        # no INTERNAL anchors ("](#" = `(` immediately followed by `#`); source-file
+        # links ](src/...#L42) carry a path segment before `#` and are the render form
         self.assertNotIn("](#", report)
 
     def test_frontend_two_columns_three_states(self):
@@ -438,8 +444,8 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertEqual(code, 0)
         report = Path(json.loads(out)["report"]).read_text(encoding="utf-8")
         self.assertIn("### P-01 · 输入校验 · /order/submit · 低", report)
-        self.assertIn("`OrderVO.java`:11", report)
-        self.assertIn("`OldVO.java`(3-5)", report)   # no line -> file(hint)
+        self.assertIn("[`OrderVO.java`:11](OrderVO.java#L11)", report)
+        self.assertIn("`OldVO.java`(3-5)", report)   # no line -> file(hint), plain
 
     def test_rows_projection_consistency_and_check(self):
         self._grouping([
@@ -463,6 +469,192 @@ class RenderSdrReportTest(unittest.TestCase):
         code, _, err = self._run("--check", str(self.run_dir))
         self.assertEqual(code, 2)
         self.assertIn("rows length", err)
+
+
+class SourceLinkTest(unittest.TestCase):
+    """improve-mgh-sdr-report-source-links: _source_link unit behaviour + end-to-end
+    link rendering, degradation, and manifest-plain-text guarantees."""
+
+    def setUp(self):
+        self.m = _load()
+        self.repo = Path(os.path.normcase("C:/dev/repo"))
+
+    def _link(self, text, file, line=None, repo=None):
+        return self.m._source_link(text, file, line, repo or self.repo)
+
+    # --- 3.1 direct helper tests -----------------------------------------------
+
+    def test_relative_path_with_line(self):
+        self.assertEqual(
+            self._link("Ctl.submit", "src/main/java/Ctl.java", 42),
+            "[Ctl.submit](src/main/java/Ctl.java#L42)")
+
+    def test_no_line_anchor_omitted(self):
+        self.assertEqual(self._link("Mapper.xml", "src/mapper/M.xml", None),
+                         "[Mapper.xml](src/mapper/M.xml)")
+
+    def test_outside_repo_absolute_stays_plain(self):
+        self.assertEqual(self._link("x", "C:/other/place/F.java", 3), "x")
+        self.assertEqual(self._link("x", "D:/dev/repo/F.java", 3), "x")   # other drive
+
+    def test_inside_repo_absolute_case_insensitive_drive(self):
+        self.assertEqual(self._link("x", "c:/DEV/repo/src/F.java", 7),
+                         "[x](src/F.java#L7)")
+
+    def test_empty_and_missing_stay_plain(self):
+        for f in ("", "   ", None, 42, ["a"]):
+            self.assertEqual(self._link("x", f, 1), "x")
+
+    def test_space_and_paren_paths_stay_plain(self):
+        self.assertEqual(self._link("x", "src/my dir/F.java", 1), "x")
+        self.assertEqual(self._link("x", "src/f(1).java", 1), "x")
+
+    def test_backslash_relative_normalized_to_slash(self):
+        self.assertEqual(self._link("x", "src\\main\\F.java", 1), "[x](src/main/F.java#L1)")
+
+    def test_parent_escape_stays_plain(self):
+        self.assertEqual(self._link("x", "../outside/F.java", 1), "x")
+        self.assertEqual(self._link("x", "src/../../outside/F.java", 1), "x")
+
+    def test_display_text_bracket_escaped(self):
+        self.assertEqual(self._link("a[b]c", "src/F.java", 1), "[a\\[b\\]c](src/F.java#L1)")
+
+    def test_posix_absolute_inside_repo(self):
+        if os.name == "nt":
+            self.skipTest("POSIX-absolute semantics only exist off Windows")
+        self.assertEqual(self._link("x", "/repo/src/F.java", 2, Path("/repo")),
+                         "[x](src/F.java#L2)")
+
+    # --- 3.2/3.3/3.4 end-to-end -------------------------------------------------
+
+    TMP = Path(tempfile.mkdtemp(prefix="mgh_sdrlink_"))
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.TMP, ignore_errors=True)
+
+    def _prep(self, units, drafts, tmp):
+        repo = tmp / "repo"
+        run_dir = repo / ".mgh-sdr" / "runs" / "t1"
+        (run_dir / "markers").mkdir(parents=True)
+        (run_dir / "drafts").mkdir(parents=True)
+        (run_dir / "context.json").write_text(json.dumps({
+            "branch": "feature-pay", "base": "master", "dimensions": None,
+            "sensitive_catalog_source": "default-template", "external_repos": [],
+            "baseline_truncated": False}, ensure_ascii=False), encoding="utf-8")
+        (run_dir / "grouping.json").write_text(json.dumps({
+            "repo": str(repo), "base": "master", "branch": "feature-pay",
+            "empty": False, "codegraph": True, "total": len(units),
+            "counts": {"interface": sum(1 for u in units if u["kind"] == "interface"),
+                       "standalone": sum(1 for u in units if u["kind"] != "interface")},
+            "excluded": {"count": 0, "by_reason": {}},
+            "codegraph_stats": {}, "units": units, "pending": []},
+            ensure_ascii=False), encoding="utf-8")
+        for uid, findings in drafts.items():
+            (run_dir / "drafts" / f"{uid}.json").write_text(
+                json.dumps({"unit": uid, "findings": findings}, ensure_ascii=False),
+                encoding="utf-8")
+            (run_dir / "markers" / f"{uid}.done").write_text("{}", encoding="utf-8")
+        return repo, run_dir
+
+    def _run_mod(self, mod, *args):
+        sys.argv = ["render_sdr_report.py"] + list(args)
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = mod.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def _node(self, short, file, line, **kw):
+        n = {"fqn_short": short, "label": short, "file": file, "line": line}
+        n.update(kw)
+        return n
+
+    def test_e2e_links_and_degradation(self):
+        units = [
+            {"unit_id": "ctl_submit", "kind": "interface", "route": "/order/submit",
+             "status": "done", "chain": [
+                 self._node("Ctl.submit", "src/Ctl.java", 10, change="changed",
+                            route="/order/submit"),
+                 self._node("Svc.submit", "src/Svc.java", 20, change="changed"),
+                 self._node("Svc.helper", "src/Svc.java", 25, change="changed"),
+                 self._node("Dao.ins", "src/Dao.java", 30, change="changed"),
+                 self._node("DaoMapper.xml", "src/mapper/D.xml", None,
+                            change="external", branch_of=3)]},
+            {"unit_id": "old_shell", "kind": "interface", "route": "/legacy/shell",
+             "status": "done", "chain": [
+                 self._node("Shell.run", "src/Shell.java", 5, change="unchanged"),
+                 self._node("Shell.gone", "", 9, change="changed", branch_of=0)]},
+            {"unit_id": "cache_warm", "kind": "standalone", "route": "",
+             "status": "done", "chain": [
+                 self._node("CacheWarmer.warm", "src/CacheWarmer.java", 3,
+                            change="changed")]},
+        ]
+        drafts = {
+            "ctl_submit": [{"dimension": "sql-injection", "severity": "high",
+                            "route": "/order/submit", "file": "src/Dao.java",
+                            "line": 30, "line_hint": "30", "risk": "r", "suggestion": "s",
+                            "control_ref": None}],
+            "old_shell": [{"dimension": "input-validation", "severity": "low",
+                           "route": "/legacy/shell", "file": "C:/outside/V.java",
+                           "line": 8, "line_hint": "", "risk": "r", "suggestion": "s",
+                           "control_ref": None}],
+            "cache_warm": [],
+        }
+        repo, run_dir = self._prep(units, drafts, self.TMP)
+        mod = _load()
+        code, out, err = self._run_mod(mod, "--run-dir", str(run_dir), "--repo", str(repo))
+        self.assertEqual(code, 0, err)
+        report = Path(json.loads(out)["report"]).read_text(encoding="utf-8")
+        # 链节点带锚点链接;mapper 终端无锚点;同类延续 `·` 与分隔符不入链接
+        self.assertIn("[Ctl.submit](src/Ctl.java#L10) → "
+                      "[Svc.submit](src/Svc.java#L20) ·[Svc.helper](src/Svc.java#L25) → "
+                      "[Dao.ins](src/Dao.java#L30) ⇢[DaoMapper.xml](src/mapper/D.xml)",
+                      report)
+        # `†` 前缀入链接文本;分支分隔符 `⤷` 不入链接;空 file 节点降级纯文本
+        self.assertIn("[†Shell.run](src/Shell.java#L5)", report)
+        self.assertRegex(report, r"\[†Shell\.run\]\(src/Shell\.java#L5\) ⤷ ?Shell\.gone")
+        # standalone 入口列 = 首链节点带链(绝对盘符大小写差异 → 转仓内相对)
+        self.assertIn("[CacheWarmer.warm](src/CacheWarmer.java#L3)", report)
+        # 章节二位置:file:line 链接;仓外绝对路径 finding 保持纯文本
+        self.assertIn("[`src/Dao.java`:30](src/Dao.java#L30)", report)
+        self.assertIn("- 位置:`C:/outside/V.java`:8", report)
+        self.assertNotIn("](C:/outside", report)
+        # 维度列仍纯文本 P-NN;全文无内部锚点
+        self.assertIn("是 [P-01]", report)
+        self.assertNotIn("](#", report)
+        self.assertNotIn("<a id=", report)
+        # 降级形态不破坏 --check
+        code, _, err = self._run_mod(mod, "--check", str(run_dir))
+        self.assertEqual(code, 0, err)
+        # 3.4 manifest rows[] 纯文本 + 去链接化后与表格单元格一致
+        man = json.loads((run_dir / "sdr_manifest.json").read_text(encoding="utf-8"))
+        for r in man["rows"]:
+            self.assertNotIn("[", r["entry"])
+            self.assertNotIn("](", r["entry"] + r["chain"])
+        strip = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+        by_unit = {r["unit_id"]: r for r in man["rows"]}
+        table_pairs: list[tuple[str, str]] = []
+        for ln in report.splitlines():
+            if not ln.startswith("|"):
+                continue
+            if ln.startswith("| ") and set(ln) <= set("| -:") and "---" in ln:
+                continue   # separator row
+            if "接口/方法入口" in ln:
+                continue   # header row
+            cells = [c.strip() for c in ln.strip("|").split("|")]
+            chain_plain = strip.sub(r"\1", cells[1])
+            entry_plain = strip.sub(r"\1", cells[0])
+            table_pairs.append((entry_plain, chain_plain))
+        self.assertEqual(len(table_pairs), len(man["rows"]))
+        for r, (entry_plain, chain_plain) in zip(man["rows"], table_pairs):
+            self.assertEqual(r["entry"], entry_plain)
+            self.assertEqual(r["chain"], chain_plain)
+        self.assertEqual(by_unit["cache_warm"]["entry"], "CacheWarmer.warm")
 
 
 if __name__ == "__main__":

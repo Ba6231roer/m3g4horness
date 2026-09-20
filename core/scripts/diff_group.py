@@ -21,8 +21,27 @@ Grouping rules (heuristic, NOT a promise — disclosed in the report):
     units, the flow does not fail.
   standalone unit (kind=standalone): every remaining file (non-interface java, config,
     SQL, frontend passthrough, deleted files, binaries) clustered by directory; clusters
-    merge in sorted order while the combined slice stays within --max-standalone-bytes
-    (a single oversize file is its own unit — merged-capped, never split mid-file).
+    merge in sorted order while the combined slice MEASURES within --max-standalone-bytes
+    (measured, never estimated — see the slice byte gate below).
+
+Slice byte gate — the budget is a hard cap, not a target (an LLM context window is a
+  physical ceiling; a soft target is no target at all). Every size judgement is the utf-8
+  byte length of the RENDERED slice (`_SliceGate.bytes` -> `_render_slice`), i.e. the very
+  renderer that materializes the file — NEVER a parallel estimator (an estimator and the
+  artifact drift; this gate cannot). Packing-time member sizes use the same measurement.
+  A unit over its cap runs three dispositions in order, first one that resolves it wins:
+    1. lossless re-split — a multi-file unit over cap is greedy-packed by path into
+       `-partN` continuation units, each measured <= cap; NO hunk is dropped and NO
+       content is truncated (more units is the only cost);
+    2. context slim — only for an atomic residue (one file left, never split mid-file):
+       the DESCRIPTIVE blocks (ann_ctx / sym_ctx) are truncated to module-constant caps,
+       visibly marked in the slice and recorded in `slimmed{}`. Evidence anchors are NEVER
+       truncated: diff bodies, the "Files in this unit" list, the per-hunk `@@` locator
+       headers and the header fields all stay intact;
+    3. fail-loud, zero dispatch — still over cap -> exit 2 naming the unit_id, its cap,
+       the measured bytes and the largest contributing file, BEFORE any slice file or
+       grouping.json is written (zero side effects; fanout_runner --tier sdr passes exit 2
+       through verbatim, so "nothing on disk to consume" == "no subagent spawned").
 
 Exclusion filter (deterministic closed set, applied BEFORE any grouping, both modes):
   test trees / build outputs / generated code / static assets / lockfiles / build
@@ -33,7 +52,9 @@ Exclusion filter (deterministic closed set, applied BEFORE any grouping, both mo
   `excluded{count, by_reason{}}` + the report's honesty boundary disclose it, and
   --include-excluded is the one-flag fallback restoring the full review.
 
-Slice file: per-unit diff hunks (git default 3-line context) + file list + change types
+Slice file (written with newline="" so its bytes ARE the rendered text — the gate's
+measurement and the artifact must not differ by a platform newline translation): per-unit
+diff hunks (git default 3-line context) + file list + change types
 (A/M/D/R) + routes. Draft path / markers: drafts live in `<checkpoints>/../drafts`
 (deterministic sibling of the markers dir in the standard <run-dir>/ layout); slices in
 --materialize. `pending[]` fields are ALL Path.resolve()-absolute and inside the repo
@@ -61,7 +82,9 @@ Exit codes (R5.3b): 0 ok (incl. empty) · 1 input error (--repo missing/not a di
 git command failed — fail-loud + stderr recipe; fanout_runner passes exit 2 through
 verbatim, NEVER into a re-dispatch loop). `--check <run-dir>`: validates grouping.json +
 slices + markers self-consistency (paths absolute + in subtree, exactly one terminal
-marker or pending); violations exit 2 (R5.9).
+marker or pending) and, when the run record carries a `budget{}`, that every pending
+unit's `unit_bytes` is within its applicable cap and `slimmed{}` is well formed
+(absent = old record, assertion skipped, still exit 0); violations exit 2.
 
 Call-chain grouping (optional, codegraph-gated): when `<repo>/.codegraph/` exists AND a
 `codegraph` binary is on PATH (env override MGH_CODEGRAPH_BIN for tests/operators), the
@@ -111,13 +134,32 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Shared marker predicate (single source of the marker-path rule, imported by the
+# resume reader too — a second copy of the concatenation is how "enumerator says
+# pending while disk holds a marker" re-dispatch loops are born).
+from sdr_tier import (codegraph_available, codegraph_bin,  # noqa: E402
+                      codegraph_probe_reason, forward_done_ids,
+                      forward_failed_ids, forward_marker_paths)
+
 DEFAULT_MAX_STANDALONE_BYTES = 64 * 1024  # 64KB merge cap for standalone clusters
 DEFAULT_MAX_INTERFACE_BYTES = 256 * 1024  # 256KB split cap for interface units
+
+# Level-2 (context slim) caps for an atomic residue that is still over budget. Module
+# constants on purpose: the real levers stay --max-standalone-bytes / --max-interface-bytes,
+# so the CLI contract surface does not grow (the truncation limits are not a user knob).
+# These are RESCUE floors, not comfort levels — a context block smaller than its cap cannot
+# rescue anything, so the cap is the size above which truncation starts to buy back budget.
+# Everything the reviewer cites (diff body, locators, file list) survives regardless, and
+# the file list still names every file, so a truncated block costs addressing comfort, not
+# coverage. Keep them small enough to be reachable on a real residue.
+SLIM_ANN_CTX_MAX_BYTES = 1024   # annotation/upstream-route context block
+SLIM_SYM_CTX_MAX_BYTES = 512    # per-file symbol table
 
 CODEGRAPH_LIMIT = 500    # callees/callers --limit: raise well above the CLI default 20 so
 # a real changed-set edge is not truncated away behind unrelated same-name callers.
 CODEGRAPH_TIMEOUT = 20   # per-query subprocess timeout; a hang degrades to no edges
-CODEGRAPH_DIR = ".codegraph"
+# The index dir name and the availability predicate live in `sdr_tier` (shared with
+# `sdr_context.py`, which writes the run's codegraph signal) — see the import above.
 
 # Upstream anchoring: BFS depth cap over the caller edges (2 hops, visited-guarded).
 ANCHOR_MAX_HOPS = 2
@@ -237,15 +279,6 @@ def _current_branch(repo: Path) -> str:
 
 # --- codegraph probe + call-edge acquisition (optional, D3) ------------------
 
-def _codegraph_bin() -> str | None:
-    """Path to the codegraph binary (env override wins; else PATH). None = unavailable."""
-    env = os.environ.get("MGH_CODEGRAPH_BIN")
-    if env:
-        p = Path(env)
-        return str(p) if p.is_file() else None
-    return shutil.which("codegraph")
-
-
 def _cg_command(bin_path: str) -> list[str]:
     """How to exec the resolved binary: a .py/.pyw needs the interpreter (test seam);
     a .cmd/.bat needs cmd (npm shim on Windows); otherwise it is a native executable."""
@@ -258,9 +291,10 @@ def _cg_command(bin_path: str) -> list[str]:
 
 
 def _codegraph_available(repo: Path) -> bool:
-    """codegraph is a grouping input ONLY when the repo is indexed (.codegraph/ dir)
-    AND a binary resolves. Absent either -> fallback grouping (never a hard dep)."""
-    return (repo / CODEGRAPH_DIR).is_dir() and _codegraph_bin() is not None
+    """Alias of the shared probe (kept as the local name this module's call sites
+    use). The predicate itself lives in `sdr_tier` so the grouping decision and the
+    run-config signal cannot be computed from different rules."""
+    return codegraph_available(repo)
 
 
 def _cg_query(repo: Path, sub: str, symbol: str) -> dict | None:
@@ -268,7 +302,7 @@ def _cg_query(repo: Path, sub: str, symbol: str) -> dict | None:
 
     ANY failure (no binary / nonzero exit / not-found info text / unparseable / timeout)
     returns None so the caller degrades per-symbol — never aborts the run."""
-    bin_path = _codegraph_bin()
+    bin_path = codegraph_bin()
     if not bin_path:
         return None
     cmd = _cg_command(bin_path) + [sub, symbol, "--path", str(repo),
@@ -288,12 +322,8 @@ def _cg_query(repo: Path, sub: str, symbol: str) -> dict | None:
 
 
 def _codegraph_probe_reason(repo: Path) -> str | None:
-    """Why call-chain grouping is off (None = available). Diagnostic only."""
-    if not (repo / CODEGRAPH_DIR).is_dir():
-        return "no .codegraph dir"
-    if _codegraph_bin() is None:
-        return "no binary"
-    return None
+    """Alias of the shared probe reason (see `_codegraph_available`)."""
+    return codegraph_probe_reason(repo)
 
 
 def _cg_edges(repo: Path, key: str) -> tuple[set[str], set[str]]:
@@ -637,23 +667,28 @@ def _dir_of(rel: str) -> str:
     return p.rsplit("/", 1)[0] if "/" in p else "."
 
 
-def _cluster_standalone(files: list[FileDiff], cap: int) -> list[tuple[str, list[FileDiff]]]:
+def _cluster_standalone(files: list[FileDiff], cap: int,
+                        gate: _SliceGate) -> list[tuple[str, list[FileDiff]]]:
     """Directory-cluster the standalone files; merge sorted dir groups while the merged
-    slice stays within cap bytes (approximated by cumulative diff text length). A single
-    oversize file stays its own unit (merge-capped, never split)."""
+    slice MEASURES within cap bytes (`gate` = the renderer that materializes it, never a
+    parallel estimator — the header / file-list / per-hunk locator lines are exactly what
+    the old `Σ(diff lines) + 64/file` estimate missed). Route order and the "never split
+    mid-file" rule are unchanged. A single oversize file stays its own unit here; a
+    MULTI-file unit still over cap is re-split by the gate (level 1)."""
     by_dir: dict[str, list[FileDiff]] = {}
     for f in files:
         by_dir.setdefault(_dir_of(f.path), []).append(f)
-    dirs = sorted(by_dir)
-    def _size(fs: list[FileDiff]) -> int:
-        return sum(sum(len(l) + 1 for _, _, ls in f.hunks for l in ls) + 64 for f in fs)
+
+    def _size(fs: list[FileDiff], name: str) -> int:
+        return gate.bytes(_probe_unit(_safe_name(name) or "unit", "standalone", "", fs))
+
     buckets: list[tuple[str, list[FileDiff]]] = []
-    for d in dirs:
+    for d in sorted(by_dir):
         if buckets:
             name, members = buckets[-1]
             merged = members + by_dir[d]
-            if _size(merged) <= cap:
-                prefix = _common_prefix(_dir_of(m.path) for m in merged)
+            prefix = _common_prefix(_dir_of(m.path) for m in merged)
+            if _size(merged, prefix) <= cap:
                 buckets[-1] = (prefix, merged)
                 continue
         buckets.append((d, list(by_dir[d])))
@@ -672,31 +707,39 @@ def _common_prefix(dirs) -> str:
 
 
 def _sel_hunks_size(fd: FileDiff, sel: list[int]) -> int:
-    """Approx slice size for a file restricted to `sel` hunk indices (diff text length)."""
+    """Diff-text byte weight of a file restricted to `sel` hunk indices. This is NOT the
+    slice budget judge (that is `_SliceGate.bytes`, measured on the rendered slice); it is
+    only used to report the largest contributing file on a gate refusal."""
     return sum(len(l) + 1 for i, (_s, _c, ls) in enumerate(fd.hunks)
-               for l in ls if i in sel) + 64
+               for l in ls if i in sel)
 
 
-def _cluster_standalone_sel(items: list[tuple[FileDiff, list[int]]],
-                            cap: int) -> list[tuple[str, list[tuple[FileDiff, list[int]]]]]:
+def _cluster_standalone_sel(items: list[tuple[FileDiff, list[int]]], cap: int,
+                            gate: _SliceGate, sym_of=None
+                            ) -> list[tuple[str, list[tuple[FileDiff, list[int]]]]]:
     """Directory-cluster residual (partially-claimed) files by their selected hunks;
-    merge sorted dir groups while the merged selected size stays within cap. Mirrors
+    merge sorted dir groups while the merged slice MEASURES within cap (`gate`). Mirrors
     `_cluster_standalone` but honours per-file hunk selection (a file split across an
-    interface chain and a standalone leftover contributes only its leftover hunks)."""
+    interface chain and a standalone leftover contributes only its leftover hunks), and
+    `sym_of` — the per-file symbol table the java-residual caller will attach — so the
+    probe measures the unit that will actually be materialized."""
     by_dir: dict[str, list[tuple[FileDiff, list[int]]]] = {}
     for fd, sel in items:
         by_dir.setdefault(_dir_of(fd.path), []).append((fd, sel))
 
-    def _size(members: list[tuple[FileDiff, list[int]]]) -> int:
-        return sum(_sel_hunks_size(fd, sel) for fd, sel in members)
+    def _size(members: list[tuple[FileDiff, list[int]]], name: str) -> int:
+        selmap = {fd.path: sel for fd, sel in members}
+        sym = sym_of(members) if sym_of is not None else None
+        return gate.bytes(_probe_unit(_safe_name(name) or "unit", "standalone", "",
+                                      [fd for fd, _ in members], selmap, None, sym))
 
     buckets: list[tuple[str, list[tuple[FileDiff, list[int]]]]] = []
     for d in sorted(by_dir):
         if buckets:
             name, members = buckets[-1]
             merged = members + by_dir[d]
-            if _size(merged) <= cap:
-                prefix = _common_prefix([_dir_of(fd.path) for fd, _ in merged])
+            prefix = _common_prefix([_dir_of(fd.path) for fd, _ in merged])
+            if _size(merged, prefix) <= cap:
                 buckets[-1] = (prefix, merged)
                 continue
         buckets.append((d, list(by_dir[d])))
@@ -734,11 +777,10 @@ def _sym_table(syms: list[dict], limit: int = 40) -> list[str]:
     return out
 
 
-def _build_units(repo: Path, file_diffs: list[FileDiff], branch: str,
-                 cap: int) -> list[Unit]:
-    units: list[Unit] = []
-    seen_ids: set[str] = set()
-
+def _id_factory(seen_ids: set[str]):
+    """Unit-id allocator: filesystem-safe stem (NTFS ADS lesson) + a numeric suffix on
+    collision. Shared by the grouping builders AND the gate's level-1 re-split, so a
+    split continuation can never collide with an id that already exists."""
     def _uid(raw: str) -> str:
         base = _safe_name(raw) or "unit"
         cand, n = base, 1
@@ -747,6 +789,44 @@ def _build_units(repo: Path, file_diffs: list[FileDiff], branch: str,
             cand = f"{base}-{n}"
         seen_ids.add(cand)
         return cand
+    return _uid
+
+
+def _probe_unit(unit_id: str, kind: str, route: str, files, hunk_sel=None,
+                ann_ctx=None, sym_ctx=None, chain=None) -> Unit:
+    """A candidate Unit used for MEASURING only (it becomes a real unit when accepted).
+    The identity passed here MUST be the one the candidate carries if accepted: the
+    renderer prints `unit_id`/`route`, so a stand-in identity would make the packing
+    decision and the pre-write gate disagree by a few bytes. Copies every list — probing
+    MUST NOT mutate the accumulator it is measured against."""
+    u = Unit(unit_id, kind, route, list(files), dict(hunk_sel or {}),
+             list(ann_ctx or []), list(sym_ctx or []))
+    u.chain = list(chain or [])
+    return u
+
+
+class _SliceGate:
+    """The slice byte gate. Its one measurement is `_render_slice(...)` -> utf-8 byte
+    length: the SAME renderer that materializes the slice, so the number the packing
+    decision uses, the number `pending[].unit_bytes` carries and the number `--check`
+    asserts are one number, not three estimates. A renderer change moves the gate with it."""
+
+    __slots__ = ("repo", "base", "branch", "raw_text")
+
+    def __init__(self, repo: Path, base: str, branch: str, raw_text: str):
+        self.repo, self.base, self.branch, self.raw_text = repo, base, branch, raw_text
+
+    def text(self, unit: Unit) -> str:
+        return _render_slice(self.repo, self.base, self.branch, unit, self.raw_text)
+
+    def bytes(self, unit: Unit) -> int:
+        return len(self.text(unit).encode("utf-8"))
+
+
+def _build_units(repo: Path, file_diffs: list[FileDiff], branch: str,
+                 cap: int, gate: _SliceGate) -> list[Unit]:
+    units: list[Unit] = []
+    _uid = _id_factory(set())
 
     interfaces: list[FileDiff] = []
     standalone: list[FileDiff] = []
@@ -763,7 +843,7 @@ def _build_units(repo: Path, file_diffs: list[FileDiff], branch: str,
                 continue
         standalone.append(fd)
 
-    for d, members in _cluster_standalone(standalone, cap):
+    for d, members in _cluster_standalone(standalone, cap, gate):
         units.append(Unit(_uid(d), "standalone", "", members, None))
     return units
 
@@ -999,15 +1079,19 @@ def _chain_nodes(repo: Path, branch: str, anchors: list[tuple[str, str]],
     return nodes
 
 
-def _split_interface_budget(hosts: list[dict], iface_cap: int, uid) -> list[Unit]:
+def _split_interface_budget(hosts: list[dict], iface_cap: int, uid,
+                            gate: _SliceGate) -> list[Unit]:
     """Enforce --max-interface-bytes. A host's constituents are its per-route bodies
     (files + hunk selection + ann); under budget they emit as ONE unit (';'-joined
     route); over budget they greedy-pack (route-sorted, deterministic) into `-partN`
     units, each carrying its own route string + independent slice path. A single
-    constituent over the cap is further split across its files (sorted, greedy) so
-    EVERY part lands within budget — one oversize file may still exceed it (merged-
-    capped, never split mid-file, same rule as standalone). The host's materialized
-    chain rides EVERY part (the chain is a unit-level record, not a slice-budget body)."""
+    constituent over the cap is further split across its files (sorted, greedy).
+    EVERY decision here is the MEASURED slice size (`gate`), not a sum of per-file
+    estimates: an accumulator's size is re-measured as a whole, because the rendered
+    union is not the sum of its parts (one shared header, and a file shared by two
+    constituents renders once). A part still over cap after this (one oversize file,
+    never split mid-file) is the atomic residue the gate's level 2/3 handles. The host's
+    materialized chain rides EVERY part (a unit-level record, not a slice-budget body)."""
     out: list[Unit] = []
 
     def _fill(u: Unit, con: dict) -> None:
@@ -1019,64 +1103,81 @@ def _split_interface_budget(hosts: list[dict], iface_cap: int, uid) -> list[Unit
         if con["ann"]:
             u.ann_ctx.extend(con["ann"])
 
+    def _join(acc: Unit, con: dict) -> Unit:
+        """Probe: `acc` with `con` absorbed. Non-mutating — the accumulator is only ever
+        advanced once the measurement says the joint unit still fits."""
+        probe = _probe_unit(acc.unit_id, acc.kind, acc.route, acc.files, acc.hunk_sel,
+                            acc.ann_ctx, acc.sym_ctx, acc.chain)
+        if con["route"] and con["route"] not in probe.route.split(";"):
+            probe.route = f"{probe.route};{con['route']}"
+        _fill(probe, con)
+        return probe
+
+    def _with_file(acc: Unit, fd: FileDiff, sel: list[int]) -> Unit:
+        """Probe: `acc` with one more (file, hunk subset) absorbed — the file-level twin of
+        `_join` (same non-mutating discipline)."""
+        probe = _probe_unit(acc.unit_id, acc.kind, acc.route, acc.files, acc.hunk_sel,
+                            acc.ann_ctx, acc.sym_ctx, acc.chain)
+        if fd not in probe.files:
+            probe.files.append(fd)
+        probe.hunk_sel[fd.path] = sorted(
+            set(probe.hunk_sel.get(fd.path, ())) | set(sel))
+        return probe
+
+    def _new_part(host: dict, route: str, ann) -> Unit:
+        u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
+                 "interface", route, [], {}, list(ann))
+        u.chain = host.get("chain", [])
+        return u
+
     for host in hosts:
         cons = host["constituents"]
-        total = sum(c["bytes"] for c in cons)
-        if total <= iface_cap or len(cons) <= 1:
-            u = host["unit"]
-            for c in cons:
-                _fill(u, c)
-            out.append(u)
+        whole = host["unit"]
+        for c in cons:
+            _fill(whole, c)
+        if gate.bytes(whole) <= iface_cap:
+            out.append(whole)
             continue
         # over budget: greedy-pack constituents in route order into -partN units
         parts: list[Unit] = []
-        acc_u: Unit | None = None
-        acc_bytes = 0
+        acc: Unit | None = None
         for c in sorted(cons, key=lambda c: c["route"]):
             if c["bytes"] > iface_cap:
                 # single constituent over cap: flush, then split it across its files
-                if acc_u is not None:
-                    parts.append(acc_u)
-                    acc_u, acc_bytes = None, 0
+                if acc is not None:
+                    parts.append(acc)
+                    acc = None
                 for fd in sorted(c["files"], key=lambda f: f.path):
                     sel = c["selmap"].get(fd.path, list(range(len(fd.hunks))))
-                    sz = _sel_hunks_size(fd, sel)
-                    if acc_u is not None and acc_bytes + sz > iface_cap and acc_u.files:
-                        parts.append(acc_u)
-                        acc_u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
-                                     "interface", c["route"], [], {}, [])
-                    if acc_u is None:
-                        acc_u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
-                                     "interface", c["route"], [], {}, list(c["ann"]))
-                    acc_u.chain = host.get("chain", [])
-                    acc_u.files.append(fd)
-                    acc_u.hunk_sel[fd.path] = sorted(
-                        set(acc_u.hunk_sel.get(fd.path, ())) | set(sel))
-                    acc_bytes += sz
-                if acc_u is not None:
-                    parts.append(acc_u)
-                    acc_u, acc_bytes = None, 0
+                    if acc is not None and gate.bytes(
+                            _with_file(acc, fd, sel)) > iface_cap:
+                        parts.append(acc)
+                        acc = None
+                    if acc is None:
+                        acc = _new_part(host, c["route"], c["ann"])
+                    acc.files.append(fd)
+                    acc.hunk_sel[fd.path] = sorted(
+                        set(acc.hunk_sel.get(fd.path, ())) | set(sel))
+                if acc is not None:
+                    parts.append(acc)
+                    acc = None
                 continue
-            if acc_u is not None and acc_bytes + c["bytes"] > iface_cap:
-                parts.append(acc_u)
-                acc_u, acc_bytes = None, 0
-            if acc_u is None:
-                acc_u = Unit(uid(f"{host['base_id']}-part{len(parts) + 1}"),
-                             "interface", c["route"], [], {}, list(c["ann"]))
+            if acc is not None and gate.bytes(_join(acc, c)) > iface_cap:
+                parts.append(acc)
+                acc = None
+            if acc is None:
+                acc = _new_part(host, c["route"], c["ann"])
             else:
-                acc_u.route = f"{acc_u.route};{c['route']}"
-            acc_u.chain = host.get("chain", [])
-            _fill(acc_u, c)
-            acc_bytes += c["bytes"]
-        if acc_u is not None:
-            parts.append(acc_u)
+                _fill(acc, c)
+        if acc is not None:
+            parts.append(acc)
         out.extend(parts)
     return out
 
 
 def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
                            cap: int, iface_cap: int,
-                           stats: dict) -> list[Unit]:
+                           stats: dict, gate: _SliceGate) -> list[Unit]:
     """codegraph-gated call-chain grouping. Only called when the probe succeeded
     (`_codegraph_available`); every codegraph failure degrades per-symbol.
 
@@ -1095,16 +1196,7 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
     to directory clustering + `cap` — same path as non-java residuals, with a bounded
     per-file symbol table in the slice header."""
     units: list[Unit] = []
-    seen_ids: set[str] = set()
-
-    def _uid(raw: str) -> str:
-        base = _safe_name(raw) or "unit"
-        cand, n = base, 1
-        while cand in seen_ids:
-            n += 1
-            cand = f"{base}-{n}"
-        seen_ids.add(cand)
-        return cand
+    _uid = _id_factory(set())
 
     # 1. per-java-file symbol map + hunk ownership (deterministic local scan).
     finfo: dict[str, dict] = {}
@@ -1226,10 +1318,14 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
             con["selmap"][fd.path] = sorted(set(con["selmap"].get(fd.path, ())) | idxs)
             claimed.setdefault(fd.path, set()).update(idxs)
 
-    def _con_bytes(con: dict) -> int:
-        return sum(_sel_hunks_size(fd, con["selmap"].get(fd.path,
-                                                           list(range(len(fd.hunks)))))
-                   for fd in con["files"])
+    def _con_bytes(con: dict, base_id: str) -> int:
+        """Measured size of ONE constituent as it would render in a unit of its own. The
+        probe identity is the host's base_id: a constituent alone in a part materializes as
+        `_uid(base_id)`. A `-partN` continuation id is a few bytes longer, which the gate's
+        level-1 re-split absorbs (it re-measures the real units before writing)."""
+        return gate.bytes(_probe_unit(_safe_name(base_id) or "unit", "interface",
+                                      con["route"], con["files"], con["selmap"],
+                                      con["ann"]))
 
     # 4. route-anchored downstream closure -> one constituent per route anchor.
     claimed: dict[str, set[int]] = {}
@@ -1339,11 +1435,11 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
         else:
             h["chain"] = []
         for c in h["constituents"]:
-            c["bytes"] = _con_bytes(c)
+            c["bytes"] = _con_bytes(c, h["base_id"])
         h["unit"] = Unit(_uid(h["base_id"]), "interface",
                          ";".join(c["route"] for c in h["constituents"]), [], {}, [])
         h["unit"].chain = h["chain"]
-    units.extend(_split_interface_budget(hosts, iface_cap, _uid))
+    units.extend(_split_interface_budget(hosts, iface_cap, _uid, gate))
 
     # 5. leftovers: interface-file unclaimed hunks keep a class-level interface unit;
     #    java residuals now take directory clustering + budget (same as non-java —
@@ -1366,17 +1462,25 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
             residual_java.append((fd, unclaimed, info))
             continue
         residual_other.append((fd, unclaimed))
-    for name, members in _cluster_standalone_sel([(fd, sel) for fd, sel, _ in residual_java],
-                                                 cap):
-        selmap = {fd.path: sel for fd, sel in members}
-        files = [fd for fd, _ in members]
+    jinfo = {fd.path: info for fd, _sel, info in residual_java}
+
+    def _res_sym(members) -> list[str]:
+        """The symbol table a java-residual cluster renders (bounded, per file). Also the
+        clustering probe's input: the table is slice BODY, so a cluster that fits only
+        without it is a cluster that does not fit."""
         sym: list[str] = ["## Files & symbols in this cluster (branch version)"]
         for fd, _sel in members:
-            info = next(i for f, _s, i in residual_java if f is fd)
             sym.append(f"- {fd.path}")
-            sym.extend(_sym_table(info["syms"]))
-        units.append(Unit(_uid(name), "standalone", "", files, selmap, None, sym))
-    for name, members in _cluster_standalone_sel(residual_other, cap):
+            sym.extend(_sym_table(jinfo[fd.path]["syms"]))
+        return sym
+
+    for name, members in _cluster_standalone_sel(
+            [(fd, sel) for fd, sel, _ in residual_java], cap, gate, _res_sym):
+        selmap = {fd.path: sel for fd, sel in members}
+        files = [fd for fd, _ in members]
+        units.append(Unit(_uid(name), "standalone", "", files, selmap, None,
+                          _res_sym(members)))
+    for name, members in _cluster_standalone_sel(residual_other, cap, gate):
         selmap = {fd.path: sel for fd, sel in members}
         files = [fd for fd, _ in members]
         units.append(Unit(_uid(name), "standalone", "", files, selmap))
@@ -1426,6 +1530,183 @@ def _render_slice(repo: Path, base: str, branch: str, unit: Unit,
     return "\n".join(out) + "\n"
 
 
+# --- slice byte gate: over-budget dispositions (level 1 / 2 / 3) ------------
+
+def _sym_ctx_of(unit: Unit, paths: set[str] | None = None) -> list[str]:
+    """The symbol-table block restricted to `paths` (the cluster header line and any line
+    that is not a per-file section head are kept — they carry no file attribution)."""
+    if not unit.sym_ctx or paths is None:
+        return list(unit.sym_ctx)
+    out: list[str] = []
+    keep = False
+    for line in unit.sym_ctx:
+        if line.startswith("- "):
+            keep = line[2:].strip() in paths
+        if keep:
+            out.append(line)
+    return out
+
+
+def _part_of(u: Unit, part_id: str, files: list[FileDiff]) -> Unit:
+    """One level-1 continuation unit. LOSSLESS: `files` partition the parent's files, each
+    carrying its parent hunk selection, so the union of the parts' hunks equals the
+    parent's. `ann_ctx` (which has no per-file attribution) rides every part; `sym_ctx`
+    follows its file."""
+    paths = {fd.path for fd in files}
+    sel = ({p: s for p, s in u.hunk_sel.items() if p in paths} if u.hunk_sel else {})
+    p = _probe_unit(part_id, u.kind, u.route, files, sel, u.ann_ctx,
+                    _sym_ctx_of(u, paths), u.chain)
+    return p
+
+
+def _split_unit_files(u: Unit, cap: int, gate: _SliceGate, uid) -> list[Unit]:
+    """Level 1 — lossless re-split of a MULTI-file unit that measures over `cap`: greedy
+    pack its files in path order (deterministic; NEVER split mid-file) into `-partN`
+    continuation units, each measured <= cap. The only cost is more units: no hunk is
+    dropped and no content is truncated, so this level never loses coverage. A part whose
+    single file already exceeds `cap` is left whole — it is the atomic residue levels 2/3
+    exist for (a file is never split mid-file)."""
+    files = sorted(u.files, key=lambda f: f.path)
+    parts: list[Unit] = []
+    cur: list[FileDiff] = []
+    cur_id: str | None = None
+    for fd in files:
+        if cur_id is None:
+            cur_id = uid(f"{u.unit_id}-part{len(parts) + 1}")
+            cur = [fd]
+            continue
+        if gate.bytes(_part_of(u, cur_id, cur + [fd])) <= cap:
+            cur = cur + [fd]
+            continue
+        parts.append(_part_of(u, cur_id, cur))
+        cur_id = uid(f"{u.unit_id}-part{len(parts) + 1}")
+        cur = [fd]
+    if cur_id is not None:
+        parts.append(_part_of(u, cur_id, cur))
+    return parts
+
+
+def _truncate_lines(value, limit: int):
+    """Head-first truncation of one descriptive context field to `limit` utf-8 bytes,
+    with the dropped-line count and the original size kept for the visible marker.
+    Handles both shapes (list of lines / one string). Deterministic: same field + same
+    limit -> same result, no clock, no sampling."""
+    lines = value.splitlines() if isinstance(value, str) else list(value)
+    orig = len("\n".join(lines).encode("utf-8"))
+    if orig <= limit:
+        return value, 0, orig
+    kept: list[str] = []
+    used = 0
+    for i, line in enumerate(lines):
+        nxt = used + len(line.encode("utf-8")) + (1 if kept else 0)
+        if nxt > limit:
+            break
+        kept.append(line)
+        used = nxt
+    dropped = len(lines) - len(kept)
+    marker = f"… (截断:{dropped} 行 / 原 {orig} 字节)"
+    # the marker itself is slice bytes: back off until the whole block fits the cap
+    while kept and used + 1 + len(marker.encode("utf-8")) > limit:
+        kept.pop()
+        used = len("\n".join(kept).encode("utf-8")) if kept else 0
+        dropped = len(lines) - len(kept)
+        marker = f"… (截断:{dropped} 行 / 原 {orig} 字节)"
+    if isinstance(value, str):
+        return ("\n".join(kept + [marker])), dropped, orig
+    return kept + [marker], dropped, orig
+
+
+def _slim_context(u: Unit, cap: int, gate: _SliceGate) -> dict[str, int]:
+    """Level 2 — truncate the DESCRIPTIVE context blocks of an atomic residue that is
+    still over `cap`. Returns `{field: original bytes}` for what was truncated ({} when
+    the blocks already fit the module caps).
+
+    Evidence anchors are NEVER touched: `fd.hunks[].body` (the diff itself), the
+    "Files in this unit" list, the per-hunk `@@ <path> @@ new-file lines N+C` locators,
+    and the `kind`/`route`/`repo`/`diff range` header fields all describe the change and
+    are what the reviewer cites. `ann_ctx`/`sym_ctx` only help locate it — and the
+    unchanged-route snippet inside `ann_ctx` is an authz anchor, which is exactly why the
+    truncation is marked visibly in the slice instead of being silently dropped."""
+    slimmed: dict[str, int] = {}
+    for field, limit in (("ann_ctx", SLIM_ANN_CTX_MAX_BYTES),
+                         ("sym_ctx", SLIM_SYM_CTX_MAX_BYTES)):
+        value = getattr(u, field)
+        if not value:
+            continue
+        if len("\n".join(value if isinstance(value, list) else [value]
+                         ).encode("utf-8")) <= limit:
+            continue
+        kept, _dropped, orig = _truncate_lines(value, limit)
+        setattr(u, field, kept)
+        slimmed[field] = orig
+    return slimmed
+
+
+def _largest_contributor(u: Unit) -> str:
+    """The file whose selected diff body weighs most (the thing to shrink, review alone or
+    raise the cap for). Ties break on path so the refusal message is deterministic."""
+    best, best_sz = "", -1
+    for fd in sorted(u.files, key=lambda f: f.path):
+        sel = u.hunk_sel.get(fd.path) if u.hunk_sel else None
+        if sel is None:
+            sel = list(range(len(fd.hunks)))
+        sz = _sel_hunks_size(fd, sel)
+        if sz > best_sz:
+            best, best_sz = fd.path, sz
+    return best
+
+
+def _gate_units(units: list[Unit], gate: _SliceGate, uid, skip: set[str],
+                iface_cap: int, stand_cap: int) -> tuple[list[Unit], dict[str, dict]]:
+    """Apply the slice byte gate to every unit about to be materialized.
+
+    `skip` = units already terminal on disk (.done / .failed): their ids, markers and
+    slices are the resume truth source, so they are passed through untouched — re-splitting
+    one would orphan its marker and re-open finished work.
+
+    Level 3 exits the process BEFORE any slice file or grouping.json exists. That is the
+    whole point: the dispatcher consumes disk, so zero artifacts == zero subagents, no
+    matter how the caller reacts to the exit code."""
+    out: list[Unit] = []
+    slim_records: dict[str, dict] = {}
+    over: list[tuple[Unit, int, int]] = []
+    work = list(units)
+    while work:
+        u = work.pop(0)
+        if u.unit_id in skip:
+            out.append(u)
+            continue
+        cap = iface_cap if u.kind == "interface" else stand_cap
+        if gate.bytes(u) <= cap:
+            out.append(u)
+            continue
+        if len(u.files) > 1:                       # level 1: lossless re-split
+            work[0:0] = _split_unit_files(u, cap, gate, uid)
+            continue
+        rec = _slim_context(u, cap, gate)          # level 2: context slim (atomic residue)
+        if gate.bytes(u) <= cap:
+            if rec:
+                slim_records[u.unit_id] = rec
+            out.append(u)
+            continue
+        over.append((u, cap, gate.bytes(u)))       # level 3: fail-loud, zero dispatch
+    if over:
+        _eprint(f"error: {len(over)} unit(s) still over their slice byte budget after "
+                f"re-split + context slim — refusing to dispatch oversize review units "
+                f"(exit 2, zero side effects: no slice, no grouping.json, no subagent).")
+        for u, cap, size in over:
+            _eprint(f"  - {u.unit_id}: {size} bytes > cap {cap} "
+                    f"(kind={u.kind}, files={len(u.files)}, "
+                    f"largest contributing file: {_largest_contributor(u)})")
+        _eprint("recipe: raise the cap (`--max-standalone-bytes` for standalone clusters, "
+                "`--max-interface-bytes` for interface units), narrow the diff range "
+                "(`--base`/`--branch`) so this file's change is smaller, or review the "
+                "listed file(s) out-of-band and re-run. A single file's diff body is the "
+                "one thing this gate will never truncate.")
+        sys.exit(2)
+    return out, slim_records
+
+
 # --- main -------------------------------------------------------------------
 
 def _enumerate(args) -> dict:
@@ -1467,10 +1748,10 @@ def _enumerate(args) -> dict:
     checkpoints = Path(args.checkpoints).resolve()
     checkpoints.mkdir(parents=True, exist_ok=True)
     slices_dir = Path(args.materialize).resolve() if args.materialize else None
-    drafts_dir = checkpoints.parent / "drafts"
     grouping_path = checkpoints.parent / "grouping.json"
 
-    done, failed = _markers(checkpoints)
+    gate = _SliceGate(repo, base, branch, r.stdout)
+
     probe_reason = _codegraph_probe_reason(repo) if not _codegraph_available(repo) else None
     cg_on = bool(file_diffs) and probe_reason is None
     stats = {k: 0 for k in ("symbols_queried", "edges_captured", "edges_in_changed_set",
@@ -1479,10 +1760,28 @@ def _enumerate(args) -> dict:
     if cg_on:
         units = _build_units_callchain(repo, file_diffs, branch,
                                        args.max_standalone_bytes,
-                                       args.max_interface_bytes, stats)
+                                       args.max_interface_bytes, stats, gate)
     else:
-        units = _build_units(repo, file_diffs, branch, args.max_standalone_bytes) \
-            if file_diffs else []
+        units = _build_units(repo, file_diffs, branch, args.max_standalone_bytes,
+                             gate) if file_diffs else []
+
+    # Marker judgment is FORWARD over the canonical unit ids produced above (shared
+    # predicate) — never a filename glob. Glob counts legacy/orphan markers whose
+    # name maps to no current unit id; the forward computation is the same one the
+    # resume reader runs, so "pending here" and "pending on resume" cannot diverge.
+    unit_ids = [u.unit_id for u in units]
+    done = forward_done_ids(checkpoints, unit_ids)
+    failed = forward_failed_ids(checkpoints, unit_ids)
+
+    # Slice byte gate, BEFORE anything is written. Units already terminal on disk are
+    # passed through (their markers/slices are the resume truth source); every unit about
+    # to be materialized is measured on its RENDERED text and put through the three-level
+    # ladder (lossless re-split -> context slim -> fail-loud exit 2). The refusal path
+    # leaves zero artifacts, so the dispatcher has nothing to consume.
+    gate_skip = set(done) | (set() if args.include_failed else set(failed))
+    units, slim_records = _gate_units(units, gate, _id_factory(set(unit_ids)),
+                                      gate_skip, args.max_interface_bytes,
+                                      args.max_standalone_bytes)
 
     pending = []
     counts = {"interface": 0, "standalone": 0}
@@ -1505,21 +1804,35 @@ def _enumerate(args) -> dict:
         # unit_id with the same forward-derived failed_marker path, for the
         # dispatcher's --retry-failed flow. The all_units status row above
         # still reports the marker truth "failed".)
-        slice_text = _render_slice(repo, base, branch, u, r.stdout)
+        # `unit_bytes` is the gate's own measurement of the text being written — not a
+        # post-write stat(). Same renderer, same number: the budget judgement and the
+        # artifact cannot disagree (a --check assertion, not a convention).
+        slice_text = gate.text(u)
+        u.slice_bytes = len(slice_text.encode("utf-8"))
         spath = (slices_dir / f"{u.unit_id}.slice.md") if slices_dir else None
         if spath is not None:
             spath.parent.mkdir(parents=True, exist_ok=True)
-            spath.write_text(slice_text, encoding="utf-8")
-            u.slice_bytes = spath.stat().st_size
+            # newline="" pins the file to the rendered text byte-for-byte. Default text
+            # mode would translate \n to os.linesep, so on Windows the artifact would be
+            # one byte per line LARGER than the gate measured — the exact judge/artifact
+            # divergence this gate exists to remove. Readers are unaffected (universal
+            # newlines normalize on read).
+            spath.write_text(slice_text, encoding="utf-8", newline="")
+        draft_path, done_marker, failed_marker = forward_marker_paths(checkpoints,
+                                                                     u.unit_id)
         pending.append({
             "unit_id": u.unit_id,
             "input_path": str(spath) if spath else "",
-            "draft_path": str((drafts_dir / f"{u.unit_id}.json").resolve()),
-            "done_marker": str((checkpoints / f"{u.unit_id}.done").resolve()),
-            "failed_marker": str((checkpoints / f"{u.unit_id}.failed").resolve()),
+            "draft_path": draft_path,
+            "done_marker": done_marker,
+            "failed_marker": failed_marker,
             "kind": u.kind,
             "route": u.route,
             "unit_bytes": u.slice_bytes,
+            # which descriptive context blocks were truncated for this unit and their
+            # pre-truncation size ({} = intact). Disclosed in the report's honesty
+            # boundary: a slimmed unit's input completeness is below a normal unit's.
+            "slimmed": slim_records.get(u.unit_id, {}),
             # materialized call chain (interface units, codegraph mode; standalone and
             # codegraph-off units carry [] — the structure is always present)
             "chain": u.chain,
@@ -1550,6 +1863,10 @@ def _enumerate(args) -> dict:
         "failed": len(failed),
         "counts": counts,
         "excluded": excluded,
+        # the caps this run actually enforced (--check reads them back: it gets the run
+        # dir only, never the flags, so the run record must carry its own budget truth)
+        "budget": {"max_standalone_bytes": args.max_standalone_bytes,
+                   "max_interface_bytes": args.max_interface_bytes},
         "codegraph_stats": {**stats, "excluded_files": excluded["count"]},
         "pending": page,
         "offset": args.offset,
@@ -1578,16 +1895,6 @@ def _enumerate(args) -> dict:
     return result
 
 
-def _markers(checkpoints: Path) -> tuple[set, set]:
-    done, failed = set(), set()
-    if checkpoints.is_dir():
-        for p in checkpoints.glob("*.done"):
-            done.add(p.name[:-len(".done")])
-        for p in checkpoints.glob("*.failed"):
-            failed.add(p.name[:-len(".failed")])
-    return done, failed
-
-
 def _check(run_dir: Path) -> int:
     gp = run_dir / "grouping.json"
     if not gp.is_file():
@@ -1603,6 +1910,20 @@ def _check(run_dir: Path) -> int:
     repo = Path(g.get("repo", ""))
     violations = []
     units = g.get("pending", [])
+    # budget: NEW field — the caps this run enforced. Absent (old grouping.json) means the
+    # per-unit cap assertion cannot be evaluated and is skipped, same incremental contract
+    # as excluded / codegraph_stats / chain[].
+    stand_cap = iface_cap = None
+    budget = g.get("budget")
+    if budget is not None:
+        if not isinstance(budget, dict) or not all(
+                isinstance(budget.get(k), int)
+                for k in ("max_standalone_bytes", "max_interface_bytes")):
+            violations.append(f"budget malformed (want {{max_standalone_bytes: int, "
+                              f"max_interface_bytes: int}}): {budget!r}")
+        else:
+            stand_cap, iface_cap = (budget["max_standalone_bytes"],
+                                    budget["max_interface_bytes"])
     for u in units:
         for field in ("input_path", "draft_path", "done_marker", "failed_marker"):
             v = u.get(field, "")
@@ -1660,6 +1981,22 @@ def _check(run_dir: Path) -> int:
                 if bo is not None:
                     if not isinstance(bo, int) or bo < 0 or bo >= len(chain) or bo == ci:
                         violations.append(f"{uid}: chain[{ci}] branch_of illegal: {bo!r}")
+        # slimmed: incremental field — absent (old grouping.json) is fine; present it must
+        # be a field -> original-bytes map ({} = intact).
+        sl = u.get("slimmed")
+        if sl is not None and (not isinstance(sl, dict)
+                               or not all(isinstance(k, str) and isinstance(v, int)
+                                          for k, v in sl.items())):
+            violations.append(f"{uid}: slimmed malformed (want {{field: original_bytes}}): "
+                              f"{sl!r}")
+        # the budget assertion itself: only with a recorded budget (see below), and only
+        # for a unit that carries the measured size.
+        if stand_cap is not None:
+            cap = iface_cap if u.get("kind") == "interface" else stand_cap
+            ub = u.get("unit_bytes")
+            if isinstance(ub, int) and ub > cap:
+                violations.append(f"{uid}: unit_bytes {ub} > {u.get('kind')} cap {cap} "
+                                  f"(the slice byte gate was bypassed for this run)")
     for field in ("base", "branch", "counts"):
         if field not in g:
             violations.append(f"grouping.json missing field: {field}")
@@ -1735,12 +2072,18 @@ def main():
     ap.add_argument("--max-standalone-bytes", type=int,
                     default=DEFAULT_MAX_STANDALONE_BYTES,
                     help=f"standalone cluster merge cap in bytes (default "
-                         f"{DEFAULT_MAX_STANDALONE_BYTES})")
+                         f"{DEFAULT_MAX_STANDALONE_BYTES}) — judged on the MEASURED "
+                         f"slice, not an estimate; a cluster over cap is re-split "
+                         f"losslessly, then context-slimmed, then refused (exit 2, no "
+                         f"slice written, no subagent dispatched)")
     ap.add_argument("--max-interface-bytes", type=int,
                     default=DEFAULT_MAX_INTERFACE_BYTES,
                     help=f"interface unit split cap in bytes (default "
                          f"{DEFAULT_MAX_INTERFACE_BYTES}; over-budget merged units "
-                         f"split into -partN units)")
+                         f"split into -partN units) — judged on the MEASURED slice; a "
+                         f"unit still over cap is re-split losslessly, then "
+                         f"context-slimmed, then refused (exit 2, no slice written, no "
+                         f"subagent dispatched)")
     ap.add_argument("--include-excluded", action="store_true",
                     help="fallback: do NOT apply the closed exclusion filter (tests, "
                          "build outputs, static assets, lockfiles, build scripts "

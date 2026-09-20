@@ -13,6 +13,7 @@ Run: py tests/test_sdr_context.py
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -355,6 +356,115 @@ class SdrContextTest(unittest.TestCase):
     def test_check_missing_run_dir_exits_2(self):
         code, _, _ = self._run("--check", str(self.tmp / "nope"))
         self.assertEqual(code, 2)
+
+    # --- run-level state co-write (sentinel + codegraph signal) ---
+    # The step owns both files as a SCRIPT side effect, so neither depends on the
+    # orchestrator reading and executing a `printf` recipe.
+
+    def _sentinel_path(self):
+        return self.repo / ".mgh-sdr" / ".active"
+
+    def test_sentinel_is_written_by_the_script(self):
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        sp = self._sentinel_path()
+        self.assertTrue(sp.is_file(), "sdr_context did not write the guard sentinel")
+        body = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(body["domain"], "mgh-sdr")
+        self.assertEqual(body["target"], str(self.repo.resolve()))
+        self.assertEqual(body["out_roots"], [])
+        self.assertEqual(body["read_roots"], [])
+        # Windows-native Python path, never a shell MSYS form
+        self.assertNotIn("/c/", body["target"])
+        # and it is on disk regardless of any orchestrator action
+        self.assertIn("sentinel", err)
+
+    def test_sentinel_read_roots_are_the_actually_searched_roots(self):
+        front = self._make_front(reachable=True, name="front")
+        self._approve(front)
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        searched = [e["path"] for e in json.loads(out)["external_repos"]]
+        body = json.loads(self._sentinel_path().read_text(encoding="utf-8"))
+        self.assertEqual(body["read_roots"], searched)
+        self.assertNotIn(str(self.tmp / "never_searched"), body["read_roots"])
+
+    def test_sentinel_omits_a_vanished_external_root(self):
+        # an approved root that disappears from disk between approval and retrieval is
+        # dropped by retrieval, so it must not be declared either.
+        front = self._make_front(reachable=True, name="front")
+        self._approve(front)
+        # rename rather than rmtree: git object files are read-only on Windows
+        front.rename(front.parent / "front-moved-away")
+        self.assertFalse(front.is_dir())
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        body = json.loads(self._sentinel_path().read_text(encoding="utf-8"))
+        self.assertNotIn(str(front), body["read_roots"])
+
+    def test_operator_read_root_lands_in_the_sentinel(self):
+        extra = self.tmp / "operator-declared"
+        extra.mkdir()
+        code, out, err = self._run(*self._base_args(), "--read-root", str(extra))
+        self.assertEqual(code, 0, err)
+        body = json.loads(self._sentinel_path().read_text(encoding="utf-8"))
+        self.assertIn(str(extra), body["read_roots"])
+
+    def test_run_config_carries_only_the_codegraph_signal(self):
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        rc = self.run_dir / "run_config.json"
+        self.assertTrue(rc.is_file(), "sdr_context did not write the codegraph signal")
+        body = json.loads(rc.read_text(encoding="utf-8"))
+        for start_state in ("repo", "base", "branch", "dimensions"):
+            self.assertNotIn(start_state, body)
+        self.assertEqual(set(body), {"no_codegraph"},
+                         "run_config.json must carry ONLY the codegraph signal")
+
+    def test_signal_is_derived_from_the_repo_not_the_flag(self):
+        """The default is a PROBE, not a declaration: an unindexed repo reports off, and
+        only an indexed repo with a resolvable binary reports on. Echoing the caller's
+        flag would tell the reviewer its slice carries a whole call chain that the
+        grouping stage — running the same predicate — never merged."""
+        code, _, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        body = json.loads((self.run_dir / "run_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(body, {"no_codegraph": True}, "no .codegraph/ -> signal off")
+
+        (self.repo / ".codegraph").mkdir(exist_ok=True)
+        fake_bin = self.tmp / "codegraph.cmd"
+        fake_bin.write_text("@echo off\n", encoding="utf-8")
+        old = os.environ.get("MGH_CODEGRAPH_BIN")
+        os.environ["MGH_CODEGRAPH_BIN"] = str(fake_bin)
+        try:
+            code, _, err = self._run(*self._base_args())
+            self.assertEqual(code, 0, err)
+            body = json.loads(
+                (self.run_dir / "run_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(body, {"no_codegraph": False},
+                             "indexed repo + resolvable binary -> signal on")
+        finally:
+            if old is None:
+                os.environ.pop("MGH_CODEGRAPH_BIN", None)
+            else:
+                os.environ["MGH_CODEGRAPH_BIN"] = old
+
+    def test_no_codegraph_flag_flips_the_signal(self):
+        code, out, err = self._run(*self._base_args(), "--no-codegraph")
+        self.assertEqual(code, 0, err)
+        body = json.loads((self.run_dir / "run_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(body, {"no_codegraph": True})
+
+    def test_rerun_writes_byte_identical_run_state(self):
+        code, _, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        first_sentinel = self._sentinel_path().read_text(encoding="utf-8")
+        first_rc = (self.run_dir / "run_config.json").read_text(encoding="utf-8")
+        code, _, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._sentinel_path().read_text(encoding="utf-8"), first_sentinel)
+        self.assertEqual((self.run_dir / "run_config.json").read_text(encoding="utf-8"),
+                         first_rc)
 
 
 if __name__ == "__main__":

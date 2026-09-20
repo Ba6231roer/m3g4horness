@@ -289,7 +289,7 @@ CLI I/O 契约:`stdout`=结构化 JSON、`stderr`=诊断/进度**严格分流**;
 
 ### Requirement: Regression test coverage and zero dependencies
 
-本变更新增脚本 MUST 有回归单测:`tests/test_list_chunks.py`(resume-aware pending、空/截断不静默)、
+新增脚本 MUST 有回归单测:`tests/test_list_chunks.py`(resume-aware pending、空/截断不静默)、
 `tests/test_list_verify_jobs.py`;既有 `tests/test_stage_check.py` SHALL 扩到 `prefilter`/`dedup`/
 `emit_sarif` `--check`;`tests/test_block_adhoc_scripts.py` SHALL 扩到 `MGH_SAST_ACTIVE` 路径(放行
 合法叶子、拦截内省/越权 Write)。全部新增脚本 MUST 仅用 Python ≥3.10 标准库,MUST NOT `import

@@ -40,7 +40,7 @@ frontmatter `paths:`(由该类控制的 `protects` glob 派生),使 rule 仅在�
 `AGENTS.md` 进根上下文,故索引块 SHALL 保持简洁(每 category 一行级);详述文件 SHALL **仅在 agent 任务
 涉及对应领域时经 Read 按需加载**(逐字对齐 opencode 文档 "Manual Instructions in AGENTS.md" lazy 范式)。
 MUST NOT 写 `.opencode/AGENTS.md`(opencode 不加载该位置,issue #11454);MUST NOT 把详述文件列入
-`opencode.json` `instructions`(该字段 eager 全量并入,不省上下文,违本变更目标)。opencode 不支持
+`opencode.json` `instructions`(该字段 eager 全量并入,不省上下文,与 lazy 索引块目标相悖)。opencode 不支持
 path-scoping,lazy 由索引块的语义 directive 驱动(非路径自动触发)。
 
 #### Scenario: Concise index block plus per-category detail files
@@ -97,7 +97,7 @@ opencode(`--format opencode`)SHALL 使用**单个**受管块 `<!-- security-cont
 
 #### Scenario: Old inline block migrated to index block via reused sentinel
 
-- **WHEN** 目标 `AGENTS.md` 含旧版「全量规则内联」的 `<!-- security-controls:begin --> … :end -->` 块(本变更前产物),以新版重跑
+- **WHEN** 目标 `AGENTS.md` 含旧版「全量规则内联」的 `<!-- security-controls:begin --> … :end -->` 块(旧版产物),以新版重跑
 - **THEN** `assemble_rules.py` 把该同哨兵块替换为索引块(规则正文已由 T3 重生为 `docs/security-controls/<cat>.md`),用户其余内容不动
 
 ### Requirement: Emission validation and manifest

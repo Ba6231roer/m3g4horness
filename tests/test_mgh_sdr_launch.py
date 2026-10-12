@@ -359,9 +359,10 @@ import shutil  # noqa: E402  (tearDown uses it; placed here to keep the header i
 
 
 class TestLauncherReportSurface(unittest.TestCase):
-    """improve-mgh-sdr-report-html-render: the post-run report sweep targets the
-    self-contained HTML form, and --open is a declared default-off contract (--help is
-    the contract surface)."""
+    """fix-mgh-sdr-multibranch-findings: the post-run report claim targets THIS branch's
+    run-dir sdr_manifest.json (`report` field) — the repo-root mgh-sdr-*.html mtime glob
+    is gone (a probe branch used to claim the previous branch's report). --open remains
+    a declared default-off contract (--help is the contract surface)."""
 
     def setUp(self):
         self.m = _load()
@@ -397,14 +398,310 @@ class TestLauncherReportSurface(unittest.TestCase):
         self.assertIn('"--open"', src)
         self.assertIn('action="store_true"', src)
 
-    def test_report_glob_targets_html(self):
+    def test_report_claim_is_run_dir_manifest_never_a_repo_glob(self):
         import inspect
         src = inspect.getsource(self.m)
-        self.assertIn('repo.glob("mgh-sdr-*.html")', src)
-        self.assertNotIn('mgh-sdr-*.md', src)
+        # the cross-branch claiming glob is DELETED, not narrowed
+        self.assertNotIn('repo.glob("mgh-sdr-*.html")', src)
+        self.assertNotIn("mgh-sdr-*.md", src)
+        # the only claim source is the run-dir manifest's report field + on-disk check
+        self.assertIn("sdr_manifest.json", src)
+        self.assertIn("no report produced for", src)
         # --open fires only on a real report file (a --dry-run outcome is the prompt
         # path and must never be opened)
         self.assertIn('outcome.endswith(".html")', src)
+
+
+class _FakeHostMixin:
+    """Shared harness: monkeypatches the loaded launcher module so a branch flow runs
+    WITHOUT the real sdr_context.py or a real host CLI. `_run_context` returns a minimal
+    in-memory ctx; `_spawn_host` records every call (host / repo / model / prompt) and
+    simulates the host session's render step by writing the renderer's co-products
+    (sdr_manifest.json + report.html) into the current branch's run dir before
+    returning `spawn_code`."""
+
+    def _install_fakes(self, m, spawn_code=0, write_manifest=True):
+        self.m = m
+        self.spawned = []
+        self.run_dirs = []
+
+        def fake_context(repo, run_dir, base, branch, dims, read_roots,
+                         no_codegraph=False):
+            self.run_dirs.append(Path(run_dir))
+            return {"external_repos": [], "external_skipped": [],
+                    "pending_approval": [],
+                    "baseline_path": str(self.repo / "baseline.md"),
+                    "baseline_truncated": False,
+                    "sensitive_catalog_source": "default-template",
+                    "sensitive_catalog": {}}
+
+        def fake_spawn(host, repo, prompt, model=None):
+            self.spawned.append({"host": host, "repo": str(repo), "model": model,
+                                 "prompt": prompt})
+            if self.run_dirs:
+                rd = self.run_dirs[-1]
+                # two runs within the same second share the timestamped run dir: start
+                # from a clean slate so a stale manifest from an earlier run cannot
+                # masquerade as this run's render output
+                for stale in ("sdr_manifest.json", "report.html"):
+                    (rd / stale).unlink(missing_ok=True)
+                if write_manifest:
+                    (rd / "report.html").write_text("<html></html>", encoding="utf-8")
+                    (rd / "sdr_manifest.json").write_text(
+                        json.dumps({"report": str(rd / "report.html")}),
+                        encoding="utf-8")
+            return spawn_code
+
+        m._run_context = fake_context
+        m._spawn_host = fake_spawn
+
+    def _two_branch_repo(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_launch_mb_"))
+        self.repo = self.tmp / "repo"
+        _init_repo(self.repo)
+        (self.repo / "f.txt").write_text("base", encoding="utf-8")
+        _commit_all(self.repo, "init")
+        for name in ("feature-pay", "feature-b2"):
+            _git(self.repo, "checkout", "-qb", name)
+            (self.repo / "f.txt").write_text(name, encoding="utf-8")
+            _commit_all(self.repo, name)
+        _git(self.repo, "checkout", "-q", "master")
+
+    def _launch(self, argv):
+        old_argv = sys.argv
+        sys.argv = ["mgh_sdr_launch.py"] + argv
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = self.m.main()
+                except SystemExit as e:  # argparse misuse exits directly
+                    code = e.code
+        finally:
+            sys.argv = old_argv
+        return code, out.getvalue(), err.getvalue()
+
+
+class TestBranchPrecheck(unittest.TestCase, _FakeHostMixin):
+    """P1+P6 branch pre-check: an unresolvable branch ref is a deterministic early
+    failure BEFORE any side effect — zero host spawn, zero run dir, zero sentinel —
+    recorded FAILED (branch not found) while the later branches run on; launcher exit 1
+    + FAILED summary. True run, --dry-run, and single-branch mode share the same gate."""
+
+    def setUp(self):
+        self.m = _load()
+        self._two_branch_repo()
+        self._install_fakes(self.m)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_multibranch_probe_fails_fast_zero_side_effects_rest_continue(self):
+        mb = self.tmp / "branches.txt"
+        mb.write_text("sdr-mb-nonexistent\nfeature-pay\nfeature-b2\n", encoding="utf-8")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--multi-branch", str(mb)])
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out, "", "a failed sweep must not print the stdout JSON payload")
+        self.assertIn("branch not found: sdr-mb-nonexistent", err)
+        self.assertIn("FAILED BRANCHES (1)", err)
+        # zero spawn + zero run dir for the probe; the two real branches ran normally
+        # (the host is whichever CLI auto-detection found — both spawns use it)
+        self.assertEqual(len(self.spawned), 2)
+        self.assertEqual(len({s["host"] for s in self.spawned}), 1)
+        names = sorted(d.name for d in (self.repo / ".mgh-sdr" / "runs").iterdir())
+        self.assertEqual(len(names), 2, f"run dirs: {names}")
+        self.assertTrue(all("nonexistent" not in n for n in names))
+        self.assertFalse((self.repo / ".mgh-sdr" / ".active").exists(),
+                         "sentinel must not survive the sweep")
+
+    def test_dry_run_invalid_list_fails_probe_valid_branch_still_produces(self):
+        mb = self.tmp / "branches.txt"
+        mb.write_text("sdr-mb-nonexistent\nfeature-pay\n", encoding="utf-8")
+        code, out, err = self._launch(["--repo", str(self.repo), "--dry-run",
+                                       "--multi-branch", str(mb)])
+        self.assertEqual(code, 1, err)
+        self.assertIn("branch not found: sdr-mb-nonexistent", err)
+        self.assertEqual(self.spawned, [], "--dry-run spawns zero hosts overall")
+        run_dirs = list((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        self.assertEqual(len(run_dirs), 1, "the valid branch still produces artifacts")
+        self.assertTrue((run_dirs[0] / "orchestrator_prompt.md").is_file())
+        self.assertFalse(any("nonexistent" in d.name
+                             for d in (self.repo / ".mgh-sdr" / "runs").iterdir()))
+
+    def test_single_branch_nonexistent_exits_1_zero_side_effects(self):
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "no-such-branch"])
+        self.assertEqual(code, 1, err)
+        self.assertIn("branch not found: no-such-branch", err)
+        self.assertIn("FAILED BRANCHES (1)", err)
+        self.assertEqual(self.spawned, [])
+        runs = self.repo / ".mgh-sdr" / "runs"
+        self.assertFalse(runs.is_dir() and any(runs.iterdir()), "zero run dirs")
+        self.assertFalse((self.repo / ".mgh-sdr" / ".active").exists(),
+                         "zero sentinel writes")
+
+
+class TestReportClaimManifest(unittest.TestCase, _FakeHostMixin):
+    """P2 report claim: the ONLY source is this branch's run-dir sdr_manifest.json
+    `report` field (file must be on disk); missing manifest / missing file => FAILED
+    (no-report) — a repo-root foreign report is NEVER claimed and --open never fires on
+    a FAILED branch."""
+
+    def setUp(self):
+        self.m = _load()
+        self._two_branch_repo()
+        self._install_fakes(self.m)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _foreign_report(self):
+        fr = self.repo / "mgh-sdr-19700101_000000_other.html"
+        fr.write_text("<html>foreign</html>", encoding="utf-8")
+        return fr
+
+    def test_ok_claims_the_manifest_report_path(self):
+        foreign = self._foreign_report()
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["reports"], [str(self.run_dirs[0] / "report.html")],
+                         "the manifest path is claimed, not the repo-root foreign file")
+        self.assertNotIn(str(foreign), out)
+
+    def test_exit0_without_manifest_is_failed_no_report_never_claims_foreign(self):
+        foreign = self._foreign_report()
+        self._install_fakes(self.m, write_manifest=False)
+        ok, outcome, _ = self.m._run_one(self.repo, "feature-pay", "master",
+                                         "claude", None, [], False)
+        self.assertFalse(ok)
+        self.assertEqual(outcome, "no report produced for feature-pay")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay"])
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out, "")
+        self.assertIn("no report produced for feature-pay", err)
+        self.assertNotIn(str(foreign), err, "the foreign report is never claimed")
+
+    def test_manifest_with_missing_report_file_is_failed(self):
+        # manifest present but its `report` file is not on disk => FAILED (no-report)
+        def fake_spawn_broken(host, repo, prompt, model=None):
+            self.spawned.append({"host": host, "repo": str(repo), "model": model})
+            rd = self.run_dirs[-1]
+            (rd / "sdr_manifest.json").write_text(
+                json.dumps({"report": str(rd / "report.html")}), encoding="utf-8")
+            return 0
+
+        self.m._spawn_host = fake_spawn_broken
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay"])
+        self.assertEqual(code, 1, err)
+        self.assertIn("no report produced for feature-pay", err)
+
+    def test_open_fires_only_for_an_ok_branch_report(self):
+        import webbrowser
+        opened = []
+
+        def record(uri, *a, **k):
+            opened.append(str(uri))
+            return True
+
+        orig = webbrowser.open
+        webbrowser.open = record
+        try:
+            code, _, err = self._launch(["--repo", str(self.repo), "--branch",
+                                         "feature-pay", "--open"])
+            self.assertEqual(code, 0, err)
+            self.assertEqual([u for u in opened if u.endswith("report.html")],
+                             opened, "exactly the ok report is opened")
+        finally:
+            webbrowser.open = orig
+        self._install_fakes(self.m, write_manifest=False)
+        opened.clear()
+        webbrowser.open = record
+        try:
+            code, _, err = self._launch(["--repo", str(self.repo), "--branch",
+                                         "feature-pay", "--open"])
+            self.assertEqual(code, 1, err)
+            self.assertEqual(opened, [], "--open must NOT fire on a FAILED branch")
+        finally:
+            webbrowser.open = orig
+
+
+class TestSpawnEnvAndFlags(unittest.TestCase):
+    """P3 env hygiene: the spawned child env carries NO `PWD` (opencode resolves the
+    project by `PWD ?? cwd` — an inherited PWD landed every session in the wrong
+    project) and cwd = the target repo, BOTH hosts. P4 diagnosability: opencode spawn
+    carries `--print-logs --log-level ERROR` (claude does not); `--model` passes through
+    to both hosts, appended only when given; --help documents the flag (the launcher
+    --help is the contract surface)."""
+
+    def setUp(self):
+        self.m = _load()
+        self.repo = Path(tempfile.mkdtemp(prefix="mgh_spawn_"))
+        self.captured = []
+        self._orig_run = self.m.subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            self.captured.append((list(cmd), kwargs))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        self.m.subprocess.run = fake_run
+
+    def tearDown(self):
+        self.m.subprocess.run = self._orig_run
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def _last(self):
+        return self.captured[-1]
+
+    def test_env_has_no_pwd_and_cwd_is_repo_both_hosts(self):
+        old = os.environ.get("PWD")
+        os.environ["PWD"] = "C:/some/other/dir"
+        try:
+            for host in ("claude", "opencode"):
+                with self.subTest(host=host):
+                    self.assertEqual(self.m._spawn_host(host, self.repo, "p"), 0)
+                    cmd, kwargs = self._last()
+                    self.assertIsInstance(kwargs.get("env"), dict)
+                    self.assertNotIn("PWD", kwargs["env"])
+                    self.assertEqual(kwargs["cwd"], str(self.repo))
+        finally:
+            if old is None:
+                os.environ.pop("PWD", None)
+            else:
+                os.environ["PWD"] = old
+
+    def test_opencode_carries_log_flags_claude_does_not(self):
+        self.m._spawn_host("opencode", self.repo, "p")
+        cmd, _ = self._last()
+        self.assertEqual(cmd[2:5], ["--print-logs", "--log-level", "ERROR"])
+        self.m._spawn_host("claude", self.repo, "p")
+        cmd, _ = self._last()
+        self.assertNotIn("--print-logs", cmd)
+        self.assertNotIn("--log-level", cmd)
+
+    def test_model_passthrough_both_hosts_only_when_given(self):
+        for host in ("opencode", "claude"):
+            self.m._spawn_host(host, self.repo, "p", "prov/m1")
+            cmd, _ = self._last()
+            self.assertEqual(cmd[-2:], ["--model", "prov/m1"], host)
+        for host in ("opencode", "claude"):
+            self.m._spawn_host(host, self.repo, "p")
+            cmd, _ = self._last()
+            self.assertNotIn("--model", cmd, host)
+
+    def test_help_documents_model_flag(self):
+        # self.m.subprocess.run is monkeypatched for the other tests (the subprocess
+        # module object is global) — this test intentionally uses the SAVED original.
+        r = self._orig_run([sys.executable, str(LAUNCH), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--model <provider/model>", r.stdout)
 
 
 if __name__ == "__main__":

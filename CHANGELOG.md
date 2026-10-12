@@ -16,6 +16,38 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — /mgh-sdr 多分支 sweep 六缺陷:失败探针早败、报告按分支认领、spawn 环境卫生、可诊断性、守卫通配误拦 (0.1.59)
+
+多分支真仓验证战役(findings 2026-10-12)暴露的六个产品缺陷一次收口:
+
+- **分支存在性预检(修「不存在分支烧一轮 LLM 还被标成功」)**:launcher 对每个待跑分支
+  在**任何副作用之前**(run 目录 / 哨兵 / 提示词 / 宿主 spawn)先 `git rev-parse --verify`
+  预检;不可解析 → 该分支确定性早败(零 spawn、零 LLM、零产物),记 FAILED 后后续分支
+  照常;真跑与 `--dry-run`、单分支与 `--multi-branch` 同一预检——dry-run 由此获得对清单
+  的真实校验力(含无效分支 → 退出 1,不再假绿)。
+- **报告认领以本分支 run 目录 manifest 为准(修跨分支产物污染)**:宿主退出 0 后只认
+  `<run-dir>/sdr_manifest.json` 的 `report` 字段(渲染器同一事务原子写);manifest 缺失或
+  报告文件不在盘 → FAILED(no-report);「仓根最新 `mgh-sdr-*.html` glob」整体删除,跨分支
+  认领在结构上不可能。退出码 1 的覆盖面随之扩为:分支不存在 / sdr_context 失败 / 宿主非零
+  退出 / 退出 0 但未产报告。
+- **spawn 环境卫生(修 opencode 会话全落错项目)**:spawn 宿主 CLI 时剥离子进程环境中的
+  `PWD`(opencode 按 `PWD ?? cwd` 解析项目归属);从任意非目标仓 cwd 启动,会话都落在
+  launcher 显式传入的 cwd = 目标仓。
+- **可诊断性 + `--model` 透传(修失败现场只有一句错误信封)**:opencode spawn 固定追加
+  `--print-logs --log-level ERROR`(provider 形失败在 launcher stderr 可定位);launcher
+  新增 `--model <provider/model>`,两宿主同名透传、未传不附加——替代手改项目级
+  opencode.json 的环境绕行。
+- **守卫通配 token 归一(修「仓根找报告」合法命令被误拦)**:Bash 分派入口单点归一——
+  引号闭合绝对路径后紧邻的 glob 段剥引号拼为单 token(`ls "<target>"/*.html` 不再把
+  `/*.html` 碎片按盘符根解析);含 `*`/`?` 的 token 按首个元字符前的前缀判属。文件搜索 /
+  目录列举 / 兜底净网三判定共用归一后 token 流;树外前缀与 `..` 越树前缀照旧拦截。
+- **发布面**:三端守卫拷贝同步(core canonical = claude = opencode,字节级 parity);
+  `VERSION` bump。
+
+诚实边界随动(AGENTS.md):通配按**去通配前缀**判属,glob 展开结果不判定(与
+regex-over-string 立场一致);别名/变量间接照旧不可见。渲染器 / 分组 / fan-out 零变化;
+三面命令壳零变化(壳未逐字枚举 launcher flags,契约面在 launcher `--help`)。
+
 ### Changed — 简报表调用链两级显示 + 扩展维度中文列头 (0.1.58)
 
 真仓首跑(springBootTemplate,8 单元 / 23 findings)反馈的阅读性迭代:

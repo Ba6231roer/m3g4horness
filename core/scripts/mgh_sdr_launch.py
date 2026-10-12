@@ -7,7 +7,7 @@ the full review without cloning this dev repo:
 
   py mgh_sdr_launch.py --repo <abs-target> [--branch <ref>] [--base <ref>]
       [--host opencode|claude] [--dimensions <json>] [--multi-branch <file>]
-      [--read-root <abs>]... [--open] [--dry-run]
+      [--read-root <abs>]... [--model <provider/model>] [--open] [--dry-run]
 
 Why a launcher: the two experience/safety problems of an external (frontend) repo are
 solved OUTSIDE the host CLI session —
@@ -32,34 +32,53 @@ solved OUTSIDE the host CLI session —
      reuses + refreshes it (resume semantics) instead of silently locking daily dev.
 
 Per-branch flow (single branch, or serially per --multi-branch line):
-  gate (repo + host CLI in PATH; --host explicit > opencode > claude; none => exit 2 +
-  recipe) -> run dir <repo>/.mgh-sdr/runs/<ts[-branch]>/ -> sdr_context.py (external
-  retrieval + baseline + sensitive catalog, IN THIS PROCESS, which also co-writes the
-  guard sentinel + the run_config.json codegraph signal) -> sentinel refresh
-  (idempotent; read_roots = actually-searched roots + --read-root additions, re-judged
-  against the project config as the second authorization gate) -> orchestrator prompt
-  file (verbatim absolute paths from the sdr_context stdout) -> spawn host CLI
-  (`opencode run` with the task on stdin / `claude -p` likewise; claude gets a 480000ms
-  soft-deadline note — claude Bash per-call cap 600000 x 0.8) -> sentinel removal.
+  BRANCH PRE-CHECK (git rev-parse --verify: the ref must resolve; a failed check is a
+  deterministic early failure — zero host spawn, zero LLM spend, zero run dir / sentinel /
+  prompt side effects — recorded FAILED and the sweep continues; true run, --dry-run,
+  single-branch and --multi-branch all share this same first gate) -> gate (repo + host
+  CLI in PATH; --host explicit > opencode > claude; none => exit 2 + recipe) -> run dir
+  <repo>/.mgh-sdr/runs/<ts[-branch]>/ -> sdr_context.py (external retrieval + baseline +
+  sensitive catalog, IN THIS PROCESS, which also co-writes the guard sentinel + the
+  run_config.json codegraph signal) -> sentinel refresh (idempotent; read_roots =
+  actually-searched roots + --read-root additions, re-judged against the project config
+  as the second authorization gate) -> orchestrator prompt file (verbatim absolute paths
+  from the sdr_context stdout) -> spawn host CLI (`opencode run --print-logs --log-level
+  ERROR` with the task on stdin / `claude -p` likewise; claude gets a 480000ms
+  soft-deadline note — claude Bash per-call cap 600000 x 0.8; the child env is spawned
+  WITHOUT `PWD` so the host resolves the project by the explicit cwd = the target repo)
+  -> sentinel removal -> report claim: the ONLY accepted source is THIS branch's run-dir
+  `sdr_manifest.json` `report` field (the renderer's deterministic co-product); missing
+  manifest or report file not on disk => FAILED (no-report) — a repo-root
+  `mgh-sdr-*.html` glob is NEVER consulted, so cross-branch report claiming is
+  structurally impossible.
 
 --multi-branch <file>: a local text file, one branch name per line (`#` comments and
 blank lines ignored); each branch runs the COMPLETE flow serially with its own run dir
 (+= "-<branch-safe>") + report + sentinel lifecycle; a branch failure is recorded and
 the loop continues; launcher exit 1 iff any branch failed.
 
---dry-run: gates + sdr_context + sentinel + prompt file, then STOPS before spawning
-(zero host CLI invocation); the sentinel is KEPT (the next real run reuses it) — exit 0.
+--dry-run: the SAME branch pre-check runs first (an unresolvable branch ref fails the
+dry-run too — a green smoke must not bless an invalid branch list), then gates +
+sdr_context + sentinel + prompt file, then STOPS before spawning (zero host CLI
+invocation); the sentinel is KEPT (the next real run reuses it) — exit 0 only if every
+branch passed the pre-check.
+
+--model <provider/model>: passed through to the host CLI verbatim (`opencode run
+--model` / `claude -p --model`); omitted => no model flag is appended (the host's own
+default applies).
 
 Exit codes (R5.3b): 0 all branches ok (incl. --dry-run) · 1 runtime failure (>=1 branch
-failed / host CLI exited non-zero) · 2 misuse (argparse / host missing / repo not a git
-work tree / branch ref missing in --multi-branch mode is a per-branch failure not a
-launcher abort).
+FAILED: branch not found / sdr_context failed / host CLI exited non-zero / host exited 0
+but produced no report) · 2 misuse (argparse / host missing / repo not a git work tree).
+A branch ref that does not resolve is a per-branch FAILED (exit 1 via the failure
+summary), NEVER a launcher abort.
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/subprocess/sys/pathlib).
 """
 from __future__ import annotations
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -312,15 +331,28 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
     return "\n".join(lines) + "\n"
 
 
-def _spawn_host(host: str, repo: Path, prompt: str) -> int:
-    """Spawn the host CLI with the task message on stdin; return its exit code."""
+def _spawn_host(host: str, repo: Path, prompt: str, model: str | None = None) -> int:
+    """Spawn the host CLI with the task message on stdin; return its exit code.
+
+    opencode gets `--print-logs --log-level ERROR` (provider-shaped failures must be
+    diagnosable from this process's stderr — an error envelope line alone is not);
+    claude takes no log flags. `--model` is passed through verbatim to either host,
+    appended only when given. Env hygiene: the child env is `os.environ` WITHOUT `PWD`
+    — opencode resolves the project by `PWD ?? cwd`, so an inherited PWD (whatever dir
+    this launcher was started from) would land the session in the WRONG project; with
+    it stripped the host falls back to the explicit cwd = the target repo. claude takes
+    the same path (it does not read PWD; stripping is harmless)."""
     if host == "opencode":
-        cmd = [shutil.which("opencode") or "opencode", "run"]
+        cmd = [shutil.which("opencode") or "opencode", "run",
+               "--print-logs", "--log-level", "ERROR"]
     else:
         cmd = [shutil.which("claude") or "claude", "-p"]
+    if model:
+        cmd += ["--model", model]
     _eprint(f"[launch] spawning {host} (task on stdin; cwd={repo})")
     try:
-        r = subprocess.run(cmd, input=prompt, cwd=str(repo), text=True,
+        env = {k: v for k, v in os.environ.items() if k != "PWD"}
+        r = subprocess.run(cmd, input=prompt, cwd=str(repo), env=env, text=True,
                            encoding="utf-8", errors="replace")
     except OSError as e:
         _eprint(f"error: host spawn failed: {e}")
@@ -345,8 +377,20 @@ def _read_multi_branch(path: Path) -> list[str]:
 
 def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
              read_roots: list[str], dry_run: bool,
-             no_codegraph: bool = False) -> tuple[bool, str, list[str]]:
+             no_codegraph: bool = False,
+             model: str | None = None) -> tuple[bool, str, list[str]]:
     """One complete branch flow. Returns (ok, report_path_or_reason, pending_approval)."""
+    # BRANCH PRE-CHECK — the very first act, before ANY side effect (run dir creation,
+    # sdr_context, sentinel, prompt file, spawn): the ref must resolve to an object in
+    # the target repo (wide form: branch / tag / short SHA all pass, matching what
+    # `git diff base..branch` accepts). Failure is a deterministic early failure — zero
+    # host spawn, zero LLM spend, zero artifacts. True run, --dry-run, single-branch and
+    # --multi-branch all share this one gate (a green --dry-run therefore really vouches
+    # for the branch list).
+    if _git(repo, "rev-parse", "--verify", "--quiet", branch).returncode != 0:
+        _eprint(f"[launch] branch {branch}: FAILED pre-check (ref does not resolve) — "
+                f"zero spawn, zero artifacts; sweep continues")
+        return False, f"branch not found: {branch}", []
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = repo / RUNS_REL / (f"{ts}-{_safe_name(branch)}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -385,7 +429,7 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
                 "NOT spawning the host CLI (sentinel kept for the next real run)")
         return True, str(prompt_path), pending
     try:
-        code = _spawn_host(host, repo, prompt)
+        code = _spawn_host(host, repo, prompt, model)
     finally:
         pass
     # the host session's step 5 also removes the sentinel; this is the launcher-side
@@ -393,8 +437,22 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     _remove_sentinel(repo)
     if code != 0:
         return False, f"host CLI exited {code} for {branch}", pending
-    reports = sorted(repo.glob("mgh-sdr-*.html"), key=lambda p: p.stat().st_mtime)
-    report = str(reports[-1]) if reports else "(report not found — check host output)"
+    # Report claim: the ONLY source is THIS branch's run-dir sdr_manifest.json `report`
+    # field (the renderer's deterministic co-product, atomically written in the same
+    # transaction as the report — a successful render always leaves the manifest, so a
+    # missing manifest / missing report file means the render never happened => FAILED,
+    # never a repo-root `mgh-sdr-*.html` mtime guess: cross-branch claiming is
+    # structurally impossible on this path).
+    report = None
+    try:
+        manifest = json.loads((run_dir / "sdr_manifest.json").read_text(encoding="utf-8"))
+        cand = manifest.get("report")
+        if isinstance(cand, str) and Path(cand).is_file():
+            report = cand
+    except (OSError, ValueError):
+        pass
+    if report is None:
+        return False, f"no report produced for {branch}", pending
     return True, report, pending
 
 
@@ -417,6 +475,10 @@ def main():
     ap.add_argument("--read-root", action="append", metavar="<abs>",
                     help="extra confirmed read-only root for sentinel read_roots[] "
                          "(repeatable)")
+    ap.add_argument("--model", metavar="<provider/model>",
+                    help="model id passed through to the host CLI (`opencode run "
+                         "--model` / `claude -p --model`); omitted => no model flag "
+                         "is appended (the host's own default applies)")
     ap.add_argument("--no-codegraph", action="store_true",
                     help="mark the codegraph SIGNAL off in the run's run_config.json "
                          "(dispatcher-side `{{codegraph}}` placeholder becomes off). The "
@@ -456,7 +518,7 @@ def main():
         _eprint(f"[launch] === branch {branch} ===")
         ok, outcome, pending = _run_one(repo, branch, args.base, host, args.dimensions,
                                         args.read_root or [], args.dry_run,
-                                        args.no_codegraph)
+                                        args.no_codegraph, args.model)
         pending_all.extend(p for p in pending if p not in pending_all)
         if ok:
             reports.append(outcome)

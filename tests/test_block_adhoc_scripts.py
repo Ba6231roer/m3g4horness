@@ -1810,11 +1810,12 @@ class _RealTreeBashMixin:
         shutil.rmtree(self.sona, ignore_errors=True)
         shutil.rmtree(self.sonb, ignore_errors=True)
 
-    def _bash(self, cmd, target=None, cwd=None, active="1"):
+    def _bash(self, cmd, target=None, cwd=None, active="1", domain="init"):
         """target=None => degrade path (MGH_TARGET unset); cwd=None => the neutral temp dir
-        (outside sona — the cwd-drift judge for bare verbs / relative refs)."""
-        key = _DOMAIN_ENV["init"]
-        sibs = [v for d, v in _DOMAIN_ENV.items() if d != "init"]
+        (outside sona — the cwd-drift judge for bare verbs / relative refs); domain picks
+        the run-domain activation env key (default init)."""
+        key = _DOMAIN_ENV[domain]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != domain]
         old_sib = {s: os.environ.pop(s, None) for s in sibs}
         old_active = os.environ.get(key)
         old_target = os.environ.get("MGH_TARGET")
@@ -2225,6 +2226,99 @@ class TestBashPathAllowset(unittest.TestCase, _RealTreeBashMixin):
         self.assertEqual(code, 2)
         self.assertIn("out-of-tree write", err)
         self.assertNotIn("read allow-set", err)
+
+
+class TestGlobTokenNormalization(unittest.TestCase, _RealTreeBashMixin):
+    """Glob-form token judgment (D5): ① a glob segment directly abutting a quote-closed
+    absolute path (`"<t>"/*.html`) is joined with it into one logical token at the Bash
+    dispatch entry — without the join the `/*.html` fragment was misread as a bare `/…`
+    absolute path resolving to the drive root, a FALSE out-of-tree block that hit the
+    sanctioned report-discovery command; ② a token with glob metacharacters is judged by
+    its glob-free prefix. The join is a false-positive fix, NEVER a relaxation:
+    out-of-tree prefixes and `..`-climbing prefixes still block; a non-run-domain
+    session is untouched."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    # --- PASS: the evidence shapes, one per Bash judgment face ---
+    def test_evidence_shape_passes_in_sdr_domain(self):
+        # the exact real-machine false-positive: listing + search verbs + the catch-all
+        # net all see the same joined in-tree token -> pass (exit 0)
+        code, err = self._bash(f'ls -la "{self.sona}" | grep -i "mgh-sdr" ; '
+                               f'ls "{self.sona}"/*.html',
+                               target=self.sona, cwd=self.sona, domain="sdr")
+        self.assertEqual(code, 0, err)
+
+    def test_search_verb_after_pipe_with_joined_glob_passes(self):
+        code, err = self._bash(f'ls "{self.sona}"/*.html | grep -i "mgh-sdr"',
+                               target=self.sona, cwd=self.sona, domain="sdr")
+        self.assertEqual(code, 0, err)
+
+    def test_net_rule_joined_in_tree_glob_passes(self):
+        # `cat` is in NO verb table: only the fail-closed net judges — the joined
+        # prefix is in-tree => pass
+        code, err = self._bash(f'cat "{self.sona}"/*.log',
+                               target=self.sona, cwd=self.sona, domain="sdr")
+        self.assertEqual(code, 0, err)
+
+    def test_glob_inside_quoted_in_tree_path_passes(self):
+        # glob WITHIN the quotes (no join needed): the token's glob-free prefix decides
+        code, err = self._bash(f'rg "x" "{self.sona}\\src\\*.java"',
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_join_helper_shapes(self):
+        # unit-level: the join fires ONLY on quote-closed absolute path + abutting glob
+        self.assertEqual(self.m._join_abutting_globs('ls "C:\\t"/*.html'),
+                         "ls C:\\t/*.html")
+        self.assertEqual(self.m._join_abutting_globs('ls "C:\\t"\\*.log'),
+                         "ls C:\\t\\*.log")
+        self.assertEqual(self.m._join_abutting_globs('ls "C:\\t" | grep x'),
+                         'ls "C:\\t" | grep x')
+        self.assertEqual(self.m._join_abutting_globs('rg "pat" file*'),
+                         'rg "pat" file*')
+        self.assertEqual(self.m._glob_free_prefix("C:\\t/*.ht*"), "C:\\t/")
+        self.assertEqual(self.m._glob_free_prefix("C:\\t\\a?b.log"), "C:\\t\\a")
+        self.assertEqual(self.m._glob_free_prefix("C:\\t\\plain.log"),
+                         "C:\\t\\plain.log")
+
+    # --- BLOCK: the join is NEVER a containment relaxation ---
+    def test_out_of_tree_glob_prefix_still_blocked_listing(self):
+        code, err = self._bash(f'ls "{self.sonb}"/*.html',
+                               target=self.sona, cwd=self.sona, domain="sdr")
+        self.assertEqual(code, 2)
+        self.assertIn("directory listing", err)
+
+    def test_out_of_tree_glob_prefix_still_blocked_search(self):
+        code, err = self._bash(f'rg "x" "{self.sonb}"/*.java',
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("file search", err)
+
+    def test_dotdot_prefix_still_blocked(self):
+        # no glob chars: the full token resolves with `..` folded -> outside -> block
+        code, err = self._bash(f'type "{self.sona}\\..\\..\\secret.txt"',
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+
+    def test_glob_free_prefix_with_dotdot_still_blocked(self):
+        # glob chars AFTER a `..`-climbing prefix: the prefix decides -> block
+        code, err = self._bash(f'type "{self.sona}"\\..\\..\\secret*.txt',
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("read allow-set", err)
+
+    def test_inactive_session_unaffected(self):
+        # no run-domain (no env, no sentinel): the same evidence command passes silently
+        code, err = self._bash(f'ls -la "{self.sona}" | grep -i "mgh-sdr" ; '
+                               f'ls "{self.sona}"/*.html',
+                               target=self.sona, active="")
+        self.assertEqual(code, 0)
 
 
 class TestReadRootsConfig(unittest.TestCase):

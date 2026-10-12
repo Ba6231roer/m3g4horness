@@ -341,6 +341,40 @@ _PATH_TOKEN_RX = re.compile(
     r'((?:[A-Za-z]:[\\/]|\\\\|/|\.\.[/\\]|~[/\\])[^\s;"\'&|]*)'
     r'"?\'?')
 
+# Glob-form token judgment: two normalization steps that feed EVERY Bash absolute-path
+# judgment (file-search / directory-listing / mutation / redirect / this rule m), so all
+# rules judge the same normalized token stream. Step 1 (join): a glob segment directly
+# abutting a quote-closed absolute path (`"C:\t"/*.html`, `"C:\t"\*.log`) is joined with
+# it into ONE logical token by stripping the quotes — without the join the extractor
+# reads the closing quote as the token end and the following `/*.html` fragment as a
+# bare `/…` absolute path that resolves to the drive root: a false out-of-tree hit that
+# blocked the sanctioned report-discovery command. Step 2 (prefix): a token containing
+# glob metacharacters (`*`/`?`) is judged by its glob-free prefix — everything before
+# the FIRST metacharacter (_glob_free_prefix). An out-of-tree prefix
+# (`"D:\other"/*.log`) remains a block; a `..`-climbing prefix remains a block. The join
+# is a false-positive fix, NEVER a read-side relaxation. Regex-over-string, NOT a shell
+# parser (same stance as every other Bash rule): alias/variable indirection stays
+# invisible, and the glob's EXPANSION RESULTS are not judged — only the prefix decides.
+_GLOB_JOIN_RX = re.compile(
+    r'(["\'])((?:[A-Za-z]:[\\/]|\\\\|/)[^"\']*?)\1(?=[\\/][^\s;&|]*[*?])')
+
+
+def _join_abutting_globs(command: str) -> str:
+    """Single-point Bash-command normalization: strip the quotes off a quote-closed
+    absolute path that DIRECTLY abuts a glob segment (`"C:\\t"/*.html` ->
+    `C:\\t/*.html`), so every downstream extraction sees one logical token instead of a
+    bare `/…` fragment. Applied once at the Bash dispatch entry, before any rule."""
+    return _GLOB_JOIN_RX.sub(r"\2", command)
+
+
+def _glob_free_prefix(tok: str) -> str:
+    """The judgeable prefix of a glob-form token: everything before the FIRST glob
+    metacharacter (`*`/`?`); a token without metacharacters is returned unchanged."""
+    for i, ch in enumerate(tok):
+        if ch == "*" or ch == "?":
+            return tok[:i] or tok
+    return tok
+
 # mgh-core missing-install discrimination (rule l): a path segment pair marking an INSTALLED
 # mgh-core script + a script extension. The segment is host-neutral (matches both
 # `.claude/mgh-core/scripts/…` and `.opencode/mgh-core/scripts/…`).
@@ -570,7 +604,7 @@ def _out_of_tree_file_search(command, target, cwd, read_roots=()):
     abs_tokens = _ABS_PATH_TOKEN_RX.findall(command)
     for tok in abs_tokens:
         try:
-            r = Path(tok).resolve()
+            r = Path(_glob_free_prefix(tok)).resolve()
         except (OSError, ValueError):
             continue
         if not r.is_relative_to(target) and not _in_read_root(r, read_roots):
@@ -609,7 +643,7 @@ def _out_of_tree_listing(command, target, cwd, read_roots=()):
     path_toks = [t for t in toks[1:] if t and not t.startswith("-")]
     for tok in path_toks:
         try:
-            p = Path(tok)
+            p = Path(_glob_free_prefix(tok))
             r = p.resolve() if p.is_absolute() else (cwd / p).resolve()
         except (OSError, ValueError):
             continue
@@ -721,11 +755,11 @@ def _path_outside_allowset(command, target, cwd, read_roots):
     for tok in _bash_path_tokens(command):
         try:
             if tok.startswith("~"):
-                r = Path(tok).expanduser().resolve()
+                r = Path(_glob_free_prefix(tok)).expanduser().resolve()
             elif tok.startswith(".."):
-                r = (cwd / tok).resolve()
+                r = (cwd / _glob_free_prefix(tok)).resolve()
             else:
-                r = Path(tok).resolve()
+                r = Path(_glob_free_prefix(tok)).resolve()
         except (OSError, ValueError):
             continue
         if r.is_relative_to(target) or _in_read_root(r, read_roots):
@@ -791,7 +825,7 @@ def _out_of_tree_mutation(command: str, target, cwd):
             if abs_tokens:
                 dest = abs_tokens[-1]
                 try:
-                    return kind, dest, not Path(dest).resolve().is_relative_to(target)
+                    return kind, dest, not Path(_glob_free_prefix(dest)).resolve().is_relative_to(target)
                 except (OSError, ValueError):
                     return None, "", False
             # no explicit path -> destination defaults to cwd
@@ -804,7 +838,7 @@ def _out_of_tree_mutation(command: str, target, cwd):
         # is the hit (W1/W3); otherwise the FIRST in-tree token is the destination for P1.
         for tok in abs_tokens:
             try:
-                if not Path(tok).resolve().is_relative_to(target):
+                if not Path(_glob_free_prefix(tok)).resolve().is_relative_to(target):
                     return kind, tok, True   # out-of-tree hit
             except (OSError, ValueError):
                 continue
@@ -829,7 +863,7 @@ def _out_of_tree_mutation(command: str, target, cwd):
             kind = "delete" if is_del else "write"
             for tok in _ABS_PATH_TOKEN_RX.findall(command):
                 try:
-                    if not Path(tok).resolve().is_relative_to(target):
+                    if not Path(_glob_free_prefix(tok)).resolve().is_relative_to(target):
                         return kind, tok, True
                 except (OSError, ValueError):
                     continue
@@ -1193,7 +1227,12 @@ def main():
     ti = payload.get("tool_input") or {}
 
     if tool == "Bash":
-        cmd = (ti.get("command") or "")
+        # single-point glob normalization (D5): a glob segment directly abutting a
+        # quote-closed absolute path is joined with it into one logical token BEFORE any
+        # rule sees the command — every Bash judgment below (mutation / search / listing
+        # / redirect / rule m) judges the same normalized token stream. Prefix judgment
+        # (glob-free prefix) is applied at each token resolution point.
+        cmd = _join_abutting_globs(ti.get("command") or "")
         # rule l (terminal state, FIRST): a command referencing an mgh-core script that is
         # absent on disk or installed outside the tree is the root-project-only-install shape;
         # every later recipe is meaningless — stop-all wins before any other judgment.
@@ -1316,7 +1355,7 @@ def main():
                 rdest = rm.group(1).strip('"\'')
                 if not rdest or _is_temp_redirect_target(rdest):
                     continue
-                if _is_out_of_tree(rdest, target):
+                if _is_out_of_tree(_glob_free_prefix(rdest), target):
                     if _redirect_in_sanctioned(rdest, domain, target, out_roots):
                         continue
                     sys.stderr.write(

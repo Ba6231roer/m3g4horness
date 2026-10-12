@@ -9,54 +9,53 @@
 ## 这是什么
 
 **m3g4h⊿rness**(读作 *megahorn-ness*;双重语义:宝可梦招式「超级角击 / Megahorn」,
-隐喻渗透测试的角击;亦是 *mega-harness*)是一套面向 AI 编程 Agent(Claude Code /
-opencode / deepseek-harness(dsh))的**安全工作流工具族**,所有命令共享前缀 `mgh-`。
+隐喻渗透测试的角击;亦是 *mega-harness*)是一套面向 AI 编程 Agent(opencode /
+deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令共享前缀 `mgh-`。
+磁盘目录名用 ASCII 的 `m3g4horness`(`⊿=U+22BF` 不入路径,避免 bash/git/CI 脆弱)。
 
-| 命令          | 状态      | 说明                                                |
-| ----------- | ------- | ------------------------------------------------- |
-| `/mgh-sast` | ✅ 可用    | 9 阶段 agentic SAST。零运行时依赖地复刻 vvaharness 流水线(详见下节)。 |
-| `/mgh-init` | ✅ 可用    | 发现存量安全控制 → 生成 Agent rules。隔离优先三层流水线(确定性发现 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ claude/opencode rules(二选一,结构不混)。详见 `openspec/changes/add-mgh-init/`。 |
-| `/mgh-sra`  | ✅ 可用    | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-sra/`。 |
-| `/mgh-srr` | ✅ 可用    | **无 openspec** 的自由文本需求(word/txt/md/excel/透传)安全评审。端口-适配器:确定性 intake 适配器(`ingest_requirements.py`)产出 sra 同 shape 上下文 → **逐字复用 sra 中间引擎**(clarify/augment/consistency 零新增提示词)→ 确定性 render 适配器(`render_report.py`)产**普通报告 + 台账**(NEVER 触 openspec)。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底;与 sra 共享 `business_context.json`。原创(无 vvah 源)。详见 `openspec/changes/add-mgh-srr/`。 |
-| `/mgh-sdr` | ✅ 可用    | **需求分支代码 diff 的存量安全设计符合性复核**(merge 前关卡)。`git diff base..branch` → 接口维度注解启发式分组 + standalone 簇(`diff_group.py`)→ 存量设计基线投影 + 外部前端仓主流程受控检索(`sdr_context.py`,结论物化 + 哨兵 `read_roots[]`)→ fan-out 6 维度复核(垂直/横向/其他权限、SQL 注入、敏感信息、输入校验;`fanout_runner --tier sdr`)→ 项目根中文**自包含单文件 HTML 报告**(样式/脚本/数据全内嵌、离线可读)+ `<run-dir>/sdr_report_data.json` canonical 数据文件(`render_sdr_report.py`)。launcher `mgh_sdr_launch.py` 一条命令拉起(外部仓检索在 launcher 进程,宿主会话零权限打断);敏感目录缺省回退默认模板(与 sra/srr 显式分歧)。详见 `openspec/changes/add-mgh-sdr/`。 |
-| `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑设计强耦合安全测试案例。                              |
+### 用户画像与设计目标
 
-> TODO 命令目前仅为**空骨架**,功能定义见仓库根 [`task.260630.md`](task.260630.md)。`/mgh-sra` 与 `/mgh-srr` 产出的项目级 `business_context.json`(`roles[]`/`interface_authz[]`/`sensitive_fields[]`)为未来 `/mgh-blst` 预留消费口。
+本工具族为以下运行环境量身设计;读研发铁律时,把每条规则都理解成对这张表中某个约束的
+应对,规则就不是任性好恶而是必然推论:
 
-**宿主矩阵**:同一命令族经 `install.sh --claude|--opencode|--dsh` 三端分发 —— claude =
-`.claude/commands/*.md`(+ agents/skills/hooks);opencode = `.opencode/command|agent`;
-dsh(deepseek-harness)= `mgh-core/` + `<target>/.dsh/skills/mgh-*/SKILL.md`(user-invocable
-skill,用户 `/mgh-*` 显式召唤、模型不可自触发)+ profile `cordis.patch.yml` 受管块接线守卫。
-三面壳为**逐字镜像**,方言差异仅落白名单五类(frontmatter / 召唤语义 / 执行边界披露 /
-工具名归一 / 主机机制事实按 dsh 实测改写)。
+| 运行环境约束 | 工具族的设计应对 |
+| --- | --- |
+| 企业内网,不能联网装依赖 | 确定性脚本零 pip 依赖(R2),install 时自检 |
+| 内网部署的大模型服务:上下文窗口仅 ~150K,模型较旧较弱 | 机械重活下沉确定性脚本,LLM 只做判断类工作;命令壳 token 硬预算(R5.6);大任务拆成带独立上下文的 subagent 隔离扇出,单请求只见切片 |
+| 速度慢、有并发限制、每 10 分钟 100 次调用的频控 | fan-out 派发器内置槽位补位 / 失活检测 / 快败冷却 / 限流风暴截断;归纳阶段打包(pack)摊薄调用开销;软时限干净早退代替硬超时丢任务 |
+| 大代码仓:数百万行、十年迭代历史,Java Web 项目为主 | `--scope` 按模块切片 + `--merge` 合并;callgraph 缓存 + scan 续点;`--resume` 磁盘化断点续跑(R5.4) |
+| 高安全要求(银行项目为主) | 产物一律是「候选 + 证据」并声明诚实边界,人工复核;每步产物 `--check` fail-loud 不带病前进(R5.9);运行时守卫拦越权操作(R5.7) |
+| 目标:稳定、全面、准确地做安全工作 | 稳定 = 确定性脚本 + 哨兵 + resume 全磁盘化;全面 = 闭集维度 + 启发式兜底(漏分组退独立单元,覆盖不丢);准确 = 证据锚点 + 三信号匹配 + codegraph 结构确认 + 披露不夸大 |
 
-## mgh-sast 与原项目 vvaharness 的关系(必读)
+### 命令族(按优先级排列;前两个是主力)
 
-`/mgh-sast` 是 **vvaharness**(Visa / Project Glasswing,Apache-2.0)9 阶段 LLM SAST
-流水线的**零运行时依赖重写**:
+| 命令 | 状态 | 说明 |
+| --- | --- | --- |
+| `/mgh-init` | ✅ 主力 | 发现存量安全控制 → 生成 Agent rules。隔离优先流水线(确定性发现 → scout 扇出补漏 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ opencode `AGENTS.md` 受管块(默认)/ claude `.claude/rules`(显式 opt-in),结构不混。能力规格 `openspec/specs/control-discovery/`(出规则见 `rules-emission/`)。 |
+| `/mgh-sdr` | ✅ 主力 | 需求分支代码 diff 的**存量安全设计符合性复核**(merge 前关卡)。`git diff base..branch` → 接口维度注解启发式分组 + standalone 簇(`diff_group.py`)→ 存量设计基线投影 + 外部前端仓主流程受控检索(`sdr_context.py`,结论物化 + 哨兵 `read_roots[]`)→ fan-out 6 维度复核(垂直/横向/其他权限、SQL 注入、敏感信息、输入校验;`fanout_runner --tier sdr`)→ 项目根中文**自包含单文件 HTML 报告**(样式/脚本/数据全内嵌、离线可读)+ `<run-dir>/sdr_report_data.json` canonical 数据文件(`render_sdr_report.py`)。零参 = 显式默认集(master / 当前分支 / 全 6 维);多分支 sweep 走 launcher `mgh_sdr_launch.py --multi-branch`;敏感目录缺省回退默认模板(与 sra/srr 显式分歧)。能力规格 `openspec/specs/security-design-review/`。 |
+| `/mgh-sra` | ✅ | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。能力规格 `openspec/specs/security-augmentation/`。 |
+| `/mgh-srr` | ✅ | **无 openspec** 的自由文本需求(word/txt/md/excel/透传)安全评审。端口-适配器:确定性 intake 适配器(`ingest_requirements.py`)产出 sra 同 shape 上下文 → **逐字复用 sra 中间引擎**(clarify/augment/consistency 零新增提示词)→ 确定性 render 适配器(`render_report.py`)产**普通报告 + 台账**(NEVER 触 openspec)。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底;与 sra 共享 `business_context.json`。原创(无 vvah 源)。能力规格 `openspec/specs/freeform-security-review/`。 |
+| `/mgh-sast` | ✅ | 9 阶段 agentic SAST。零运行时依赖地复刻 vvaharness 流水线(上游对照见 `docs/upstream-index.md`)。能力规格 `openspec/specs/sast-orchestration-discipline/`。 |
+| `/mgh-ut-init` | ✅ | 发现项目实际测试约定(framework / mock / assertion / fixture / naming)→ 归纳 agent rules(classify 分层 → per-group 抽样提炼 → synthesize → rules);`--format` 默认 opencode(AGENTS.md 惰性索引 + `docs/test-conventions/` 详述),claude 面产 `.claude/rules/test-*.md`;识别到的弱测试仅标记、不当约定。**dsh 面暂未分发**。能力规格 `openspec/specs/test-convention-discovery/`。 |
+| `/mgh-blst` | 🚧 TODO | 结合业务接口逻辑设计强耦合安全测试案例(空骨架)。 |
 
-- **LLM 阶段**(s1/s2/s3/s4/s6/s8)由宿主 agent 的 subagent 执行,提示词**逐字移植**;
-- **确定性阶段**(s5 prefilter / s7 dedup / s9 SARIF+CVSS+CWE)由 Python ≥3.10 标准库脚本执行;
-- **不 import、不 bundle 任何 `vvaharness/` 代码**(install 时有零依赖自检)。
+> `/mgh-blst` 目前仅为**空骨架**。`/mgh-sra` 与 `/mgh-srr` 产出的项目级
+> `business_context.json`(`roles[]`/`interface_authz[]`/`sensitive_fields[]`)为其预留消费口。
 
-```mermaid
-flowchart LR
-    subgraph 原项目["vvaharness (上游, 只读)"]
-        A1["pipeline/stages/*::SYSTEM 提示词"]
-        A2["report/{cvss,cwe}.py"]
-        A3["backends/config/cli/injectors/report 企业+运维面"]
-    end
-    A1 -- "逐字移植<br/>tools/extract_prompts.py" --> P1["core/prompts/**"]
-    A2 -- "原样并入" --> P2["core/scripts/emit_sarif.py"]
-    A3 -- "整体砍掉<br/>改由宿主 agent 承接" --> H["Claude Code / opencode / dsh<br/>宿主 agent"]
-    P1 --> SAST["/mgh-sast"]
-    P2 --> SAST
-    H -- "执行 LLM 阶段" --> SAST
-    NEW["重写独创<br/>expand_scope / diff_seed<br/>--diff/--path/--package"] --> SAST
-```
+**宿主矩阵(优先级序:opencode → dsh → claude)**:同一命令族经
+`install.sh --opencode|--dsh|--claude` 三端分发 ——
 
-**逐项对应关系**(功能实现 + 提示词 + 保真度 + 未实现清单)记录在
-[`docs/upstream-index.md`](docs/upstream-index.md),分文档在 `docs/upstream/`。
+- **opencode(首选)**:`.opencode/command|agent` + `core/` → `.opencode/mgh-core/`
+  + `.opencode/plugins/` 的 `tool.execute.before` 守卫插件;
+- **dsh(deepseek-harness,次选)**:`<target>/.dsh/skills/mgh-*/SKILL.md`(user-invocable
+  skill,用户 `/mgh-*` 显式召唤、模型不可自触发)+ `core/` → `<target>/mgh-core/`
+  + profile `cordis.patch.yml` 受管块接线守卫;当前分发 5 个命令(**暂无 ut-init/blst**);
+- **claude(第三)**:`.claude/commands/*.md`(+ agents/skills/hooks)+ `core/` →
+  `.claude/mgh-core/` + `.claude/settings.json` 的 PreToolUse 守卫命令。
+
+已覆盖命令的三面壳为**逐字镜像**,方言差异仅落白名单五类(frontmatter / 召唤语义 /
+执行边界披露 / 工具名归一 / 主机机制事实按 dsh 实测改写);dsh 面暂缺 ut-init/blst,
+补齐前「三面镜像」以已分发命令为准。
 
 ## 研发铁律
 
@@ -99,7 +98,7 @@ flowchart LR
 | 受众 | 文件 |
 | --- | --- |
 | 人类·随包分发 | 终端报告(`report.md`/详述文件);proposal 人话序 |
-| 人类·仅研发仓 | `docs/man/**`、`docs/glossary.md` —— 本仓根 `docs/` 是开发者私人资料,装进用户项目时**不落地**,故其中的文件**不得被任何分发内容引用**(详见下方 R5.10 第 ⑨ 类) |
+| 人类·仅研发仓 | 根 `README.md`、根 `AGENTS.md`、`docs/man/**`、`docs/glossary.md` —— 本仓根 `docs/` 是开发者私人资料,装进用户项目时**不落地**,故其中的文件**不得被任何分发内容引用**(详见下方 R5.10 第 ⑨ 类);根 README/AGENTS 同样不经 install 分发 |
 | agent | 命令壳纪律段、stage 提示词、`core/contracts/**`、JSON schema、`NEVER` 链、flag 表 |
 | 双受众 | `proposal.md`(人话序 + 结构化 why/what/capabilities/impact) |
 
@@ -109,15 +108,15 @@ flowchart LR
 机器可检子集(人话序存在性 / 术语黑名单 / 英文原子密度)由 `tools/check_plain_language.py`
 代理(存在性 fail-loud 退出码 2;黑名单与密度 WARN 退出码 0,仅扫人类面文件)。
 
-### R4 — 改名/解耦后的路径规约
+### R4 —(已撤销,编号保留空缺)
 
-- 本仓库已从原 `visa-vulnerability-agentic-harness/vvah-sast/` **迁出为独立仓库**,
-  磁盘目录名 `m3g4horness`(品牌显示名 `m3g4h⊿rness`,因 `⊿=U+22BF` 放进目录名会让
-  bash/git/CI 脆弱,故磁盘用 ASCII)。
-- 工具脚本(`tools/gen_*.py`)的路径常量**相对仓库根**(`releases/...`、`core/...`),
-  从仓库根运行。
-- `tools/extract_prompts.py` 默认 `--vvaharness = C:/DEV/visa-vulnerability-agentic-harness/vvaharness`
-  (原项目位置),便于原项目更新时一键重抽。
+改名/迁出历史与 vvaharness 移植背景对日常研发无操作意义,已移至维护者私有文档区
+`docs/upstream-vvah-background.md`;逐项映射的权威处仍是 `docs/upstream-index.md`(见 R1)。
+仍有效的两条残留:
+
+- `tools/gen_*.py` 的路径常量**相对仓库根**(`releases/...`、`core/...`),一律从仓库根运行;
+- 上游提示词重抽 `tools/extract_prompts.py`(默认 `--vvaharness` 指向原项目,路径见
+  `docs/upstream-index.md` 的「路径规约」表)。
 
 ### R5 — Agent 工具命令稳定性(作者期铁律)
 
@@ -133,7 +132,8 @@ flowchart LR
 | R5.2 黑盒纪律 | runtime hook 阻断越权 Write/微脚本 | `block_adhoc_scripts.py` + `MGH_*_ACTIVE` |
 | R5.3 脚本稳定性 | 自包含 + I/O 契约(脚本自验) | 回归测 `tests/` |
 | R5.4 长跑可观测 | per-call `timeout` + `--resume` 重派 | 编排器 Bash 纪律 |
-| R5.7 hook 闭环 | 双端 runtime hook(env-or-哨兵激活)+ CI | `block_adhoc_scripts.py` + `<run-root>/.active` 哨兵 + CI |
+| R5.6 壳 token 预算 | fail-loud 尺寸 lint | `tools/check_distributed_prompt_budget.py` |
+| R5.7 hook 闭环 | 三端 runtime hook(env-or-哨兵激活)+ CI | `block_adhoc_scripts.py` + `<run-root>/.active` 哨兵 + CI |
 | R5.8 自检 + 回归 | install 自检 + 回归测 | `install.sh` + `tests/` |
 | R5.9 边界校验 | `--check` fail-loud(退出码 2) | 各产出者 `--check` |
 | R5.10 分发纯净 | purity lint | `tools/check_distributed_purity.py` |
@@ -209,7 +209,10 @@ flowchart LR
   `--help` 或无参 → 打印 flag 表并 STOP(花 token 前先校验);仅当命令在参数表**逐项标注默认值**并显式声明零参执行时,无参 = 按声明的默认集执行(mgh-sdr 首用);`description:` ≤1536 chars。
   - **token 硬上限(强制性,lint fail-loud 防回归)**:编排器壳正文 **≤ 5,000 tok**;编排器加载的 fragments **逐个评估单次 Read 轮尺寸是否结构良好**(无硬求和上限;三者磁盘 `mid_tokens` 合计 ≤ ~10,000 作**防漂移** lint,标注根据 = 磁盘大小防漂移、**非**运行时叠加占用);子 agent 有效系统(agent def + stage prompt + 其加载的 fragments)≤ 5,000 tok。理由〔硬上限不是来自上下文算术,而是承重观察:opencode 无平台命令体尺寸上限(已核实 `packages/core/src/v1/config/command.ts`)、命令体作为触发消息仅一次性进 USER 历史(非每轮 system)、fragment 经 `REQUIRED SUB-SKILL` 仅为模型 lazy `Read` 产出的单次 USER 历史项(非每轮 system 税),故**压缩阈值不绑定壳/fragment 尺寸**(完整机制 + 源码行号见 [`docs/opencode-context-mechanics.md`](docs/opencode-context-mechanics.md),开发涉及压缩/加载时**先读**);但壳常驻历史 + 是弱模型唯一可靠的行为指令源,经验上结构良好的 mgh-* 壳(mgh-sast/ut-init)自然落在 ~4.5–5K,超 ~2×(mgh-init 9.4K)即冗余信号 + 注意力/执行忠实度衰减——硬上限 = 防松散迭代再膨胀回本次优化前〕(原「fragments 合计 ≤ 3,000 tok」求和上限已废,据 opencode 运行时模型重接地,见 `harden-mgh-init-shell-budget` design D6 + 报告 §9)。落地方式 = **保真度优先**裁剪(删冗余/重复/R5.10 dev-meta,迁可分片细节进按需 fragment;**MUST NOT** 删承重处理流程节点与已修 bug 防线,见报告「⚠ 裁剪前提:保真度优先」);超尺寸壳 SHALL **shard-to-fit**(抽子流程进 lazy fragment),NEVER 靠删承重内容硬凑达标。`description:` 简练(便于命令选择器;opencode 源码**未**强制 maxLength,约束由本规自管)。
   - **行数非硬约束(已废 500 行)**:zh-dense 承载比 ~25–35 tok/line → 5K tok 对应 ~145–200 行,原「500 行」上限松 2.5–3.5×。LINE 仅作 drafting 指引,**TOKEN 是约束维度**。
-  - **lint 强制(防回归,承 R5.8)**:`tools/measure_prompts.py` 已存在(stdlib,`mid_tokens` 工作值 + 高/低区间);新增 `tools/check_distributed_prompt_budget.py`(或并入 `tools/check_contracts.py`)对每个 mgh-* 壳 + 子 agent 有效系统断言 ≤ 上限,失败 exit 2 + 接 CI。**回归语义**:lint 也 flag 增量(相对上次 release 基线的字节/token 增长超阈值)→ review,防慢漂移积累成突破。
+  - **lint 强制(防回归,承 R5.8)**:`tools/measure_prompts.py`(stdlib,`mid_tokens` 工作值 + 高/低区间;
+    `--root` 模式亦把根 `AGENTS.md`/`CLAUDE.md` 计入计量);`tools/check_distributed_prompt_budget.py`
+    已按**独立工具**落地(未并入 `tools/check_contracts.py`),对 17 个 mgh-* 壳断言 ≤ 上限,失败 exit 2 + 接 CI。
+    **回归语义**:lint 也 flag 增量(相对上次 release 基线的字节/token 增长超阈值)→ review,防慢漂移积累成突破。
 - **R5.7 评估驱动 + hook 强制闭环**(同号两段;**段 A 评估方法论** + **段 B hook 强制闭环**):
   **段 A 评估方法论(TDD-for-docs)**:改 `core/prompts/**` 前先建 baseline(无该提示词跑 ≥5 次 capture
   失败模式,variance 是指标)→ blind A/B 对比 pass rate/tokens → 新命令由 A 实例写、全新 B 实例
@@ -225,8 +228,9 @@ flowchart LR
   + 据退出码阻断;**判定逻辑单一来源在 Python 标准库守卫 `block_adhoc_scripts.py`**(三端字节级 parity 守卫,
   canonical = `core/scripts/block_adhoc_scripts.py`,`tests/test_dsh_hook_parity.py` +
   `tests/test_opencode_hook_parity.py`;零依赖 AST 扫描只扫 `*.py`,`.ts` 不在扫描集)。当前兑现:`block-adhoc-scripts`
-  (三端:claude PreToolUse + opencode `.ts` 插件 + dsh `.ts` shim;同一守卫不改;`/mgh-init`+`/mgh-sast`+`/mgh-sra`+`/mgh-srr` #1 违例=微脚本内省
-  + 越权 `*.py`/`.ps1`/`.ts`/… + 越树写 / init 树内根污染 / **越树读**(`Read`/`Glob`/`Grep` + Bash 直接 `rg`/`grep`/`find`/… 越出 `MGH_TARGET` 子树;读侧是写侧越树判定的同形扩展,target 缺失降级、`pattern` 不解析;扇出 `targets[].file` 物化绝对路径,承 `harden-mgh-read-confinement`)+ **Bash 面双层判定 = 动词枚举 + 路径允许集净网**(承 `harden-mgh-bash-path-allowlist`):五张动词表(搜索/写/删/列目录/解释器)降为**精化层**(供写/删专属 recipe、cwd 漂移、init/ut-init P1 根污染),其下垫**与动词无关的 catch-all 净网**(规则 m,链末)——命令中任一路径 token(盘符绝对/UNC/POSIX 绝对/`..` 引导〔对守卫 cwd resolve〕/`~/` 引导;引号剥离、含 `://` 排除、裸 `~`/`..` 不判)resolve 后不在**统一读允许集** → 拦(退出码 2 + recipe 列三类允许根);治「表外动词携带树外路径直接放行」(`robocopy`/`Get-Content`/`curl -o`/`Expand-Archive`/…,每发现一个词补一个词的线性维护)+ **读允许集三源并集、双面同集**:`MGH_TARGET` ∪ 哨兵 `read_roots[]` ∪ 项目配置 `<target>/.mgh/read-roots.json`(schema `{"v":1,"read_roots":["<abs>…]}`;手工可编辑;缺文件=零变化,坏 JSON/错型=fail-closed 零授权不崩;条目「存在 ∧ 是目录」才生效;未知字段忽略)——**语义反转**:已声明只读根现在 Bash 面同样可读(凡允许读的目录,用什么工具读都放行);写侧**不变**仍判 `MGH_TARGET` 单独(声明根永不可写,叶源码/`py -c`/temp/file-assoc 拦截不放宽))+ **写/删/重定向侧越树拦截**(Bash 写动词 `New-Item`/`Set-Content`/`tee`/`mkdir`/`Copy-Item`/`Move-Item`/… + 破坏性删 `Remove-Item`/`del`/`rm`/`rmdir` + `>`/`>>` 重定向 + `py -c` 写形态(`write(`/`makedirs`/`shutil.copy`/`shutil.rmtree`/…) 的越树目标 → fail-loud;init/ut-init 树内写亦须落受信子树 P1;工具面 claude `MultiEdit`/`NotebookEdit` + opencode `apply_patch`(patchText 标记提取为 glue) + dsh `str_replace_editor`(command/path 提取为 glue)入写侧越树判定;删侧 recipe 标不可逆;承 `harden-mgh-write-confinement`,读侧三层不动)+ **dsh 特有旁路工具面**(`run_code` 归一 `RunCode` = 内联解释器违例同形,形状判定不嗅 body;`terminal_*`/`job_*` 归一 `TerminalIO`/`JobCtl` = 交互终端/后台作业绕前台约束,域内直接 deny;`pwsh` 归一 `Bash` 零新代码命中五表+净网;均在守卫单一真源分派,shim 只映射);五运行域 `MGH_{INIT,SAST,SRA,SRR,UT_INIT}_ACTIVE`)。**激活 = env 或磁盘哨兵(最优锚点起有界向上发现)**
+  (三端:claude PreToolUse + opencode `.ts` 插件 + dsh `.ts` shim;同一守卫不改;六运行域
+  `/mgh-init`+`/mgh-sast`+`/mgh-sra`+`/mgh-srr`+`/mgh-sdr`+`/mgh-ut-init` 的 #1 违例=微脚本内省
+  + 越权 `*.py`/`.ps1`/`.ts`/… + 越树写 / init 树内根污染 / **越树读**(`Read`/`Glob`/`Grep` + Bash 直接 `rg`/`grep`/`find`/… 越出 `MGH_TARGET` 子树;读侧是写侧越树判定的同形扩展,target 缺失降级、`pattern` 不解析;扇出 `targets[].file` 物化绝对路径,承 `harden-mgh-read-confinement`)+ **Bash 面双层判定 = 动词枚举 + 路径允许集净网**(承 `harden-mgh-bash-path-allowlist`):五张动词表(搜索/写/删/列目录/解释器)降为**精化层**(供写/删专属 recipe、cwd 漂移、init/ut-init P1 根污染),其下垫**与动词无关的 catch-all 净网**(规则 m,链末)——命令中任一路径 token(盘符绝对/UNC/POSIX 绝对/`..` 引导〔对守卫 cwd resolve〕/`~/` 引导;引号剥离、含 `://` 排除、裸 `~`/`..` 不判)resolve 后不在**统一读允许集** → 拦(退出码 2 + recipe 列三类允许根);治「表外动词携带树外路径直接放行」(`robocopy`/`Get-Content`/`curl -o`/`Expand-Archive`/…,每发现一个词补一个词的线性维护)+ **读允许集三源并集、双面同集**:`MGH_TARGET` ∪ 哨兵 `read_roots[]` ∪ 项目配置 `<target>/.mgh/read-roots.json`(schema `{"v":1,"read_roots":["<abs>…]}`;手工可编辑;缺文件=零变化,坏 JSON/错型=fail-closed 零授权不崩;条目「存在 ∧ 是目录」才生效;未知字段忽略)——**语义反转**:已声明只读根现在 Bash 面同样可读(凡允许读的目录,用什么工具读都放行);写侧**不变**仍判 `MGH_TARGET` 单独(声明根永不可写,叶源码/`py -c`/temp/file-assoc 拦截不放宽))+ **写/删/重定向侧越树拦截**(Bash 写动词 `New-Item`/`Set-Content`/`tee`/`mkdir`/`Copy-Item`/`Move-Item`/… + 破坏性删 `Remove-Item`/`del`/`rm`/`rmdir` + `>`/`>>` 重定向 + `py -c` 写形态(`write(`/`makedirs`/`shutil.copy`/`shutil.rmtree`/…) 的越树目标 → fail-loud;init/ut-init 树内写亦须落受信子树 P1;工具面 claude `MultiEdit`/`NotebookEdit` + opencode `apply_patch`(patchText 标记提取为 glue) + dsh `str_replace_editor`(command/path 提取为 glue)入写侧越树判定;删侧 recipe 标不可逆;承 `harden-mgh-write-confinement`,读侧三层不动)+ **dsh 特有旁路工具面**(`run_code` 归一 `RunCode` = 内联解释器违例同形,形状判定不嗅 body;`terminal_*`/`job_*` 归一 `TerminalIO`/`JobCtl` = 交互终端/后台作业绕前台约束,域内直接 deny;`pwsh` 归一 `Bash` 零新代码命中五表+净网;均在守卫单一真源分派,shim 只映射);六运行域 `MGH_{INIT,SAST,SRA,SRR,SDR,UT_INIT}_ACTIVE`)。**激活 = env 或磁盘哨兵(最优锚点起有界向上发现)**
   ——守卫激活当且仅当 `MGH_*_ACTIVE=1` env **或** 锚到盘根链上任一级 `<dir>/<run-root>/.active` 哨兵存在;锚 = hook payload `cwd`(claude / dsh〔dsh 由 shim 从会话头目录填入 payload〕)?? 守卫进程 cwd(opencode),向上 walk ≤16 级/盘根,每级查哨兵;哨兵 JSON
   `{domain,target,out_roots[],v}` init/ut-init 域由 `write_runconfig.py` **确定性副作用** co-write(非编排器 `printf`;脚本一跑哨兵必在)+ `resume_state.py --check` 存在性校验(进行中缺哨兵 = 守卫休眠 = 退出码 2 + re-arm recipe)+ `--rearm-sentinel` 确定性重写(据 `run_config.target`);其它域由编排器 step 0 经 `Bash` 写;run 完成/干净停止移除(契约 `core/contracts/hooks/runtime-enforcement.md`)。**读侧叶源码拦截**:`Read` 已安装 `mgh-core/scripts/` 下叶脚本源码(脚本扩展名 ∧ `mgh-core/scripts` 路径段双条件)→ 退出码 2 + recipe(报错看 stderr,NEVER Read 叶子源码)——「叶脚本只读」的读侧对偶,治「拉叶源码进上下文 debug」的 token 膨胀;目标项目自身 `.py` 与非脚本产物不误伤(承 `harden-mgh-init-deterministic-enforcement`)。
   **可靠性边界(opencode/dsh)由哨兵关闭**:opencode 插件进程**不继承** mid-session bash 导出的 env(`shell.ts::shellEnv` 只读
@@ -244,11 +248,14 @@ flowchart LR
   warn 不阻断 install,CI 必 fail);任何 `.md`/脚本改动 bump 版本号;回归测覆盖 契约等价 / 导入
   鲁棒(非脚本目录 cwd 子进程)/ 性能不退化 / 零依赖 AST 扫描 / R5.1 CLI lint。
   - **定向跑优先,全量是闸门**:改哪面跑哪面(「改动面 → 测试文件」映射表见
-    [快速命令](#快速命令));`tests/` 全量(1223 测 / ~185s)SHALL 仅在发布前或**跨面改动**
-    (碰 `core/contracts/`、`install.sh`、hook 三端接线、跨脚本公共 helper)时跑。理由〔全量耗时
-    集中在 3 个真·I/O 面(`test_diff_group` 真建 git 仓 / `test_fanout_runner` 真子进程与计时器 /
-    `test_sdr_context` 真 codegraph 探针),其余 54 个文件均 <10s;把它当每次改动的习惯会挤掉
-    真正该做的实机验证〕。
+    [快速命令](#快速命令));`tests/` 全量(66 文件 / 1546 测 / unittest 累计 ~180s;2026-10-12 实测)
+    SHALL 仅在发布前或**跨面改动**(碰 `core/contracts/`、`install.sh`、hook 三端接线、跨脚本公共
+    helper)时跑。理由〔全量耗时集中在 4 个真·I/O 面(`test_fanout_runner` 真子进程与计时器 ~50s /
+    `test_install_dsh` 真跑 `install.sh --dsh` ~30s / `test_diff_group` 真建 git 仓 ~20s /
+    `test_mgh_sdr_launch` 真子进程 ~9s),其余 62 个文件均 <10s;把它当每次改动的习惯会挤掉
+    真正该做的实机验证〕。**本机注意**:`py` 在维护者 Git Bash 里是坏的 Windows Store 占位,
+    直接跑 `install.sh --dsh` 相关测试会 `py: command not found`——垫一个转发到 `python` 的
+    `py` 再跑(分发壳内的 `py` 由各壳 step 0 解释器探测兜底,不受影响)。
   - **回归测 NEVER 吃 300s 级墙钟默认值**:in-process harness 跑 `fanout_runner.main()` MUST 显式
     传 `--cooldown-s 0`——理由〔`--cooldown-s` 默认 300 是**真实等待**,harness 漏传 = 单测静默
     挂 5 分钟(实测:单测 300.8s → 1.0s);`test_fanout_stale.py::_Env.main` 与
@@ -256,11 +263,15 @@ flowchart LR
 - **R5.9 边界校验泛化(承 openspec validate-at-boundary)**:每个 stage 产物的产出者 MUST 暴露
   `--check`(或独立 validator,如 `validate_inventory.py`);编排器跑完一步、进下一步前 MUST 运行之,
   失败 fail-loud(退出码 2)回退重跑,**不带着破损产物继续**。范式源头:`assemble_rules.py --check`。
-  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout` `--check` + `validate_inventory.py` + `prefilter`/`dedup`/`emit_sarif` `--check`(/mgh-sast 确定性阶段)+ `prepare_augment`/`merge_augment`/`merge_memory` `--check`(/mgh-sra)+ `ingest_requirements`/`render_report` `--check`(/mgh-srr)。
+  当前覆盖:`discover_controls`/`plan_scout`/`merge_scout`/`classify_tests` `--check` + `validate_inventory.py`(init)
+  + `prefilter`/`dedup`/`emit_sarif`/`load_controls` `--check`(/mgh-sast 确定性阶段)+ `prepare_augment`/`merge_augment`/`merge_memory` `--check`(/mgh-sra)
+  + `ingest_requirements`/`render_report` `--check`(/mgh-srr)+ `diff_group`/`sdr_context`/`render_sdr_report`/`resume_sdr_state` `--check`(/mgh-sdr)
+  + `assemble_test_rules` `--check` 与独立 validator `validate_test_rules.py`(/mgh-ut-init)。
 - **R5.10 分发产物纯净性**:经 `install.sh` 装入目标项目的 md(命令壳 / agent 定义 / stage
   提示词 / I/O 契约 / skills)MUST 仅含对目标 agent 有用的操作性内容,NEVER 携带只在本仓研发语境
   才有意义的悬空引用——在目标项目里它们指向不存在的手册/编号/文件,浪费 token 且误导 agent
-  (目标项目常有自带 `AGENTS.md` 与无关编号)。禁引完整八类:① 研发铁律编号(`R5.x`/`R3`/`R1–R4`);
+  (目标项目常有自带 `AGENTS.md` 与无关编号)。禁引清单(①–⑧ 八类 + 后加的第 ⑨ 类):
+  ① 研发铁律编号(`R5.x`/`R3`/`R1–R4`);
   ② 失败/发现 ID(`FDn`);③ 设计决策 ID(`Dn`,含 `D9 = D12` 形态);④ openspec 变更夹名
   (`(add|fix|harden|improve|purify)-mgh-(init|sast|sra|blst|srr|ut-init)-…`);⑤ 内部上游文档(`glasswing_docs/`);
   ⑥ 仓根开发态文件指针(`task.*.md`,install 不分发);⑦ dev-meta 措辞(`承/兑现 R5.x`、`范式锚点`、
@@ -302,47 +313,60 @@ flowchart LR
 m3g4horness/
 ├── AGENTS.md                 # 本文件
 ├── README.md                 # 面向使用者
-├── task.260630.md            # mgh-init/sra/blst 功能定义(下一阶段 proposal 输入)
+├── CHANGELOG.md              # 版本历史(Keep a Changelog 格式)
+├── VERSION                   # 当前版本号(任何 .md/脚本改动 bump)
+├── install.sh / install.ps1  # 安装脚本(bash / PowerShell;--opencode|--dsh|--claude,默认 opencode)
+├── CLAUDE.md                 # 壳引导:@AGENTS.md 内联,自身不持规则
 ├── core/                     # 平台中立的单一真相源
 │   ├── prompts/              # 阶段 SYSTEM 提示词 + fragments + lenses + baselines(移植)
-│   ├── scripts/              # diff_seed / expand_scope / prefilter / dedup / emit_sarif
-│   ├── profiles/             # default / cli / full
-│   ├── contracts/            # 阶段 I/O JSON 契约
+│   ├── scripts/              # 确定性脚本(~50 个:init/sast/sra/srr/sdr/ut-init 六域 + 守卫 + fanout_runner)
+│   ├── profiles/             # default / cli / full / init / sra / srr
+│   ├── contracts/            # 阶段 I/O JSON 契约(fanout / hooks / init / sast / sdr / sra / srr / ut-init)
 │   └── docs/                 # prompt-provenance, NOTICE
-├── releases/claude-code/     # Claude Code shell → 装入 .claude/
-│   ├── commands/{mgh-sast,mgh-init,mgh-sra,mgh-blst}.md
-│   ├── agents/sast-*.md
-│   └── skills/sast-*/
-├── releases/opencode/        # opencode shell → 装入 .opencode/
-│   ├── command/{mgh-sast,mgh-init,mgh-sra,mgh-blst}.md
-│   └── agent/sast-*.md
-├── docs/                     # 开发者私人资料:man 页 / 术语表 / 上游对照 / 分析与 review 笔记
-│   ├── man/                  #   给维护者本人读的命令通俗说明(不随包分发,见 R5.10 第 ⑨ 类)
-│   ├── upstream/             #   逐功能分析分文档
-│   └── opencode-context-mechanics.md  # opencode 上下文/压缩机制(开发涉及压缩时先读)
-├── tools/                    # 构建期工具(extract_prompts / gen_*),不随安装分发
-└── tests/                    # 确定性阶段单测
+├── releases/opencode/        # opencode 壳 → 装入 .opencode/(command ×7 + agent ×33 + hooks + plugins)
+├── releases/claude-code/     # claude 壳 → 装入 .claude/(commands ×7 + agents + skills + hooks)
+├── releases/dsh/             # dsh 壳 → 装入 .dsh/ + <target>/mgh-core/(skills ×5 + agents + plugins)
+├── openspec/                 # 规格驱动研发:specs/(能力规格,26 个)+ changes/(活跃变更与 archive)
+├── docs/                     # 开发者私人资料(不随安装分发,分发内容禁引——R5.10 第⑨类)
+│   ├── man/                  #   给维护者本人读的命令通俗说明(六命令 + init 产物/runbook)
+│   ├── glossary.md           #   术语词典(人类面用词后盾,R3)
+│   ├── upstream/ + upstream-index.md  #   vvaharness 逐功能对照(R1 锚点)
+│   └── *.md                  #   opencode 机制 / fan-out 指南 / 各命令工作流详解 / 分析与 review 笔记
+├── tools/                    # 构建期工具(不随安装分发):extract_prompts / gen_dsh_tiers /
+│                             #   gen_opencode_agents / gen_lens_skills / install_hook /
+│                             #   install_opencode_plugin / install_dsh_wiring / create_dsh_profile /
+│                             #   measure_prompts / check_contracts / check_distributed_purity /
+│                             #   check_distributed_prompt_budget / check_plain_language
+└── tests/                    # 回归单测(66 文件 / 1546 测;映射表见下)
 ```
 
 ## 快速命令
 
 ```bash
-# 装入目标项目(Claude Code 默认 / opencode)
-./install.sh --claude  .          # 或: ./install.sh --opencode .
-./install.sh                       # 默认 claude,目标=当前目录
+# 装入目标项目(优先级序:opencode → dsh → claude;默认 opencode,CI/多机建议显式传参)
+./install.sh --opencode <目标项目>    # 或: --dsh / --claude
 
 # 零依赖自检(应无输出)
 grep -rnE "^[[:space:]]*(import[[:space:]]+vvaharness|from[[:space:]]+vvaharness[[:space:]]+import)" --include=*.py .
 
-# 定向回归测(默认姿势:改哪面跑哪面,见下表)
-py tests/test_fanout_runner.py    # 单一文件 = 一套测试;多文件逐个跑
+# 各 lint(改动分发面 / 文档后顺手跑)
+python tools/check_contracts.py                  # R5.1 壳内 *.py --flag 与脚本 --help 对账
+python tools/check_distributed_purity.py         # R5.10/R5.11 分发纯净 + SDD 不指私档
+python tools/check_distributed_prompt_budget.py  # R5.6 壳 token 预算
+python tools/check_plain_language.py             # R3 人话 lint(人类面文件)
+
+# 定向回归测(默认姿势:改哪面跑哪面,见下表;本机 `py` 是坏的 Store 占位,用 `python`)
+python tests/test_fanout_runner.py    # 单一文件 = 一套测试;多文件逐个跑
 
 # 全量回归测(仅发布前 / 跨面改动时)
-for f in tests/test_*.py; do py "$f" || exit 1; done
+for f in tests/test_*.py; do python "$f" || exit 1; done
 
 # 上游提示词重抽(原项目更新时)
-py tools/extract_prompts.py --out ./core/prompts
+python tools/extract_prompts.py --out ./core/prompts
 ```
+
+> 分发壳与 man 页里的 `py` 是**规范 token**——壳 step 0 有解释器探测(py/python/python3 取第一个
+> ≥3.10 者),目标机没有 `py` 也能跑;本仓快速命令直接写 `python` 是因为维护者本机 `py` 坏。
 
 ### 改动面 → 测试文件(定向跑映射表)
 
@@ -356,25 +380,27 @@ helper)或发布前才跑全量。
 | `resume_state.py` / `list_steps.py` / 中止自愈 | `test_resume_state` `test_list_steps` `test_stuck_run_selfheal` |
 | `block_adhoc_scripts.py` / hook 三端接线(claude matcher / opencode HANDLED / dsh TOOL_MAP) | `test_block_adhoc_scripts` `test_opencode_hook_parity` `test_dsh_hook_parity` `test_install_hook` `test_install_opencode_plugin` `test_install_dsh` |
 | init 发现面 `discover_controls.py` / 分簇 / 骨架 | `test_init_discover` `test_init_clusters` `test_skeleton` `test_discover_resilience` `test_init_runtime` |
-| init 扇出面 `plan_scout` / `merge_scout` / `list_*` 枚举 / `describe_artifact` | `test_scout_plan` `test_merge_scout` `test_list_clusters` `test_scout_batches` `test_list_scout_batches` `test_describe_artifact` |
+| init 扇出面 `plan_scout` / `merge_scout` / `list_*` 枚举 / `describe_artifact` | `test_scout_plan` `test_merge_scout` `test_scout_batches` `test_list_clusters` `test_list_scout_batches` `test_describe_artifact` |
 | init 归纳与出 rules `plan_aggregate` / `assemble_rules` / T1 记录 | `test_plan_aggregate` `test_assemble_rules` `test_validate_t1_records` |
 | init 起始态 `write_runconfig.py` / ack 契约 | `test_write_runconfig` `test_init_ack_contract` |
-| sdr 面(`diff_group` / `sdr_context` / 报告 / launcher / 读根 / 敏感目录) | `test_diff_group` `test_sdr_context` `test_render_sdr_report` `test_mgh_sdr_launch` `test_read_roots_config` `test_sensitive_catalog` |
+| sdr 面(`diff_group` / `sdr_context` / `sdr_tier` / 报告 / launcher / 步骤与 resume / 读根 / 敏感目录) | `test_diff_group` `test_sdr_context` `test_sdr_tier` `test_render_sdr_report` `test_mgh_sdr_launch` `test_list_sdr_steps` `test_resume_sdr_state` `test_read_roots_config` `test_sensitive_catalog` `test_sdr_failure_chain` |
 | sra / srr 面 | `test_sra_prepare` `test_sra_merge` `test_sra_memory` `test_srr_ingest` `test_srr_report` |
 | ut-init 面 | `test_ut_init_runtime` `test_ut_init_ack_contract` `test_resume_ut_init_state` `test_write_ut_runconfig` `test_classify_tests` `test_test_rules_purity` |
 | sast 确定性阶段 | `test_deterministic` `test_sast_runtime` `test_chunk_sources` `test_list_chunks` `test_list_verify_jobs` `test_stage_check` `test_load_controls` `test_focus_scope` |
-| 命令壳 / 提示词 / 分发产物 | `test_distributed_md_purity` `test_plain_language` `test_dsh_command_surface` `test_mgh_init_codegraph_parity` `test_mgh_sra_codegraph_parity` `test_mgh_srr_codegraph_parity` + `py tools/check_contracts.py` |
+| 命令壳 / 提示词 / 分发产物 | `test_distributed_md_purity` `test_plain_language` `test_recipe_visibility` `test_dsh_command_surface` `test_mgh_init_codegraph_parity` `test_mgh_sra_codegraph_parity` `test_mgh_srr_codegraph_parity` + `python tools/check_contracts.py` |
 | 任意 `core/scripts/*.py` / `tools/*.py` | `test_zero_deps` `test_no_compile_warnings`(各 ~0.5s,建议顺手带上) |
 
 ### 慢测清单(真·墙钟等待;非必要不单独跑)
 
-除下表外,全仓无长等待测试;**文件级慢**是量的堆积不是等待——`test_diff_group`(44s/37 测,
-每测真建一次 git 仓)、`test_sdr_context`(18s)、`test_fanout_runner`(41s/107 测)。
+除下表外,全仓无长等待测试;**文件级慢**是量的堆积不是等待(2026-10-12 全量实测):
+`test_fanout_runner`(50s/157 测,真子进程与计时器)、`test_install_dsh`(30s/27 测,真跑
+install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_sdr_launch`(9s/29 测,
+真子进程)。
 
 | 测试 | ~秒 | 为什么慢 |
 | --- | --- | --- |
-| `test_ut_init_ack_contract::test_shell_flags_all_declared_in_help` | 7.1 | 对每个脚本真跑一次 `py <script> --help`(~40 次子进程) |
 | `test_install_dsh::TestDshSkillsInstall`(每测) | ~10 | 真跑 `install.sh --dsh` 到 scratch 目标(core/ 真拷贝 + 隔离 `DSH_HOME` 内真接线) |
+| `test_ut_init_ack_contract::test_shell_flags_all_declared_in_help` | ~7 | 对每个脚本真跑一次 `py <script> --help`(~40 次子进程) |
 | `test_fanout_runner::TestFastFailCooldown::test_in_flight_units_keep_harvesting_during_cooldown` | 5.0 | 显式 `time.sleep(2.5)` 必须活过 cooldown 窗口 |
 | `test_fanout_runner::TestRateLimitStorm::test_signature_drift_degrades_to_cooldown_path` | 2.7 | `--cooldown-s 1` 真实计时器 |
 | `test_fanout_runner::TestRateLimitStorm::test_mixed_unknown_crash_blocks_truncation` | 2.6 | 同上 |
@@ -403,12 +429,18 @@ helper)或发布前才跑全量。
   `docs/security-controls/<cat>.md` 详述文件;opencode 无路径作用域,按需加载是**语义性**的
   (索引块指令驱动,非路径自动触发)——**非确定性可测**:agent 若跳过对应 Read 可能漏掉可复用
   控制。claude 侧 `paths:` 路径作用域为确定性触发(已天然 lazy)。
+- `/mgh-ut-init` 规则为 **LLM 归纳候选**;每组按样本数抽样、非全量审读;识别到的**弱测试仅标记、
+  不删除**,也不被当作项目约定;opencode/claude 两面结构不混。
 - `/mgh-sdr` 的发现是 **LLM 候选,非确认漏洞**;接口分组是**注解启发式**(Spring/JAX-RS/Servlet 常用注解),漏分组接口退入独立变更单元(粒度粗、覆盖不丢),非 java web 项目整体退化为 standalone 模式;外部仓结论是**检索时点快照**(不保证前端分支同步);基线经字节预算投影(低优先级细节可能未全量投影);敏感目录来源为 project 或 default-template 回退(目录外字段仅按回退规则识别);报告为**自包含单文件 HTML**(数据同步落 `<run-dir>/sdr_report_data.json`,人读 HTML 与机器读 JSON 同源),源文件链接为仓内相对路径(部分浏览器对 `.java` 等扩展名可能下载而非打开),历史 `.md` 报告不迁移不回写。
 - 守卫 Bash 面路径净网是 **regex-over-string 提取、非 shell 解析器**(与全部 Bash 规则同立场),已知残余:① **未知写动词把数据写进已声明只读根**——token 在读允许集内放行、变异规则又不认得该动词 → 漏(sdr 审批流 change 落地后声明根全部经用户拍板,风险受控);② **别名/变量间接**(`$p='D:\out'; cp x $p`)提取不到裸路径 → 漏;③ 接受的新拦截(原放行→现拦,救济=配置声明或非运行会话):`> /tmp/x` 单写、`--flag=<树外路径>` 取值、`git -C <树外>`、无害提及树外路径;④ **通配按去通配前缀判属**——引号闭合路径后紧邻 glob 段先拼为单 token、含 `*`/`?` 的 token 按首个元字符前的前缀 resolve 判定(治「树内路径+通配」被拆成越树碎片误拦),glob 的**展开结果**不判定、别名/变量间接照旧不可见(同 ②)。
 
 ## 可参考项目
-本项目部分实现方式、实现理念、工具使用可参考如下已拉取到本地的项目代码仓
-1. C:\DEV\superpowers
-2. C:\DEV\OpenSpec
-3. C:\DEV\codegraph
-4. C:\DEV\deepseek-harness
+
+本项目的部分实现方式、实现理念、工具使用可参考以下项目源码。这些仓库拉取在**部分开发
+环境**的固定路径下,不一定存在于当前机器——**路径存在时**才去读其源码作参考,不存在
+就跳过,NEVER 花时间去找:
+
+1. `C:\DEV\superpowers`
+2. `C:\DEV\OpenSpec`
+3. `C:\DEV\codegraph`
+4. `C:\DEV\deepseek-harness`

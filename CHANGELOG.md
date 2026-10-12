@@ -16,6 +16,33 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — 顶级文档重写(命令/宿主优先级、用户画像、过时信息清理)+ install 默认宿主改 opencode (0.1.60)
+
+- **顶级文档重写**:根 `README.md` 与根 `AGENTS.md` 按当前产品形态重写——命令优先级
+  (init/sdr 为主力,排在前)、宿主优先级(opencode → dsh → claude)、AGENTS 新增
+  「用户画像与设计目标」对照表(内网弱模型/频控/大仓/银行级安全要求 → 各研发铁律的
+  必然推论);README 新增「适用环境」与 sdr/ut-init 章节,删除与命令 `--help` 重复的
+  全量 flag 表。过时信息清理:命令表补 `mgh-ut-init`、删除已失效的 `task.260630.md`
+  引用、「详见 openspec/changes/add-mgh-*」死链改为 `openspec/specs/` 能力规格指针、
+  守卫运行域五→六(补 `MGH_SDR_ACTIVE`)、R5.6/R5.8/R5.9 与实测对齐(token 预算 lint
+  已落地;全量回归 66 文件/1546 测)、R5.9 `--check` 覆盖清单补全 sdr/ut-init。
+- **install 默认宿主 claude → opencode**:`install.sh` 与 `install.ps1` 不带宿主 flag
+  时默认安装 opencode 面(与宿主优先级一致);显式 `--claude|--opencode|--dsh` 行为
+  不变,幂等性不受影响。
+- **可参考项目恢复(条件存在口径)**:superpowers / OpenSpec / codegraph /
+  deepseek-harness 四个参考仓路径保留在 AGENTS.md,口径改为「路径存在时才参考其源码,
+  不存在跳过、NEVER 找」。
+- **sdr man 页报告口径更新**:`docs/man/mgh-sdr.md` 的人读报告描述从项目根 `.md` 更新为
+  自包含单文件 `.html`(浏览器双击即读;机器读数据在 run 目录 `sdr_report_data.json`)。
+- **AGENTS.md 减负(vvah 背景降级)**:整节删除「mgh-sast 与原项目 vvaharness 的关系
+  (必读)」与 R4 迁移历史——`/mgh-sast` 已非功能主力,背景常驻每个会话只耗 token;
+  mermaid 移植流向图与改名历史摘抄至 `docs/upstream-vvah-background.md`(维护者私有
+  文档区,按需查阅),逐项映射权威仍在 `docs/upstream-index.md`;R4 编号保留空缺
+  (防 R5.x 引用重排),仍有效的两条操作性事实(工具脚本从仓库根运行 / extract_prompts
+  默认路径)留在 R4 存根。
+- 杂项:`docs/glossary.md` 补 3 条(切片 `--scope` / mgh-core / 零参执行);根 `CLAUDE.md`
+  规则枚举补 R5。
+
 ### Fixed — /mgh-sdr 多分支 sweep 六缺陷:失败探针早败、报告按分支认领、spawn 环境卫生、可诊断性、守卫通配误拦 (0.1.59)
 
 多分支真仓验证战役(findings 2026-10-12)暴露的六个产品缺陷一次收口:

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # m3g4h⊿rness installer — copies a platform shell + core/ into a project.
 # Usage: ./install.sh [--claude|--opencode|--dsh] [target_project_dir]
-#   default platform: claude ; default target: current dir
+#   default platform: opencode ; default target: current dir
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLATFORM="claude"
+PLATFORM="opencode"
 TARGET="${TARGET:-.}"
 ENFORCE_HOOK="1"   # inject PreToolUse hook (R5.7); --no-enforce-hook opts out
 DSH_PROFILE="${DSH_PROFILE:-}"   # --dsh: accepted only as 'mgh' (the fixed composition face); other names fail loud

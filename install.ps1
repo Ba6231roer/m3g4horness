@@ -2,7 +2,7 @@
 # Usage: .\install.ps1 [-Platform claude|opencode|dsh] [-Target .] [-DshProfile <name>] [-NoEnforceHook]
 [CmdletBinding()]
 param(
-  [ValidateSet('claude','opencode','dsh')][string]$Platform = 'claude',
+  [ValidateSet('claude','opencode','dsh')][string]$Platform = 'opencode',
   [string]$Target = '.',
   [string]$DshProfile = '',
   [switch]$NoEnforceHook

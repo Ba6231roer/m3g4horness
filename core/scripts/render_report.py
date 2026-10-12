@@ -23,8 +23,9 @@ CLI contract (`--help` is the contract surface, R5.1):
   --memory <path>      optional business_context.json (counts answered clarifications;
                        default: change_context.memory_source, else none)
   --max-aggregate-bytes B  render aggregate-input (all finalized drafts) byte cap (default
-                       256KB). Over it → disclosed in srr_manifest.json boundaries[] + the
-                       report (P0 soft boundary, non-blocking); layered reduction is later.
+                       96KB = 98304; worst-case ~2 bytes/token → ≤ ~48K tokens). Over it →
+                       disclosed in srr_manifest.json boundaries[] + the report (P0 soft
+                       boundary, non-blocking); layered reduction is later.
   --check <out-dir>    post-render validation: security_review_report.md + srr_manifest.json
                        exist with complete shape (counts fields + >=6 boundaries incl. the
                        SRR-specific one) + no openspec/ path touched; exit 2 on violation.
@@ -73,7 +74,8 @@ _BOUNDARIES = [
 # P0 aggregate-context-budget soft boundary: render reads ALL finalized drafts (its aggregate
 # input). Over --max-aggregate-bytes it discloses + advises (non-blocking); layered reduction
 # is a later change. (request-context-budget; bytes = conservative token upper bound.)
-DEFAULT_MAX_AGGREGATE_BYTES = 256 * 1024  # 256KB — render aggregate-input cap (P0 soft)
+DEFAULT_MAX_AGGREGATE_BYTES = 96 * 1024  # 96KB (= 98304) — render aggregate-input cap (P0 soft);
+# uniform --max-aggregate-bytes default across all declaring scripts
 _AGGREGATE_OVER_BUDGET = (
     "本次 render 的聚合输入(全部定稿 drafts)超过 --max-aggregate-bytes 阈值;P0 为软边界,"
     "render 仍整份读入、未硬界。建议对超大需求文档用 --split 切分单元或 --focus 收窄维度,减小聚合输入。"

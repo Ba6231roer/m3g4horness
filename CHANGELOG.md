@@ -16,6 +16,283 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — 简报表调用链两级显示 + 扩展维度中文列头 (0.1.58)
+
+真仓首跑(springBootTemplate,8 单元 / 23 findings)反馈的阅读性迭代:
+
+- **调用链两级显示**:主链(入口 → 流转 · 同类延续)保持正常字号不缩进;分支(`⤷`)与
+  mapper 终端(`⇢`)段整体落入缩进、小字号、左侧竖线的子块,按段换行不拆节点——长链
+  (真实项目二十余节点的常见形态)从一条平铺长行变为主次分明的两级结构。段序与字形不变,
+  自上而下阅读即纯文本链逐字还原;数据文件与 manifest 完全不受影响(纯视图层分组)。
+- **扩展维度列头中文**:自由扩展维度是 fan-out 任务的 sanctioned 行为,真仓出现的
+  `architecture-layering` 在列头与问题详述标题显示中文名(架构分层);渲染器内置已见扩展
+  维度的标签表,未见扩展维度回退显示原始键。数据面始终保存原始键,机器 join 不变。
+
+### Changed — sdr 评审报告从 Markdown 换成自包含单文件 HTML:数据/呈现分离,阅读体验归浏览器 (0.1.57)
+
+`/mgh-sdr` 的评审报告此前是 `.md` 文件:读者必须装 Markdown 阅读工具,简报表里的 P-NN
+编号不能点击跳转(目标编辑器不支持内部锚点,规格为此明令禁止锚点),调用链图用 mermaid
+语法、呈现质量取决于编辑器插件。本次把「人读呈现」从编辑器限制里解出来:
+
+- **报告形态**:`<repo>/mgh-sdr-<分支>-<时间戳>.md` → **同名 `.html` 自包含单文件**
+  (样式/脚本/数据全内嵌,零外部引用,file:// 双击即读、离线可用)。**BREAKING**:报告
+  扩展名与格式变更;历史 `.md` 报告不迁移不回写。
+- **canonical 数据文件**:新增 `<run-dir>/sdr_report_data.json`——报告全量结构化数据,
+  与 HTML 内嵌数据块由构造保证同源,`--check` 校验 JSON 等价;下游确定性消费(未来
+  /mgh-blst、报告 diff 工具)以它为接口,NEVER 去解析 HTML。
+- **章节三调用链图**:mermaid → 渲染器确定性生成的**内嵌 SVG**(分层布局 + 正交折线,
+  mapper 终端虚线边、未变更节点 `†` 前缀保留),页内滚轮缩放、拖拽平移;mermaid 依赖归零。
+- **简报表可交互**:severity/维度筛选(纯视图态,不改写数据文件)、P-NN 页内锚点跳转;
+  链节点与问题位置渲染为仓内源文件链接(部分浏览器对 `.java` 等扩展名可能下载而非打开,
+  报告诚实边界披露)。
+- **随动**:launcher `mgh_sdr_launch.py` 新增 `--open`(默认 off,跑完自动开浏览器);
+  三面命令壳、sdr 契约、`list_sdr_steps` render 步 path_pattern 同步;`--check` 扩展
+  (数据文件存在可解析、与内嵌块 JSON 等价、`.html` 结构标记断言,违例退出码 2)。
+
+诚实修正:本次**不减少 LLM token**——fan-out 侧本来就是「子代理只写 JSON + 脚本确定性
+渲染」,报告正文从不花 token;真实收益是阅读体验与数据/呈现分离。渲染器 CLI 形状、
+manifest schema、fan-out 契约零变化;`resume_sdr_state.py` 渲染判定键(`sdr_manifest.json`
+存在)不受扩展名切换影响。
+
+### Changed — scout 候选聚合从「超界照发」变硬预算:96KB 默认、候选粒度装箱、dispatcher 波次派发 (0.1.56)
+
+`/mgh-init` 的 scout-merge 聚合节点此前是软边界:输入超预算时靠提示词自律「回 `oversize`
+再手工翻页扇出」，且默认预算 256KB 对内网 ~150K token 窗口(最坏 ~2 bytes/token)偏大。
+本次把它升级为与 T2 综合同构的**硬预算闸门 + 波次派发**：
+
+- **预算收紧**:聚合默认预算 256KB → **96KB**(`plan_aggregate`/`write_runconfig`/
+  `write_ut_runconfig`/`render_report` 同名默认一致，`check_contracts` 断言)。
+- **硬界装箱**:`plan_aggregate --node scout-merge` 改为**候选粒度稳定序贪心装箱**(物化
+  文件 ≤ 预算由构造保证);病态单候选确定性瘦身投影(只截 `evidence_snippet`/`snippet`/
+  `entry_points`，去重锚点等结构字段永不截，原 checkpoint 不回写);瘦后仍超 → 退出码 2、
+  零物化零派发(旧「warn + 照发 oversize」路径两节点同退)。
+- **dispatcher 接入**:`fanout_runner --tier scout-merge`(map 段波次 + marker-aware 重列
+  + 四级超时/熔断/冷却全部复用);新增 `init-scout-merge-partial`/`-rollup` 两级 stage
+  提示词与 opencode/claude/dsh 三面 agent 定义;手派路径降级为退出码 2 回退。
+- **接线**:scout fragment 段重写为 dispatcher-first、三面壳组件表/tier 清单、
+  `list_steps --step scout` 增 `extra_invocations`、`discipline_core` 三条新 recipe、
+  `gen_dsh_tiers.REQUIRED_TIERS`、install 自检清单。
+
+### Added — dsh subagent fan-out: the dispatcher grows a third host, stage delegation rides named tool instances, and the five shells retire their degradation blocks (0.1.55)
+
+Route A's closing piece. `fanout_runner.py` now spawns dsh headless children:
+`dsh --profile mgh --patch <mgh-core>/dsh/tiers/<tier>.yml -` with the task text riding
+the child env `MGH_TASK_TEXT` (measured spike overturned the spec's stdin assumption —
+headless has no stdin task channel, and multi-line argv dies at the first newline of the
+npm `.ts` shim; the maintainer approved the env channel). Host auto-detection appends
+`dsh` LAST (opencode > claude > dsh — dual-host machines see zero behavior change), and
+an explicit `--host` always wins. Before any dsh spawn the dispatcher gate-asserts the
+tier mount file and the `mgh` profile dir exist — missing = exit 2 + regenerate recipe,
+zero spawns. Stage prompts no longer ask subagents to guess `.opencode` vs `.claude`:
+the four init templates carry one `{{mgh_core}}` placeholder the dispatcher fills from
+its own install position.
+
+- **Third-dialect agent source → compiled mounts**: `releases/dsh/agents/` holds one
+  definition per fan-out tier (scout/t1/t2/t3/sdr) and per interactive stage
+  (8×`sast-*` + 3×`sra-*`); `tools/gen_dsh_tiers.py` compiles tiers to
+  `<target>/mgh-core/dsh/tiers/*.yml` and a named-delegation patch fragment, `--check`
+  giving the deterministic 1:1 mounts↔definitions assertion install runs fail-loud.
+- **mgh profile = sole composition face**: `tools/create_dsh_profile.py` creates the
+  skeleton (base+headless bundles, add-only, foreign package.json = collision
+  fail-loud, user profiles never touched); `install_dsh_wiring.py --delegates-file`
+  composes the managed block = guard shim ∪ timeout policy (`enableRunInBackground:
+  false`, closing the background-job channel) ∪ 11 named delegate tools (persona loaded
+  at build time, `toolFilter` built in). The old "sole existing profile / --dsh-profile
+  any name" inference is gone — a non-mgh name now fails loud (wrong profile = wiring
+  nothing). `install.sh`/`install.ps1 --dsh` wire all of the above idempotently.
+- **Shells**: the five dsh shells drop change 2's fan-out degradation blockquotes;
+  sast/sra/srr dispatch wording picks the named instances verbatim
+  (`mgh_sast_deepdive`, `mgh_sra_clarify`, …), sdr/init disclose the now-wired tier
+  dispatch, and mgh-init honestly keeps a residual-degradation note for the interactive
+  init stages (survey/resolve/scout-merge/T4 have no named instances in this change).
+- **Contract**: `core/contracts/fanout/runtime.md` registers the spawn shape, tier
+  mounting, timeout levelling (dsh terminates on timeout, matching the shipped
+  kill-and-redispatch contract), coarse per-plugin tool whitelist (host capability
+  boundary), and the provider precondition (install self-check proves CLI presence,
+  not end-to-end runnability). Pinned to dsh 0.1.5-rc.2.
+- **Tested**: `test_fanout_runner::TestDshHost` (spawn-shape snapshots, env-channel
+  byte fidelity incl. CJK/quotes, precheck gate through the real `main()` with zero
+  spawns), `test_fanout_stale` dsh cmdline kill form, `test_gen_dsh_tiers`, and
+  `test_install_dsh` end-to-end (tiers+delegates land, mgh profile wired, user profile
+  untouched, reinstall byte-stable, non-mgh name rejected).
+
+### Added — dsh command surface: five user-invocable skill shells, three-face lints, and the sra/srr shard-to-fit that paid off the legacy token debt (0.1.54)
+
+Change 1 gave dsh a guard; a guard with no commands is a locked door with no hallway.
+This lands the command carrying surface: each `mgh-*` orchestrator shell ships on dsh
+as a project-scoped skill (`<target>/.dsh/skills/mgh-<name>/SKILL.md`, kebab-case
+`user-invocable: true` + `disable-model-invocation: true` — user slash-invocation only,
+the model cannot self-trigger orchestration), a verbatim mirror of its claude/opencode
+siblings except a closed five-class dialect whitelist (frontmatter / invocation
+semantics / execution-boundary disclosure replacing claude's `allowed-tools` / tool-name
+spelling / host mechanism facts rewritten per dsh's verified behavior — dsh *does* batch
+questions via `ask_user_question`, its shim *does not* inherit mid-session env, its
+tool calls *do* take a per-call ms `timeout`). Fan-out steps carry an honest D4
+degradation blockquote (stop at the dispatch step, report disk-resumable progress) until
+change 3 wires subagent dispatch.
+
+- **Three-face lints**: `check_contracts.py` now extracts `*.py --flag` from all 17
+  shells (459 flags asserted against `--help`); new
+  `tools/check_distributed_prompt_budget.py` asserts every orchestrator shell body
+  ≤ 5,000 mid_tokens; purity lint's scan set gained `releases/dsh/skills`; new
+  `tests/test_dsh_command_surface.py` pins frontmatter shape, `mgh-core/`-rooted asset
+  references, and lazy-fragment pointer resolvability.
+- **Shard-to-fit (maintainer-approved, faithfulness-first)**: the lint exposed
+  pre-existing debt (claude sra 5460 / srr 5148, opencode sra 5101, dsh sra 5223 /
+  srr 5013 mid_tokens). The `## Orchestration flow` sections of mgh-sra/mgh-srr moved
+  **verbatim** into six lazy fragments (`core/prompts/fragments/{sra,srr}-flow-
+  {claude,opencode,dsh}.md`, ~1.7–2.2K tok each, loaded via `REQUIRED SUB-SKILL`), each
+  shell keeping a skeleton pointer; all 17 shells now pass with zero content deleted.
+  The two sra/srr codegraph parity tests now assert against shell + its own-face flow
+  fragment (the stanzas moved verbatim with the section; discipline unchanged).
+- **Install**: `install.sh --dsh` / `install.ps1 -Platform dsh` place the five skill
+  dirs idempotently and self-check presence + frontmatter four fields + rooting
+  (fail-soft at install, loud in CI via `test_install_dsh::TestDshSkillsInstall`);
+  placement is NOT gated by `--no-enforce-hook` (shells ≠ enforcement).
+- **Verified against dsh 0.1.5-rc.2 source**: skill bodies have no size cap (only
+  catalog descriptions truncate) — design Open Question 1 closed, no truncation risk.
+- **Pending**: subagent dispatch on dsh (change 3 `add-mgh-dsh-subagent-fanout` owns
+  wiring it and deleting the D4 paragraphs); real-machine acceptance `/mgh-sdr` default
+  run + guard interaction.
+
+### Added — dsh becomes the third guarded host: pre-execute shim, bypass-tool coverage, `install.sh --dsh` (0.1.53)
+
+The guard (`block_adhoc_scripts.py`) previously spoke to two hosts — claude via a
+PreToolUse command hook, opencode via a `tool.execute.before` plugin. dsh
+(deepseek-harness) had no wiring at all: its own `run_code` / `pwsh` / terminal /
+background-job tools were complete bypasses around every discipline the other two
+hosts enforce, and installing mgh into a dsh project meant trusting the agent's
+self-restraint.
+
+- **dsh shim (glue only)**: `releases/dsh/plugins/mgh-guard.ts` subscribes to dsh's
+  `tools/pre-execute` waterfall, normalizes dsh tool ids onto the guard's canonical
+  names (`pwsh`→`Bash`, `str_replace_editor`→`ApplyPatch` with paths extracted from
+  the command payload, etc.), spawns the sibling `block_adhoc_scripts.py` with a
+  one-shot stdin Buffer, and turns exit code 2 into `{kind:"deny", reason:<guard
+  stderr>}` — the recipe text reaches the model verbatim. Interpreter fallback
+  `py`→`python3`→`python`; no Python / guard crash / unmapped tool id ⇒ pass with a
+  log line (fail-soft, never blocks day-to-day dev). Activation is the same
+  env-or-disk-sentinel discovery as the other two faces (anchor = session-header cwd
+  carried in the payload).
+- **New guard branches (single decision source stays Python)**: `RunCode`
+  (domain-active → deny + recipe pointing at the sanctioned leaf-script exit; shape
+  only, body never sniffed) and `TerminalIO`/`JobCtl` (interactive-terminal /
+  background-job bypasses → domain-active deny). `pwsh` needed zero new code —
+  normalized to `Bash` it hits the existing verb tables + the rule-m path net
+  verbatim.
+- **Install dialect**: `install.sh --dsh` / `install.ps1 -Platform dsh` mirror the
+  shim + a sibling guard copy into `<target>/mgh-core/dsh/` and wire them into a dsh
+  profile's `cordis.patch.yml` through an idempotent marker-anchored managed block
+  (`tools/install_dsh_wiring.py`; a stale block is replaced in place, the user's own
+  entries never touched). dsh has no project-auto-discovery, so the profile layer IS
+  the mount point. Missing `$DSH_HOME` / zero-or-multiple profiles → fail loud
+  before any write; `--no-enforce-hook` mirrors but skips wiring.
+- **Three-face wiring invariant**: the claude matcher, the opencode `HANDLED` set,
+  and the dsh `TOOL_MAP` must all cover every guard dispatch branch — a new branch
+  without all three faces extended now fails CI. Guard copies gained a core
+  canonical (`core/scripts/block_adhoc_scripts.py`) with the claude/opencode/dsh
+  siblings asserted byte-identical.
+
+Verification: targeted hook-face tests (265 guard + 44 opencode-parity + 12 dsh-parity
++ 9 install-dsh + install-hook/plugin suites, all green); purity + contracts lint
+green; live first-run on a real dsh session saw out-of-tree write/read denials,
+`pwsh` out-of-tree write denial, and zero interference in a non-run-domain repo.
+
+### Changed — /mgh-sdr accepts zero args as the highest-frequency invocation, and step 0 probes the Python interpreter once so no command ever guesses (0.1.52)
+
+Two daily frictions stacked on `/mgh-sdr`. Zero args — "current branch vs master,
+all 6 dimensions", the dominant real usage — hit the family STOP discipline and
+demanded a parameter just to unlock a run whose defaults already live in the
+scripts' argparse. And with `py` (Windows Python Launcher) hardcoded in ~30 shell
+examples, any machine without it entered an "interpreter not found → rename and
+retry" loop that burned one context round per miss.
+
+- **Zero args = declared defaults**: `--help` still prints the table and STOPs
+  (unchanged); no arguments at all proceeds with base=`master` / current branch /
+  all 6 dimensions. On the default path the shell omits `--base`/`--branch`
+  outright and never runs `git rev-parse` itself — the resolved `base`/`branch`
+  come back in step 1 stdout, and the run directory is named `<ts>` only.
+  R5.6 gained the matching exception: a shell may execute on zero args only when
+  its parameter table annotates a default for EVERY entry (now machine-checkable);
+  the other mgh-* shells keep the old STOP unchanged.
+- **Step 0 interpreter probe**: one Bash command tries `py`, `python`, `python3`
+  with `;`-separation and emits a `PYPROBE <name> OK|UNAVAILABLE` line for each —
+  all candidates visible in a single call, chosen by rc 0 AND version ≥3.10 (the
+  short-circuit `||` chain was rejected: it hides the remaining versions, and the
+  Microsoft Store stub passes existence checks while failing at rc 49). The `py`
+  in every example is a canonical token replaced verbatim by the selected
+  interpreter; after a compaction or crash the orchestrator re-runs the probe
+  (one cheap command) rather than guessing per command. The probe result never
+  lands on disk (`run_config.json` / sentinel schemas unchanged); all candidates
+  failing → clean stop before step 1 with the probe output disclosed.
+
+Verification: contract lint (330 flags) and both shells' prompt budget (4572 /
+4601 `mid_tokens`, ceiling 5000) pass; purity + plain-language targeted tests
+pass; a no-`py` PATH simulation in a fresh clone probed once (selected `python`
+3.13.2) and ran step 0 sentinel-arm → step 1 with no `--base`/`--branch` (stdout
+resolved `base=master` / `branch=main`) → step 2 `--check` → sentinel removal
+with zero per-command interpreter trial-and-error.
+
+### Added — the /mgh-sdr orchestrator gets in-register exits for every failure-window temptation; the guard wakes BEFORE step 1 can fail (0.1.51)
+
+One real `/mgh-sdr` run produced a four-action violation chain, and every action
+SUCCEEDED: the orchestrator invented an approval flag `sdr_context.py` never had, then —
+while the trial-and-error loop had the guard asleep (the sdr sentinel was only a step-1
+*success* side effect, and opencode never inherits mid-session env) — parsed a producer's
+stdout through a `python3 - <<'EOF'` heredoc, relayed 31KB of stdout through `/tmp` and
+read it back, and finally processed the run artifacts with `py -c`. Three holes stacked: the approval
+loop straddled two scripts (reporter vs writer), guard activation parasited on the success
+path, and the sanctioned inspection exit (`describe_artifact.py`) was invisible to the sdr
+shell until the guard itself recommended it in a block message.
+
+- **The invented capability became real.** `sdr_context.py --approve-external <abs>`
+  (repeatable) registers a user-consented root through the SAME validated atomic writer
+  `read_roots_config.py --add` uses (direct import, design D1), retrieves it THIS run, and
+  lands it in the sentinel `read_roots[]` — consent → approve → search closes in one
+  command. Approval semantics hold: the flag is passed ONLY after explicit user consent in
+  the host session; `--check` now WARNs (exit unchanged) when `pending_approval[]` is
+  non-empty, so a skipped approval leaves a product-level trace.
+- **Failed guesses route to exits.** An unknown flag whose name hits the
+  `{approve, read, external, root}` word-roots now fails with argparse's native error PLUS
+  a copy-pasteable two-line recipe (absolute self-path; the `--approve-external` form and
+  the equivalent `read_roots_config.py --add` + re-run). Non-matching unknown flags keep
+  argparse's exact native failure. `sdr_context.py` / `diff_group.py` gained `--summary`
+  stdout projections (fixed-shape key figures; `external_repos[]` drops `route_hits[]`; disk
+  artifacts byte-identical, same execution tail-projection, no new files) — the direct
+  answer to the big-stdout → temp-file temptation; per-file retrieval stderr collapsed to
+  one line per repo.
+- **The guard is awake during the failure window.** `resume_sdr_state.py --arm-sentinel`
+  (argparse-mutually-exclusive with `--rearm-sentinel`) writes the minimal sentinel at
+  step 0 — target from `--repo` or the `<repo>/.mgh-sdr/runs/<ts>/` layout, same-target
+  re-arm is a no-op that NEVER clears `read_roots[]`, different-target refuses to anchor a
+  second tree. Step 1's success co-write still refines it. The shell's clean-stop step now
+  carries the residual-sentinel `rm` line.
+- **Heredoc/here-string closed on both faces.** `_PY_INLINE_RX` blocks interpreter + stdin
+  `<<`/`<<<` by SHAPE alone (segmented on `;`/`&&`/`|`, no body-token sniffing — heredoc
+  bodies are often invisible to a token gate); the `-c` path stays body-token-gated so
+  benign `py -c` behavior is byte-unchanged; a bare `-` without `<<` stays a pass
+  (minimal-interception surface, new shapes get added as real machines report them).
+  Both guard copies stay byte-identical; the interception-surface wording expanded in
+  lockstep across the fragment, both sdr shells and
+  `core/contracts/hooks/runtime-enforcement.md` (three feed shapes, one phrasing).
+- **Exits visible before the incident, enforced mechanically.** Both sdr shells now carry
+  the exact `describe_artifact.py --in <abs> --keys/--field/--sample` recipes at steps 1/2
+  plus the stdout-direct-consumption declaration; the launcher's pending-approval hint
+  recommends `--approve-external` (equivalent path kept). A new `check_contracts.py` rule
+  extracts every `\w+\.py` from the guard's `_WORKLIST`/`_recipe` text and fails the build
+  (exit 2, per-domain `(domain, missing-script)` pairs) if a recommended primitive is
+  absent from that domain's shells ∪ the shared fragment — the recommendation/visibility
+  correspondence stops being a convention.
+- **Verified**: the four real-chain actions固化 as an end-to-end replay in
+  `tests/test_sdr_failure_chain.py` (invented flag → exit 2 + copy-pasteable recipe; the
+  recipe transcribed verbatim closes approval + retrieval in ONE run; heredoc / `/tmp`
+  relay / `py -c` all blocked exit 2 with `describe_artifact.py` in the recipe; a
+  sentinel-only activation proves the opencode env-inheritance boundary is closed by disk);
+  6 recipe-visibility cases incl. the reverse case (delete the fragment literal → lint must
+  fail); targeted suites for every touched face + full regression green; contract lint
+  covers the new flags (330 flags / 12 shells); purity lint clean; shells 4146 / 4175
+  mid_tokens (budget 5000, no shard needed).
+
 ### Changed — the sdr report's three locate-points became clickable source-file links; unlocatable paths degrade to the exact old text (0.1.50)
 
 `/mgh-sdr` reports solved "readable" (the chain short forms) but not "reachable" — a human

@@ -29,7 +29,7 @@ code** — only the small structured JSON each T1 produced.
 ## Aggregate context budget (P0 soft boundary)
 You see ALL T1 records (`checkpoints/t1/*.json`) in one context — this is the aggregate
 node of the pipeline. If that aggregate input clearly exceeds `--max-aggregate-bytes`
-(default 256KB) — e.g. hundreds of clusters / many large records — state it back to the
+(default 96KB) — e.g. hundreds of clusters / many large records — state it back to the
 orchestrator (a one-line note in your output + checkpoint). The orchestrator then advises
 `--scope` + `--merge` (per-module runs) and discloses "aggregate over budget, not
 hard-bounded" in `init_manifest.json::boundaries[]` + `report.md`. **P0 = disclose +

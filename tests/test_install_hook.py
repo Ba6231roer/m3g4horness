@@ -89,7 +89,7 @@ class TestInstallHook(unittest.TestCase):
         m = self._matcher_of_ours(s)
         self.assertEqual(set(m.split("|")),
                          {"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "ApplyPatch",
-                          "Read", "Glob", "Grep"})
+                          "Read", "Glob", "Grep", "RunCode", "TerminalIO", "JobCtl"})
 
     def _legacy_settings(self, command="py .claude/hooks/block_adhoc_scripts.py", s=None):
         """settings.json carrying OUR entry with the legacy `Bash|Write|Edit` matcher."""
@@ -107,8 +107,7 @@ class TestInstallHook(unittest.TestCase):
         self.assertEqual(self._run(s), 0)
         data = json.loads(s.read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
-        self.assertEqual(entry["matcher"],
-                         "Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep")
+        self.assertEqual(entry["matcher"], self.m._DEFAULT_MATCHER)
         self.assertEqual(entry["hooks"][0]["command"],
                          "py .claude/hooks/block_adhoc_scripts.py")
         self.assertEqual(len(data["hooks"]["PreToolUse"]), 1)  # in place, no duplicate
@@ -134,8 +133,7 @@ class TestInstallHook(unittest.TestCase):
         self._run(s)
         data = json.loads(s.read_text(encoding="utf-8"))
         self.assertEqual(len(data["hooks"]["PreToolUse"]), 1)
-        self.assertEqual(self._matcher_of_ours(s),
-                         "Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep")
+        self.assertEqual(self._matcher_of_ours(s), self.m._DEFAULT_MATCHER)
 
     def test_user_custom_command_field_preserved(self):
         # the entry is anchored by OUR marker inside command; a user who edited the
@@ -146,8 +144,7 @@ class TestInstallHook(unittest.TestCase):
         data = json.loads(s.read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
         self.assertEqual(entry["hooks"][0]["command"], user_cmd)  # command preserved
-        self.assertEqual(entry["matcher"],
-                         "Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep")
+        self.assertEqual(entry["matcher"], self.m._DEFAULT_MATCHER)
 
     def test_explicit_matcher_skips_evolution(self):
         # an explicit --matcher pins the intent; a legacy-subset entry is left as-is.

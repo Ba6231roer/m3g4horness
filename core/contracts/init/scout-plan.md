@@ -72,3 +72,33 @@ Consumer: orchestrator merges with regex candidates → `form_clusters`.
   (t2 `synthesis.json.done`/`.done`、t3 `*.json.done`、t4 `consistency.json.done`/`.done`),
   stderr 注明 + stdout `invalidated_tiers[]`;并入 == 0(全重复/全失败)时不删(输入没变)。
   t1 各簇 `.done` 保留(scout 簇 fold-in 后自然成新 pending)。
+
+## `checkpoints/scout/shards/<shard_id>.json`(map-reduce 分片摘要)
+
+Producer: `init-scout-merge-partial`(经 `fanout_runner --tier scout-merge` 波次派发,
+仅当 `plan_aggregate.py --node scout-merge` 判 `needs_reduce=true`)。
+Consumer: `init-scout-merge-rollup`(仅吞 `rollup.summary_paths`,写终态
+`scout_candidates.json` + touch `checkpoints/scout/merge.json.done`)。
+
+```json
+{
+  "node": "scout-merge-partial",
+  "shard_id": "scout-merge-0",
+  "batches": ["scout-001", "scout-004"],
+  "repo": "<abs repo root>",
+  "candidates": [<deduped scout candidate, source:"scout">, ...],
+  "unresolved": ["<file>", ...],
+  "notes": "<bounded note; cross-shard decisions deferred to rollup>"
+}
+```
+
+- `candidates[]` 为**候选直存形状**(与终态 wrapper 同形,`merge_scout._normalize`/`_key`
+  直接消费,**不新增适配字段**):`file`/`line`/`category`/`kind`/`anchor{class,method,kind}`/
+  `shape`/`evidence_snippet`/`entry_points`/`confidence`/`source:"scout"`;被闸门 slim 投影过的
+  候选原样携带 `_slimmed` 留痕(结构字段永不被截,`_key` 去重锚点完整)。
+- `batches`:该 shard 覆盖的去重 batch_id 列表(与 `plan_aggregate` stdout `pending[].batches`
+  同值,供 rollup/报告披露批切分)。
+- partial 只做 **shard 内**去重/归一;跨 shard 锚点元组
+  (`file`+`anchor.class`+`anchor.method`+`category`)去重归 rollup 一层。
+- `.failed` shard 是终态:不重试、不阻断波次;**map 未全 done → 编排器不 rollup**,
+  披露缺口。

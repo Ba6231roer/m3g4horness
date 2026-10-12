@@ -466,6 +466,120 @@ class SdrContextTest(unittest.TestCase):
         self.assertEqual((self.run_dir / "run_config.json").read_text(encoding="utf-8"),
                          first_rc)
 
+    # --- approval single-command closure (--approve-external, reuse of read_roots writer) ---
+    def test_approve_external_closes_loop_in_one_command(self):
+        front = self._make_front(reachable=True, configured=False)
+        # first run: the declared repo is unapproved -> pending_approval, zero reads
+        code, out, _ = self._run(*self._base_args())
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["pending_approval"], [str(front)])
+        self.assertFalse((self.run_dir / "external").exists())
+        # re-run with consent -> config written + retrieved THIS run + into sentinel
+        code, out, err = self._run(*self._base_args(), "--approve-external", str(front))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["pending_approval"], [])
+        self.assertEqual([e["path"] for e in d["external_repos"]], [str(front)])
+        cfg = json.loads((self.repo / ".mgh" / "read-roots.json").read_text(encoding="utf-8"))
+        self.assertIn(str(Path(front).resolve()),
+                      [str(Path(x).resolve()) for x in cfg["read_roots"]])
+        sent = json.loads(self._sentinel_path().read_text(encoding="utf-8"))
+        self.assertIn(str(front), sent["read_roots"])
+
+    def test_approve_external_invalid_target_zero_write(self):
+        gone = self.tmp / "gone-root"   # does not exist
+        code, _, err = self._run(*self._base_args(), "--approve-external", str(gone))
+        self.assertEqual(code, 2)
+        self.assertFalse((self.repo / ".mgh" / "read-roots.json").exists())
+        self.assertIn("--approve-external", err)
+
+    def test_approve_external_repeat_is_idempotent(self):
+        front = self._make_front(reachable=True, configured=False)
+        self._run(*self._base_args(), "--approve-external", str(front))
+        cfg_after_once = json.loads(
+            (self.repo / ".mgh" / "read-roots.json").read_text(encoding="utf-8"))
+        code, out, err = self._run(*self._base_args(), "--approve-external", str(front))
+        self.assertEqual(code, 0, err)
+        cfg_after_twice = json.loads(
+            (self.repo / ".mgh" / "read-roots.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg_after_once["read_roots"], cfg_after_twice["read_roots"])
+        self.assertEqual(cfg_after_twice["read_roots"].count(str(Path(front).resolve())), 1)
+
+    def test_invented_approval_flag_gets_recipe(self):
+        # an undeclared approval-flavoured flag -> argparse error + copy-pasteable recipe
+        code, _, err = self._run("--approve-external-repos", "D:/x",
+                                 *self._base_args())
+        self.assertEqual(code, 2)
+        self.assertIn("unrecognized arguments", err)
+        self.assertIn("recipe", err)
+        self.assertIn("--approve-external", err)
+
+    def test_unrelated_unknown_flag_native_error_no_recipe(self):
+        code, _, err = self._run("--frobnicate", *self._base_args())
+        self.assertEqual(code, 2)
+        self.assertIn("unrecognized arguments", err)
+        self.assertNotIn("recipe", err)
+
+    def test_registered_read_root_flag_not_misfired(self):
+        # --read-root is a DECLARED flag (contains the 'read'/'root' roots); parse_known_args
+        # never routes it to `unknown`, so the approval recipe must not misfire on it.
+        extra = self.tmp / "op-root"
+        extra.mkdir()
+        code, out, err = self._run(*self._base_args(), "--read-root", str(extra))
+        self.assertEqual(code, 0, err)
+
+    # --- --summary stdout projection (disk unchanged, heavy fields dropped) ---
+    def test_summary_projection_drops_heavy_fields(self):
+        front = self._make_front(reachable=True)   # configured -> retrieved
+        code, out, err = self._run(*self._base_args(), "--summary")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(set(d), {
+            "repo", "run_dir", "base", "branch", "baseline_path", "baseline_bytes",
+            "baseline_truncated", "sensitive_catalog_source", "external_repos",
+            "external_skipped", "pending_approval"})
+        self.assertNotIn("sensitive_catalog", d)
+        self.assertNotIn("baseline_truncated_bytes", d)
+        for e in d["external_repos"]:
+            self.assertNotIn("route_hits", e)
+            self.assertIn("diff_files", e)
+        # disk artifact still carries the full record incl route_hits + catalog
+        ctx = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        self.assertIn("route_hits", ctx["external_repos"][0])
+        self.assertIn("sensitive_catalog", ctx)
+
+    def test_default_stdout_still_full_record(self):
+        self._make_front(reachable=True)
+        code, out, _ = self._run(*self._base_args())   # no --summary
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertIn("sensitive_catalog", d)
+        self.assertIn("route_hits", d["external_repos"][0])
+        self.assertIn("baseline_truncated_bytes", d)
+
+    def test_stderr_per_repo_summary_line(self):
+        self._make_front(reachable=True)
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        self.assertIn("[sdr_context] external front:", err)
+        self.assertIn("diff file(s)", err)
+
+    # --- --check advisory WARN on unapproved holdover ---
+    def test_check_warns_on_pending_approval_empty_vs_nonempty(self):
+        front = self._make_front(reachable=True, configured=False)
+        self._run(*self._base_args())
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0)              # unapproved is a legal degraded state
+        self.assertIn("UNAPPROVED", err)
+        self.assertIn(str(front), err)
+        # approve the declared root -> re-run -> pending empty -> no WARN line
+        self._approve(front)
+        code, _, err2 = self._run(*self._base_args())
+        self.assertEqual(code, 0, err2)
+        code, _, err2 = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0)
+        self.assertNotIn("UNAPPROVED", err2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

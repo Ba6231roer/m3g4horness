@@ -18,13 +18,12 @@ the small candidate JSON each S3 reader produced.
 3. **Merge `unresolved[]`** across batches into one deduped list.
 4. Emit the merged scout candidate set.
 
-## Aggregate context budget (P0 soft boundary)
-You see ALL scout-reader batch records (`checkpoints/scout/*.json`) in one context — this
-is an aggregate node. If that aggregate input clearly exceeds `--max-aggregate-bytes`
-(default 256KB), state it back to the orchestrator. The orchestrator then advises
-`--scope`+`--merge` / a smaller `--scout-budget` and discloses "aggregate over budget, not
-hard-bounded" in `init_manifest.json::boundaries[]` + `report.md`. **P0 = disclose +
-fallback**; layered reduction is a later change. Do NOT silently drop records to fit.
+## Aggregate context budget
+本 stage 的输入由编排器的**硬预算闸门**保证 ≤ `--max-aggregate-bytes`:闸门
+(`plan_aggregate.py --node scout-merge`)在输入超预算时改走 map-reduce 分片派发
+(`init-scout-merge-partial` + rollup),**不会**把超预算的全集交给你。因此你收到的
+scout 记录全集恒在预算内;若仍无法装下,**NEVER** 静默丢记录——回 `oversize <绝对 path>`
+让编排器披露。
 
 ## Hard rules
 - Operate only on structured records. If a record lacks `file:line` evidence, drop it

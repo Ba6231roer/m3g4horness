@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""
+r"""
 render_sdr_report — deterministic summary renderer for /mgh-sdr: collect the fan-out
 units' draft JSONs (.done + parseable), dedup-merge findings by {dimension, route, file},
-and render the human-facing Simplified-Chinese md report at the project root plus
-`sdr_manifest.json` in the run dir. The report is the ONE artifact a human consumes
-(daily / pre-merge trigger); all machine artifacts stay in the run dir.
+and render the human-facing Simplified-Chinese report as a SELF-CONTAINED single-file
+HTML at the project root, plus `sdr_report_data.json` (canonical machine-facing data)
+and `sdr_manifest.json` in the run dir.
+
+One data assembly, two carriers: the renderer builds the whole report content into ONE
+dict — ① it is written atomically as `<run-dir>/sdr_report_data.json` (the interface
+downstream deterministic consumers read), ② the SAME dict is embedded into the HTML as
+a `<script type="application/json">` block and rendered into the DOM by the page's own
+inline JS. JSON-equivalence between the two carriers holds by construction; `--check`
+parses and compares them, so the human page and the machine file can never drift.
+
+The HTML is fully self-contained: styles, scripts and data are all INLINE — zero
+external references (no CDN, no web fonts, no images, no network), double-click opens
+it in any modern browser over file://. Page interactions are plain vanilla JS:
+severity/dimension table filters (view state only — the data files are NEVER
+rewritten), P-NN in-page anchor jumps to the finding sections, and wheel-zoom /
+drag-pan on the embedded SVG chain diagrams.
 
 Findings merge: same {dimension, route, file} triple => ONE entry (line_hint union;
 risk/suggestion/control_ref from the first occurrence — duplicates across units carry no
@@ -14,46 +28,30 @@ new information). `.failed` units do NOT block rendering: they are counted in
 honesty-boundary section discloses "N review units failed; their coverage is unreviewed".
 An unparsable draft of a .done unit takes the same path (failed_units, not a crash).
 
-Report name: `mgh-sdr-<branch-safe>-<YYYYMMDD_HHMMSS>.md` at --repo root (tool name
+Report name: `mgh-sdr-<branch-safe>-<YYYYMMDD_HHMMSS>.html` at --repo root (tool name
 fixed `mgh-sdr`; branch name filesystem-safe; second-resolution local timestamp). A same-
 name report (re-run within the same second) is ATOMICALLY overwritten (idempotent);
-across seconds both reports coexist (history is the user's to manage).
+across seconds both reports coexist (history is the user's to manage). Historical `.md`
+reports are neither migrated nor rewritten.
 
-NEVER writes into `openspec/`, NEVER writes anything in the target repo except the
-report file itself, NEVER writes outside --out-dir + the report.
+Injection safety (finding text and slice text come from an LLM and quote target-repo
+source — a real injection surface): the HTML skeleton is a static template with NO
+per-run interpolation; all dynamic text reaches the DOM through the page's single
+escaping entry (`textContent` / `setAttribute`, never string-concatenated into
+innerHTML), and the embedded JSON block has every `</` escaped to `<\/` (a legal JSON
+string escape, parse-identical) so a `</script>` literal can never terminate the block.
 
-Honesty boundary (>= 6 entries, always):
-  1. findings are LLM candidates needing human review, not confirmed vulnerabilities;
-  2. interface grouping is an annotation heuristic — an unrecognized interface/chain
-     falls into a directory-clustered unit (coarser granularity, coverage not lost);
-  3. cited existing controls assert EXISTENCE, not effectiveness;
-  4. external-repo conclusions are a retrieval-moment snapshot (frontend branch sync not
-     guaranteed);
-  5. the baseline is a byte-budgeted projection — low-priority design details may be
-     missing;
-  6. the sensitive-catalog source and coverage (fields outside the catalog are only
-     recognized by the fallback rule) + failed units (their coverage is unreviewed);
-  7. exclusion-set disclosure — N files excluded by the closed set (test trees/build
-     outputs/static assets/lockfiles/build scripts, counted per reason), NOT reviewed;
-     --include-excluded is the fallback.
-plus a failed-units entry when failed_units[] is non-empty, a dimensions-narrowed
-entry when the run used fewer than the default 6, and an external-repo-UNAPPROVED
-entry when declared repos were skipped for lack of project-config authorization
-(`unapproved:` skips — kept distinct from `not-found` unreachable degradations).
-
-Grouping overview (report head): interface/standalone unit counts, codegraph on/off +
-capture stats (route anchors / upstream anchors / chain merges / edges), exclusion
-counts — grouping quality is observable without opening grouping.json. The stats ride
-grouping.json in the run dir (older layouts: the section is simply absent).
-
-Source links: the 入口/调用链/位置 render points are markdown links to repo-relative
-source files (`[text](rel/path#Lline)`, anchor omitted when no line); a path that
-cannot be resolved inside the repo (outside it, empty/missing, spaces or parens)
+Source links: the 入口/调用链/位置 points render as links to repo-relative source files
+(`<a href="rel/path#Lline">`, anchor omitted when no line); a path that cannot be
+resolved inside the repo (outside it, empty/missing, leading `..`, spaces or parens)
 degrades to the plain-text form — never a broken link. Resolution is purely lexical
-(NEVER stats the target), so the report is reproducible across checkout states.
+(NEVER stats the target), so the report is reproducible across checkout states. Manifest
+`rows[]` and data-file `rows[]` keep the PLAIN-TEXT short forms (no link syntax) — the
+table links are a render projection of the same data.
 
-Exit codes (R5.3b): 0 ok · 1 input error (run dir/drafts missing) · 2 misuse (argparse)
-or --check violation (manifest/draft/counts inconsistency; R5.9).
+Exit codes: 0 ok · 1 input error (run dir/drafts missing) · 2 misuse (argparse) or
+--check violation (data file missing/unparsable, embedded-block drift, manifest/data
+inconsistency).
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/re/sys/pathlib).
 """
@@ -69,6 +67,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 TOOL_NAME = "mgh-sdr"
+DATA_FILE = "sdr_report_data.json"
 
 # Default closed-set dimension keys (the report groups by whatever the drafts actually
 # carry; free-text extension dimensions render under their own name).
@@ -81,6 +80,10 @@ _DIMENSION_LABEL = {
     "sql-injection": "SQL 注入",
     "sensitive-data": "敏感信息屏蔽",
     "input-validation": "输入校验",
+    # free-text extension dimensions observed in real runs — display label ONLY; the
+    # raw kebab key stays the machine join in data files/manifest, and an unseen
+    # extension falls through to the raw key (never guess a translation)
+    "architecture-layering": "架构分层",
 }
 _SEVERITY_LABEL = {"high": "高", "medium": "中", "low": "低", "info": "提示"}
 _SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
@@ -92,6 +95,7 @@ _DIMENSION_COL = {
     "sql-injection": "SQL注入",
     "sensitive-data": "敏感屏蔽",
     "input-validation": "输入校验",
+    "architecture-layering": "架构分层",
 }
 
 
@@ -180,43 +184,32 @@ def _merge_findings(drafts: list) -> dict:
     return by_dim
 
 
-def _render_chain(chain: list, repo: Path | None = None) -> str:
-    """chain[] -> abbreviated one-cell chain text (Plan C): `·` same-class continuation,
+def _render_chain(chain: list) -> str:
+    """chain[] -> abbreviated one-cell chain text: `·` same-class continuation,
     `⤷` branch (branch_of host), `⇢` mapper XML terminal, `†` unchanged node. A linear
     chain reads as A → B → C → ⇢terminal; branch nodes are appended flat after the main
     line. Returns "" for an empty/absent chain (the row falls back to the entry form).
-    With `repo` set, each node short form is wrapped as a source link (the `†` prefix
-    stays inside the text, separators stay outside; design D4); without it the plain
-    text form is produced (manifest rows[])."""
+    This is the PLAIN-TEXT short form (manifest/data rows[]); the linked table cell is
+    the same walk rendered as segments (`_chain_segments`)."""
     if not chain:
         return ""
-    # main line = nodes without branch_of, in array order; branch subtrees = nodes with
-    # branch_of, rendered right after the main line in array order (fan-out never nests:
-    # branch_of always points at a main-line index — asserted by diff_group --check)
     main = [(i, n) for i, n in enumerate(chain) if n.get("branch_of") is None]
     branches = [(i, n) for i, n in enumerate(chain) if n.get("branch_of") is not None]
-
-    def node(n):
-        txt = _node_text(n)
-        if repo is None:
-            return txt
-        return _source_link(txt, n.get("file"), n.get("line"), repo)
-
     parts: list[str] = []
     prev_class = None
     for pos, (i, n) in enumerate(main):
         if pos == 0:
-            parts.append(node(n))
+            parts.append(_node_text(n))
         elif n.get("change") == "external":
-            parts.append(" ⇢" + node(n))   # mapper XML terminal (XML not a graph node)
+            parts.append(" ⇢" + _node_text(n))   # mapper XML terminal (XML not a graph node)
         elif n.get("file") and n.get("file") == prev_class:
-            parts.append(" ·" + node(n))   # same-class continuation
+            parts.append(" ·" + _node_text(n))   # same-class continuation
         else:
-            parts.append(" → " + node(n))
+            parts.append(" → " + _node_text(n))
         prev_class = n.get("file")
     for _i, n in branches:
         sep = " ⇢" if n.get("change") == "external" else " ⤷"
-        parts.append(sep + node(n))
+        parts.append(sep + _node_text(n))
     return "".join(parts)
 
 
@@ -231,16 +224,16 @@ _ABS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
 _ABS_UNC = re.compile(r"^\\\\[^\\]")
 
 
-def _source_link(text: str, file, line, repo: Path) -> str:
-    """`text` wrapped as a markdown link to the repo-relative source file:
-    `[text](rel#Lline)` (anchor omitted when line is None). PURELY LEXICAL resolution
-    (NEVER stats the filesystem): an absolute path is rebased onto `repo` and only
-    linked when inside its subtree; a relative path is taken as repo-root-relative;
-    empty/missing, subtree-outside, leading `..`, and paths with spaces or
-    parentheses degrade to the plain text — the error direction is "fewer links",
-    never a broken one. Display-text `[`/`]` get minimal backslash escapes."""
+def _href_of(file, line, repo: Path) -> str | None:
+    """Repo-relative href for a source-file link (`rel#L<line>`, anchor omitted when
+    line is absent), or None when the plain-text form is required. PURELY LEXICAL
+    (NEVER stats the filesystem — the diff branch's files may not be checked out):
+    an absolute path is rebased onto `repo` and only linked when inside its subtree;
+    a relative path is taken as repo-root-relative; empty/missing, subtree-outside,
+    leading `..`, and paths with spaces or parentheses degrade to plain text — the
+    error direction is "fewer links", never a broken one."""
     if not isinstance(file, str) or not file.strip():
-        return text
+        return None
     f = file.strip()
     if _ABS_DRIVE.match(f) or _ABS_UNC.match(f) or f.startswith("/"):
         nf = os.path.normpath(f)
@@ -251,48 +244,130 @@ def _source_link(text: str, file, line, repo: Path) -> str:
             try:
                 rel = os.path.relpath(nf, nr)
             except ValueError:      # different drive (Windows) = outside the repo
-                return text
+                return None
         rel = rel.replace("\\", "/")
     else:
         rel = os.path.normpath(f.replace("\\", "/")).replace("\\", "/")
-    if not rel or rel.startswith("..") or rel == ".":
-        return text
+    if not rel or rel == "." or rel.startswith(".."):
+        return None
     if " " in rel or "(" in rel or ")" in rel:
-        return text
-    disp = text.replace("]", "\\]").replace("[", "\\[")
+        return None
     anchor = f"#L{line}" if isinstance(line, int) and not isinstance(line, bool) else ""
-    return f"[{disp}]({rel}{anchor})"
+    return rel + anchor
 
 
-def _mermaid_chain(unit_id: str, route: str, chain: list) -> str:
-    """One mermaid flowchart LR per BRANCHED unit (章节三): entry → nodes → dashed
-    mapper-terminal edges. branch_of = the edge's source host; mapper terminals (change
-    == "external") get dashed edges. Linear chains never reach here (caller filters)."""
-    ids: list[str] = []
+def _seg(sep: str, n: dict, repo: Path) -> dict:
+    """One chain-cell segment: the separator BEFORE the node (outside the link) plus the
+    node's short text and its resolved link target. De-linkified join of all segments
+    reproduces `_render_chain` byte-for-byte."""
+    line = n.get("line")
+    return {
+        "sep": sep,
+        "text": _node_text(n),
+        "href": _href_of(n.get("file"), line, repo),
+        "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
+    }
+
+
+def _chain_segments(chain: list, repo: Path) -> list[dict]:
+    """chain[] -> linked table-cell segments (same walk as `_render_chain`; the `†`
+    prefix stays inside the text, separators stay outside)."""
+    if not chain:
+        return []
+    main = [(i, n) for i, n in enumerate(chain) if n.get("branch_of") is None]
+    branches = [(i, n) for i, n in enumerate(chain) if n.get("branch_of") is not None]
+    segs: list[dict] = []
+    prev_class = None
+    for pos, (i, n) in enumerate(main):
+        if pos == 0:
+            sep = ""
+        elif n.get("change") == "external":
+            sep = " ⇢"
+        elif n.get("file") and n.get("file") == prev_class:
+            sep = " ·"
+        else:
+            sep = " → "
+        segs.append(_seg(sep, n, repo))
+        prev_class = n.get("file")
+    for _i, n in branches:
+        sep = " ⇢" if n.get("change") == "external" else " ⤷"
+        segs.append(_seg(sep, n, repo))
+    return segs
+
+
+# --- 章节三 SVG chain-graph layout (deterministic layered; JS draws + zooms) ---------
+
+_GRAPH_NODE_W = 260
+_GRAPH_NODE_H = 40
+_GRAPH_GAP_X = 60
+_GRAPH_GAP_Y = 26
+_GRAPH_PAD = 12
+
+
+def _layout_graph(unit: dict, route: str) -> dict | None:
+    """章节三 data for ONE branched unit. Deterministic layered layout over chain[]:
+    the entry sits at depth 0, a main-line node's depth = its position on the line,
+    a branch/mapper-terminal node hangs off its host (branch_of index, fallback the
+    previous array node — the dispatcher's encoding never nests) at depth(host)+1.
+    Same-depth nodes stack vertically in first-appearance order — a conflict yields a
+    row of its own, never an overlap. Coordinates feed the SVG viewBox; zoom/pan is the
+    page JS's job. Mapper terminals (change=external) ride dashed edges."""
+    chain = unit.get("chain") or []
+    if not chain:
+        return None
+    main_idx = [i for i, n in enumerate(chain) if n.get("branch_of") is None]
+    depth: dict[int, int] = {}
+    for pos, i in enumerate(main_idx):
+        depth[i] = pos
+    edges: list[dict] = []
+    for pos in range(1, len(main_idx)):
+        dst = main_idx[pos]
+        edges.append({"src": main_idx[pos - 1], "dst": dst,
+                      "dashed": chain[dst].get("change") == "external"})
     for i, n in enumerate(chain):
-        base = re.sub(r"[^A-Za-z0-9]", "", str(n.get("fqn_short", ""))) or f"n{i}"
-        ids.append(f"n{i}{base[:24]}")
-    lines = ["```mermaid", "flowchart LR"]
-    for i, n in enumerate(chain):
-        label = str(n.get("label") or n.get("fqn_short", "")).replace('"', "'")
-        if n.get("change") == "external":
-            # mapper XML terminal: declared + dashed edge FROM its host node
-            host = n.get("branch_of") if isinstance(n.get("branch_of"), int) else i - 1
-            if isinstance(host, int) and 0 <= host < len(chain):
-                lines.append(f'  {ids[host]} -.-> {ids[i]}["{label}"]')
-            else:
-                lines.append(f'  {ids[i]}["{label}"]')
-            continue
-        if i == 0:
-            prefix = str(n.get("route") or route or "")
-            head = f'{prefix} ' if prefix else ""
-            lines.append(f'  {ids[i]}["{head}{label}"]')
+        if n.get("branch_of") is None:
             continue
         bo = n.get("branch_of")
-        src = ids[bo] if isinstance(bo, int) and 0 <= bo < len(chain) else ids[i - 1]
-        lines.append(f'  {src} --> {ids[i]}["{label}"]')
-    lines.append("```")
-    return "\n".join(lines)
+        src = bo if isinstance(bo, int) and 0 <= bo < len(chain) else i - 1
+        edges.append({"src": src, "dst": i, "dashed": n.get("change") == "external"})
+        depth[i] = depth.get(src, 0) + 1
+    by_depth: dict[int, list[int]] = {}
+    for i in sorted(depth):            # array order = first appearance
+        by_depth.setdefault(depth[i], []).append(i)
+    n_cols = len(by_depth)
+    max_rows = max((len(v) for v in by_depth.values()), default=1)
+    width = _GRAPH_PAD * 2 + n_cols * _GRAPH_NODE_W + max(0, n_cols - 1) * _GRAPH_GAP_X
+    height = _GRAPH_PAD * 2 + max_rows * _GRAPH_NODE_H + max(0, max_rows - 1) * _GRAPH_GAP_Y
+    entry = main_idx[0] if main_idx else -1
+    nodes = []
+    for d in sorted(by_depth):
+        for row, i in enumerate(by_depth[d]):
+            n = chain[i]
+            label = str(n.get("label") or n.get("fqn_short", ""))
+            if n.get("change") == "unchanged":
+                label = "†" + label
+            if i == entry:
+                prefix = str(n.get("route") or route or "")
+                if prefix:
+                    label = prefix + " " + label
+            f = n.get("file") if isinstance(n.get("file"), str) else ""
+            line = n.get("line")
+            title = ""
+            if f:
+                title = f"{f}:{line}" if isinstance(line, int) \
+                        and not isinstance(line, bool) else f
+            nodes.append({
+                "id": i,
+                "x": _GRAPH_PAD + d * (_GRAPH_NODE_W + _GRAPH_GAP_X),
+                "y": _GRAPH_PAD + row * (_GRAPH_NODE_H + _GRAPH_GAP_Y),
+                "w": _GRAPH_NODE_W, "h": _GRAPH_NODE_H,
+                "label": label,
+                "title": title,
+                "terminal": n.get("change") == "external",
+            })
+    routes = str(unit.get("route", "")).split(";")
+    return {"unit_id": unit.get("unit_id", ""), "route": routes[0] if routes else "",
+            "width": width, "height": height, "nodes": nodes, "edges": edges}
 
 
 def _sorted_units(units: list) -> list:
@@ -340,71 +415,76 @@ def _row_dimensions(dims, rows) -> list:
         sorted(d for d in seen if d not in DEFAULT_DIMENSIONS and d not in dims)
 
 
-def _build_rows(g_units: list, by_dim: dict, pnums: dict, unit_refs: dict,
-                external: list, repo: Path) -> list[dict]:
+def _standalone_entry(u: dict, repo: Path) -> tuple[str, str | None]:
+    """Entry for a no-route unit: the unit's own method-def short form (first chain
+    node, else the unit_id stem). Returns (text, href) — the route-string entry never
+    links, so only this path produces a linked entry."""
+    chain = u.get("chain") or []
+    if chain:
+        n = chain[0]
+        return _node_text(n), _href_of(n.get("file"), n.get("line"), repo)
+    stem = str(u.get("unit_id", ""))
+    return stem, None
+
+
+def _build_rows(g_units: list, by_dim: dict, unit_refs: dict,
+                external: list, repo: Path) -> tuple[list, list, list]:
     """简报表 data rows from grouping.json units[] (the renderer's row truth). Failed
     units NEVER become rows (their coverage is unreviewed — the honesty boundary
-    discloses them instead). `entry`/`chain` stay the plain-text short forms (manifest
-    rows[] = machine consumption); `entry_link`/`chain_link` are the table cells
-    (same data, `_source_link`-wrapped; design D4)."""
-    rows = []
+    discloses them instead). Returns (internal_rows, manifest_rows, row_links):
+    manifest_rows = the plain-text projection (identical list in sdr_manifest.json and
+    sdr_report_data.json), row_links = the per-row link projection the page JS renders
+    (same data, same walk — never a second truth)."""
+    rows, links = [], []
     for u in _sorted_units(g_units):
         if u.get("status") == "failed":
             continue
         routes = [r for r in str(u.get("route", "")).split(";") if r]
         chain = u.get("chain") or []
         chain_txt = _render_chain(chain)
-        chain_link = _render_chain(chain, repo)
+        segs = _chain_segments(chain, repo)
         if routes:
-            entry = routes[0] if len(routes) == 1 else routes[0] + f"(+{len(routes) - 1})"
-            entry_link = entry       # route strings never link
+            entry_txt = routes[0] if len(routes) == 1 else routes[0] + f"(+{len(routes) - 1})"
+            entry_rec = {"text": entry_txt, "href": None, "line": None}
             if not chain_txt:
-                chain_txt = entry
-                chain_link = entry_link
+                chain_txt = entry_txt
+                segs = [{"sep": "", "text": entry_txt, "href": None, "line": None}]
         else:
-            entry, entry_link = _standalone_entry(u, repo)
+            txt, href = _standalone_entry(u, repo)
+            entry_rec = {"text": txt, "href": href, "line": None}
             if not chain_txt:
-                chain_txt = entry
-                chain_link = entry_link
-        refs = unit_refs.get(u.get("unit_id", ""), set())
+                chain_txt = txt
+                segs = [{"sep": "", "text": txt, "href": href, "line": None}]
+        uid = u.get("unit_id", "")
+        refs = unit_refs.get(uid, set())
         dim_refs: dict[str, set] = {}
         for ref in refs:
             for dim, lst in by_dim.items():
                 if any(f["pnum"] == ref for f in lst):
                     dim_refs.setdefault(dim, set()).add(ref)
         rows.append({
-            "unit_id": u.get("unit_id", ""),
+            "unit_id": uid,
             "kind": u.get("kind", ""),
-            "entry": entry,
+            "entry": entry_txt if routes else entry_rec["text"],
             "chain": chain_txt,
-            "entry_link": entry_link,
-            "chain_link": chain_link,
             "frontend_is": "—",
             "frontend_count": "—",
             "dim_refs": dim_refs,
             "all_refs": refs,
         })
+        links.append({"unit_id": uid, "entry": entry_rec, "chain": segs})
     # frontend two columns need the row route: fill after rows exist
     for r, u in zip(rows, _sorted_units(g_units)):
         if u.get("status") == "failed":
             continue
         fis, fcnt = _frontend_pair(str(u.get("route", "")), external)
         r["frontend_is"], r["frontend_count"] = fis, fcnt
-    return rows
-
-
-def _standalone_entry(u: dict, repo: Path | None = None) -> tuple[str, str]:
-    """Entry for a no-route unit: the unit's own method-def short form (first chain
-    node, else the unit_id stem). Returns (plain, linked) — the route-string entry never
-    links, so callers other than this one produce an identical linked form."""
-    chain = u.get("chain") or []
-    if chain:
-        txt = _node_text(chain[0])
-        linked = txt if repo is None else _source_link(
-            txt, chain[0].get("file"), chain[0].get("line"), repo)
-        return txt, linked
-    stem = str(u.get("unit_id", ""))
-    return stem, stem
+    manifest_rows = [{
+        "unit_id": r["unit_id"], "entry": r["entry"], "chain": r["chain"],
+        "frontend_is": r["frontend_is"], "frontend_count": r["frontend_count"],
+        "issue_refs": sorted(r["all_refs"]),
+    } for r in rows]
+    return rows, manifest_rows, links
 
 
 def _boundaries(by_dim, failed, catalog_source, external, dims, baseline_truncated,
@@ -469,8 +549,468 @@ def _load_grouping(run_dir: Path) -> dict:
         return {}
 
 
+def _json_embed(data: dict) -> str:
+    r"""The data dict serialized for the HTML embed: every `</` becomes `<\/` — a legal
+    JSON string escape that parses identically — so a `</script>` literal carried in
+    LLM/切片 text can never terminate the host `<script>` block."""
+    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+
+
+# ============================================================================
+# Self-contained HTML template: skeleton + CSS + page JS, section-commented.
+# Static string — NO per-run interpolation. The run data enters at exactly one
+# point (the __MGH_DATA_JSON__ marker inside the application/json block) and is
+# rendered into the DOM by the JS below. All dynamic text reaches the DOM via
+# textContent/setAttribute (auto-escaping) — string-concatenated innerHTML is
+# never used for data, so LLM/切片 text cannot inject markup.
+# ============================================================================
+_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mgh-sdr 安全设计符合性复核报告</title>
+<!-- section: css -->
+<style>
+  :root {
+    --ink: #1f2430; --muted: #6b7280; --line: #d9dde5; --bg: #f7f8fa;
+    --card: #ffffff; --accent: #1d4ed8;
+    --high: #b91c1c; --medium: #b45309; --low: #1d4ed8; --info: #4b5563;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--ink);
+         font: 15px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 24px 0 4px; }
+  h2 { font-size: 18px; margin: 36px 0 10px; padding-bottom: 6px;
+       border-bottom: 2px solid var(--line); }
+  h3 { font-size: 15px; margin: 18px 0 6px; }
+  .banner { margin: 14px 0 0; padding: 10px 14px; border: 1px solid #f59e0b;
+            border-left-width: 5px; background: #fffbeb; border-radius: 6px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  ul.meta { margin: 8px 0; padding-left: 22px; }
+  /* 章节一 summary table */
+  .filters { margin: 10px 0; display: flex; gap: 10px; align-items: center; }
+  .filters select { padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px;
+                    background: var(--card); font: inherit; }
+  table.summary { border-collapse: collapse; width: 100%; background: var(--card);
+                  font-size: 13.5px; }
+  table.summary th, table.summary td { border: 1px solid var(--line);
+                                       padding: 6px 9px; text-align: left;
+                                       vertical-align: top; }
+  table.summary thead th { position: sticky; top: 0; background: #eef1f6; z-index: 1; }
+  table.summary tr.hidden { display: none; }
+  td.chain { font-size: 13px; }
+  td.chain .seg { display: inline-block; margin-right: 4px; overflow-wrap: anywhere; }
+  .chain-main { margin-bottom: 3px; }
+  .chain-sub { font-size: 11.5px; color: var(--muted); padding-left: 10px;
+               border-left: 2px solid var(--line); line-height: 1.8; margin-top: 2px; }
+  td a { color: var(--accent); text-decoration: none; }
+  td a:hover { text-decoration: underline; }
+  span.yes { color: var(--high); font-weight: 600; }
+  span.no { color: var(--muted); }
+  /* 章节二 findings */
+  .finding { background: var(--card); border: 1px solid var(--line);
+             border-left-width: 5px; border-radius: 6px; padding: 10px 14px;
+             margin: 10px 0; scroll-margin-top: 60px; }
+  .finding.sev-high   { border-left-color: var(--high); }
+  .finding.sev-medium { border-left-color: var(--medium); }
+  .finding.sev-low    { border-left-color: var(--low); }
+  .finding.sev-info   { border-left-color: var(--info); }
+  .finding h3 { margin: 0 0 6px; }
+  .finding ul { margin: 0; padding-left: 20px; }
+  .finding a { color: var(--accent); text-decoration: none; }
+  .finding a:hover { text-decoration: underline; }
+  /* 章节三 SVG chain graphs */
+  .graph { background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+           margin: 10px 0; padding: 6px; }
+  .graph svg { width: 100%; height: auto; display: block; cursor: grab;
+               touch-action: none; }
+  .graph svg.dragging { cursor: grabbing; }
+  .graph svg .edge { fill: none; stroke: #64748b; stroke-width: 1.6; }
+  .graph svg .edge.dashed { stroke-dasharray: 6 4; }
+  .graph svg .node rect { fill: #eef2f9; stroke: #94a3b8; rx: 6; }
+  .graph svg .node.terminal rect { fill: #fdf6ec; stroke: #d97706;
+                                   stroke-dasharray: 4 3; }
+  .graph svg .node text { font-size: 13px; fill: var(--ink); }
+  .graph svg .node:hover rect { stroke: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>mgh-sdr 安全设计符合性复核报告</h1>
+  <div class="banner">发现是 LLM 生成的待复核候选,不是已确认漏洞。合并/处置前须人工复核。</div>
+  <section id="sec-overview">
+    <h2>报告头部</h2>
+    <div id="head-meta"></div>
+    <div id="grouping-overview"></div>
+  </section>
+  <section id="sec-summary">
+    <h2>章节一 简报表</h2>
+    <div id="summary"></div>
+    <p class="muted">阅读方式:维度列只标 是/否 + <code>P-NN</code> 编号,点击编号跳转
+    「章节二 问题详述」对应条目。`†` 未变更节点 · `⤷` 分支 · `⇢` mapper XML 终端 ·
+    `·` 同类延续。筛选为纯视图态,不改写本报告携带的数据。</p>
+  </section>
+  <section id="sec-findings">
+    <h2>章节二 问题详述</h2>
+    <div id="findings"></div>
+  </section>
+  <section id="sec-graphs">
+    <h2>章节三 分支调用链图</h2>
+    <div id="graphs"></div>
+  </section>
+  <section id="sec-ok-units">
+    <h2>无问题单元</h2>
+    <ul id="ok-units"></ul>
+  </section>
+  <section id="sec-boundaries">
+    <h2>诚实边界</h2>
+    <ul id="boundaries"></ul>
+  </section>
+</main>
+<!-- section: data (the ONLY per-run content; `</` escaped to `<\/` by the renderer) -->
+<script type="application/json" id="mgh-data">__MGH_DATA_JSON__</script>
+<!-- section: page js (vanilla; renders everything above from the embedded data) -->
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("mgh-data").textContent);
+
+  // The single string-escaping entry. Every dynamic value reaches the DOM through
+  // textContent or setAttribute (both auto-isolate), and string-concatenated
+  // innerHTML is never used for data — escapeHtml covers any string-level HTML
+  // need so there is exactly ONE sanctioned escape path, never two.
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function a(href, text) {
+    var n = document.createElement("a");
+    n.setAttribute("href", href);
+    n.textContent = String(text);
+    return n;
+  }
+
+  // ---- report head + grouping overview ------------------------------------
+  function renderMeta(d) {
+    var m = d.meta;
+    var box = document.getElementById("head-meta");
+    var ul = el("ul", "meta");
+    ul.appendChild(el("li", null, "分支:" + m.branch + "(base:" + m.base + ")"));
+    ul.appendChild(el("li", null, "时间:" + m.time_display));
+    ul.appendChild(el("li", null, "检查面:" + m.dimensions.join(", ")));
+    ul.appendChild(el("li", null, "敏感目录来源:" + m.sensitive_catalog_source
+      + m.catalog_note));
+    ul.appendChild(el("li", null, "外部仓结论:" + m.external_headline));
+    ul.appendChild(el("li", null, "单元:" + m.units_total + " 个(done "
+      + m.units_done + " / failed " + m.units_failed + ");findings 去重后 "
+      + m.findings_total + " 条(高 " + m.by_severity.high + " / 中 "
+      + m.by_severity.medium + " / 低 " + m.by_severity.low + " / 提示 "
+      + m.by_severity.info + ")"));
+    box.appendChild(ul);
+    var ov = document.getElementById("grouping-overview");
+    if (m.overview && m.overview.length) {
+      ov.appendChild(el("h3", null, "分组概览"));
+      var oul = el("ul", "meta");
+      m.overview.forEach(function (o) {
+        oul.appendChild(el("li", null, o.k + ":" + o.v));
+      });
+      ov.appendChild(oul);
+    }
+  }
+
+  // ---- 章节一 summary table (filters are view-state only) ------------------
+  var F = { sev: "", dim: "" };
+
+  function entryCell(td, rec) {
+    if (rec.href) td.appendChild(a(rec.href, rec.text));
+    else td.appendChild(el("span", null, rec.text));
+  }
+  function chainCell(td, rl) {
+    if (!rl.chain.length) { entryCell(td, rl.entry); return; }
+    // Two-tier display: the main line (entry → flow · same-class) reads at full size;
+    // branch (⤷) and mapper-terminal (⇢) segments drop into an indented, smaller
+    // sub-block. Segments keep their order and glyphs — read top-to-bottom the cell
+    // reproduces the plain-text chain exactly (the rows[] machine projection).
+    var main = [], sub = [];
+    rl.chain.forEach(function (s) {
+      (s.sep === " ⤷" || s.sep === " ⇢" ? sub : main).push(s);
+    });
+    function emit(parent, segs) {
+      segs.forEach(function (s) {
+        var sp = document.createElement("span");
+        sp.className = "seg";
+        if (s.sep) sp.appendChild(document.createTextNode(s.sep));
+        if (s.href) sp.appendChild(a(s.href, s.text));
+        else sp.appendChild(el("span", null, s.text));
+        parent.appendChild(sp);
+      });
+    }
+    var mainDiv = el("div", "chain-main");
+    emit(mainDiv, main);
+    td.appendChild(mainDiv);
+    if (sub.length) {
+      var subDiv = el("div", "chain-sub");
+      emit(subDiv, sub);
+      td.appendChild(subDiv);
+    }
+  }
+  function dimCell(td, row, dim, byP) {
+    var refs = row.issue_refs.filter(function (p) {
+      return byP[p] && byP[p].dimension === dim;
+    }).sort();
+    if (!refs.length) { td.appendChild(el("span", "no", "否")); return; }
+    td.appendChild(el("span", "yes", "是 ["));
+    refs.forEach(function (p, i) {
+      if (i) td.appendChild(document.createTextNode(", "));
+      td.appendChild(a("#" + p, p));     // in-page anchor jump to 章节二
+    });
+    td.appendChild(el("span", "yes", "]"));
+  }
+
+  function renderTable(d) {
+    var box = document.getElementById("summary");
+    if (!d.rows.length) {
+      box.appendChild(el("p", "muted",
+        "(无 grouping.json 单元数据:旧 run 布局,仅问题详述可用)"));
+      return;
+    }
+    var byP = {};
+    d.findings.forEach(function (f) { byP[f.pnum] = f; });
+    var links = {};
+    d.row_links.forEach(function (rl) { links[rl.unit_id] = rl; });
+
+    var bar = el("div", "filters");
+    bar.appendChild(el("span", null, "筛选:"));
+    var sevSel = el("select");
+    [["", "全部严重度"], ["high", "高"], ["medium", "中"], ["low", "低"],
+     ["info", "提示"]].forEach(function (o) {
+      var op = document.createElement("option");
+      op.value = o[0]; op.textContent = o[1];
+      sevSel.appendChild(op);
+    });
+    var dimSel = el("select");
+    var op0 = document.createElement("option");
+    op0.value = ""; op0.textContent = "全部维度";
+    dimSel.appendChild(op0);
+    d.dimension_columns.forEach(function (c) {
+      var op = document.createElement("option");
+      op.value = c; op.textContent = d.meta.dimension_cols[c] || c;
+      dimSel.appendChild(op);
+    });
+    var count = el("span", "muted");
+    bar.appendChild(sevSel); bar.appendChild(dimSel); bar.appendChild(count);
+    box.appendChild(bar);
+
+    var t = el("table", "summary");
+    var cols = ["接口/方法入口", "调用链", "是否前端接口", "前端使用"].concat(
+      d.dimension_columns.map(function (c) { return d.meta.dimension_cols[c] || c; }));
+    var thead = el("thead"), hr = el("tr");
+    cols.forEach(function (cname) { hr.appendChild(el("th", null, cname)); });
+    thead.appendChild(hr); t.appendChild(thead);
+    var tbody = el("tbody");
+    var trs = d.rows.map(function (row) {
+      var tr = el("tr");
+      var rl = links[row.unit_id] || { entry: { text: row.entry }, chain: [] };
+      var tdE = el("td"); entryCell(tdE, rl.entry); tr.appendChild(tdE);
+      var tdC = el("td", "chain"); chainCell(tdC, rl); tr.appendChild(tdC);
+      tr.appendChild(el("td", null, row.frontend_is));
+      tr.appendChild(el("td", null, row.frontend_count));
+      d.dimension_columns.forEach(function (dim) {
+        var td = el("td"); dimCell(td, row, dim, byP); tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+      return { row: row, tr: tr };
+    });
+    t.appendChild(tbody); box.appendChild(t);
+
+    function matches(row) {
+      if (F.sev && !row.issue_refs.some(function (p) {
+            return byP[p] && byP[p].severity === F.sev; })) return false;
+      if (F.dim && !row.issue_refs.some(function (p) {
+            return byP[p] && byP[p].dimension === F.dim; })) return false;
+      return true;
+    }
+    function apply() {
+      var n = 0;
+      trs.forEach(function (x) {
+        if (matches(x.row)) { x.tr.classList.remove("hidden"); n++; }
+        else x.tr.classList.add("hidden");
+      });
+      count.textContent = "显示 " + n + " / " + trs.length + " 行";
+    }
+    sevSel.addEventListener("change", function () { F.sev = sevSel.value; apply(); });
+    dimSel.addEventListener("change", function () { F.dim = dimSel.value; apply(); });
+    apply();
+  }
+
+  // ---- 章节二 findings (id = P-NN: the anchor the table jumps to) ----------
+  function renderFindings(d) {
+    var box = document.getElementById("findings");
+    if (!d.findings.length) {
+      box.appendChild(el("p", null,
+        "本次检查面内未产出任何问题记录;不代表「无风险」,仅代表本次检查面 + 基线"
+        + "投影下未命中。"));
+      return;
+    }
+    d.findings.forEach(function (f) {
+      var card = el("div", "finding sev-" + f.severity);
+      card.setAttribute("id", f.pnum);
+      card.appendChild(el("h3", null, f.pnum + " · " + f.dimension_label + " · "
+        + (f.route || "(独立变更单元)") + " · " + f.severity_label));
+      var ul = el("ul");
+      var li = el("li");
+      li.appendChild(document.createTextNode("位置:"));
+      if (f.loc.href) li.appendChild(a(f.loc.href, f.loc.text));
+      else li.appendChild(el("span", null, f.loc.text));
+      ul.appendChild(li);
+      if (f.risk) ul.appendChild(el("li", null, "风险:" + f.risk));
+      if (f.suggestion) ul.appendChild(el("li", null, "建议:" + f.suggestion));
+      if (f.control_ref) ul.appendChild(el("li", null, "命中存量控制:" + f.control_ref));
+      card.appendChild(ul);
+      box.appendChild(card);
+    });
+  }
+
+  // ---- 章节三 SVG chain graphs (layout coords computed by the renderer) ----
+  // XML namespace identifier — a name, not a fetched resource; nothing on this
+  // page loads from the network.
+  var SVGNS = "http://www.w3.org/2000/svg";
+
+  function buildSvg(g) {
+    var wrap = el("div", "graph");
+    var svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + g.width + " " + g.height);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    var byId = {};
+    g.nodes.forEach(function (n) { byId[n.id] = n; });
+    g.edges.forEach(function (e) {
+      var s = byId[e.src], t = byId[e.dst];
+      if (!s || !t) return;
+      var sx = s.x + s.w, sy = s.y + s.h / 2, dx = t.x, ty = t.y + t.h / 2;
+      var mx = (sx + dx) / 2;
+      var p = document.createElementNS(SVGNS, "path");
+      p.setAttribute("d", "M " + sx + " " + sy + " H " + mx + " V " + ty + " H " + dx);
+      p.setAttribute("class", "edge" + (e.dashed ? " dashed" : ""));
+      svg.appendChild(p);
+    });
+    g.nodes.forEach(function (n) {
+      var grp = document.createElementNS(SVGNS, "g");
+      grp.setAttribute("class", "node" + (n.terminal ? " terminal" : ""));
+      var r = document.createElementNS(SVGNS, "rect");
+      r.setAttribute("x", n.x); r.setAttribute("y", n.y);
+      r.setAttribute("width", n.w); r.setAttribute("height", n.h);
+      grp.appendChild(r);
+      var tx = document.createElementNS(SVGNS, "text");
+      tx.setAttribute("x", n.x + 10);
+      tx.setAttribute("y", n.y + n.h / 2);
+      tx.setAttribute("dominant-baseline", "middle");
+      tx.textContent = n.label;
+      grp.appendChild(tx);
+      if (n.title) {
+        var ti = document.createElementNS(SVGNS, "title");
+        ti.textContent = n.title;          // hover: file:line
+        grp.appendChild(ti);
+      }
+      svg.appendChild(grp);
+    });
+    attachZoomPan(svg, g);
+    wrap.appendChild(svg);
+    wrap.appendChild(el("p", "muted", "滚轮缩放 · 按住拖拽平移"));
+    return wrap;
+  }
+
+  function attachZoomPan(svg, g) {
+    var vb = { x: 0, y: 0, w: g.width, h: g.height };
+    function apply() {
+      svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h);
+    }
+    svg.addEventListener("wheel", function (ev) {
+      ev.preventDefault();
+      var r = svg.getBoundingClientRect();
+      var px = vb.x + (ev.clientX - r.left) / r.width * vb.w;
+      var py = vb.y + (ev.clientY - r.top) / r.height * vb.h;
+      var k = ev.deltaY > 0 ? 1.15 : 1 / 1.15;
+      var nw = Math.min(Math.max(vb.w * k, 200), 20000);
+      var nh = vb.h * (nw / vb.w);
+      vb.x = px - (px - vb.x) * (nw / vb.w);
+      vb.y = py - (py - vb.y) * (nh / vb.h);
+      vb.w = nw; vb.h = nh;
+      apply();
+    }, { passive: false });
+    var drag = null;
+    svg.addEventListener("pointerdown", function (ev) {
+      drag = { x: ev.clientX, y: ev.clientY };
+      svg.setAttribute("class", "dragging");
+    });
+    svg.addEventListener("pointermove", function (ev) {
+      if (!drag) return;
+      var r = svg.getBoundingClientRect();
+      vb.x -= (ev.clientX - drag.x) / r.width * vb.w;
+      vb.y -= (ev.clientY - drag.y) / r.height * vb.h;
+      drag = { x: ev.clientX, y: ev.clientY };
+      apply();
+    });
+    ["pointerup", "pointerleave"].forEach(function (t) {
+      svg.addEventListener(t, function () {
+        drag = null;
+        svg.removeAttribute("class");
+      });
+    });
+  }
+
+  function renderGraphs(d) {
+    var box = document.getElementById("graphs");
+    if (!d.chain_graphs.length) {
+      box.appendChild(el("p", "muted", "(无带分支的单元:线性链不画图)"));
+      return;
+    }
+    d.chain_graphs.forEach(function (g) {
+      box.appendChild(el("h3", null, g.unit_id + " · " + g.route));
+      box.appendChild(buildSvg(g));
+    });
+  }
+
+  // ---- 收尾 sections --------------------------------------------------------
+  function renderOkUnits(d) {
+    var box = document.getElementById("ok-units");
+    if (d.ok_units.length) {
+      d.ok_units.forEach(function (u) {
+        box.appendChild(el("li", null, u + "(复核通过,merge 前放行参考)"));
+      });
+    } else {
+      box.appendChild(el("li", null, "(无:全部单元均产出问题记录或失败)"));
+    }
+  }
+  function renderBoundaries(d) {
+    var box = document.getElementById("boundaries");
+    d.boundaries.forEach(function (b) { box.appendChild(el("li", null, b)); });
+  }
+
+  renderMeta(DATA);
+  renderTable(DATA);
+  renderFindings(DATA);
+  renderGraphs(DATA);
+  renderOkUnits(DATA);
+  renderBoundaries(DATA);
+})();
+</script>
+</body>
+</html>
+"""
+
+
 def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
-            out_dir: Path | None):
+            out_dir: Path):
     branch = ctx.get("branch", "")
     base = ctx.get("base", "")
     dims = ctx.get("dimensions") or DEFAULT_DIMENSIONS
@@ -481,7 +1021,7 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
                   if s.startswith("unapproved: ")]
     now = datetime.now().astimezone()
     ts = now.strftime("%Y%m%d_%H%M%S")
-    report_path = repo / f"{TOOL_NAME}-{_safe_name(branch)}-{ts}.md"
+    report_path = repo / f"{TOOL_NAME}-{_safe_name(branch)}-{ts}.html"
 
     total = sum(len(v) for v in by_dim.values())
     by_sev = {"high": 0, "medium": 0, "low": 0, "info": 0}
@@ -519,163 +1059,130 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
             if key in pnums:
                 unit_refs.setdefault(d["unit"], set()).add(pnums[key])
 
-    # ---- report body ----------------------------------------------------------
-    L: list[str] = []
-    L.append(f"# {TOOL_NAME} 安全设计符合性复核报告")
-    L.append("")
-    L.append(f"- 分支:`{branch}`(base:`{base}`)")
-    L.append(f"- 时间:{now.strftime('%Y-%m-%d %H:%M:%S %z')}")
-    L.append(f"- 检查面:{', '.join(dims)}")
-    L.append(f"- 敏感目录来源:{catalog_source}"
-             + ("(项目目录复用)" if catalog_source == "project"
-                else "(默认模板回退:PIPL/GB-T 35273 37 项;与 sra/srr 的显式行为分歧)"))
-    if external:
-        L.append(f"- 外部仓结论:{', '.join(e.get('slug', '?') for e in external)}"
-                 f"({len(external)} 仓,检索时点快照)")
-    elif unapproved:
-        L.append(f"- 外部仓结论:无(外部仓未授权,前端相关检查面未覆盖)")
-    else:
-        L.append("- 外部仓结论:无(未声明 / 不可达降级,前端相关检查面未覆盖)")
-    L.append(f"- 单元:{len(drafts) + len(failed)} 个(done {len(drafts)} / failed "
-             f"{len(failed)});findings 去重后 {total} 条"
-             f"(高 {by_sev['high']} / 中 {by_sev['medium']} / 低 {by_sev['low']} / "
-             f"提示 {by_sev['info']})")
-
-    # 分组概览:unit counts + anchoring/merge summary + exclusion counts (grouping
-    # quality at a glance — was previously unobservable from the report alone).
-    g_counts = grouping.get("counts") or {}
-    if g_counts or excluded or cg_stats:
-        L.append("")
-        L.append("## 分组概览")
-        L.append("")
-        if g_counts:
-            L.append(f"- 单元数:interface {g_counts.get('interface', 0)} / "
-                     f"standalone {g_counts.get('standalone', 0)}"
-                     f"(total {grouping.get('total', '?')})")
-        if cg_stats:
-            L.append(f"- codegraph:{'on' if grouping.get('codegraph') else 'off'}"
-                     f"(路由锚 {cg_stats.get('anchors_changed', 0)}、向上锚定 "
-                     f"{cg_stats.get('anchors_upstream', 0)}、链合并 "
-                     f"{cg_stats.get('chain_merged', 0)}、捕获调用边 "
-                     f"{cg_stats.get('edges_captured', 0)}、变更集内边 "
-                     f"{cg_stats.get('edges_in_changed_set', 0)})")
-        if excluded.get("count"):
-            detail = "、".join(f"{k} {v}" for k, v in sorted((excluded.get("by_reason")
-                                                              or {}).items()))
-            L.append(f"- 排除文件:{excluded['count']} 个"
-                     + (f"({detail})" if detail else "")
-                     + "(未进入评审,详见诚实边界)")
-    L.append("")
-    L.append("> **发现是 LLM 生成的待复核候选,不是已确认漏洞。** 合并/处置前须人工复核。")
-    L.append("")
-
-    # ---- 章节一 简报表 ---------------------------------------------------------
     g_units = grouping.get("units")
-    rows: list[dict] = []
     if g_units:
-        rows = _build_rows(g_units, by_dim, pnums, unit_refs, external, repo)
-    L.append("## 章节一 简报表")
-    L.append("")
-    if rows:
-        cols = ["接口/方法入口", "调用链", "是否前端接口", "前端使用"] + \
-               [_dim_col(d) for d in _row_dimensions(dims, rows)]
-        L.append("| " + " | ".join(cols) + " |")
-        L.append("| " + " | ".join(["---"] * len(cols)) + " |")
-        for r in rows:
-            cells = [r["entry_link"].replace("|", "\\|"),
-                     r["chain_link"].replace("|", "\\|"),
-                     r["frontend_is"].replace("|", "\\|"),
-                     r["frontend_count"].replace("|", "\\|")]
-            for d in _row_dimensions(dims, rows):
-                refs = r["dim_refs"].get(d)
-                cells.append(("是 [" + ", ".join(sorted(refs)) + "]") if refs else "否")
-            L.append("| " + " | ".join(cells) + " |")
-        L.append("")
-        L.append("> 阅读方式:维度列只标 是/否 + `P-NN` 编号(纯文本,无内部锚点);"
-                 "编号详情统一看「章节二 问题详述」。`†` 未变更节点 · `⤷` 分支 · "
-                 "`⇢` mapper XML 终端 · `·` 同类延续。")
-        L.append("")
+        rows, manifest_rows, row_links = _build_rows(g_units, by_dim, unit_refs,
+                                                     external, repo)
     else:
-        L.append("(无 grouping.json 单元数据:旧 run 布局,仅问题详述可用)")
-        L.append("")
+        rows, manifest_rows, row_links = [], [], []
+    dim_cols = _row_dimensions(dims, rows)
 
-    # ---- 章节二 问题详述 -------------------------------------------------------
-    L.append("## 章节二 问题详述")
-    L.append("")
-    if not flat:
-        L.append("本次检查面内未产出任何问题记录;不代表「无风险」,仅代表本次检查面 + 基线"
-                 "投影下未命中。")
-        L.append("")
-    else:
-        for f in flat:   # flat is already severity-asc then route/file = P-NN order
-            label = _DIMENSION_LABEL.get(f["dimension"], f["dimension"])
-            L.append(f"### {f['pnum']} · {label} · "
-                     f"{f['route'] or '(独立变更单元)'} · "
-                     f"{_SEVERITY_LABEL.get(f['severity'], f['severity'])}")
-            # 位置:有 line → `file:line`;无 line → `file`(line_hint)。链接包装现行
-            # 显示文本(不可链化时逐字保持原形态),NEVER 为换取链接丢信息
-            loc_txt = f"`{f['file']}`"
-            if f.get("line"):
-                loc_txt += f":{f['line']}"
-            elif f.get("line_hint"):
-                loc_txt += f"({f['line_hint']})"
-            loc = _source_link(loc_txt, f["file"], f.get("line"), repo)
-            L.append(f"- 位置:{loc}")
-            if f["risk"]:
-                L.append(f"- 风险:{f['risk']}")
-            if f["suggestion"]:
-                L.append(f"- 建议:{f['suggestion']}")
-            if f["control_ref"]:
-                L.append(f"- 命中存量控制:{f['control_ref']}")
-            L.append("")
+    findings = []
+    for f in flat:   # flat is already severity-asc then route/file = P-NN order
+        loc_txt = f["file"]
+        if f.get("line"):
+            loc_txt += f":{f['line']}"
+        elif f.get("line_hint"):
+            loc_txt += f"({f['line_hint']})"
+        findings.append({
+            "pnum": f["pnum"],
+            "dimension": f["dimension"],
+            "dimension_label": _DIMENSION_LABEL.get(f["dimension"], f["dimension"]),
+            "severity": f["severity"],
+            "severity_label": _SEVERITY_LABEL.get(f["severity"], f["severity"]),
+            "route": f["route"],
+            "loc": {"text": loc_txt, "href": _href_of(f["file"], f.get("line"), repo),
+                    "line": f.get("line")},
+            "line_hint": f["line_hint"],
+            "risk": f["risk"],
+            "suggestion": f["suggestion"],
+            "control_ref": f.get("control_ref"),
+        })
 
-    # ---- 章节三 分支调用链图 ----------------------------------------------------
-    # 真实分支 = a non-external node carries branch_of (a java fan-out). branch_of on
-    # an `external` mapper-terminal node is D3 encoding, NOT a branch — a linear chain
-    # whose only branch_of is its ⇢ terminal stays in 章节一 and draws NO diagram.
+    # 章节三: real branches only = a NON-external node carries branch_of (a java
+    # fan-out). branch_of on an `external` mapper-terminal node is encoding, NOT a
+    # branch — a linear chain whose only branch_of is its ⇢ terminal draws NO diagram.
     branch_units = [u for u in g_units or []
                     if any(n.get("branch_of") is not None
                            and n.get("change") != "external"
                            for n in (u.get("chain") or []))]
-    L.append("## 章节三 分支调用链图")
-    L.append("")
-    if not branch_units:
-        L.append("(无带分支的单元:线性链不画图)")
-        L.append("")
-    else:
-        for u in branch_units:
-            routes = str(u.get("route", "")).split(";")
-            L.append(f"#### {u.get('unit_id')} · {routes[0]}")
-            L.append("")
-            L.append(_mermaid_chain(u.get("unit_id"), routes[0], u.get("chain") or []))
-            L.append("")
+    chain_graphs = []
+    for u in branch_units:
+        g = _layout_graph(u, str(u.get("route", "")).split(";")[0])
+        if g:
+            chain_graphs.append(g)
 
-    L.append("## 无问题单元")
-    L.append("")
-    if ok_units:
-        for u in ok_units:
-            L.append(f"- `{u}`(复核通过,merge 前放行参考)")
+    if external:
+        ext_headline = (f"{', '.join(e.get('slug', '?') for e in external)}"
+                        f"({len(external)} 仓,检索时点快照)")
+    elif unapproved:
+        ext_headline = "无(外部仓未授权,前端相关检查面未覆盖)"
     else:
-        L.append("- (无:全部单元均产出问题记录或失败)")
-    L.append("")
+        ext_headline = "无(未声明 / 不可达降级,前端相关检查面未覆盖)"
+    catalog_note = ("(项目目录复用)" if catalog_source == "project"
+                    else "(默认模板回退:PIPL/GB-T 35273 37 项;与 sra/srr 的显式行为分歧)")
 
-    L.append("## 诚实边界")
-    L.append("")
-    for b in _boundaries(by_dim, failed, catalog_source, external, dims,
-                         ctx.get("baseline_truncated", False), excluded, skipped,
-                         slimmed):
-        L.append(f"- {b}")
-    L.append("")
+    # 分组概览: unit counts + anchoring/merge summary + exclusion counts (grouping
+    # quality at a glance — observable without opening grouping.json). Rides
+    # grouping.json in the run dir (older layouts: the section is simply absent).
+    overview = []
+    g_counts = grouping.get("counts") or {}
+    if g_counts or excluded or cg_stats:
+        if g_counts:
+            overview.append({"k": "单元数",
+                             "v": f"interface {g_counts.get('interface', 0)} / "
+                                  f"standalone {g_counts.get('standalone', 0)}"
+                                  f"(total {grouping.get('total', '?')})"})
+        if cg_stats:
+            overview.append({"k": "codegraph",
+                             "v": ("on" if grouping.get("codegraph") else "off")
+                                  + f"(路由锚 {cg_stats.get('anchors_changed', 0)}、"
+                                    f"向上锚定 {cg_stats.get('anchors_upstream', 0)}、"
+                                    f"链合并 {cg_stats.get('chain_merged', 0)}、"
+                                    f"捕获调用边 {cg_stats.get('edges_captured', 0)}、"
+                                    f"变更集内边 {cg_stats.get('edges_in_changed_set', 0)})"})
+        if isinstance(excluded, dict) and excluded.get("count"):
+            detail = "、".join(f"{k} {v}" for k, v in
+                               sorted((excluded.get("by_reason") or {}).items()))
+            overview.append({"k": "排除文件",
+                             "v": f"{excluded['count']} 个"
+                                  + (f"({detail})" if detail else "")
+                                  + "(未进入评审,详见诚实边界)"})
+
+    boundaries = _boundaries(by_dim, failed, catalog_source, external, dims,
+                             ctx.get("baseline_truncated", False), excluded,
+                             skipped, slimmed)
+
+    data = {
+        "v": 1,
+        "meta": {
+            "tool": TOOL_NAME,
+            "branch": branch,
+            "base": base,
+            "ts": ts,
+            "time_display": now.strftime("%Y-%m-%d %H:%M:%S %z"),
+            "dimensions": list(dims),
+            "dimension_cols": {d: _dim_col(d) for d in dim_cols},
+            "sensitive_catalog_source": catalog_source,
+            "catalog_note": catalog_note,
+            "external_repos": [{"slug": e.get("slug"), "path": e.get("path"),
+                                "branch_sync_note": e.get("branch_sync_note")}
+                               for e in external],
+            "external_headline": ext_headline,
+            "units_total": len(drafts) + len(failed),
+            "units_done": len(drafts),
+            "units_failed": len(failed),
+            "findings_total": total,
+            "by_severity": by_sev,
+            "overview": overview,
+        },
+        "dimension_columns": dim_cols,
+        "rows": manifest_rows,
+        "row_links": row_links,
+        "findings": findings,
+        "chain_graphs": chain_graphs,
+        "ok_units": ok_units,
+        "boundaries": boundaries,
+    }
+
+    html_text = _HTML_TEMPLATE.replace("__MGH_DATA_JSON__", _json_embed(data))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = out_dir / (report_path.name + ".tmp")
-    tmp.write_text("\n".join(L) + "\n", encoding="utf-8")
-
-    manifest_rows = [{
-        "unit_id": r["unit_id"], "entry": r["entry"], "chain": r["chain"],
-        "frontend_is": r["frontend_is"], "frontend_count": r["frontend_count"],
-        "issue_refs": sorted(r["all_refs"]),
-    } for r in rows]
+    tmp.write_text(html_text, encoding="utf-8")
+    dtmp = out_dir / (DATA_FILE + ".tmp")
+    dtmp.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n",
+                    encoding="utf-8")
 
     manifest = {
         "tool": TOOL_NAME,
@@ -696,9 +1203,7 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
             "failed_units": len(failed),
             "excluded_files": excluded.get("count", 0) if isinstance(excluded, dict) else 0,
         },
-        "boundaries": _boundaries(by_dim, failed, catalog_source, external, dims,
-                                  ctx.get("baseline_truncated", False), excluded,
-                                  skipped, slimmed),
+        "boundaries": boundaries,
         "failed_units": failed,
         "report": str(report_path),
         "ts": ts,
@@ -707,10 +1212,10 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n",
                     encoding="utf-8")
     # atomic placement (same-volume os.replace): a same-second re-run overwrites cleanly
-    import os
     os.replace(tmp, report_path)
+    os.replace(dtmp, out_dir / DATA_FILE)
     os.replace(mtmp, out_dir / "sdr_manifest.json")
-    return report_path, manifest
+    return report_path, manifest, data
 
 
 def _run(args) -> dict:
@@ -739,12 +1244,15 @@ def _run(args) -> dict:
     drafts, failed = _load_drafts(run_dir)
     by_dim = _merge_findings(drafts)
     out_dir = Path(args.out_dir).resolve() if args.out_dir else run_dir
-    report_path, manifest = _render(repo, run_dir, ctx, by_dim, drafts, failed, out_dir)
+    report_path, manifest, _data = _render(repo, run_dir, ctx, by_dim, drafts, failed,
+                                           out_dir)
     _eprint(f"[render_sdr_report] report={report_path}")
     _eprint(f"[render_sdr_report] findings={manifest['counts']['findings']} "
             f"failed_units={manifest['counts']['failed_units']} "
             f"boundaries={len(manifest['boundaries'])}")
-    result = {"report": str(report_path), "manifest": str(out_dir / "sdr_manifest.json"),
+    result = {"report": str(report_path),
+              "data": str(out_dir / DATA_FILE),
+              "manifest": str(out_dir / "sdr_manifest.json"),
               "counts": manifest["counts"], "boundaries": len(manifest["boundaries"]),
               "checked": False}
     return result
@@ -762,6 +1270,16 @@ def _check(run_dir: Path) -> int:
     except (OSError, ValueError) as e:
         _eprint(f"error: malformed sdr_manifest.json: {e}")
         return 2
+    # canonical data file: present + parseable
+    dp = run_dir / DATA_FILE
+    data = None
+    if not dp.is_file():
+        violations.append(f"{DATA_FILE} missing (the canonical data file)")
+    else:
+        try:
+            data = json.loads(dp.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            violations.append(f"malformed {DATA_FILE}: {e}")
     # draft truth vs manifest counts
     drafts, failed = _load_drafts(run_dir)
     by_dim = _merge_findings(drafts)
@@ -780,44 +1298,38 @@ def _check(run_dir: Path) -> int:
         violations.append(f"report file missing: {report!r}")
     else:
         text = Path(report).read_text(encoding="utf-8")
+        if Path(report).suffix.lower() != ".html":
+            violations.append(f"report is not a .html file: {report}")
         if "诚实边界" not in text:
             violations.append("report missing honesty-boundary section")
         if report.replace("\\", "/").find("/openspec/") >= 0:
             violations.append("report path under openspec/ (NEVER allowed)")
-        # 纯文本 P-NN 引用(目标编辑器不支持 md 内部锚点):any anchor form = violation.
-        # The ](#  pattern only matches INTERNAL anchors (`(` immediately followed by
-        # `#`); source-file links ](src/...#L42) carry a path segment before the `#`
-        # and are the intended render form (design D2/D3), so they never match.
-        for pat, what in ((r"<a id=", "html anchor <a id="), (r"\{#", "pandoc anchor {#"),
-                          (r"\]\(#", "md link anchor ](#")):
-            if re.search(pat, text):
-                violations.append(f"report contains {what} (NEVER: anchors are not "
-                                  f"supported by target editors)")
-        # rows[] projection must match the rendered table body row count
-        if "## 章节一" in text:
-            in_table = False
-            header_seen = False
-            table_rows = 0
-            for ln in text.splitlines():
-                if ln.startswith("## "):
-                    in_table = ln.startswith("## 章节一")
-                    header_seen = False
-                    continue
-                if in_table and ln.startswith("|"):
-                    if "---" in ln:
-                        header_seen = True   # separator under the header row
-                        continue
-                    if not header_seen:
-                        header_seen = True   # the header row itself
-                        continue
-                    table_rows += 1
-            if m.get("rows") is not None and len(m["rows"]) != table_rows:
-                violations.append(f"manifest rows length {len(m['rows'])} != report "
-                                  f"table rows {table_rows}")
-        else:
-            # old-layout runs without grouping.json render no 简报表; rows must be absent
-            if m.get("rows"):
-                violations.append("manifest has rows[] but report has no 简报表 section")
+        # text-level structure assertions (no browser): the embedded data block and
+        # the per-section anchor markers the page's in-page navigation relies on
+        for marker in ('id="mgh-data"', 'id="sec-overview"', 'id="sec-summary"',
+                       'id="sec-findings"', 'id="sec-graphs"', 'id="sec-ok-units"',
+                       'id="sec-boundaries"'):
+            if marker not in text:
+                violations.append(f"report missing section marker {marker}")
+        # two carriers, one dict: the embedded block must parse to the data file's
+        # exact content, and the manifest rows[] must equal the data rows[]
+        if data is not None:
+            mm = re.search(r'<script type="application/json" id="mgh-data">(.*?)'
+                           r'</script>', text, re.S)
+            if not mm:
+                violations.append("report has no embedded data block")
+            else:
+                try:
+                    embedded = json.loads(mm.group(1))
+                except ValueError as e:
+                    embedded = None
+                    violations.append(f"embedded data block not parseable JSON: {e}")
+                if embedded is not None and embedded != data:
+                    violations.append("embedded data block != sdr_report_data.json "
+                                      "(carrier drift)")
+            if m.get("rows") != (data.get("rows") if isinstance(data, dict) else None):
+                violations.append("manifest rows[] != data file rows[] (projection "
+                                  "drift)")
     # the renderer NEVER writes beyond the report + run dir: the report must live at the
     # repo root and the manifest in the run dir
     if "sdr_manifest.json" not in str(mp):
@@ -836,12 +1348,14 @@ def _check(run_dir: Path) -> int:
 def main():
     ap = argparse.ArgumentParser(
         description="deterministic summary renderer for /mgh-sdr: dedup-merge fan-out "
-                    "draft findings and render the human-facing report at the project root")
+                    "draft findings and render the self-contained single-file HTML "
+                    "report + canonical data JSON for the run")
     ap.add_argument("--run-dir", help="absolute run dir (<repo>/.mgh-sdr/runs/<ts>)")
     ap.add_argument("--repo", help="absolute target repo root (report lands here)")
-    ap.add_argument("--out-dir", help="manifest output dir (default: the run dir)")
+    ap.add_argument("--out-dir", help="manifest/data output dir (default: the run dir)")
     ap.add_argument("--check", metavar="<run-dir>",
-                    help="validate a run dir's manifest + report (fail-loud exit 2)")
+                    help="validate a run dir's data file, manifest + report "
+                         "(fail-loud exit 2)")
     args = ap.parse_args()
 
     for stream in (sys.stdout, sys.stderr):

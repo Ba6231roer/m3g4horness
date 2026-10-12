@@ -134,6 +134,19 @@ class ListSdrStepsTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["steps"][0]["discipline"],
                          state["discipline_reminders"])
 
+    def test_render_step_names_html_report_and_data_file(self):
+        # improve-mgh-sdr-report-html-render: the render step's output surface is the
+        # self-contained .html report + the canonical data file beside the manifest —
+        # a stale `.md` pattern here would send an agent hunting a file that is never
+        # produced again.
+        code, out, err = self._run("--step", "render")
+        self.assertEqual(code, 0, err)
+        pattern = json.loads(out)["steps"][0]["output"]["path_pattern"]
+        self.assertIn(".html", pattern)
+        self.assertNotIn(".md", pattern)
+        self.assertIn("sdr_report_data.json", pattern)
+        self.assertIn("sdr_manifest.json", pattern)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

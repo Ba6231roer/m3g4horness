@@ -2054,6 +2054,43 @@ def _check(run_dir: Path) -> int:
     return 0
 
 
+def _summary_projection(result: dict) -> dict:
+    """--summary stdout view (design D4): a fixed-shape projection of the SAME run —
+    counts + distribution + paging + the absolute-path `pending[]` (逐字, unchanged
+    form), dropping the heavy `units[]` / `codegraph_stats` / `excluded.by_reason`
+    detail. Pure stdout transform: `_enumerate` already materialized slices + wrote
+    grouping.json identically; the DEFAULT (no --summary) stdout is untouched.
+
+    Paging note: diff_group has no byte-budget auto-shrink (that lives only in the init
+    `list_*` family), so `--offset/--limit` are the sole levers here and `effective_limit`
+    reports the count actually returned on this page."""
+    units = result.get("units", [])
+    counts = result.get("counts", {})
+    page = result.get("pending", [])
+    return {
+        "repo": result["repo"],
+        "base": result["base"],
+        "branch": result["branch"],
+        "summary": {
+            "pending_total": sum(1 for u in units if u.get("status") == "pending"),
+            "done": result.get("done", 0),
+            "failed": result.get("failed", 0),
+            "by_type": {
+                "interface": counts.get("interface", 0),
+                "standalone": counts.get("standalone", 0),
+                "partN": sum(1 for u in units if "-part" in (u.get("unit_id") or "")),
+            },
+            "excluded_count": result.get("excluded", {}).get("count", 0),
+            "empty": result.get("empty", False),
+            "effective_limit": len(page),
+            "offset": result.get("offset", 0),
+        },
+        # pending[] carried verbatim (absolute paths) — the dispatcher consumes the SAME
+        # field shapes in both forms (design D4 二选一 = 保持绝对逐字)
+        "pending": page,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="deterministic diff collection + interface-dimension grouping for "
@@ -2091,6 +2128,12 @@ def main():
     ap.add_argument("--offset", type=int, default=0, help="page offset (default 0)")
     ap.add_argument("--limit", type=int, default=None,
                     help="max pending items per page (default: all)")
+    ap.add_argument("--summary", action="store_true",
+                    help="stdout a fixed-shape projection (identical side effects + disk "
+                         "artifacts + default form unchanged): summary{pending_total,done,"
+                         "failed,by_type{interface,standalone,partN},excluded_count,empty,"
+                         "effective_limit,offset} + absolute-path pending[]; drops the "
+                         "heavy units[]/codegraph_stats detail for a single-screen read")
     ap.add_argument("--resume", action="store_true",
                     help="call-shape parity: disk markers are ALWAYS the truth source "
                          "(.done units skipped, .failed terminal)")
@@ -2140,7 +2183,8 @@ def main():
         return 2
 
     result = _enumerate(args)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(_summary_projection(result) if args.summary else result,
+                     ensure_ascii=False))
     return 0
 
 

@@ -35,7 +35,10 @@ root context — sentinel discovery is anchor-relative — but is NOT used as a 
 target, to avoid over-blocking when the orchestrator did not pin one).
 
 Blocks the real-world failure shapes —
-  (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( / .json);
+  (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( / .json),
+      and ANY heredoc/here-string inline code fed to the interpreter (`py - <<EOF` /
+      `py - <<< '…'` / `… | python3 - <<'EOF'`) — blocked by SHAPE alone (no body-token sniffing:
+      heredoc bodies are often invisible or truncated in the command string);
   (b) Write/Edit of ANY script extension {.py,.ps1,.sh,.bash,.zsh,.bat,.cmd,.ts,.js,.mjs,.cjs}
       — runtime scripts are READ-ONLY (NO path whitelist: the prior core/scripts and
       tests/tools/hooks exemptions only mattered while inactive, at which point main() already
@@ -157,11 +160,38 @@ Blocks the real-world failure shapes —
       indirection (`$p='D:\\out'; cp x $p`) extracts no bare path; an unknown write verb INTO a
       declared read root passes the net (the root is in the read allow-set) — declared roots
       are user-approved read-only trees.
+      (harden-mgh-bash-path-allowlist): with a pinned target, EVERY path-like token in the
+      command (Windows drive-letter absolute / UNC / POSIX absolute / `..`-leading resolved
+      against the guard cwd / `~/`-leading expanduser-resolved; bare `~` is NOT a token; bare
+      `..` without a separator is NOT a token; quoted forms are stripped; tokens containing
+      `://` are URL fragments and excluded) MUST resolve inside the unified read allow-set —
+      MGH_TARGET ∪ sentinel read_roots[] ∪ project config read_roots[] — REGARDLESS of which
+      verb leads the command. Closes the "verb not in any enumeration table" escape class
+      (robocopy, curl -o, .NET static write methods, Get-Content of an out-of-tree file,
+      Expand-Archive, …). Runs LAST in the Bash chain (after the mutation / introspection /
+      temp / aggregate / file-assoc / search / listing / interpreter / redirect rules) so
+      mutation-shaped hits keep surfacing their specific write/delete recipes; the verb tables
+      REMAIN IN FORCE as refinements (write/delete wording, cwd-drift coverage, init/ut-init
+      P1 root pollution). Target unpinned => degrade to pass (mirror of every other path
+      rule). Residual boundaries (regex-over-string, NOT a shell parser): alias/variable
+      indirection (`$p='D:\\out'; cp x $p`) extracts no bare path; an unknown write verb INTO a
+      declared read root passes the net (the root is in the read allow-set) — declared roots
+      are user-approved read-only trees.
+  (n) dsh-dialect bypass surfaces (add-mgh-dsh-host-foundation; names are the shim-normalized
+      guard names, NEVER dsh field names): `RunCode` = the host's bundled in-process code
+      runner, the direct analogue of the blocked `py -c` inline-interpreter shape — denied
+      inside a run-domain with a recipe pointing at the sanctioned exit (run the declared
+      leaf scripts via the shell tool). `TerminalIO` (terminal_open/send/read/signal/close/
+      list) and `JobCtl` (job_output/job_list/job_kill) are interactive/background execution
+      surfaces that would let a blocked foreground command continue out-of-sight — denied
+      inside a run-domain outright. The dsh `pwsh` shell tool is normalized to the `Bash`
+      face by the shim and hits rules (a)-(m) with zero guard-side code.
 On a hit: exit 2 (Claude Code blocks the call) + stderr recipe pointing at the sanctioned
 primitives (list_* --materialize input_path / describe_artifact / producer stdout).
 
 Claude Code feeds the tool call as JSON on stdin:
-  {"tool_name":"Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep", "tool_input":{...}, ...}
+  {"tool_name":"Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep|RunCode|TerminalIO|JobCtl", "tool_input":{...}, ...}
+  (RunCode/TerminalIO/JobCtl appear only via the dsh shim face.)
 
 Zero runtime deps (Python >=3.10 stdlib: json/os/pathlib/re/sys). Idempotent, stateless,
 no TTY.
@@ -203,6 +233,15 @@ _INTRO_TOKENS = ("import json", "open(", "load(", ".json")
 _PYC_WRITE_TOKENS = ("makedirs", "mkdir", "write(", "write_text", "write_bytes",
                      "shutil.copy", "shutil.move", "shutil.rmtree", "os.replace",
                      "os.rename", "os.remove", "os.unlink")
+# Inline interpreter code shapes (rule (a)). The `-c` alternative keeps its EXISTING judged
+# path (_is_introspect_py_c, body-token gated — benign `py -c` behavior unchanged); the
+# heredoc (`- <<`) / here-string (`- <<<`) alternatives block by SHAPE alone, because a
+# heredoc body is often invisible or truncated in the command string, so token sniffing is
+# unreliable there and feeding inline code to an interpreter IS the violation shape. A bare
+# `-` WITHOUT `<<` (e.g. `git log -`, other stdin piping) is deliberately NOT in this rule
+# face — minimal interception surface, new observed shapes net in later (same stance as the
+# Bash verb tables).
+_PY_INLINE_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9]*\s+(?:-c\b|- <<<|- <<)')
 
 # Script extensions blocked at runtime (leaf scripts read-only; .ts covers the opencode plugin
 # glue -- its install-time write happens while the guard is inactive). .json/.md are NOT here
@@ -702,6 +741,18 @@ def _is_introspect_py_c(cmd: str) -> bool:
     return any(tok in low for tok in _INTRO_TOKENS)
 
 
+def _is_py_inline_heredoc(cmd: str) -> bool:
+    """Shape-only heredoc/here-string detection (rule (a) extension): the command body is
+    split into segments on `;`/`&&`/`||`/`|` and each segment judged independently. A
+    `-c`-shaped match is left to _is_introspect_py_c (behavior unchanged), so only the
+    `-` + `<<`/`<<<` form blocks here. No body-token sniffing."""
+    for seg in re.split(r"&&|\|\||[;|]", cmd):
+        for m in _PY_INLINE_RX.finditer(seg):
+            if "-c" not in m.group(0):
+                return True
+    return False
+
+
 def _out_of_tree_mutation(command: str, target, cwd):
     """Decide a Bash write/delete-verb (or `py -c` write shape) for write confinement.
 
@@ -1182,6 +1233,11 @@ def main():
             sys.stderr.write(
                 f"blocked: ad-hoc `py -c` introspection in {domain} run-domain.\n  {_recipe(domain)}\n")
             return 2
+        if _is_py_inline_heredoc(cmd):
+            sys.stderr.write(
+                f"blocked: ad-hoc inline interpreter code (heredoc/here-string fed to "
+                f"`py`) in {domain} run-domain.\n  {_recipe(domain)}\n")
+            return 2
         # temp-dir write + read-back is checked BEFORE the aggregate read: a list_* command that
         # carries an aggregate as a --flag AND redirects stdout to temp would otherwise trip the
         # aggregate rule with the wrong recipe — the precise guidance here is "consume stdout
@@ -1388,6 +1444,34 @@ def main():
                         f"blocked: ApplyPatch outside the MGH_TARGET tree in {domain} "
                         f"run-domain: {path}\n{_write_recipe(domain, target, kind)}\n")
                     return 2
+    elif tool == "RunCode":
+        # dsh-dialect rule (n): the host's bundled in-process code runner is the direct
+        # analogue of the blocked `py -c` inline-interpreter shape — an arbitrary Python
+        # body executed outside every leaf-script contract. Denied inside a run-domain
+        # regardless of body tokens (a heredoc body can be invisible to sniffing; the
+        # execution surface itself IS the violation). Sanctioned exit: run the declared
+        # leaf scripts via the shell tool.
+        sys.stderr.write(
+            f"blocked: bundled code-runner (RunCode) in {domain} run-domain — the "
+            f"in-process interpreter is the `py -c` bypass shape.\n"
+            f"  Sanctioned exit: run the INSTALLED leaf script verbatim via the shell "
+            f"tool — `py <target>/.claude/mgh-core/scripts/<script>.py …` (or "
+            f".opencode/mgh-core/scripts/, mgh-core/dsh/ peers); work-lists via the "
+            f"list_* primitives; derived quantities via the producer's stdout fields.\n"
+            f"  {_recipe(domain)}\n")
+        return 2
+    elif tool in ("TerminalIO", "JobCtl"):
+        # dsh-dialect rule (n): interactive terminal I/O and background-job control would
+        # let a command blocked on the foreground Bash face continue out-of-sight (and
+        # `job_kill`'s `reason`/terminal `text` inputs carry arbitrary payloads the path
+        # net cannot parse). Denied inside a run-domain outright.
+        sys.stderr.write(
+            f"blocked: {tool} (interactive terminal / background-job surface) in {domain} "
+            f"run-domain — bypasses the foreground Bash confinement.\n"
+            f"  Run deterministic leaf scripts in the FOREGROUND shell tool with an "
+            f"explicit per-call timeout; NEVER move blocked work to a terminal or "
+            f"background job.\n  {_recipe(domain)}\n")
+        return 2
     return 0
 
 

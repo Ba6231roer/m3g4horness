@@ -40,8 +40,14 @@ class TestShellCodegraphParity(unittest.TestCase):
     def setUp(self):
         self.assertTrue(CLAUDE_SHELL.is_file(), f"{CLAUDE_SHELL} missing")
         self.assertTrue(OPENCODE_SHELL.is_file(), f"{OPENCODE_SHELL} missing")
-        self.claude = CLAUDE_SHELL.read_text(encoding="utf-8")
-        self.opend = OPENCODE_SHELL.read_text(encoding="utf-8")
+        # shard-to-fit: the flow stanzas live in each face's lazy fragment; the
+        # orchestrator surface under test is shell + fragment read at runtime.
+        self.claude = CLAUDE_SHELL.read_text(encoding="utf-8") + (
+            ROOT / "core" / "prompts" / "fragments" / "sra-flow-claude.md"
+        ).read_text(encoding="utf-8")
+        self.opend = OPENCODE_SHELL.read_text(encoding="utf-8") + (
+            ROOT / "core" / "prompts" / "fragments" / "sra-flow-opencode.md"
+        ).read_text(encoding="utf-8")
 
     def _assert_both(self, needle):
         self.assertIn(needle, self.claude, f"claude shell missing: {needle!r}")

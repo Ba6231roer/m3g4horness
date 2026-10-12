@@ -28,7 +28,7 @@ boundary (no tool internals in rule prose) while editing.
 ## Aggregate context budget (P0 soft boundary)
 You see ALL drafted rule files (claude: every `.claude/rules/security-*.md`; opencode:
 every `<rules-dir>/<cat>.md`) in one context — this is an aggregate node. If that
-aggregate clearly exceeds `--max-aggregate-bytes` (default 256KB), state it back to the
+aggregate clearly exceeds `--max-aggregate-bytes` (default 96KB), state it back to the
 orchestrator. The orchestrator then advises `--scope`+`--merge` and discloses "aggregate
 over budget, not hard-bounded" in `init_manifest.json::boundaries[]` + `report.md`.
 **P0 = disclose + fallback**; do NOT silently skip rule files to fit a budget.

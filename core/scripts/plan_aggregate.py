@@ -10,9 +10,10 @@ records, and:
     behavior for small repos — zero regression);
   - total input > budget  → needs_reduce=true: cuts the records into ≤-budget shards (T2 by
     `category`, splitting an over-budget category whole-record into multiple ≤-budget parts
-    `t2-<category>-part<N>`; scout-merge by batch cluster), --materialize writes each shard's
-    bounded input, and emits per-shard checkpoint paths. The orchestrator fans out one
-    partial-synthesis subagent per shard (bounded input, bounded ack) then a single rollup
+    `t2-<category>-part<N>`; scout-merge by stable-order greedy packing at CANDIDATE
+    granularity), --materialize writes each shard's bounded input, and emits per-shard
+    checkpoint paths. The orchestrator fans out one partial-synthesis subagent per shard
+    (bounded input, bounded ack) then a single rollup
     subagent that consumes ONLY the shard summaries — every model request ≤ budget.
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
@@ -29,23 +30,26 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   - needs_reduce=false → pending=[] + rollup omitted; orchestrator uses single-context init-synthesis
     / init-scout-merge directly (existing path). This path is BYTE-IDENTICAL to the pre-map-reduce
     release (no repo / failed_marker added) — single-context callers read the same fields.
-  - Shard item: {shard_id, node, categories (t2) | batches (scout-merge), input_path, bytes,
-    oversize, checkpoint_path, done_marker, failed_marker}  (all ABSOLUTE; passed verbatim by the
+  - Shard item: {shard_id, node, categories (t2) | batches (scout-merge: deduped list of
+    batch_ids the shard covers), input_path, bytes, oversize, checkpoint_path, done_marker,
+    failed_marker}  (all ABSOLUTE; passed verbatim by the
     orchestrator). t2 map-reduce items additionally carry part_index/part_count (part-split
-    disclosure; 0/1 when the category was not split) and slimmed ({} or the atomic-oversize
-    slim-projection trace {record: {original_bytes, truncated: {field: original_bytes}}}).
-    A dispatched t2 shard is ALWAYS ≤ budget: an over-budget category is split into parts and
-    an atomic-oversize record (a single record whose own bytes exceed budget) is deterministically
-    slim-projected at materialization (prose fields only; `evidence` anchors and other structural
-    fields never truncated; checkpoints/t1 originals NEVER rewritten) or the run exits 2 —
-    so t2 `oversize` is always false (field kept for stdout compat; the old
-    "warn + dispatch oversize anyway" path is removed). scout-merge keeps its envelope/stdout
-    byte-identical (hand-paged non-goal; its `oversize:true` + warn + send behavior is unchanged).
+    disclosure; 0/1 when the category was not split); both nodes carry slimmed ({} or the
+    atomic-oversize slim-projection trace {record: {original_bytes, truncated: {field:
+    original_bytes}}}).
+    A dispatched shard is ALWAYS ≤ budget at BOTH nodes: t2 splits an over-budget category
+    into parts; scout-merge packs candidates greedily across batch boundaries; an atomic-
+    oversize unit (a single record / candidate whose own bytes exceed budget) is
+    deterministically slim-projected at materialization (prose fields only; `evidence`
+    anchors and other structural fields never truncated; checkpoints/t1|scout originals
+    NEVER rewritten) or the run exits 2 —
+    so `oversize` is always false (field kept for stdout compat; the old
+    "warn + dispatch oversize anyway" path is removed at both nodes).
     repo (needs_reduce=true only) = `--init-dir` resolve parent — `.mgh-init` always
     lives under <target>/.mgh-init, so repo == <target> absolute root (anchor for the dispatcher's
     `_anchor_check`). failed_marker = same directory as done_marker, file `.<shard_id>.json.failed`
     (written by the dispatcher when a unit fails / drifts out of the repo anchor tree).
-  - --node t2 only (dispatcher adoption; scout-merge stays hand-paged): the enumerator is
+  - Both aggregate nodes (dispatcher adoption): the enumerator is
     marker-aware — pending[] EXCLUDES shards whose `.done`/`.failed` marker exists, and the stdout
     adds list_*-style {total, done, failed} (marker-derived; total = done + failed + pending).
     summary_paths/shards remain the FULL shard set (rollup + boundaries disclosure).
@@ -64,7 +68,11 @@ from pathlib import Path
 # but the guard keeps it in the self-contained family (R5.3a).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DEFAULT_BUDGET = 256 * 1024          # 256KB — --max-aggregate-bytes default
+DEFAULT_BUDGET = 96 * 1024           # 96KB (= 98304) — --max-aggregate-bytes default. Sized for
+# the worst-case ~150K-token intranet model windows: worst CJK-dense packing is ~2 bytes/token
+# (repo token heuristic), so one dispatched aggregate shard ≤ ~48K input tokens — far below the
+# 120K red line once stage prompt + bounded ack are added. Explicit --budget overrides (big
+# -window models may raise it); see contracts/init/aggregate-sharding.md.
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB
 
 
@@ -163,14 +171,184 @@ def _shard_by_category(records: list, budget: int):
     return shards
 
 
-def _shard_by_batch_cluster(records: list, budget: int):
-    """scout-merge sharding: greedily pack batch records into ≤-budget shards
-    (batch clusters). Part splitting is a t2-only feature — scout-merge's
-    shard ids, envelope, and stdout stay byte-identical."""
-    shards = []
-    for n, (brecs, bb) in enumerate(_greedy_pack(records, budget)):
-        shards.append((f"scout-merge-{n}", None, brecs, bb, bb > budget, 0, 1))
-    return shards
+def _materialized_bytes(body: dict) -> int:
+    """Exact on-disk size of what `_write_shard_input` writes (utf-8 text mode):
+    the scout-merge packer measures with THIS so the hard invariant "every
+    dispatched shard input file ≤ budget" holds for the FILE, not just the
+    in-memory payload (Windows text mode translates each structural `\\n` to
+    `\\r\\n`; JSON string values carry no raw newlines — only indent ones)."""
+    s = json.dumps(body, ensure_ascii=False, indent=2)
+    if "\r\n" != "\n":
+        s = s.replace("\n", "\r\n")
+    return len(s.encode("utf-8"))
+
+
+# Scout-merge candidate slim caps (D2): prose/evidence fields only. Structural
+# fields (file/line/anchor/category/kind/source/id) are NEVER touched — they are
+# merge_scout._key's dedup anchors and `merge_scout.py --check`'s validated surface.
+_SCOUT_SLIM_CAPS = {"evidence_snippet": 4096, "snippet": 4096}
+_SCOUT_SLIM_ENTRY_POINTS_MAX = 16
+
+
+def _slim_scout_candidate(c) -> dict:
+    """Deterministic prose-slim projection for ONE atomic-oversize scout candidate
+    (an individual candidate whose own bytes exceed the budget). Mutates the
+    in-memory copy feeding the materialized shard input — the checkpoints/scout
+    original is NEVER rewritten. Returns the truncation trace {field:
+    original_serialized_bytes}; empty dict when nothing was cut."""
+    if not isinstance(c, dict):
+        return {}
+    touched = {}
+    for field, cap in _SCOUT_SLIM_CAPS.items():
+        val = c.get(field)
+        if isinstance(val, str):
+            orig = _byte_len(val)
+            if orig <= cap:
+                continue
+            c[field] = _cap_str(val, cap)
+            touched[field] = orig
+    ep = c.get("entry_points")
+    if isinstance(ep, list) and len(ep) > _SCOUT_SLIM_ENTRY_POINTS_MAX:
+        touched["entry_points"] = _byte_len(ep)
+        c["entry_points"] = ep[:_SCOUT_SLIM_ENTRY_POINTS_MAX]
+    if touched:
+        c["_slimmed"] = touched
+    return touched
+
+
+def _scout_batch_id(rec: dict) -> str:
+    src = str(rec.get("__source_file") or "")
+    return str(rec.get("batch_id") or Path(src).stem or "record")
+
+
+def _scout_record_payloads(cur_by_src: dict) -> list:
+    """Shard records in first-seen order; each payload keeps the original record's
+    non-list fields (incl. __source_file / batch_id) plus THIS shard's candidate
+    subset and, on the shard where the batch's unresolved item landed, its
+    unresolved list."""
+    recs = []
+    for src, slot in cur_by_src.items():
+        payload = dict(slot["base"])
+        if slot["has_cands"]:
+            payload["candidates"] = slot["candidates"]
+        if slot["unresolved"] is not None:
+            payload["unresolved"] = slot["unresolved"]
+        recs.append(payload)
+    return recs
+
+
+def _shard_by_candidate(records: list, budget: int, init_dir: Path):
+    """scout-merge sharding (D2 hard bound): stable-order greedy packing at
+    CANDIDATE granularity — items stream in (record glob order, in-record
+    candidate order); a batch's `unresolved` rides one item right after its
+    candidates (so an unsplit batch stays whole; a split batch's unresolved
+    lands on the shard of its last candidate). Every shard's MATERIALIZED
+    input is ≤ budget by construction (envelope included in the measure).
+    An individual candidate over budget alone → deterministic slim projection
+    (same three-level ladder as t2); still over → recorded as a fatal.
+    Returns (shards, slim_by_sid, bytes_by_sid, oversize_fatal) with the same
+    7-tuple shape as _shard_by_category — slot 2 carries the shard's deduped
+    batch_id list (the `batches` envelope field), part_index/part_count are
+    fixed 0/1 (candidate packing has no part concept)."""
+    shards, slim_by_sid, bytes_by_sid, fatals = [], {}, {}, []
+    cur_by_src: dict = {}      # src -> {"base","has_cands","candidates","unresolved"}
+    cur_seen: list = []        # (src, batch_id) in shard order (for `batches`)
+    slim_trace: dict = {}
+
+    def _cur_size() -> int:
+        sid = f"scout-merge-{len(shards)}"
+        return _materialized_bytes({"node": "scout-merge", "shard_id": sid,
+                                    "records": _scout_record_payloads(cur_by_src)})
+
+    def _slot(rec: dict):
+        src = str(rec.get("__source_file") or "")
+        slot = cur_by_src.get(src)
+        if slot is None:
+            base = {k: v for k, v in rec.items() if k not in ("candidates", "unresolved")}
+            slot = {"base": base, "has_cands": False, "candidates": [], "unresolved": None}
+            cur_by_src[src] = slot
+            cur_seen.append((src, _scout_batch_id(rec)))
+        return slot
+
+    def _snapshot():
+        """Deep-enough copy of the mutable shard accumulator for rollback: slots
+        are dicts holding lists, a shallow `dict(cur_by_src)` would share the
+        candidates list and undo nothing."""
+        return ({src: {"base": dict(s["base"]), "has_cands": s["has_cands"],
+                       "candidates": list(s["candidates"]), "unresolved": s["unresolved"]}
+                 for src, s in cur_by_src.items()},
+                list(cur_seen), dict(slim_trace))
+
+    def _restore(snap):
+        cur_by_src.clear(); cur_by_src.update(snap[0])
+        cur_seen.clear(); cur_seen.extend(snap[1])
+        slim_trace.clear(); slim_trace.update(snap[2])
+
+    def _close():
+        if not cur_by_src:
+            return
+        sid = f"scout-merge-{len(shards)}"
+        recs = _scout_record_payloads(cur_by_src)
+        size = _materialized_bytes({"node": "scout-merge", "shard_id": sid, "records": recs})
+        batches = list(dict.fromkeys(bid for _src, bid in cur_seen))
+        shards.append((sid, batches, recs, size, False, 0, 1))
+        slim_by_sid[sid] = dict(slim_trace)
+        bytes_by_sid[sid] = size
+        cur_by_src.clear()
+        cur_seen.clear()
+        slim_trace.clear()
+
+    for rec in records:
+        cands = rec.get("candidates")
+        if not isinstance(cands, list):
+            items = [("rec", rec, None, 0)]
+        else:
+            items = [("cand", rec, c, i) for i, c in enumerate(cands)]
+            if "unresolved" in rec:
+                items.append(("unres", rec, rec.get("unresolved"), 0))
+        for kind, owner, payload, ordinal in items:
+            def _add():
+                slot = _slot(owner)
+                if kind == "cand":
+                    slot["has_cands"] = True
+                    slot["candidates"].append(payload)
+                elif kind == "unres":
+                    slot["unresolved"] = payload
+                else:  # "rec" — non-candidate-shaped record, indivisible
+                    slot["base"].update({k: v for k, v in owner.items()
+                                         if k not in ("candidates", "unresolved")})
+                    if isinstance(owner.get("candidates"), list):
+                        slot["has_cands"] = True
+                        slot["candidates"] = list(owner["candidates"])
+                    if "unresolved" in owner:
+                        slot["unresolved"] = owner["unresolved"]
+
+            def _fatal():
+                src = str(owner.get("__source_file") or "")
+                rpath = str(init_dir / "checkpoints" / "scout" / src) if src else "record"
+                fatals.append((f"scout-merge-{len(shards)}", rpath, _cur_size()))
+
+            snap = _snapshot()
+            _add()
+            if _cur_size() > budget:
+                # The item may be what pushes the shard over: roll back, close the
+                # current shard, retry the item alone in a fresh one.
+                _restore(snap)
+                if cur_by_src:
+                    _close()
+                _add()
+                if _cur_size() > budget:
+                    if kind == "cand":
+                        orig = _byte_len(payload)
+                        touched = _slim_scout_candidate(payload)
+                        if touched:
+                            isrc = str(owner.get("__source_file") or "record")
+                            slim_trace[f"{isrc}#{ordinal}"] = {
+                                "original_bytes": orig, "truncated": touched}
+                    if _cur_size() > budget:
+                        _fatal()
+    _close()
+    return shards, slim_by_sid, bytes_by_sid, fatals
 
 
 # Deterministic slim-projection caps (serialized-value bytes) for an ATOMIC-
@@ -235,8 +413,8 @@ def _slim_record(rec: dict) -> dict:
 def _write_shard_input(shards_dir: Path, shard_id: str, node: str, categories, records: list,
                        part_index=None, part_count=None):
     """Write `<shards-dir>/<shard_id>.input.json`; idempotent. Returns (abs path, bytes).
-    part_index/part_count ride the t2 map-reduce envelope only (None = omit —
-    scout-merge envelope unchanged, design D5)."""
+    part_index/part_count/categories ride the t2 map-reduce envelope only (None =
+    omit — scout-merge envelope stays {node, shard_id, records}, design D2)."""
     shards_dir.mkdir(parents=True, exist_ok=True)
     body = {"node": node, "shard_id": shard_id, "records": records}
     if part_index is not None:
@@ -259,7 +437,8 @@ def main():
                     help=".mgh-init dir (records read from checkpoints/<t1|scout>)")
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET,
                     help=f"per-request aggregate byte cap (default {DEFAULT_BUDGET} = "
-                         f"--max-aggregate-bytes); over it → map-reduce")
+                         f"96KB = --max-aggregate-bytes; worst-case ~2 bytes/token → "
+                         f"≤ ~48K tokens per dispatched shard); over it → map-reduce")
     ap.add_argument("--materialize", metavar="<shards-dir>",
                     help="write each shard's bounded records to <dir>/<shard_id>.input.json "
                          "(+ input_path/bytes/oversize/part_index/part_count/slimmed; "
@@ -271,9 +450,9 @@ def main():
                          f"{DEFAULT_ORCH_BUDGET_BYTES}; page auto-tightened + shrunk:true)")
     ap.add_argument("--include-failed", action="store_true",
                     help="re-list failed shards into pending[] under their canonical "
-                         "shard_id with their existing .failed marker path (t2 node "
-                         "only; identity from this enumerator's forward derivation, "
-                         "never filename stems; opt-in for the dispatcher's "
+                         "shard_id with their existing .failed marker path (aggregate "
+                         "nodes t2/scout-merge; identity from this enumerator's forward "
+                         "derivation, never filename stems; opt-in for the dispatcher's "
                          "--retry-failed flow). Default off keeps stdout byte-identical")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk).
     # Before parse_args so --help is utf-8 too. No-op on StringIO (in-process tests).
@@ -310,7 +489,7 @@ def main():
     else:
         records = _read_records(init_dir / "checkpoints" / "scout",
                                 exclude_names=("merge.json", "audit.json"))
-        shard_fn = _shard_by_batch_cluster
+        shard_fn = _shard_by_candidate
         output = init_dir / "scout_candidates.json"
         done_marker = init_dir / "checkpoints" / "scout" / "merge.json.done"
         shard_cp_dir = init_dir / "checkpoints" / "scout" / "shards"
@@ -333,21 +512,21 @@ def main():
         print(json.dumps(result, ensure_ascii=False))
         return 0
 
-    raw_shards = shard_fn(records, args.budget)
-    shards_dir = Path(args.materialize).resolve() if args.materialize else None
-
-    # Atomic-oversize guard (t2, design D3): an over-budget part holds exactly
-    # one record whose own bytes greedy packing cannot split. Deterministic
-    # slim projection runs on the in-memory record feeding the materialized
-    # shard input (prose fields only; `evidence`/structural fields never
-    # truncated; checkpoints/t1 originals NEVER rewritten). A record still over
-    # budget beyond slimming is pathological (structural fields over the cap)
-    # → fail-loud exit 2 BEFORE any materialization or listing (zero side
-    # effects, zero dispatch of a doomed unit).
+    # Both aggregate nodes hard-bound their dispatched shards (t2: category
+    # split + record-granularity parts + slim; scout-merge: candidate-
+    # granularity packing + slim). The packers report slim traces and atomic-
+    # oversize fatals differently, so scout-merge gets its own call; t2's post-
+    # hoc slim pass stays below. Either way a fatal exits 2 BEFORE any
+    # materialization or listing (zero side effects, zero dispatch of a doomed
+    # unit) — the "warn + dispatch anyway" path is retired for both nodes.
     slim_by_sid: dict = {}
     bytes_by_sid: dict = {}
     oversize_fatal = []
-    if args.node == "t2":
+    if args.node == "scout-merge":
+        raw_shards, slim_by_sid, bytes_by_sid, oversize_fatal = \
+            _shard_by_candidate(records, args.budget, init_dir)
+    else:
+        raw_shards = shard_fn(records, args.budget)
         for sid, _cats, recs, nbytes, _ov, _pi, _pc in raw_shards:
             slim: dict = {}
             post = nbytes
@@ -374,18 +553,22 @@ def main():
                   f"no units dispatched", file=sys.stderr)
         return 2
 
+    shards_dir = Path(args.materialize).resolve() if args.materialize else None
+
     # D2a (marker-aware enumeration for the t2 dispatcher only): `--node t2` is consumed by
     # fanout_runner --tier t2, whose wave loop converges by re-listing (pending shrinks) and whose
-    # zero-progress circuit breaker needs marker-derived counts. So for t2: exclude terminal
+    # zero-progress circuit breaker needs marker-derived counts. So for both aggregate
+    # nodes (t2 and the now dispatcher-consumed scout-merge): exclude terminal
     # (`.done`/`.failed`) shards from pending[] and emit total/done/failed. `summary_paths`/`shards`
     # stay FULL — rollup eats every shard summary and boundaries disclose the whole reduction. A
     # `.failed` shard is terminal and NOT retried; the orchestrator surfaces it (map not all-done →
-    # report, do not rollup). scout-merge stays hand-paged → all shards listed (non-goal, unchanged).
-    marker_aware = args.node == "t2"
+    # report, do not rollup).
+    marker_aware = args.node in ("t2", "scout-merge")
+    is_t2 = args.node == "t2"
     done_count = failed_count = 0
     pending = []
     summary_paths = []
-    for sid, categories, recs, nbytes, oversize, part_index, part_count in raw_shards:
+    for sid, groups, recs, nbytes, oversize, part_index, part_count in raw_shards:
         cp = (shard_cp_dir / f"{sid}.json")
         cp_abs = str(cp)
         dm_abs = str(cp.with_name(cp.name + ".done"))
@@ -409,31 +592,30 @@ def main():
         item = {
             "shard_id": sid, "node": args.node,
             "checkpoint_path": cp_abs, "done_marker": dm_abs, "failed_marker": fm_abs,
-            "bytes": bytes_by_sid.get(sid, nbytes) if marker_aware else nbytes,
+            "bytes": bytes_by_sid.get(sid, nbytes),
             "oversize": bool(oversize),
         }
         if marker_aware:
+            item["slimmed"] = slim_by_sid.get(sid, {})
+        if is_t2:
+            # part 身份是 t2 category-partition 专属;scout-merge 候选装箱无 part 概念。
             item["part_index"] = part_index
             item["part_count"] = part_count
-            item["slimmed"] = slim_by_sid.get(sid, {})
-        if categories is not None:
-            item["categories"] = categories
+            item["categories"] = groups
         else:
-            item["batches"] = len(recs)
+            # scout-merge: `batches` = 该 shard 覆盖的去重 batch_id 列表(旧 int 计数废除)。
+            item["batches"] = groups
         if not terminal:
             if shards_dir:
                 ipath, _ = _write_shard_input(
-                    shards_dir, sid, args.node, categories, recs,
-                    part_index if marker_aware else None,
-                    part_count if marker_aware else None)
+                    shards_dir, sid, args.node, groups if is_t2 else None, recs,
+                    part_index if is_t2 else None,
+                    part_count if is_t2 else None)
                 item["input_path"] = ipath
-                # t2 shards are ≤ budget by construction (split + slim + exit-2
-                # gate above); an oversize shard can only be a scout-merge
-                # batch cluster — its warn+send disclosure stays (hand-paged).
-                if oversize:
-                    print(f"warn: shard {sid} alone > budget ({nbytes}B > {args.budget}B) — cannot "
-                          f"split further without losing whole-batch "
-                          f"view; disclose in boundaries[]", file=sys.stderr)
+                # Every dispatched shard is ≤ budget by construction at BOTH
+                # nodes (t2: split+slim+exit-2; scout-merge: candidate packing
+                # +slim+exit-2, measured on the materialized file) — the
+                # warn+dispatch-anyway disclosure path is retired.
             pending.append(item)
         summary_paths.append(cp_abs)
 

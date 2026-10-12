@@ -1,0 +1,61 @@
+Step 2 complete: `empty:false`, 8 units (6 interface + 2 standalone). Running step 3 fanout.
+Step 3 complete: 8/8 done, `partial:false`. Running step 4 render.
+`/mgh-sdr` 编排完成(单分支 `sdr-dryrun`,base `master`)。
+
+**报告绝对路径**
+`C:\DEV\springBootTemplate\mgh-sdr-sdr-dryrun-20261012_170017.html`
+
+**counts**(`render_sdr_report --check` ok)
+- units: 8(6 interface + 2 standalone)
+- findings: 22 — high 6 / medium 12 / low 4 / info 0
+- failed_units: 0, boundaries: 6, excluded_files: 0
+
+各步骤:step2 `empty:false`(8 单元)→ step3 `partial:false` 8/8 done 0 failed → step4 render + `--check` ok → `.active` 已删除。
+
+**注意:发现均为 LLM 候选,需人工复核。**
+Branch `sdr-mb-nonexistent` does not exist — `diff_group.py` refuses with exit 2. Let me clean up the empty report I test-rendered and restore the honest failure state.
+编排在 **step 2 停止**——`sdr-mb-nonexistent` 分支在仓库中不存在,`diff_group.py` 拒绝执行(退出码 2,确定性闸门)。
+
+**转述 stderr:**
+```
+error: --branch ref not found in C:\DEV\springBootTemplate: 'sdr-mb-nonexistent'
+recipe: list branches with `git branch -a` and re-run with an existing base/branch ref
+        (defaults: --base master, --branch current).
+```
+`git branch -a` 实测存在的分支:`master`、`sdr-dryrun`(当前)、`sdr-mb-authz`、`sdr-mb-sql-sensitive`——无 `sdr-mb-nonexistent`。
+
+**处置(干净停止):**
+- 未产出 `grouping.json`/切片,故未派发 fan-out、未生成正式报告。绝不猜分支、绝不以别名分支顶替。
+- 我实测跑过一次 `render_sdr_report`(确认对缺失分组的行为),它生成了一份 units=0/findings=0 的**空报告**;因该分支根本不存在,此类「无变更」报告属误导性假成功,已连同 `sdr_report_data.json`/`sdr_manifest.json` 一并删除。
+- 已移除哨兵 `C:\DEV\springBootTemplate\.mgh-sdr\.active`(残留 guard 不进入日常开发)。
+- run 目录保持失败态(仅 context 产物)。
+
+**报告路径:** 无(未生成)。**counts:** N/A —— 因输入非法,流水线未运行出有效结果。
+
+**诚实边界:** `/mgh-sdr` 输出为 LLM 候选、需人工复核;本例更根本的问题是**评审对象不存在**,非法输入不产生任何符合性结论。请确认分支名后,带同一 run 目录经 `resume_sdr_state.py` 恢复重跑。
+Step 2 done: `empty:false`, 5 units pending. Proceeding to step 3 fanout.
+Step 3 done: `partial:false`, 5/5 done. Proceeding to step 4 render.
+Step 4 rendered. Now running the `--check` validations for step 2 and step 4.
+Both checks ok. Finalizing: removing the active sentinel.
+编排完成(单分支 sdr-mb-authz)。
+
+**报告绝对路径**
+`C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-authz-20261012_170646.html`
+
+**Counts**
+- units: 5 (interface 3 / standalone 2), done 5, failed 0
+- findings: 22 — high 8 / medium 11 / low 3 / info 0
+- boundaries: 6; excluded_files: 0
+- checks: diff_group `--check ok`, render_sdr_report `--check ok`
+
+**声明**:报告中 22 条发现均为 LLM 候选,需人工复核后确认。
+
+已删除 sentinel `C:\DEV\springBootTemplate\.mgh-sdr\.active`。
+编排完成(single branch)。
+
+报告: `C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-sql-sensitive-20261012_171020.html`
+
+计数: units=4(done 4 / failed 0 / pending 0, partial=False), findings=13(high 7 / medium 6), boundaries=6, excluded_files=0。
+
+发现为 LLM 候选,需人工复核。
+{"launcher": "mgh_sdr_launch", "host": "opencode", "branches": ["sdr-dryrun", "sdr-mb-nonexistent", "sdr-mb-authz", "sdr-mb-sql-sensitive"], "reports": ["C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-dryrun-20261012_170017.html", "C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-dryrun-20261012_170017.html", "C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-mb-authz-20261012_170646.html", "C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-mb-sql-sensitive-20261012_171020.html"], "dry_run": false, "pending_approval": []}

@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent / "core" / "scripts"
@@ -37,6 +38,7 @@ TEMPLATES = {
     "scout": FANOUT_DIR / "scout-task.md",
     "t1": FANOUT_DIR / "t1-task.md",
     "t2": FANOUT_DIR / "t2-task.md",
+    "scout-merge": FANOUT_DIR / "scout-merge-task.md",
     "t3": FANOUT_DIR / "t3-task.md",
     "sdr": FANOUT_DIR / "sdr-task.md",
 }
@@ -75,6 +77,18 @@ def _unit(tmp: Path, bid="scout-001", tier="scout") -> dict:
             "failed_marker": str(init / "checkpoints" / "t2" / "shards" / f".{bid}.json.failed"),
             "bytes": 10,
         }
+    if tier == "scout-merge":
+        # plan_aggregate scout-merge shard shape (shard_id + batches list +
+        # checkpoint under checkpoints/scout/shards/).
+        return {
+            "shard_id": bid,
+            "batches": ["scout-000", "scout-001"],
+            "input_path": str(init / "inputs" / "scout-merge" / f"{bid}.input.json"),
+            "checkpoint_path": str(init / "checkpoints" / "scout" / "shards" / f"{bid}.json"),
+            "done_marker": str(init / "checkpoints" / "scout" / "shards" / f"{bid}.json.done"),
+            "failed_marker": str(init / "checkpoints" / "scout" / "shards" / f".{bid}.json.failed"),
+            "bytes": 10,
+        }
     cp = init / "checkpoints" / tier / f"{bid}.json"
     id_field = "batch_id" if tier == "scout" else "cluster_id"
     return {
@@ -96,10 +110,12 @@ def _listing(tmp: Path, units, done=0, failed=0):
 
 def _setup_repo(tmp: Path, units, tier="scout"):
     repo = tmp / "repo"
-    (repo / ".mgh-init" / "checkpoints" / tier).mkdir(parents=True, exist_ok=True)
+    cp_dir = tier if tier != "scout-merge" else "scout"
+    (repo / ".mgh-init" / "checkpoints" / cp_dir).mkdir(parents=True, exist_ok=True)
     (repo / ".mgh-init" / "inputs" / tier).mkdir(parents=True, exist_ok=True)
     plan_names = {"scout": "scout_plan.json", "t1": "clusters.json",
-                  "t2": "run_config.json", "t3": "controls_inventory.json"}
+                  "t2": "run_config.json", "scout-merge": "run_config.json",
+                  "t3": "controls_inventory.json"}
     (repo / ".mgh-init" / plan_names[tier]).write_text("{}", encoding="utf-8")
     for u in units:
         Path(u["input_path"]).write_text("{}", encoding="utf-8")
@@ -121,14 +137,15 @@ def _run_cli_tier(tier: str, tmp: Path, listing_path: Path, *extra):
     """Tier-shaped CLI invocation (t1/t3 carry --tier + their plan flags)."""
     repo = tmp / "repo"
     init = repo / ".mgh-init"
+    cp_tier = tier if tier != "scout-merge" else "scout"
     base = [sys.executable, str(SCRIPT), "--tier", tier,
-            "--checkpoints", str(init / "checkpoints" / tier),
+            "--checkpoints", str(init / "checkpoints" / cp_tier),
             "--inputs-dir", str(init / "inputs" / tier),
             "--pending-file", str(listing_path)]
     if tier == "t1":
         base += ["--clusters", str(init / "clusters.json"),
                  "--candidates", str(init / "controls_candidates.json")]
-    elif tier == "t2":
+    elif tier in ("t2", "scout-merge"):
         base += ["--init-dir", str(init)]
     elif tier == "t3":
         base += ["--inventory", str(init / "controls_inventory.json"),
@@ -212,6 +229,25 @@ class TestTemplateFill(unittest.TestCase):
         self.assertIn(unit["failed_marker"], msg)
         self.assertIn("init-synthesis-partial.md", msg)  # load instruction
         # partial-synthesis reads bounded shard records → no chunk_sources/codegraph/rule_path
+        body = msg.split("-->", 1)[1]
+        self.assertNotIn("chunk_sources.py", body)
+        self.assertNotIn("codegraph", body)
+        self.assertNotIn("rule_path:", body)
+
+    def test_scout_merge_template_fill(self):
+        unit = _unit(self.tmp, "scout-merge-0", tier="scout-merge")
+        msg = self.fr._fill_template(self.fr.TIERS["scout-merge"],
+                                     TEMPLATES["scout-merge"].read_text(encoding="utf-8"),
+                                     unit, str(self.tmp / "repo"), "off")
+        self.assertNotIn("{{", msg)
+        self.assertIn("scout-merge-0", msg)
+        self.assertIn("scout-000", msg)              # batches list stringified
+        self.assertIn(str(self.tmp / "repo"), msg)   # repo anchor
+        self.assertIn(unit["input_path"], msg)
+        self.assertIn(unit["checkpoint_path"], msg)
+        self.assertIn(unit["done_marker"], msg)
+        self.assertIn(unit["failed_marker"], msg)
+        self.assertIn("init-scout-merge-partial.md", msg)  # load instruction
         body = msg.split("-->", 1)[1]
         self.assertNotIn("chunk_sources.py", body)
         self.assertNotIn("codegraph", body)
@@ -473,7 +509,7 @@ class TestTierCli(unittest.TestCase):
         repo = self.tmp / "repo"
         init = repo / ".mgh-init"
         init.mkdir(parents=True, exist_ok=True)
-        for tier in ("t1", "t2", "t3"):
+        for tier in ("t1", "t2", "scout-merge", "t3"):
             r = subprocess.run(
                 [sys.executable, str(SCRIPT), "--tier", tier,
                  "--checkpoints", str(init / "checkpoints" / tier),
@@ -598,9 +634,109 @@ class TestTierCli(unittest.TestCase):
         self.assertEqual(body["unit"], "authn")
         self.assertEqual(body["tier"], "t3")
 
+    def test_scout_merge_exit_zero_and_stdout_tier_field(self):
+        units = [_unit(self.tmp, f"scout-merge-{i}", tier="scout-merge")
+                 for i in range(2)]
+        lp = self._listing_file("scout-merge", units)
+        r = _run_cli_tier("scout-merge", self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["tier"], "scout-merge")
+        self.assertEqual(out["total"], 2)
+        self.assertFalse(out["partial"])
+        for u in units:
+            audit = self.tmp / "repo" / ".mgh-init" / "inputs" / "scout-merge" / \
+                f"{u['shard_id']}.task.md"
+            self.assertTrue(audit.is_file(), audit)
+            self.assertNotIn("{{", audit.read_text(encoding="utf-8"))
+
+    def test_scout_merge_path_drift_marker_tier_value(self):
+        bad = dict(_unit(self.tmp, "scout-merge-0", tier="scout-merge"),
+                   checkpoint_path="D:/.mgh-init/x.json")
+        lp = self._listing_file("scout-merge", [bad])
+        r = _run_cli_tier("scout-merge", self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = json.loads(Path(bad["failed_marker"]).read_text(encoding="utf-8"))
+        self.assertEqual(body["unit"], "scout-merge-0")
+        self.assertEqual(body["tier"], "scout-merge")
+        self.assertIn("path-drift", body["reason"])
+        out = json.loads(r.stdout)
+        self.assertEqual(out["failed"], 1)
+
+    def test_scout_merge_lazy_marker_skip(self):
+        # a shard whose .done marker already exists on disk is NOT spawned
+        # (lazy pre-spawn check) — same convergence machinery as t2.
+        units = [_unit(self.tmp, f"scout-merge-{i}", tier="scout-merge")
+                 for i in range(2)]
+        done = Path(units[0]["done_marker"])
+        done.parent.mkdir(parents=True, exist_ok=True)
+        done.write_text("{}", encoding="utf-8")
+        lp = self._listing_file("scout-merge", units)
+        r = _run_cli_tier("scout-merge", self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["total"], 2)
+        self.assertEqual(out["waves_run"], 1)     # only the non-terminal unit dispatched
+        self.assertFalse(Path(units[1]["failed_marker"]).exists())
+
+    def test_scout_merge_needs_reduce_false_idempotent_no_op(self):
+        # REAL enumerator path: scout checkpoints under budget → plan_aggregate
+        # needs_reduce=false (no repo field, empty pending) → dispatcher exits 0
+        # with 0 units / partial:false (NEVER the missing-repo error, NEVER
+        # STALLED).
+        import tempfile
+        init = Path(tempfile.mkdtemp(prefix="fanout_sm_nr_"))
+        try:
+            (init / "checkpoints" / "scout").mkdir(parents=True, exist_ok=True)
+            (init / "checkpoints" / "scout" / "scout-000.json").write_text(
+                json.dumps({"batch_id": "scout-000",
+                            "candidates": [{"pad": "y" * 10}]}), encoding="utf-8")
+            (init / "run_config.json").write_text("{}", encoding="utf-8")
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT), "--tier", "scout-merge",
+                 "--init-dir", str(init), "--budget", "100000",
+                 "--checkpoints", str(init / "checkpoints" / "scout"),
+                 "--inputs-dir", str(init / "inputs" / "scout-merge")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertEqual(out["tier"], "scout-merge")
+            self.assertEqual((out["total"], out["done"], out["failed"],
+                              out["pending"]), (0, 0, 0, 0))
+            self.assertFalse(out["partial"])
+            self.assertFalse(out["stalled"])
+        finally:
+            import shutil
+            shutil.rmtree(init, ignore_errors=True)
+
+    def test_scout_merge_list_args_forward_to_plan_aggregate(self):
+        fr = _load()
+        cfg = fr.TIERS["scout-merge"]
+        args = type("A", (), {"init_dir": "C:/t/.mgh-init", "budget": 98304,
+                              "inputs_dir": "C:/t/.mgh-init/inputs/scout-merge"})()
+        argv = cfg["list_args"](args)
+        self.assertEqual(argv[:4], ["--node", "scout-merge", "--init-dir",
+                                    "C:/t/.mgh-init"])
+        self.assertEqual(argv[4:], ["--budget", "98304", "--materialize",
+                                     "C:/t/.mgh-init/inputs/scout-merge"])
+        # budget not set → NOT forwarded (plan_aggregate DEFAULT_BUDGET applies)
+        args2 = type("A", (), {"init_dir": "C:/t/.mgh-init", "budget": None,
+                               "inputs_dir": "C:/t/.mgh-init/inputs/scout-merge"})()
+        self.assertEqual(cfg["list_args"](args2),
+                         ["--node", "scout-merge", "--init-dir", "C:/t/.mgh-init",
+                          "--materialize", "C:/t/.mgh-init/inputs/scout-merge"])
+
+    def test_tier_choices_closed_set_contains_scout_merge(self):
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("{scout,scout-merge,t1,t2,t3,sdr}", r.stdout)
+
     def test_sidecar_per_tier_naming(self):
         for tier, uid in (("scout", "scout-001"), ("t1", "clst-a"),
-                          ("t2", "t2-authz"), ("t3", "authn")):
+                          ("t2", "t2-authz"), ("scout-merge", "scout-merge-0"),
+                          ("t3", "authn")):
             units = [_unit(self.tmp, uid, tier=tier)]
             lp = self._listing_file(tier, units, done=1)
             r = _run_cli_tier(tier, self.tmp, lp) if tier != "scout" \
@@ -1600,6 +1736,173 @@ class TestSpawnCommand(unittest.TestCase):
     def test_host_exe_resolves_or_falls_back(self):
         exe = self.fr._host_exe("definitely-not-a-real-host-xyz")
         self.assertEqual(exe, "definitely-not-a-real-host-xyz")  # bare-name fallback
+
+
+class TestDshHost(unittest.TestCase):
+    """dsh as the third peer host (add-mgh-dsh-subagent-fanout). Three spec
+    surfaces: spawn-command shape (env task channel → argv carries only the
+    inert `-` placeholder), probe chain (dsh appended LAST — dual-host
+    machines keep their behavior), and the pre-spawn gate (tier mount /
+    mgh profile missing → exit 2 + recipe, zero spawns). Real children are
+    `sys.executable -c` probes (same style as TestRunUnitTreeKill): they read
+    MGH_TASK_TEXT / stdin back, so no dsh binary is needed to pin the
+    delivery channel itself."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_dsh")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_dsh_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _which(self, present):
+        return lambda name: f"C:/fake/bin/{name}.cmd" if name in present else None
+
+    def test_dsh_spawn_shape_snapshot_per_tier(self):
+        for tier in ("scout", "t1", "t2", "t3", "sdr"):
+            cmd = self.fr._spawn_cmd(self.fr.TIERS[tier], "dsh")
+            self.assertEqual(cmd[1:3], ["--profile", "mgh"], tier)
+            self.assertEqual(cmd[3], "--patch", tier)
+            mount = Path(cmd[4])
+            self.assertEqual(mount.name, f"{tier}.yml", tier)
+            self.assertEqual(mount.parent.name, "tiers", tier)
+            self.assertEqual(mount.parent.parent.name, "dsh", tier)
+            # mount root = the mgh-core install root = dispatcher's own
+            # parent.parent (scripts/.. — `.claude/mgh-core`, `.opencode/
+            # mgh-core`, or dsh's root-level `mgh-core` on a target project)
+            self.assertEqual(mount.parent.parent.parent,
+                             self.fr.Path(self.fr.__file__).resolve().parent.parent,
+                             tier)
+            self.assertEqual(cmd[5], "-", tier)
+            self.assertEqual(len(cmd), 6, f"{tier}: task NEVER enters argv")
+
+    def test_probe_chain_appends_dsh_last(self):
+        # 双端既有次序不受 dsh 加入影响: all three installed → opencode;
+        # claude+dsh → claude; only dsh → dsh (仅 dsh 机器可派发).
+        for present, expected in (({"opencode", "claude", "dsh"}, "opencode"),
+                                  ({"claude", "dsh"}, "claude"),
+                                  ({"dsh"}, "dsh")):
+            with mock.patch.object(self.fr.shutil, "which", self._which(present)):
+                self.assertEqual(self.fr._detect_host(None, self.fr.TIERS["scout"]),
+                                 expected)
+
+    def test_all_three_clis_absent_exits_2_with_recipe(self):
+        buf = io.StringIO()
+        with mock.patch.object(self.fr.shutil, "which", self._which(set())), \
+                contextlib.redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as cm:
+                self.fr._detect_host(None, self.fr.TIERS["scout"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("fallback recipe", buf.getvalue())
+
+    def test_explicit_host_dsh_always_wins(self):
+        # 显式 --host 恒优先 over the probe chain's opencode-first default
+        with mock.patch.object(self.fr.shutil, "which",
+                               self._which({"opencode", "claude", "dsh"})):
+            self.assertEqual(self.fr._detect_host("dsh", self.fr.TIERS["scout"]),
+                             "dsh")
+
+    def test_explicit_host_dsh_not_installed_exits_2(self):
+        with mock.patch.object(self.fr.shutil, "which",
+                               self._which({"opencode"})):
+            with self.assertRaises(SystemExit) as cm:
+                self.fr._detect_host("dsh", self.fr.TIERS["scout"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_run_unit_delivers_task_via_env_for_dsh(self):
+        # byte fidelity across the env channel: multi-line + quotes + non-ascii
+        task = "line one\nline two “” — 中文 \"q\" 'a'"
+        probe = ("import os\n"
+                 "print('ok', len(os.environ['MGH_TASK_TEXT']))\n")
+        status, ack, detail, _, _ = self.fr._run_unit(
+            "dsh", [sys.executable, "-c", probe], task, self.tmp, 60, 0)
+        self.assertEqual(status, "spawn-ok")
+        self.assertEqual(ack, "ok")
+        self.assertEqual(detail, f"ok {len(task)}")
+
+    def test_run_unit_stdin_channel_unchanged_for_stdin_hosts(self):
+        # the dsh env branch must NOT touch opencode/claude's stdin delivery
+        task = "piped task\nsecond line"
+        probe = ("import sys\n"
+                 "print('ok', len(sys.stdin.read()))\n")
+        tmp = Path(tempfile.mkdtemp(prefix="fanout_dsh_stdin_"))
+        try:
+            status, ack, detail, _, _ = self.fr._run_unit(
+                "opencode", [sys.executable, "-c", probe], task, tmp, 60, 0)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(status, "spawn-ok")
+        self.assertEqual(detail, f"ok {len(task)}")
+
+    def test_precheck_reports_mount_and_profile_gaps(self):
+        tmp = Path(tempfile.mkdtemp(prefix="fanout_dsh_gate_"))
+        try:
+            mount = tmp / "mgh-core" / "dsh" / "tiers" / "scout.yml"
+            with mock.patch.object(self.fr, "_dsh_tier_mount",
+                                   lambda tid: mount):
+                # mount missing → exit-worthy message + regenerate recipe
+                msg = self.fr._dsh_precheck("scout")
+                self.assertIn("mount file missing", msg)
+                self.assertIn("install.sh --dsh", msg)
+                # mount present, profile missing → profile message
+                mount.parent.mkdir(parents=True)
+                mount.write_text("[]\n", encoding="utf-8")
+                home = tmp / "dshhome"
+                home.mkdir()
+                with mock.patch.dict(os.environ, {"DSH_HOME": str(home)}):
+                    msg = self.fr._dsh_precheck("scout")
+                    self.assertIn("profile 'mgh'", msg)
+                    # both present → gate passes (None)
+                    (home / "profiles" / "mgh").mkdir(parents=True)
+                    self.assertIsNone(self.fr._dsh_precheck("scout"))
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_gate_blocks_before_any_spawn_in_main(self):
+        """Spec scenario 装载缺件: a real main() run on a dsh host with the
+        tier mount absent exits 2 with the recipe and spawns NOTHING (never a
+        wave of host-error crashes)."""
+        tmp = Path(tempfile.mkdtemp(prefix="fanout_dsh_main_"))
+        try:
+            repo = _setup_repo(tmp, [])
+            units = [_unit(tmp, "scout-001")]
+            for u in units:
+                Path(u["input_path"]).write_text("{}", encoding="utf-8")
+            spawns = []
+            self.fr._run_unit = lambda *a, **k: spawns.append(a)
+            # dsh resolves in PATH, but the repo-root mount never exists here
+            with mock.patch.object(self.fr.shutil, "which",
+                                   self._which({"dsh"})):
+                saved_list = self.fr._list_pending
+                self.fr._list_pending = lambda tier, args: _listing(tmp, units)
+                argv = ["fanout_runner.py",
+                        "--scout-plan", str(repo / ".mgh-init" / "scout_plan.json"),
+                        "--checkpoints", str(repo / ".mgh-init" / "checkpoints" / "scout"),
+                        "--inputs-dir", str(repo / ".mgh-init" / "inputs" / "scout"),
+                        "--host", "dsh", "--cooldown-s", "0"]
+                old, sys.argv = sys.argv, argv
+                err = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(err), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        code = self.fr.main()
+                finally:
+                    sys.argv = old
+                    self.fr._list_pending = saved_list
+            self.assertEqual(code, 2, err.getvalue())
+            self.assertIn("mount file missing", err.getvalue())
+            self.assertIn("recipe", err.getvalue().lower())
+            self.assertEqual(spawns, [], "gate must spawn ZERO units")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_kill_stale_markers_include_dsh(self):
+        # --kill-stale cmdline 标记集含 dsh (fan-out runtime contract row)
+        self.assertEqual(self.fr._HOST_CLIS, ("opencode", "claude", "dsh"))
 
 
 class TestAgentCloneParity(unittest.TestCase):

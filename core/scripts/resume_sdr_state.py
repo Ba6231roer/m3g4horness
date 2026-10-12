@@ -27,7 +27,8 @@ Two deliberate differences from the ut-init sibling:
 Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/subprocess/sys/pathlib).
 
 CLI contract (`--help` is the contract surface, R5.1):
-  py resume_sdr_state.py --run-dir <abs> [--repo <abs>] [--check] [--rearm-sentinel]
+  py resume_sdr_state.py --run-dir <abs> [--repo <abs>] [--check]
+                         [--rearm-sentinel | --arm-sentinel]
 
   --run-dir        the sdr run dir (REQUIRED — sdr has no unique default: the launcher
                    stamps `<repo>/.mgh-sdr/runs/<ts>-<branch>/`, so every run differs).
@@ -35,6 +36,13 @@ CLI contract (`--help` is the contract surface, R5.1):
                    `<repo>/.mgh-sdr/runs/<…>` layout).
   --check          boundary check (R5.9): validate on-disk state self-consistency, exit 0/2.
   --rearm-sentinel rewrite `<repo>/.mgh-sdr/.active` deterministically from disk, exit 0.
+  --arm-sentinel   step-0 pre-arm (mutually exclusive with --rearm-sentinel): write the
+                   MINIMAL sentinel `<repo>/.mgh-sdr/.active` (target = --repo, empty
+                   read_roots) BEFORE any run product exists, closing the window where
+                   step 1 fails at argument parsing and the guard never wakes up.
+                   Idempotent: same-target sentinel → no-op (its read_roots[] are NEVER
+                   cleared); different target → refused exit 2 (the guard is NEVER
+                   re-anchored to a second tree). stdout {sentinel_path, armed, target}.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo":"<abs>","run_dir":"<abs>","base":"<ref>","branch":"<ref>","step":"<enum>",
@@ -307,10 +315,14 @@ def resolve(run_dir: Path, args) -> tuple:
                      "NOT data loss, it is the one step with ZERO completed work, so "
                      "re-running it with the same parameters restores the run completely.")
         repo_arg = repo if repo else "<repo abs>"
-        desc = (f"run `py {_script_abs('sdr_context.py')} --repo {repo_arg} "
+        desc = (f"first `py {_script_abs('resume_sdr_state.py')} --run-dir {run_dir} "
+                f"--repo {repo_arg} --arm-sentinel` — step 0 pre-arms the runtime-guard "
+                f"sentinel so the guard is awake BEFORE step 1 can fail; then "
+                f"`py {_script_abs('sdr_context.py')} --repo {repo_arg} "
                 f"--run-dir {run_dir} --base {base or 'master'} "
-                f"--branch {branch or '<当前分支>'}` — this step also writes the run's "
-                f"codegraph signal (run_config.json) and the runtime-guard sentinel")
+                f"--branch {branch or '<当前分支>'}` — step 1 also writes the run's "
+                f"codegraph signal (run_config.json) and refines the sentinel "
+                f"(read_roots = actually-searched roots)")
         nxt = _next("bash", desc, [run_dir] + ([repo] if repo else []))
     elif step == "group":
         nxt = _next("bash",
@@ -433,6 +445,50 @@ def check(run_dir: Path, args) -> dict:
     return {"ok": not violations, "violations": violations, "notes": notes}
 
 
+def arm_sentinel(run_dir: Path, args) -> tuple:
+    """Step-0 pre-arm: write the MINIMAL sentinel before ANY run product exists, so a
+    step-1 failure at argument parsing can never leave the guard asleep through the
+    whole trial-and-error window. `target` = --repo, else the
+    `<repo>/.mgh-sdr/runs/<…>` layout — NEVER invented. Idempotent: an existing
+    same-target sentinel is left byte-identical (its read_roots[], possibly already
+    refined by step 1, are NEVER cleared); a different target is refused (the guard is
+    never re-anchored onto a second tree behind an existing run). Atomic write.
+    Returns (payload, exit_code); payload on success =
+    {sentinel_path, armed, target} with armed=true only when THIS call wrote it."""
+    repo = args.repo or _repo_from_layout(run_dir)
+    if not repo:
+        return ({"error": "target repo not derivable: --repo was not given and the run "
+                          "dir does not follow the `<repo>/.mgh-sdr/runs/<ts>-<branch>/` "
+                          "layout — pass `--repo <abs>` explicitly (NEVER guess a "
+                          "repository root)."}, 2)
+    repo = Path(repo).resolve()
+    sp = repo / SENTINEL
+    if sp.is_file():
+        body, err = _load_json(sp)
+        existing = body.get("target") if isinstance(body, dict) else None
+        if err or not existing:
+            return ({"error": f"existing sentinel {sp} is unreadable or carries no "
+                              f"target ({err or 'no target field'}) — inspect it manually "
+                              f"(it may belong to a live run), remove it only if stale, "
+                              f"then re-run --arm-sentinel."}, 2)
+        if str(Path(existing).resolve()) == str(repo):
+            return ({"sentinel_path": str(sp), "armed": False, "target": str(repo)}, 0)
+        return ({"error": f"sentinel {sp} is already anchored to a different target "
+                          f"({existing!r} ≠ {str(repo)!r}) — refusing to re-arm the guard "
+                          f"onto a second tree; inspect the existing run before "
+                          f"proceeding."}, 2)
+    body = {"domain": "mgh-sdr", "target": str(repo), "out_roots": [],
+            "read_roots": [], "v": 1}
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sp.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, sp)
+    except OSError as e:
+        return ({"error": f"cannot write sentinel {sp}: {e}"}, 2)
+    return ({"sentinel_path": str(sp), "armed": True, "target": str(repo)}, 0)
+
+
 def rearm_sentinel(run_dir: Path, args) -> tuple:
     """Deterministically rewrite `<repo>/.mgh-sdr/.active` from disk. Returns
     (payload, exit_code). `target` = context.json::repo; `read_roots[]` = the
@@ -442,8 +498,12 @@ def rearm_sentinel(run_dir: Path, args) -> tuple:
     ctx_path = run_dir / "context.json"
     if not ctx_path.is_file():
         return ({"error": "context.json absent — there is no run start state to rebuild "
-                          "the sentinel from. The sentinel is written by `sdr_context.py` "
-                          "as a script side effect; run that step first."}, 2)
+                          "the sentinel from (mid-run re-arm needs it). If the run has "
+                          "NOT started yet (step 0), pre-arm instead: `py "
+                          f"{_script_abs('resume_sdr_state.py')} --run-dir {run_dir} "
+                          "--repo <abs> --arm-sentinel`; otherwise run `sdr_context.py` "
+                          "(step 1) first — it writes the sentinel as a script side "
+                          "effect."}, 2)
     ctx, err = _load_json(ctx_path)
     if not isinstance(ctx, dict):
         return ({"error": f"context.json {err or 'is not a JSON object'} — cannot rebuild "
@@ -490,9 +550,18 @@ def main():
                     help="boundary check (R5.9): validate on-disk state self-consistency "
                          "(sentinel presence for the guard window, ambiguous terminals, "
                          "work-list agreement); exit 0/2")
-    ap.add_argument("--rearm-sentinel", action="store_true",
+    mx = ap.add_mutually_exclusive_group()
+    mx.add_argument("--rearm-sentinel", action="store_true",
                     help="deterministically rewrite <repo>/.mgh-sdr/.active from "
                          "context.json (atomic, idempotent); exit 0/2")
+    mx.add_argument("--arm-sentinel", action="store_true",
+                    help="step-0 pre-arm: write the MINIMAL sentinel "
+                         "<repo>/.mgh-sdr/.active (target = --repo, empty read_roots[]) "
+                         "BEFORE any run product exists, closing the window where step 1 "
+                         "fails at argument parsing and the guard never wakes up. "
+                         "Idempotent: same target already armed -> no-op (read_roots[] "
+                         "NEVER cleared); different target -> refused exit 2. stdout "
+                         "{sentinel_path, armed, target}; exit 0/2")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk).
     # Before parse_args so --help is utf-8 too. No-op on StringIO (in-process tests).
     for stream in (sys.stdout, sys.stderr):
@@ -514,6 +583,17 @@ def main():
                 f"(`<repo>/.mgh-sdr/runs/<ts>-<branch>/`); create it first if this is a "
                 f"fresh run.")
         return 1
+
+    if args.arm_sentinel:
+        payload, code = arm_sentinel(run_dir, args)
+        if code == 0:
+            _eprint(f"[resume_sdr_state --arm-sentinel] "
+                    f"{'sentinel armed' if payload['armed'] else 'already armed (no-op)'}: "
+                    f"{payload['sentinel_path']}")
+        else:
+            _eprint(f"error: {payload['error']}")
+        print(json.dumps(payload, ensure_ascii=False))
+        return code
 
     if args.rearm_sentinel:
         payload, code = rearm_sentinel(run_dir, args)

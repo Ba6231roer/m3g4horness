@@ -101,6 +101,13 @@ _STEPS = [
         "kind": "bash",
         "script_name": "fanout_runner.py",
         "cli_args": "--scout-plan <init-dir>/scout_plan.json --checkpoints <init-dir>/checkpoints/scout --inputs-dir <init-dir>/inputs/scout",
+        # map-stage drive for the scout-merge aggregate (over-budget path; gate
+        # plan_aggregate --node scout-merge decides — needs_reduce=false → this
+        # dispatcher line is a clean no-op, see scout fragment).
+        "extra_invocations": [
+            {"script_name": "fanout_runner.py",
+             "cli_args": "--tier scout-merge --init-dir <init-dir> --budget <max-aggregate-bytes> --checkpoints <init-dir>/checkpoints/scout --inputs-dir <init-dir>/inputs/scout-merge"},
+        ],
         "input": {"artifact": "scout_plan.json", "shape": "{batches[]"},
                   "output": {"artifact": "scout_candidates.json", "shape": "{candidates[],source}",
                              "path_pattern": "<init-dir>/scout_candidates.json"},
@@ -208,7 +215,7 @@ def _build_step(entry: dict) -> dict:
     script_name = entry["script_name"]
     script_abs = _script_abs(script_name)
     cli_args = entry["cli_args"]
-    return {
+    built = {
         "step": step_id,
         "kind": entry["kind"],
         "script": script_name,
@@ -218,6 +225,16 @@ def _build_step(entry: dict) -> dict:
         "output": entry["output"],
         "discipline": get_discipline(step_id),
     }
+    # Optional same-step companion commands (e.g. scout step's scout-merge map
+    # drive); resolved the same way as the primary invocation.
+    extras = []
+    for ex in entry.get("extra_invocations", []):
+        ex_abs = _script_abs(ex["script_name"])
+        extras.append({"script": ex["script_name"], "script_abs": ex_abs,
+                       "invocation": _invocation(ex_abs, ex["cli_args"])})
+    if extras:
+        built["extra_invocations"] = extras
+    return built
 
 
 def main():

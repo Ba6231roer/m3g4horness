@@ -5,25 +5,39 @@ Producer: for `/mgh-init` (and `/mgh-ut-init`, which shares the writer), the sen
 `run_config.json`; `resume_state.py --check` validates its existence mid-run and
 `--rearm-sentinel` rewrites it from the persisted `run_config.target` on resume); other
 domains write it from the orchestrator shell step 0 (Bash). Consumer: the shared guard
-`releases/{claude-code/hooks,opencode/hooks}/block_adhoc_scripts.py` (byte-identical twin;
-the opencode `.ts` plugin is glue-only and pipes to the same `.py`). Spec:
+`core/scripts/block_adhoc_scripts.py` — the canonical copy; the three distributed guard
+copies (claude `hooks/`, opencode `hooks/`, dsh `mgh-core/dsh/` sibling) are byte-identical
+to it, asserted by `tests/test_dsh_hook_parity.py`. The opencode `.ts` plugin and the dsh
+`.ts` shim are glue-only: each normalizes its host's tool-execution event into the same
+`{tool_name, tool_input, cwd}` payload and pipes it to the same `.py` (all decision logic
+lives in the Python guard — NEVER in either `.ts`). Spec:
 `openspec/specs/runtime-hook-enforcement/spec.md`.
 
 > **激活 = env 或磁盘哨兵(最优锚点起有界向上发现)。** 守卫在一个 mgh 运行域内激活当且仅当
 > (a) env `MGH_<DOM>_ACTIVE=1` 已设,**或** (b) 锚到盘根链上任一级 `<dir>/<run-root>/.active`
-> 哨兵存在。锚 = **最优可用 cwd 信号**:hook stdin payload 的 `cwd` 字段(claude PreToolUse
-> 携带会话/工具 cwd——发起工具调用的那个上下文)优先,缺省回退守卫进程 cwd(opencode 插件
-> 进程)。哨兵发现从锚自身起**向上 walk**(锚 → 逐祖先,至盘根或 16 级有界,先到者止),每级
+> 哨兵存在。锚 = **最优可用 cwd 信号**:hook stdin payload 的 `cwd` 字段优先——claude PreToolUse
+> 携带会话/工具 cwd(发起工具调用的那个上下文);dsh 由 shim 从会话头 `exec.agent.session.header.cwd`
+> 取同一语义的目录填入 payload `cwd`;缺省回退守卫进程 cwd(opencode 插件进程 / dsh 无会话头时)。
+> 哨兵发现从锚自身起**向上 walk**(锚 → 逐祖先,至盘根或 16 级有界,先到者止),每级
 > 查 `<dir>/<run-root>/.active`。向上 walk 闭合锚错配缺口:reader subagent(或从别处启动的
 > 宿主)锚 cwd 是 target 子目录任意深度,仍能在 `<target>/<run-root>/.active` 命中哨兵——旧
 > cwd-only 单点发现在该锚下找不到哨兵 → 守卫休眠 → 读/写侧全部静默降级放行。哨兵绕开
-> opencode「插件进程不继承 mid-session bash 导出的 env」的可靠性边界。运行域外(锚起向上
+> opencode「插件进程不继承 mid-session bash 导出的 env」的可靠性边界(该边界同样存在于 dsh:
+> 插件/shim 进程 env 不随会话导出而变,磁盘哨兵对三端同源可见)。运行域外(锚起向上
 > walk 全链有界皆无哨兵且无 env):退出码 0 放行(零日常噪声)。
 >
-> **opencode 残余边界(显式运行要求,非缺陷)**:插件进程 cwd = opencode 服务器启动目录,env
-> 又不继承——若从 target 树**外**启动 opencode,锚不在 target 链上,守卫整 run 休眠。守卫
-> **NEVER 整盘扫描补偿**(性能 + 越权)。运行要求:**在 target 根或其子目录启动 opencode**。
+> **opencode / dsh 残余边界(显式运行要求,非缺陷)**:opencode 插件进程 cwd = opencode
+> 服务器启动目录,env 又不继承——若从 target 树**外**启动 opencode,锚不在 target 链上,守卫
+> 整 run 休眠。dsh 的锚来自会话头 cwd(每工具调用随 payload 传入),休眠面更小;仅剩
+> 「会话头缺失 → 回退 shim 进程 cwd」这一退化形状。守卫
+> **NEVER 整盘扫描补偿**(性能 + 越权)。运行要求:**在 target 根或其子目录启动宿主**。
 > 这优于现状(现状连从 target 子目录启动都休眠)。
+>
+> **dsh fail-soft 条款**:shim 找不到可用 Python 解释器(回退链 `py`→`python3`→`python` 全
+> 缺)、守卫 spawn 自身崩溃、或 payload 无法归一化 → **一律放行 + 日志一条**(失败绝不
+> 阻断正常开发)。deny 通道 = 守卫退出码 2 → shim 返回 `{kind:"deny", reason:<守卫 stderr
+> 全文>}`,宿主把它渲染成模型可见的 `Error: <reason>`(不截断);recipe 文案的唯一来源是
+> 守卫,shim 不加工。
 
 ## Sentinel `<dir>/<run-root>/.active` (anchored upward discovery)
 
@@ -83,8 +97,27 @@ readable, never writable.
 | `mgh-ut-init` | `MGH_UT_INIT_ACTIVE` | `.mgh-ut-init` | `<dir>/.mgh-ut-init/.active` |
 
 `<dir>` runs over the anchor-to-drive-root chain (anchor itself first, then each ancestor,
-bounded to 16 levels / the filesystem root). The anchor = payload `cwd` (claude) ?? guard
-process cwd (opencode).
+bounded to 16 levels / the filesystem root). The anchor = payload `cwd` (claude / dsh —
+the dsh shim fills it from the session header cwd) ?? guard process cwd (opencode).
+
+## dsh tool-name normalization (shim `TOOL_MAP`, glue only)
+
+dsh emits lowercase snake_case tool ids. The shim's static `TOOL_MAP` constant normalizes
+them onto the guard's canonical names (the same names the claude face dispatches on); the
+guard NEVER sees a dsh-native id, and fields are renamed to the snake_case tool_input shape
+(`file_path` etc.) the guard already parses:
+
+| dsh tool id | normalized name | notes |
+|---|---|---|
+| `bash` | `Bash` | dsh's bash tool is win32-disabled; see `pwsh` |
+| `pwsh` | `Bash` | zero new guard code — hits the existing five verb tables + rule-m catch-all verbatim |
+| `read` / `write` / `edit` / `multiedit` / `notebookedit` | `Read` / `Write` / `Edit` / `MultiEdit` / `NotebookEdit` | field `file_path` passes through |
+| `str_replace_editor` | `ApplyPatch` | shim extracts `paths[]`/`operations[]` from `command`+`path` (`view` → empty paths = non-mutating pass); mutating commands enter the write-confinement tool face |
+| `glob` / `grep` | `Glob` / `Grep` | `pattern`/`path`/`include`→`glob` |
+| `run_code` | `RunCode` | bundled inline interpreter = introspection-shaped violation's peer on the tool face: domain-active → exit 2 + recipe pointing at the sanctioned exit (run the INSTALLED leaf script verbatim); body is NOT sniffed (shape-only, same stance as the heredoc rule) |
+| `terminal_open/send/read/signal/close/list` | `TerminalIO` | interactive terminal bypasses foreground confinement → domain-active deny |
+| `job_output/list/kill` | `JobCtl` | background-job bypass likewise → domain-active deny |
+| anything else (e.g. `web_fetch`) | *unmapped* | shim returns `next()` untouched (pass-through; observed-and-adjudicated during first-run acceptance) |
 
 ### Lifecycle
 
@@ -120,8 +153,14 @@ over-blocking when no target was pinned).
 
 ## Runtime write discipline (active guard)
 
-1. **Bash `py -c`/`python -c` introspection** of artifacts (`import json` / `open(` / `load(` /
-   `.json`) → exit 2 + recipe.
+1. **Bash inline interpreter code** → exit 2 + introspection recipe. Two shapes under one rule:
+   `py -c`/`python -c` **introspection** of artifacts (`import json` / `open(` / `load(` /
+   `.json`; benign-bodied `py -c` is not this rule's target), and **heredoc / here-string** fed
+   to the interpreter via a standalone `-` (`py - <<EOF`, `py - <<< '…'`,
+   `python3 x.py … | python3 - <<'EOF'`) which blocks by SHAPE alone — no body-token requirement
+   (heredoc bodies are often invisible or truncated in the command string). Command bodies are
+   split on `;`/`&&`/`||`/`|` and judged per segment. A standalone `-` WITHOUT `<<`/`<<<` is
+   NOT in this rule face (minimal interception surface; new observed shapes net in later).
 2. **Script-write block** — `Write`/`Edit` of any extension in
    `_SCRIPT_EXTS = {.py, .ps1, .sh, .bash, .zsh, .bat, .cmd, .ts, .js, .mjs, .cjs}` → exit 2.
    **No path whitelist** (the prior `core/scripts` + `tests`/`tools`/`hooks` exemptions only
@@ -245,17 +284,23 @@ are already absolute for the write side; this extends that absolutization to the
 ## Guard tool-surface wiring coverage (CI-enforced invariant)
 
 The guard's decision-branch tool set (every tool name `main()` dispatches on: `Bash`,
-`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `ApplyPatch`, `Read`, `Glob`, `Grep`) SHALL
-be fully covered by **BOTH** host wiring faces, enforced by a regression test:
+`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `ApplyPatch`, `Read`, `Glob`, `Grep`,
+`RunCode`, `TerminalIO`, `JobCtl`) SHALL be fully covered by **ALL THREE** host wiring
+faces, enforced by regression tests:
 
 | Face | What must cover every guard tool name | Where |
 |---|---|---|
 | claude install face | the default PreToolUse matcher `_DEFAULT_MATCHER` (`\|`-split) | `tools/install_hook.py` |
 | opencode plugin face | the `.ts` shim `HANDLED` set + its lowercase `normalize` mapping | `releases/opencode/plugins/block_adhoc_scripts.ts` |
+| dsh shim face | the `.ts` shim static `TOOL_MAP` constant's value range | `releases/dsh/plugins/mgh-guard.ts` |
 
-Adding a guard decision branch WITHOUT extending both wiring faces SHALL fail the regression
-test (`tests/test_opencode_hook_parity.py::TestWiringCoverage`) — structurally closing the
-"dead branch" gap class on both hosts. The claude matcher previously covered only
+`RunCode`/`TerminalIO`/`JobCtl` are dsh-only ids that claude/opencode NEVER emit; they are
+listed on the claude matcher and the opencode `HANDLED` set anyway (same convention as
+`multiedit` on opencode) so the coverage invariant is machine-checkable on all three
+faces. Adding a guard decision branch WITHOUT extending all three wiring faces SHALL fail
+the regression tests (`tests/test_opencode_hook_parity.py::TestWiringCoverage` checks
+matcher ∧ HANDLED ∧ TOOL_MAP; `tests/test_dsh_hook_parity.py` checks the three-face
+same-fixture parity). The claude matcher previously covered only
 `Bash|Write|Edit`, leaving the read-side / tool-face branches unconsulted (an out-of-tree
 `Read` reached the host permission prompt and interrupted the run instead of failing loud
 with a recipe); nothing prevented the same drift on opencode. Reinstall evolves a legacy
@@ -264,8 +309,12 @@ untouched (stderr note).
 
 ## Cross-references
 
-- Guard source (single decision source): `releases/claude-code/hooks/block_adhoc_scripts.py`
-  (opencode twin byte-identical; parity test `tests/test_opencode_hook_parity.py`).
-- Guard unit tests: `tests/test_block_adhoc_scripts.py` (incl. upward-walk sentinel discovery).
-- Wiring coverage test: `tests/test_opencode_hook_parity.py::TestWiringCoverage`.
+- Guard source (single decision source): `core/scripts/block_adhoc_scripts.py` (canonical;
+  claude/opencode `hooks/` twins + the dsh sibling copy are byte-identical — parity test
+  `tests/test_dsh_hook_parity.py`, plus the opencode twin parity in
+  `tests/test_opencode_hook_parity.py`).
+- Guard unit tests: `tests/test_block_adhoc_scripts.py` (incl. upward-walk sentinel discovery
+  + the dsh bypass-tool branches).
+- Wiring coverage tests: `tests/test_opencode_hook_parity.py::TestWiringCoverage` (three
+  faces), `tests/test_dsh_hook_parity.py` (three-face same-fixture + shim glue-only scan).
 - Install / opt-out (`--no-enforce-hook`): `install.sh` + `core/contracts/.../spec.md` per command.

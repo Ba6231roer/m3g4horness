@@ -33,8 +33,10 @@ import { fileURLToPath } from "node:url"
 // TOOLS do). multiedit/notebookedit are CLAUDE-native tool ids with no opencode counterpart —
 // they are listed (and routed through the generic filePath fallback) ONLY to keep the wiring
 // invariant "shim HANDLED ⊇ guard dispatch set" machine-checkable; opencode never emits them.
+// runcode/terminalio/jobctl are the same convention for the dsh-dialect guard branches (rule
+// (n)) — listed only for the wiring invariant; opencode never emits these ids either.
 const HANDLED = new Set(["bash", "write", "edit", "read", "glob", "grep", "apply_patch",
-  "multiedit", "notebookedit"])
+  "multiedit", "notebookedit", "runcode", "terminalio", "jobctl"])
 
 // apply_patch `patchText` marker lines (opencode packages/core/src/patch.ts:35-51):
 //   *** Add File: <path>      *** Update File: <path>      *** Delete File: <path>
@@ -93,6 +95,12 @@ function normalize(tool: string, args: Record<string, unknown> | undefined) {
   }
   // write / edit / read (and the claude-native multiedit/notebookedit ids, kept for the
   // wiring invariant) all carry a file path under filePath/file_path/path.
+  // runcode/terminalio/jobctl are dsh-dialect guard names (rule (n)) listed only for the
+  // wiring invariant — opencode never emits them, but the fallback chain must NOT coerce
+  // them into Edit, so they map to their guard names directly.
+  if (tool === "runcode") return { tool_name: "RunCode", tool_input: {} }
+  if (tool === "terminalio") return { tool_name: "TerminalIO", tool_input: {} }
+  if (tool === "jobctl") return { tool_name: "JobCtl", tool_input: {} }
   const fp = (args?.filePath as string) ?? (args?.file_path as string) ?? (args?.path as string) ?? ""
   const name = tool === "read" ? "Read" : tool === "write" ? "Write"
     : tool === "multiedit" ? "MultiEdit" : tool === "notebookedit" ? "NotebookEdit" : "Edit"

@@ -5,7 +5,8 @@
 `/mgh-sdr`(security design review)——需求分支代码变更的存量安全设计符合性复核:以
 `git diff <base>..<branch>` 为输入,按接口维度 + 独立变更单元分组 fan-out,对照 mgh-init 产出的
 存量安全设计与可配置检查维度(垂直/横向越权、其他权限、SQL 注入、敏感信息屏蔽、输入校验默认开)
-逐单元查设计遗漏,确定性汇总渲染一份 md 报告到项目根。覆盖:diff 采集与分组、外部仓受控检索、
+逐单元查设计遗漏,确定性汇总渲染一份自包含单文件 HTML 报告到项目根(附同源结构化数据
+JSON 于 run 目录)。覆盖:diff 采集与分组、外部仓受控检索、
 fan-out 评审、统一问题记录、报告渲染、launcher 外壳、幂等 resume 与边界校验。
 
 ## Requirements
@@ -321,11 +322,14 @@ SHALL 为 `{route, count}` 列表形态)。
 新增确定性叶脚本 `render_sdr_report.py`(标准库、退出码 0/1/2、`--check` 承 R5.9)SHALL 收
 run 目录下全部 fan-out 单元 draft(`.done` 且 JSON 可解析者;`.failed` 单元以 stderr 汇总 +
 manifest `failed_units[]` 计入,不阻断渲染),按 `{dimension, route, file}` 三元组去重合并,
-渲染 `<repo>/<工具名>-<分支名>-<YYYYMMDD_HHMMSS>.md`(工具名固定 `mgh-sdr`;分支名取文件系统
-安全命名;时间戳到秒、本地时区)。报告 SHALL 为简体中文、面向人读,结构:
+渲染 `<repo>/<工具名>-<分支名>-<YYYYMMDD_HHMMSS>.html`(工具名固定 `mgh-sdr`;分支名取文件系统
+安全命名;时间戳到秒、本地时区)。报告 SHALL 为**自包含单文件 HTML**:样式、脚本、数据全部
+内嵌,SHALL NOT 引用任何外部资源(网络 URL 的脚本/样式/字体/数据、CDN、外链图片一概不产),
+file:// 双击用任意现代浏览器打开即可阅读,不依赖联网与任何已安装工具。报告 SHALL 为简体中文、
+面向人读,结构:
 
 - **头部**(分支/base/时间/检查面/敏感目录来源/外部仓结论摘要 + 分组概览,保留现行);
-- **章节一「简报表」**(本需求的核心结构):md 表格,**行 = 评审单元**(排序:interface 按
+- **章节一「简报表」**(本需求的核心结构):HTML 表格,**行 = 评审单元**(排序:interface 按
   route 升序、standalone 殿后按 unit_id;多路由单元按首路由参与排序),列 = 接口/方法入口、
   调用链、是否前端接口、前端使用次数、6 维度各一列(默认闭集维度;自由扩展维度各追加一列)。
   各列 SHALL 满足:入口列 = route 串(standalone 或无路由 = 该独立方法定义 `fqn_short`);
@@ -334,64 +338,73 @@ manifest `failed_units[]` 计入,不阻断渲染),按 `{dimension, route, file}`
   首字母 + 类名」形态收敛,完整包路径可由 file 列还原,`·` 同类延续、`⤷` 分支(`branch_of` 宿主)、`⇢` mapper XML 终端、
   `†` 未变更节点;`chain[]` 为空(standalone/codegraph off)= 该单元方法定义短形;入口
   = 方法定义时链写到分析可达处);**入口列与调用链列的每个「类名.方法名」短形 SHALL 渲染为
-  指向仓内源文件的 markdown 链接**(见本需求「源文件链接渲染」段);前端两列 = 按 route join
+  指向仓内源文件的链接**(见本需求「源文件链接渲染」段);前端两列 = 按 route join
   context.json `external_repos[].route_hits[]`(声明 ∧ 命中 >0 = `是`+`N 处`;声明 ∧ 0 命中 =
   `否`+`—`;无声明/不可达 = `未知`+`—`;多路由单元仅按主路由(分号串第一段)join,次路由命中
-  不抬升主路由状态);维度列 = `否` 或 `是 [P-NN]`
-  (该单元该维度的合并 findings 编号列表,**纯文本编号**,SHALL NOT 产出任何 md 内部锚点/
-  HTML anchor——目标编辑器(obsidian/Zed)不支持报告**内部**锚点跳转,编号即可定位;本约束
-  SHALL NOT 及于指向仓内源文件的链接,后者是本需求的交付内容);
-- **章节二「问题详述」**:合并去重后的每条 finding 一小节,统一 `P-NN` 编号(全局递增),
-  标题形态 `### P-01 · <维度中文标签> · <route 或独立方法> · <severity 中文>`;正文含位置
-  (`file:line`——line 取 draft 新增 `line` 字段(问题锚定行号,数值);draft 缺 `line` 时
-  降级为 `file`(不硬失败,旧 draft 兼容);位置文本 SHALL 渲染为指向该源文件的 markdown
-  链接(见「源文件链接渲染」段))、风险、建议、control_ref;排序 severity 升序
-  (高→提示)、同 severity 按 P-NN;
+  不抬升主路由状态);维度列 = `否` 或 `是 [P-NN]`(该单元该维度的合并 findings 编号列表,
+  **P-NN SHALL 为页内锚点链接**,点击跳转到章节二对应条目——HTML 形态下页内跳转由本报告
+  自身保证,SHALL NOT 依赖任何外部工具;原 MD 形态下「SHALL NOT 产出内部锚点」的禁令
+  系目标编辑器不支持所致,随报告形态切换一并废止;本约束 SHALL NOT 及于指向仓内源文件的
+  链接,后者是本需求的交付内容);
+- **章节二「问题详述」**:合并去重后的每条 finding 一小节,统一 `P-NN` 编号(全局递增,
+  条目锚点 = 其页内跳转目标),标题形态 `P-01 · <维度中文标签> · <route 或独立方法> ·
+  <severity 中文>`;正文含位置(`file:line`——line 取 draft 新增 `line` 字段(问题锚定行号,
+  数值);draft 缺 `line` 时降级为 `file`(不硬失败,旧 draft 兼容);位置文本 SHALL 渲染为
+  指向该源文件的链接(见「源文件链接渲染」段))、风险、建议、control_ref;排序 severity
+  升序(高→提示)、同 severity 按 P-NN;
 - **章节三「分支调用链图」**:仅含带真实分支(`chain[]` 存在 **非 external** 节点携带
-  `branch_of`——即 java 调用扇出;mapper 终端节点按 D3 编码也带 `branch_of`,但不构成真实
-  分支)的单元,每单元一张 mermaid `flowchart LR`(入口 → 逐节点 → mapper 终端虚线边);
-  线性链单元(含仅 ⇢ 终端带 `branch_of` 的直连 dao 短链)SHALL NOT 入本节;mermaid 节点
-  标签 SHALL NOT 嵌入链接(mermaid 锚点语法跨编辑器兼容性差,跳转由章节一表格承担);
+  `branch_of`——即 java 调用扇出;mapper 终端节点按编码也带 `branch_of`,但不构成真实
+  分支)的单元,每单元一张**内嵌 SVG 有向图**(渲染器按 `chain[]` 确定性生成分层布局:
+  入口 → 逐节点 → mapper 终端虚线边;`⤷` 分支、`⇢` 终端、`†` 未变更节点语义全部保留),
+  SHALL 支持缩放与平移(页内交互),SHALL NOT 依赖任何外部图形库;线性链单元(含仅 ⇢ 终端
+  带 `branch_of` 的直连 dao 短链)SHALL NOT 入本节;SVG 节点 SHALL NOT 承载源文件超链接
+  (源文件跳转统一由章节一表格与章节二承担,图形节点仅悬停提示 `file:line`);
 - **「无问题单元」清单**(保留,供 merge 前放行参考)+ **诚实边界节**(≥7 条,含排除集披
   露,保留现行)。
 
-**源文件链接渲染**(本需求新增的渲染规则,报告写在目标仓根目录 ⇒ 链接目标 = 源文件相对
-仓根的相对路径):
+**源文件链接渲染**(渲染规则,报告写在目标仓根目录 ⇒ 链接目标 = 源文件相对仓根的相对路径):
 
-- 链接形态 `[显示文本](<相对路径>#L<line>)`;`line` 缺失或为 `null` 时 SHALL 退化为
-  `[显示文本](<相对路径>)`(不带锚点;不支持锚点的编辑器对 `#L<line>` 自动退化为只打开
-  文件,故有 line 就带上)。
+- 链接形态 `<a href="<相对路径>#L<line>">显示文本</a>`;`line` 缺失或为 `null` 时 SHALL
+  退化为 `<a href="<相对路径>">显示文本</a>`(不带锚点)。
 - 路径解析:chain 节点 `file` 与 finding `file` 为相对路径(相对 `--repo`)时直接作链接
   目标(输出统一 `/` 分隔);为绝对路径时,resolve 后在 `--repo` 子树内 → 转为相对路径,
   在子树外 → **不产链接**(降级纯文本,报告里没有指向仓外的死链);字段缺失/空 → 纯文本。
   路径解析 SHALL NOT 依赖文件真实存在(diff 分支的源文件可能未检出到工作树;链接坏与否由
-  编辑器呈现,渲染器只做词法判定,NEVER 因此 stat 目标文件)。
+  浏览器呈现,渲染器只做词法判定,NEVER 因此 stat 目标文件)。
 - 显示文本 = 现行短形(`fqn_short` 等,含 `†` 前缀)逐字不变;`·`/`⤷`/`⇢`/`→` 分隔符不
   入链接;mapper XML 终端(`change=external`)与普通节点同等对待(有 `file` 即链)。
-- 显示文本含 `]` 等会破坏 md 链接语法的字符时,SHALL 对其做最小转义(`\]`/`\[`)或退化为
-  纯文本,NEVER 产出语法破损的链接单元格。
-- `sdr_manifest.json` `rows[]` 的 `entry`/`chain` 字段 SHALL 保持**纯文本短形**(不含链接
-  markdown 语法)——manifest 是机器消费面;表格链接是同一数据的渲染投影。
+- 显示文本与属性值含 HTML 敏感字符(`<`/`>`/`&`/`"` 等)时 SHALL 做实体转义,NEVER 产出
+  语法破损的标记;数据面(数据文件/manifest)SHALL NOT 因此引入任何 HTML 标记。
+- `sdr_manifest.json` `rows[]` 与数据文件 `rows[]` 的 `entry`/`chain` 字段 SHALL 保持
+  **纯文本短形**(不含任何链接语法/HTML 标记)——两者是机器消费面;表格链接是同一数据
+  的渲染投影。
 
-同名报告文件已存在 SHALL 原子覆盖(时间戳到秒内重跑)。`sdr_manifest.json` SHALL 新增
-`rows[]`(简报表逐行结构化投影:`{unit_id, entry, chain, frontend_is, frontend_count,
-issue_refs[]}`;issue_refs = 该单元各维度问题编号的展平列表),供下游确定性消费(如未来
-/mgh-blst);`counts` 语义不变;其余字段保留现行(`excluded_files` 透传等)。draft 问题记录
-schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)。
+**数据文件**:渲染 SHALL 同步写出 `<run-dir>/sdr_report_data.json`,承载报告全量结构化
+数据(单元行 `rows[]`、合并去重后的 `findings[]`(含 P-NN/维度/severity/位置/风险/建议/
+control_ref)、分支调用链图数据、诚实边界条目、头部元信息),HTML 内嵌**同一份数据**
+(JSON 等价一致)——人读 HTML 与机器读 JSON 同源;下游确定性消费(如未来 /mgh-blst、
+报告后处理工具)SHALL 以数据文件为接口。`--check` SHALL 校验:数据文件存在且可解析、
+与 HTML 内嵌数据一致、manifest 计数与 draft 实际一致。
+
+同名报告文件已存在 SHALL 原子覆盖(时间戳到秒内重跑)。`sdr_manifest.json` `rows[]`
+(`{unit_id, entry, chain, frontend_is, frontend_count, issue_refs[]}`;issue_refs = 该单元
+各维度问题编号的展平列表)语义不变;`counts` 语义不变;其余字段保留现行(`excluded_files`
+透传等)。draft 问题记录 schema 不变(`line` int 可选,任务模板与 agent 定义双端同步披露)。
 
 诚实边界 SHALL 至少含 7 条(现行 7 条语义保留):① 发现是 LLM 候选需人工复核,非确认漏洞;
 ② 接口分组是启发式,漏分组接口退入独立单元(分析粒度粗但覆盖不丢);③ 引用存量控制断言存在、
 不断言有效;④ 外部仓结论是检索时点快照(不保证前端分支已同步);⑤ 基线经字节预算投影,低优先
 级细节可能未全量投影;⑥ 敏感目录来源与覆盖范围(目录外字段仅按回退规则识别);⑦ 排除集披露。
-渲染器 NEVER 写 `openspec/`、NEVER 写 run 目录与报告文件之外的目标仓文件。
+渲染器 NEVER 写 `openspec/`、NEVER 写 run 目录、数据文件与报告文件之外的目标仓文件;历史
+`.md` 报告 SHALL NOT 被回写或迁移。
 
 #### Scenario: 简报表行覆盖全单元形态
 
 - **WHEN** 某 run 产 4 个 interface 单元(其一为多路由合并单元)、3 个 standalone 单元、其中
   2 个 interface 单元的 `chain[]` 带**非 external** 节点的 `branch_of`(真实分支)
-- **THEN** 章节一表格 7 行(排序:interface 按 route 升序、standalone 殿后);interface 行
+- **THEN** 章节一表格 7 数据行(排序:interface 按 route 升序、standalone 殿后);interface 行
   调用链列为缩写链(含 `⤷`/`⇢`/`†`),standalone 行为方法定义短形;带分支的 2 单元在章节三
-  各有一张 mermaid 图,线性单元不出现;全部维度列为 `否` 或 `是 [P-NN]` 纯文本
+  各有一张内嵌 SVG,线性单元不出现;全部维度列为 `否` 或可点击的 `是 [P-NN]` 页内锚点链接
 
 #### Scenario: 前端两列三态
 
@@ -403,36 +416,37 @@ schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)�
 #### Scenario: 无锚点纯文本编号引用
 
 - **WHEN** 渲染任意带 findings 的报告
-- **THEN** 简报表格维度列与章节二标题均为纯文本 `P-NN` 编号;报告全文 SHALL NOT 出现
-  `<a id=`、`{#...}`、`[text](#...)` 形态(md **内部**锚点,即 `(` 后紧跟 `#` 的跳转);
-  指向仓内源文件的 `[text](relative/path#L42)` 形态链接不在此禁列;`P-NN` 编号全局唯一且
-  章节二可按编号定位
+- **THEN** `P-NN` 编号全局唯一且章节二可按编号定位;简报表格维度列的 `P-NN` 为**页内锚点
+  链接**,点击在浏览器内跳转到章节二对应条目(页内跳转零外部依赖;原 MD 形态的内部锚点
+  禁令随报告形态切换废止);数据文件与 manifest 的 `issue_refs[]` 仍为纯文本编号(不含
+  链接语法)
 
 #### Scenario: 链节点渲染为源文件链接
 
 - **WHEN** 某单元 `chain[]` 含节点 `{fqn_short: "OrderController.submit", file:
   "src/main/java/com/x/controller/OrderController.java", line: 42}` 与节点 `{fqn_short:
   "OrderMapper.insertOrder", file: "src/main/java/com/x/mapper/OrderMapper.java", line: null}`
-- **THEN** 调用链列依次渲染 `[OrderController.submit](src/main/java/com/x/controller/OrderController.java#L42)`
-  与 `[OrderMapper.insertOrder](src/main/java/com/x/mapper/OrderMapper.java)`(无锚点退化);
-  分隔符不入链接,链的阅读顺序与短形文本不变
+- **THEN** 调用链列依次渲染 `href="src/main/java/com/x/controller/OrderController.java#L42"`
+  与 `href="src/main/java/com/x/mapper/OrderMapper.java"`(无锚点退化)的链接,显示文本为
+  短形;分隔符不入链接,链的阅读顺序与短形文本不变
 
 #### Scenario: 仓外与异常路径降级纯文本
 
 - **WHEN** 某 finding 的 `file` 为仓外绝对路径,另一 chain 节点 `file` 为空串
-- **THEN** 前者位置、后者链节点均保持现行纯文本形态,报告不含仓外路径链接;渲染退出码 0,
-  `--check` 不报不一致
+- **THEN** 前者位置、后者链节点均保持纯文本形态(无 `<a>`),报告不含仓外路径链接;渲染退出码
+  0,`--check` 不报不一致
 
 #### Scenario: manifest rows 保持纯文本
 
-- **WHEN** 渲染完成产 manifest,表格调用链列含 markdown 链接
-- **THEN** `rows[]` 对应行 `chain`/`entry` 字段为纯文本短形(不含 `[`/`]( ` 链接语法),
-  与去链接化前的表格单元格文本一致
+- **WHEN** 渲染完成产数据文件与 manifest,HTML 表格调用链列含源文件链接
+- **THEN** `sdr_manifest.json` 与 `sdr_report_data.json` 对应行 `chain`/`entry` 字段均为
+  纯文本短形(不含 `<a>`/`href` 等任何链接语法/HTML 标记),与「去链接化后的表格单元格
+  文本」一致
 
 #### Scenario: 报告文件名与内容可追溯
 
 - **WHEN** 对分支 `feature-pay` 于 2026-09-03 14:30:22 完成评审
-- **THEN** 项目根出现 `mgh-sdr-feature_pay-20260903_143022.md`,头部含 branch/base/时间戳,
+- **THEN** 项目根出现 `mgh-sdr-feature_pay-20260903_143022.html`,头部含 branch/base/时间戳,
   章节一每行可溯源到 unit_id,章节二每条可溯源到 file:line(或 file)
 
 #### Scenario: draft 缺 line 字段降级
@@ -457,10 +471,10 @@ schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)�
 
 #### Scenario: manifest rows 投影与表格一致
 
-- **WHEN** 渲染完成产 manifest
-- **THEN** `rows[]` 长度 = 章节一表格数据行数,逐行 `unit_id`/`entry`/`chain`/`frontend_is`/
-  `frontend_count` 与表格单元格一致(链接按「去链接化后的短形文本」比对);`issue_refs[]`
-  展平该行全部问题编号
+- **WHEN** 渲染完成产数据文件与 manifest
+- **THEN** `sdr_report_data.json` `rows[]` 与 `sdr_manifest.json` `rows[]` 逐行一致,长度 =
+  章节一表格数据行数,`unit_id`/`entry`/`chain`/`frontend_is`/`frontend_count` 与表格单元格
+  一致(链接按「去链接化后的短形文本」比对);`issue_refs[]` 展平该行全部问题编号
 
 #### Scenario: 报告披露排除集与分组统计
 
@@ -468,6 +482,32 @@ schema 扩展 `line`(int,可选;任务模板与 agent 定义双端同步披露)�
   25 条变更集内调用边、向上锚定 8 条链
 - **THEN** 报告诚实边界含排除计数与分类,manifest `counts.excluded_files == 120`;分组统计
   在报告头部「分组概览」可见,供操作者判断分组质量
+
+#### Scenario: 报告离线自包含
+
+- **WHEN** 渲染任意报告并在文本层面检查产物
+- **THEN** HTML 内不含任何 `http://`/`https://` 的脚本、样式、字体、数据引用(外链图片同为
+  零),样式与脚本全部内嵌,数据存在于内嵌数据块;断网环境下 file:// 打开全部章节可读、
+  章节三图形可见
+
+#### Scenario: 数据文件与内嵌数据一致且 --check 可校验
+
+- **WHEN** 渲染完成,随后对同一 run 目录跑 `--check`
+- **THEN** `<run-dir>/sdr_report_data.json` 存在、可解析,且与 HTML 内嵌数据块 JSON 等价
+  (同数据两种载体);`--check` 退出码 0;人为破坏数据文件或内嵌块之一后 `--check` 退出码 2
+
+#### Scenario: 章节三 SVG 零外部依赖且语义保留
+
+- **WHEN** 某 branched 单元 `chain[]` 含一个 `branch_of` 分支宿主、一个 mapper 终端节点
+  (`change=external`)与一个未变更节点(`†`)
+- **THEN** 该单元章节三为内嵌 `<svg>`(非 mermaid 代码块、非 canvas、不加载任何图形库),
+  mapper 终端边为虚线样式,未变更节点带 `†` 前缀,分支拓扑与 `chain[]` 一致;图形可缩放平移
+
+#### Scenario: 视图筛选不回写数据
+
+- **WHEN** 读者在章节一按 severity 或单维度筛选表格行
+- **THEN** 仅不匹配行被隐藏(纯视图态),`sdr_report_data.json` 与 `sdr_manifest.json` 的
+  `rows[]` 不因此变化;重新打开报告后全部行恢复
 
 ### Requirement: 敏感目录复用与默认模板回退(与 sra/srr 的显式分歧)
 
@@ -589,8 +629,18 @@ stderr);每次实际变更打印 stderr(变更前后条目);stdout 结构化 JSO
 
 `/mgh-sdr` SHALL 为第 6 个运行域:env `MGH_SDR_ACTIVE=1` 或磁盘哨兵 `<repo>/.mgh-sdr/.active`
 (向上 walk 发现,承既有激活契约)激活守卫;哨兵 `read_roots[]` 声明的外部只读根按 `runtime-hook-enforcement`
-的 read_roots 扩展要求生效。哨兵的写入 SHALL 为**确定性脚本副作用**(`sdr_context.py` 完成基线投影与
-外部仓检索后 co-write),SHALL NOT 依赖编排器手执行的 `Bash printf` 配方。
+的 read_roots 扩展要求生效。
+
+哨兵的写入 SHALL 为**确定性脚本副作用**且分**两级时序**:
+
+- **step 0 预武装**:编排器在**首次调用 `sdr_context.py` 之前**执行
+  `py <mgh-core>/scripts/resume_sdr_state.py --run-dir <abs-run-dir> --repo <abs> --arm-sentinel`,
+  确定性写最小哨兵(`domain:"mgh-sdr"`、`target`= `--repo` 的 Windows 原生绝对路径、
+  `out_roots:[]`、`read_roots:[]`)。目的:闭合「step 1 在参数解析/前置校验阶段即失败 → 哨兵未写 →
+  守卫整个试错期休眠」的窗口。`--arm-sentinel` SHALL 幂等(同 target 重复执行为 no-op;不覆盖已存在
+  哨兵的 `read_roots[]`)。SHALL NOT 以 `Bash printf` 手执行配方实现。
+- **step 1 细化覆盖**:`sdr_context.py` 完成基线投影与外部检索后的 co-write 语义不变(把哨兵刷新为
+  含实际检索根 `read_roots[]` 的完整版);launcher 路径的 spawn 前写入亦不变。
 
 流程 SHALL 幂等可恢复,分**产物层**与**入口层**两件事:
 
@@ -602,7 +652,10 @@ stderr);每次实际变更打印 stderr(变更前后条目);stdout 结构化 JSO
   恢复路径(**读磁盘 → 继续**)。恢复 SHALL 复用**既有 run 目录**(同一 `<run-dir>`),SHALL NOT 另起一个新的
   时间戳 run 目录——新建目录 = 已完成单元的 marker 不在新目录里 = 全部重做(零复用即全损)。
 
-编排器每步完成后 SHALL 跑对应产出者 `--check`,失败(退出码 2)回退重跑,不带着破损产物继续(承 R5.9)。
+编排器每步完成后 SHALL 跑对应产出者 `--check`,失败(退出码 2)回退重跑,不带着破损产物继续。
+step 1 **之前**的失败(含 argparse 退出码 2)SHALL 由编排器按命令壳收尾段的「干净停止」路径移除预武装
+哨兵(`rm <repo>/.mgh-sdr/.active`),NEVER 留残哨进入日常开发;残留(宿主硬杀)由下次 launcher 启动时
+检测并复用/清理的既有路径兜底。
 
 **恢复指引 MUST 域内可执行**:命令壳给出的恢复、排障与"磁盘状态是否正常"判定指引,SHALL 只引用
 在 sdr 运行目录下可实际执行的脚本——即接受 `--run-dir <sdr run dir>`(或等价的 `<run-dir>` 位置参数)
@@ -619,6 +672,29 @@ stderr);每次实际变更打印 stderr(变更前后条目);stdout 结构化 JSO
 `<repo>/.mgh-sdr/runs/<ts>-<branch>/`,且无 `--resume` / `--run-dir` 参数;故「经 launcher 同样参数重跑即续跑」
 **目前不成立**(会落到新目录、从头再跑)。续跑入口为:由调用方已知 run 目录时,经命令壳的显式
 `--run-dir` + `resume_sdr_state.py --run-dir <abs>` 继续。launcher 侧的 run 目录复用 SHALL 由后续 change 补齐。
+
+#### Scenario: step 1 失败窗口守卫仍武装
+
+- **WHEN** 编排器 step 0 已跑 `--arm-sentinel`,随后对 `sdr_context.py` 传入不存在的 flag argparse
+  退出码 2,再接续尝试 `py -c` 内联或 heredoc 形态解析产物
+- **THEN** 因 `<repo>/.mgh-sdr/.active` 已在,守卫对后续违规动作照常 fail-loud(退出码 2 + recipe),
+  不再存在「试错期整段放行」的窗口
+
+#### Scenario: 预武装哨兵幂等且不被 step 0 重复破坏
+
+- **WHEN** 预武装之后,编排器因压缩/重入再次执行同一 `--arm-sentinel` 命令
+- **THEN** 已存在且 `target` 相同的哨兵逐字不变(no-op,`read_roots[]` 即使已被 step 1 细化也 NEVER
+  被清空);`target` 不同则退出码 2 + 报错(拒绝把守卫锚到第二个树)
+
+#### Scenario: step 1 成功后的完整哨兵覆盖预武装
+
+- **WHEN** `--arm-sentinel` 预武装(read_roots 空)后 `sdr_context.py` 完整跑成并检索了两个外部根
+- **THEN** co-write 把同一哨兵刷新为 `read_roots[]` = 实际检索根;守卫的读允许集随之扩展
+
+#### Scenario: step 1 前干净停止移除预武装哨兵
+
+- **WHEN** step 1 因参数错误终止、用户选择干净停止,编排器走壳的移除步
+- **THEN** `<repo>/.mgh-sdr/.active` 被移除,守卫恢复休眠,日常开发零误伤
 
 #### Scenario: 崩溃后 resume 零全损推进
 
@@ -651,7 +727,6 @@ stderr);每次实际变更打印 stderr(变更前后条目);stdout 结构化 JSO
 - **THEN** 它跑 `diff_group.py --check <run-dir>`(域内可执行,退出码 0/2),NEVER 跑在 sdr 运行目录下
   必然以退出码 1 失败的跨域脚本;该命令的语义边界(校验产物完整性、非运行进度自洽性)SHALL 在该指引
   处就近披露,使编排器不会把它读成完整的恢复面
-
 ### Requirement: sdr 运行目录无起始态文件;codegraph 信号由脚本确定性写出
 
 `/mgh-sdr` 的运行目录 SHALL NOT 携带**起始态**文件:`run_config.json` 内的起始态字段
@@ -787,3 +862,177 @@ SHALL 复用与物化同一个渲染逻辑(单一真相源),**NEVER** 并行维�
 - **WHEN** 一次运行中有单元被瘦身后派发
 - **THEN** 渲染报告的诚实边界列出被瘦身单元及其"上下文经截断、输入完整度低于常规单元"的说明;未发生
   瘦身时该条目不出现
+
+
+### Requirement: 外部仓审批单命令闭环与未知参数报错出口
+
+`sdr_context.py` SHALL 新增 `--approve-external <abs>`(可重复):在检索开始前,对每个传入路径执行
+与 `read_roots_config.py --add` **同源**的校验与原子写(存在且为目录,违者退出码 2 + 可操作 stderr,
+幂等:已配置条目为 no-op),登记成功后该仓**当次运行即被检索**并随既有 co-write 进入哨兵
+`read_roots[]`。审批语义不破:该 flag SHALL 仅由编排器在宿主会话获用户明示同意后传入,脚本与编排器
+SHALL NOT 自行批准;`read_roots_config.py --add` + 重跑的既有路径保持逐字可用(两条入口同 schema、
+同原子写逻辑,NEVER 各维护一份写实现)。
+
+`sdr_context.py` SHALL 对未识别参数做审批语义的模糊识别:当未知 flag 名(去 `--`、小写、分词后)
+命中 `approve` / `read` / `external` 任一词根时,stderr SHALL 在 argparse 原生报错之后追加一段
+可照抄执行的配方——经 `read_roots_config.py --target <repo> --add <abs>` 批准(或同脚本
+`--approve-external` 形态重跑本命令)——配方中的脚本绝对路径与 `<repo>` 由脚本自身拼接产出;
+未命中词根的未知 flag 维持 argparse 原报错(退出码 2 不变)。
+
+#### Scenario: 同意后单命令完成审批与检索
+
+- **WHEN** 首轮运行报出 `pending_approval:["D:/xxx/front"]`,用户同意,编排器按壳配方重跑
+  `sdr_context.py --repo <abs> --run-dir <abs> --approve-external D:/xxx/front`
+- **THEN** `D:/xxx/front` 写入 `<repo>/.mgh/read-roots.json`(与 `read_roots_config.py --add` 产物
+  逐字段同形),当次 stdout `external_repos[]` 含该仓记录、`pending_approval` 为空,哨兵
+  `read_roots[]` 含该根
+
+#### Scenario: 非法审批目标 fail-loud
+
+- **WHEN** `--approve-external D:/gone`(不存在或不是目录)
+- **THEN** 退出码 2,配置零写入,stderr 指明条目无效(与 `read_roots_config.py --add` 同判据)
+
+#### Scenario: 发明的审批参数得到出口配方
+
+- **WHEN** 编排器对 `sdr_context.py` 传入其未声明的 `--approve-external-repos`(或任何命中
+  `approve`/`read`/`external` 词根的未知 flag;实现侧对「已声明的 `--approve-external`」不误伤)
+- **THEN** 退出码 2,stderr 除 argparse 原生报错外追加可照抄的批准+重跑配方(含脚本绝对路径与
+  `--target <repo>`),编排器无需再探索即可走对路径
+
+#### Scenario: 已配置仓重复批准为 no-op
+
+- **WHEN** 对已写入配置的仓再次传 `--approve-external <同一路径>`
+- **THEN** 配置不变(`added:[]` 语义),当次照常检索该仓,退出码 0
+
+
+### Requirement: 产出者 stdout 摘要视图与审批滞留提醒
+
+`sdr_context.py` 与 `diff_group.py` SHALL 各支持 `--summary`:与完整调用同参数运行(含幂等重跑的
+副作用语义不变),但 stdout 只输出**定长的关键量视图——不改动任何已落盘产物**:
+
+- `sdr_context.py --summary` 的 stdout SHALL 含 `repo`/`run_dir`/`base`/`branch`/`baseline_path`/
+  `baseline_bytes`/`baseline_truncated`/`sensitive_catalog_source`/`external_repos[]`(每项仅
+  `path`/`slug`/`summary_path`/`diff_files`/`bytes`/`truncated`,**不含** `route_hits[]` 明细)/
+  `external_skipped[]`/`pending_approval[]`;完整记录仍在 `<run-dir>/context.json`。
+- `diff_group.py --summary` 的 stdout SHALL 含单元计数与分布(`pending_total`/`done`/`failed`、
+  interface/standalone/partN 计数)、`excluded{count}` 与 `empty` 谓词,以及分页字段
+  (`effective_limit`/`offset`);`pending[]` 各项的路径字段在摘要形态下 SHALL 以
+  `slices_dir` + 单元相对后缀给出**或**保持绝对逐字(二选一在契约文档落定,选后不得漂移);
+  完整 `pending[]` 仍在非摘要调用与 `grouping.json`。
+
+`--summary` 缺省时两脚本 stdout SHALL 与现状逐字一致(纯附加,零回归面)。
+
+`sdr_context.py --check <run-dir>` SHALL 在产物自洽之外追加 advisory:读 `<run-dir>/context.json`,
+`pending_approval[]` 非空 → stderr 打印「外部仓声明未批、零读取降级」并列出条目(不改退出码——
+未批是合法降级态,不是破损态)。
+
+#### Scenario: 摘要视图免文件中介
+
+- **WHEN** 编排器跑 step 1 只想知道「基线多大、外部仓检索了几何、有无待批」
+- **THEN** `sdr_context.py --summary`(同参)的 stdout 为上述关键量,单屏可读;编排器 NEVER 需要
+  `| tail`、重定向到文件、或 `describe_artifact.py` 之外再内联解析
+
+#### Scenario: 非摘要调用逐字不变
+
+- **WHEN** 同一参数下分别以缺省形态与 `--summary` 形态运行,再比对缺省形态与改动前基线
+- **THEN** 缺省形态 stdout 与基线逐字一致;`--summary` 不落任何新文件、不改动 `context.json`
+
+#### Scenario: check 对未批外部仓出声
+
+- **WHEN** 某 run 的 `context.json` 含 `pending_approval:["D:/xxx/front"]`,编排器跑
+  `sdr_context.py --check <run-dir>`
+- **THEN** 退出码仍为 0(产物完好),stderr 出现含该路径的未批提醒行;若 `pending_approval` 为空则
+  无该行
+
+
+### Requirement: sdr 命令壳暴露产物内省与 stdout 直消费配方
+
+`/mgh-sdr` 双端命令壳 SHALL 在步骤级配方中就近暴露以下合法出口(先于任何拦截发生):
+
+- step 1 与 step 2 段各含一条「需检查产物结构/字段 →
+  `py <mgh-core>/scripts/describe_artifact.py --in <abs-json> --keys|--field a.b.c|--shape|--sample N`」
+  配方(确切脚本名与 flag 形态逐字镜像其 `--help` 契约);
+- step 1/2 各含一句「stdout = 单个 JSON 对象、stderr = 进度与提醒;正常路径从 Bash 工具返回值直接
+  消费,NEVER 重定向到文件再回读;输出过大时用 `--summary`(step 1/2 均支持),需 narrowing 用
+  `describe_artifact.py --field`」;
+- 硬边界 (b) 的措辞 SHALL 覆盖解释器内联代码的**全部**喂入形态:`-c`、解释器后跟独占 `-`(heredoc
+  经 stdin)、here-string(如 `- <<<`),而非仅 `-c`;
+- 审批闸门的「同意」分支 SHALL 以 `sdr_context.py --approve-external <abs>` 为推荐路径,
+  `read_roots_config.py --add` + 重跑保留为等价路径(两条文案都给出,语义一致)。
+
+双壳(宿主路径)在上述各点的措辞 SHALL 同构(宿主差异只留在工具名/路径前缀层)。
+
+#### Scenario: describe_artifact 配方在壳内可见
+
+- **WHEN** 审阅两份 `mgh-sdr.md` 的 step 1 与 step 2 段
+- **THEN** 每份都含 `describe_artifact.py` 的确切调用形态(与守卫 recipe 的推荐一致),且含
+  「stdout 直消费 + `--summary`」声明;编排器在**首次**需要内省前即知道合法出口
+
+#### Scenario: 双壳措辞同构
+
+- **WHEN** 比对 claude 壳与 opencode 壳的新增配方段
+- **THEN** 除路径前缀(`.claude/mgh-core` vs `.opencode/mgh-core`)外逐句一致
+
+### Requirement: 零参默认执行(/mgh-sdr 双壳)
+
+`/mgh-sdr` 命令壳(claude 与 opencode 双份,行为对等)SHALL 声明安全默认集并支持零参直接
+执行:**无任何参数**调用时,MUST 按 `--base master`、`--branch` 当前分支、`--dimensions`
+全部 6 维直接进入编排流程,NEVER 因缺参而停止索取输入;传 `--help` 时 MUST 仍仅打印
+参数表后 STOP(零 token、零解析)。默认值 MUST 由确定性脚本的 argparse 兜底解析
+(`sdr_context.py` / `diff_group.py` 的 `--base` 默认 `master`、`--branch` 空值时取
+`git rev-parse --abbrev-ref HEAD`),编排器 NEVER 自行执行 `git rev-parse` 猜分支;
+run 目录与报告的分支命名 MUST 消费 step 1 stdout 已解析的 `branch`/`base` 字段。
+参数表 SHALL 逐项标注「不传即默认」,使零参与显式传默认值两条路径产物等价。本行为是
+对家族纪律「无参 STOP」的显式例外,例外条件(命令声明安全默认集 + 参数表明示)MUST
+同步写入研发手册 R5.6 措辞,防止后续按旧纪律「修回去」。
+
+#### Scenario: 零参直接跑完整流水线
+
+- **WHEN** 用户在目标仓根目录调用 `/mgh-sdr`(不带任何参数)
+- **THEN** 编排器不打印参数表、不停止索取输入,按 base=master / branch=当前分支 /
+  全部 6 维执行 step 0–5,产出项目根中文报告;`--base`/`--branch` 在默认路径下整体
+  省略,由脚本 argparse 解析默认
+
+#### Scenario: --help 仍零 token 早停
+
+- **WHEN** 用户调用 `/mgh-sdr --help`(或 `/mgh-sdr -h`)
+- **THEN** 壳仅打印参数表后 STOP,不执行任何流水线步骤、不写任何产物、不武装哨兵
+
+#### Scenario: 双壳对等
+
+- **WHEN** 同一零参调用分别发生在 claude 与 opencode 宿主
+- **THEN** 两份命令壳的零参默认执行与 `--help` STOP 行为逐字一致,仅宿主路径前缀与
+  超时标定差异保留(与既有双壳差异面相同)
+
+### Requirement: 宿主解释器一次性探测(/mgh-sdr 双壳 step 0)
+
+`/mgh-sdr` 双壳 SHALL 在 step 0 放置一条**解释器探测配方**:单条 Bash 命令以 `;` 分隔
+依次执行候选探测(`py --version`、`python --version`、`python3 --version`,各候选失败
+不中断后续),一次跑完即可看到全部候选的可用性与版本,候选集 MUST 覆盖 Windows Python
+Launcher(`py`)与 POSIX 惯例(`python3`/`python`)。编排器 SHALL 取第一个执行成功且版本
+≥3.10 的候选为**本次 run 的解释器**,此后壳内所有 `*.py` 脚本调用 MUST 逐字使用该
+解释器——壳内示例中的 `py` 为**规范占位 token**,语义 = step 0 选中的解释器,示例文本
+MUST NOT 因探测机制改写为其他占位符。上下文压缩 / 崩溃恢复 / 新会话后若选中解释器
+不确定,MUST 重跑探测命令(单条、廉价)重建该事实,NEVER 对流水线脚本逐个换解释器名
+试错。探测结果 SHALL NOT 落盘(`run_config.json` / 哨兵 schema 不变);若所有候选均
+不可用或版本均 <3.10,编排器 MUST 早停并向用户披露(零派发、移除已武装哨兵,与其他
+step 1 前干净停止路径同构)。
+
+#### Scenario: 无 py 的 Linux 环境一次探测定型
+
+- **WHEN** 宿主机器无 `py` 启动器,仅有 `python3`(≥3.10)
+- **THEN** step 0 探测命令单条跑完,输出显示 `py` 不可用、`python3` 可用及版本;
+  编排器选定 `python3` 并用于后续全部脚本调用,流水线全程零「解释器不存在」试错
+
+#### Scenario: 压缩后新会话重探测
+
+- **WHEN** run 中途上下文被压缩、新会话按「中断恢复」章节接续,编排器无法从对话记忆
+  确定选中解释器
+- **THEN** 编排器重跑同一条探测命令选定解释器(不从磁盘猜、不逐个试错),再继续
+  resume 流程
+
+#### Scenario: 全部候选不可用早停
+
+- **WHEN** 探测命令显示无候选解释器存在,或全部候选版本 <3.10
+- **THEN** 编排器在任何流水线步骤前 STOP,向用户披露探测输出与依赖要求,移除 step 0
+  已武装哨兵,零切片物化、零派发

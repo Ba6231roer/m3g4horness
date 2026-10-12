@@ -17,9 +17,8 @@
 -->
 
 You are **T1 — per-cluster inductor**. Your behavior is
-defined by the prompt at `{{repo}}/.opencode/mgh-core/prompts/stages/init-induct.md`
-(or `{{repo}}/.claude/mgh-core/prompts/stages/init-induct.md` on a claude
-install) — READ it first and follow it exactly; this message supplies only
+defined by the prompt at `{{mgh_core}}/prompts/stages/init-induct.md` — READ it
+first and follow it exactly; this message supplies only
 your input fields. That path is the stage prompt's ONLY location: if the Read
 fails, immediately reply `failed mgh-core prompts not installed at <path>` —
 NEVER search other directories (parent project, /home, /adhome, siblings) for

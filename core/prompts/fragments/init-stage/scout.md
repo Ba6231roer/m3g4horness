@@ -28,9 +28,22 @@
      按 `offset`/`effective_limit` 翻页(单页 > `--orch-budget-bytes` 时 `shrunk:true`;NEVER wrapper `.py`);per batch in page `pending[]`(**每批一个隔离 subagent 上下文**;`--resume` 跳过已 `.done`/`.failed`):
        - spawn init-scout(透传 `input_path` + checkpoint_path + done_marker + failed_marker + slice_dir + `<list_steps script_abs 派生的绝对 chunk_sources 路径>`;subagent 读 `input_path`,needs_slice 文件写 `<绝对 chunk_sources> --in <big_file> --big-file-bytes <N> --line <L> --out <slice_dir>/<safe-stem>.slice.json` 并回读该确切路径,**绝不**整文件喂 LLM)→ 成功则恰好写 `checkpoint_path`(绝对) + touch `done_marker`;失败回 `failed <原因>` ack → 编排器写 `failed_marker`、不重试不阻断(见 orchestrator-discipline fragment「fan-out 单元 `failed` ack`)
           · **逐字节复制 recipe(provenance)**:上述 `input_path`/`checkpoint_path`/`done_marker`/`failed_marker`/`slice_dir` 从 `list_scout_batches.py` stdout `pending[]` 对应字段**逐字节**复制、逐字透传给 subagent;NEVER 手拼 `<target>/<id>`、NEVER 从记忆重写路径(弱模型会把下划线目录名概率性重生成分隔符对、把 checkpoint 漂到盘符根 `D:\.mgh-init\…`)、NEVER「简化」/改写前缀;stdout 缺某字段 → 该批 `failed`(不猜不补)。
-     spawn init-scout-merge 前**先判聚合预算** — `py .claude/mgh-core/scripts/plan_aggregate.py --node scout-merge --init-dir <target>/.mgh-init --budget <max-aggregate-bytes> [--materialize <target>/.mgh-init/inputs/scout-merge]`
-       · `needs_reduce=false`(≤ 预算)→ 既有 single-context `init-scout-merge`(只见全部 scout 批记录,无原始码)→ `scout_candidates.json` + `checkpoints/scout/merge.json.done`
-       · `needs_reduce=true`(> 预算)→ 每 shard(batch 簇)扇出 `init-scout-merge`(partial;读 shard `input_path`,ack 回传)→ 单一 rollup 仅吞各 shard 摘要 → `scout_candidates.json` + `checkpoints/scout/merge.json.done`。每请求 ≤ 预算。
+     spawn init-scout-merge 前**先判聚合预算(硬闸门)**,按需 map-reduce 或 single-context:
+       py .claude/mgh-core/scripts/plan_aggregate.py --node scout-merge --init-dir <target>/.mgh-init --budget <max-aggregate-bytes> [--materialize <target>/.mgh-init/inputs/scout-merge]
+       → stdout `{needs_reduce, repo, pending[], rollup{summary_paths[], output, done_marker}}`;`pending[]` 是 **marker-aware**(已 `.done`/`.failed` 的 shard 不在内;`checkpoints/scout/shards/` 下,重列自然收敛)。装箱为**候选粒度**(超预算批自动跨 shard 切分;病态单候选自动瘦身投影并留痕 `slimmed`,瘦身后仍超 → 退出码 2、零物化零派发)
+       · `needs_reduce=false`(≤ 预算,常见小仓)→ 既有 **single-context** `init-scout-merge`(只见全部 scout 批记录,无原始码)→ `scout_candidates.json` + touch `checkpoints/scout/merge.json.done`(行为与引入硬阈值前逐字不变)。
+       · `needs_reduce=true`(> 预算)→ **两段 map-reduce**:
+         (a) **map 段(dispatcher,一次 Bash + 重派;仅当 pending 非空)**——
+           · **派发前孤儿清理(每次 fanout 派发前,MUST)**:`py .claude/mgh-core/scripts/fanout_runner.py --kill-stale --dry-run --checkpoints <target>/.mgh-init/checkpoints/scout` 审将杀 PID → `killed` 非空则去 `--dry-run` 真杀;`killed:[]` 幂等跳过。
+           · 带 per-call `timeout` 跑一次
+             py .claude/mgh-core/scripts/fanout_runner.py --tier scout-merge --init-dir <target>/.mgh-init --budget <max-aggregate-bytes> --checkpoints <target>/.mgh-init/checkpoints/scout --inputs-dir <target>/.mgh-init/inputs/scout-merge --time-budget-ms <宿主 per-call timeout × 0.8,如 opencode 900000ms 宿主 → 720000;claude Bash 上限 600000ms → 480000> --call-timeout-s <per-call 杀上限(秒),MUST < budget×0.8,如 720000→540 / 480000→360> --stall-timeout-s <失活静默阈(秒),MUST < --call-timeout-s,如 300>
+             (`--budget` MUST 与上方 gate 的 `plan_aggregate --budget` 同一值——dispatcher 内部重列 plan_aggregate 靠它保持 `needs_reduce=true`;缺省会落到默认预算、`needs_reduce=false` 无 `repo` 而报错。fanout 内部消费 `plan_aggregate --node scout-merge --materialize`;每 shard 一个 `init-scout-merge-fanout` partial:读 `pending[].input_path`,恰好写 `pending[].checkpoint_path` + touch `done_marker`;任务消息 = scout-merge-task.md 模板逐字填充,NEVER 逐次撰写)
+           · 四级超时不变式 / `partial:true` 重派 / 零推进熔断 / 快败风暴三层:与上方 scout 读者波次**同一 recipe**(逐字套用,详见 scout 段)。
+           · 退出码 2 → 看 stderr:宿主 CLI 不可用 → 走下方**手派回退**;`STALLED` → 熔断 recipe。
+           · 任一 shard `.failed`(终态)→ **map 未全 `.done` → 不得 rollup**(rollup 只吞全量摘要,缺该 shard 摘要 = 静默丢候选)→ 报告缺口(boundaries[]/report.md 披露),诊断修复后 `--resume` 重入(已完成 shard 经 marker-aware 重列跳过)。
+           · map 全 `.done`(`partial:false`)→ 进入 (b)。
+         (b) **rollup 段(单一 reduce;编排器一步)**:单一 `init-scout-merge-rollup` subagent 仅吞 plan_aggregate stdout `rollup.summary_paths`(各 shard 摘要路径列表,编排器只透传路径、NEVER 整份读任何 summary 进自身上下文)→ 跨 shard 锚点元组去重 + 归一(从各摘要恢复候选与 `unresolved`)→ 写 `rollup.output`(`scout_candidates.json`)+ touch `rollup.done_marker`(`checkpoints/scout/merge.json.done`)。每个大模型请求 ≤ 预算。
+       · **手派回退(仅 dispatcher 退出码 2 = 宿主 CLI 不可用时)**:编排器逐波 spawn `init-scout-merge-fanout`,**逐字节**复制 `pending[]` 对应字段(`input_path`/`checkpoint_path`/`done_marker`/`failed_marker`)逐字透传(同上方逐字节 recipe;NEVER 手拼/改写);agent 定义文件的**唯一位置**= 宿主安装目录(claude `.claude/agents/`、opencode `.opencode/agent/`、dsh `mgh-core/../agents/` 经 profile 挂载),读不到即该单元 `failed`,NEVER 到其他目录翻找。map 全 `.done` 后同一 rollup(行为与 dispatcher 路径等价)。
      · 校验:`py .claude/mgh-core/scripts/merge_scout.py --check <target>/.mgh-init/scout_candidates.json`(每条 `source:"scout"` + file:line;退出码 2 → 回退)。
      spawn init-scout-audit(随机 ≈--scout-audit-pct 的 scout 拒绝项)→ checkpoints/scout/audit.json + .done
      py .claude/mgh-core/scripts/merge_scout.py --candidates <target>/.mgh-init/controls_candidates.json \

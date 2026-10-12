@@ -80,6 +80,8 @@ SCAN_DIRS = [
     ROOT / "releases" / "claude-code" / "skills",
     ROOT / "releases" / "opencode" / "command",
     ROOT / "releases" / "opencode" / "agent",
+    ROOT / "releases" / "dsh" / "skills",
+    ROOT / "releases" / "dsh" / "agents",
     ROOT / "core" / "prompts",
     ROOT / "core" / "contracts",
 ]
@@ -94,6 +96,7 @@ SCAN_SCRIPT_DIRS = [
     ROOT / "releases" / "claude-code" / "hooks",
     ROOT / "releases" / "opencode" / "hooks",
     ROOT / "releases" / "opencode" / "plugins",
+    ROOT / "releases" / "dsh" / "plugins",
 ]
 SCAN_SCRIPT_GLOBS = ("*.py", "*.ts", "*.json", "*.json.example")
 

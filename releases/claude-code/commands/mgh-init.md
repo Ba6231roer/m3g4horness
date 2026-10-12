@@ -31,7 +31,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - `--merge <partials-dir>` (merge multiple scoped runs; then STOP)
 - `--skip-consistency` (skip T4) · `--config <profile>` (default `init`)
 - `--no-scout` (skip LLM scout discovery; legacy regex-only behavior) · `--scout-budget <N>` (0=全量目标) · `--scout-batch-bytes <N>` (默认 96KB) · `--scout-batch-cap <N>` (默认 40) · `--scout-audit-pct <N>` (默认 15)
-- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize 簇切 `::shard-<n>`、scout 批/T3 category 标 `oversize`)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 256KB;T2/scout-merge 经 `plan_aggregate.py` **硬阈值**——> 预算自动 map-reduce;T4 仍软边界 + `--scope`/`--merge` 回退;触发 + shard 数进 `boundaries[]`/`report.md`)
+- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize 簇切 `::shard-<n>`、scout 批/T3 category 标 `oversize`)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 96KB;T2/scout-merge 经 `plan_aggregate.py` **硬阈值**——> 预算自动 map-reduce;T4 仍软边界 + `--scope`/`--merge` 回退;触发 + shard 数进 `boundaries[]`/`report.md`)
 - `--no-codegraph` (skip optional codegraph enrichment; legacy behavior). codegraph 检测默认 `auto`:仅当 `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用;`--no-codegraph` 或不可用 → 富化 off(行为等价于引入 codegraph 前)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
@@ -52,7 +52,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 
 | script inventory | subagent inventory |
 |---|---|
-| `discover_controls` · `chunk_sources`(大文件切片)· `describe_artifact`(瞄结构合法出口)· `list_clusters`/`list_scout_batches`/`list_rule_jobs`(fan-out 枚举)· `fanout_runner`(scout/t1/t3 波次派发 dispatcher,`--tier`)· `plan_scout`/`merge_scout` · `validate_inventory`(T2 边界)· `validate_t1_records`(T1→T2 闸门)· `assemble_rules`(T3 assemble/lint)· `resume_state`/`write_runconfig`/`plan_aggregate` | `init-survey`(opt)· `init-resolve`(opt,codegraph-gated)· `init-induct`(T1)· `init-synthesis`(T2)· `init-rulewriter`(T3)· `init-rules-consistency`(T4,opt)· `init-scout`/`init-scout-merge`/`init-scout-audit`(scout) |
+| `discover_controls` · `chunk_sources`(大文件切片)· `describe_artifact`(瞄结构合法出口)· `list_clusters`/`list_scout_batches`/`list_rule_jobs`(fan-out 枚举)· `fanout_runner`(scout/scout-merge/t1/t2/t3 波次派发 dispatcher,`--tier`)· `plan_scout`/`merge_scout` · `validate_inventory`(T2 边界)· `validate_t1_records`(T1→T2 闸门)· `assemble_rules`(T3 assemble/lint)· `resume_state`/`write_runconfig`/`plan_aggregate` | `init-survey`(opt)· `init-resolve`(opt,codegraph-gated)· `init-induct`(T1)· `init-synthesis`(T2)· `init-rulewriter`(T3)· `init-rules-consistency`(T4,opt)· `init-scout`/`init-scout-merge`/`init-scout-merge-fanout`/`init-scout-merge-rollup`/`init-scout-audit`(scout) |
 
 - 绝对脚本路径由 `list_steps.py` 运行时给(stage 流内调用行即契约面);**非平凡复用**:`expand_scope.py`(discover 复用)、`merge_scout.py` 复用 `discover_controls.form_clusters`(簇形成语义无漂移)。
 - 每 stage 产物经产出者 `--check` 校验(`discover_controls`/`plan_scout`/`merge_scout`/`validate_inventory`/`validate_t1_records`/`assemble_rules`)。

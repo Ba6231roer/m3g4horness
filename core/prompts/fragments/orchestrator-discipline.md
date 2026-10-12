@@ -15,7 +15,7 @@
 
 编排器 = 宿主 agent,**不写代码**。确定性叶脚本经 `Bash` 执行;叶子 `.py` 源码不进上下文(hook 已确定性拦截 `mgh-core/scripts` 下叶源码 `Read`;报错看 stderr)。
 
-**硬边界(`NEVER`)**:(a) `Write` 任何脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`、`<run>_helper.py`);(b) `Bash: py -c|python -c` 去内省/重派生产物(`import json` / `open(` / `load(` 读该命令运行目录 `**`)。(叶源码 `Read` 已由 hook 确定性拦截,不再是提示词要求;报错看 stderr。)
+**硬边界(`NEVER`)**:(a) `Write` 任何脚本扩展名(`.py`/`.ps1`/`.sh`/`.ts`/…)——大编排器**或**一次性微脚本(`py -c` 产物、`_prep_*.py`、`_aggregate_*.py`、`<run>_helper.py`);(b) 把**内联代码喂进解释器**去内省/重派生产物——三种喂入形态全违纪:`py -c`/`python -c`、heredoc(`py - <<EOF`…`EOF`,含 `… | python3 - <<'EOF'`)、here-string(`py - <<< '…'`);heredoc/here-string **按形态即拦**(不等体内出现 `import json`/`open(`/`load(`)。合法出口同一条:**stdout 直消费**——Bash 工具返回值已含 stdout(最后一行是 JSON),在你的推理里解析,**NEVER** 经内联代码或文件中转重派生。(叶源码 `Read` 已由 hook 确定性拦截,不再是提示词要求;报错看 stderr。)
 
 **`NEVER` 向系统临时目录写中间文件再回读**:编排器 MUST NOT 把确定性脚本 stdout 重定向到磁盘文件再回读——尤其 `$env:TEMP` / `%TEMP%` / `/tmp` / `TMPDIR`。Bash tool result 已含 stdout,**直接从工具返回值取 JSON(最后一行)、在你的推理里解析 `pending[]`**;**NEVER** 用文件中介。同一条 Bash 调用内「写 temp + 回读」的配对模式视为违纪。
 
@@ -27,7 +27,7 @@
 - **某 fan-out 单元的完整记录** → `list_* --materialize <inputs/<tier>>` stdout `pending[]` 每项的 `input_path`(绝对,subagent **自读**;≤ 单元字节预算);**NEVER** 整份读该 tier 的聚合产物(编排器只装 slim 分页待办壳)、**NEVER** `py -c`、**NEVER** 把记录体内联塞进 subagent task(只透传 `input_path`);
 - **某 fan-out 单元的输出路径** → `list_*` stdout `pending[]` 每项的 `checkpoint_path` / `rule_path`(视 tier 而定,或该命令 `list_*` 为该 tier 暴露的等价输出路径字段;均**绝对**)+ `done_marker` + `failed_marker` + `slice_dir`(大文件切片输出目录);**NEVER** 自拼 `<target>/<id>`、**NEVER** `py -c` 算路径、**NEVER** 相对路径;切片 `--out` = `<slice_dir>/<safe-stem>.slice.json`(subagent 写 + 回读该确切绝对路径;NEVER 相对 `--out`、NEVER cwd/Temp 派生、NEVER 树外);
 - **fan-out 单元 `failed` ack**(subagent 回 `failed <原因>`)→ 编排器 `Write` 该单元 `failed_marker`(= `list_*` stdout `pending[].failed_marker`,绝对、**逐字透传**、body `{unit,reason,tier}`;**NEVER** 自拼 `<checkpoint_path>.failed`、**NEVER** `py -c`、**NEVER** 让 subagent 写);**不重试**该单元、**不阻断**当前波次,继续下一单元。`.failed` = **终态**(resume 不重派,区别于 `.done` 的成功完成);crash 无 ack → 无 marker → 单元仍 `pending` → 重派(crash ≠ 确认失败,安全重试非静默丢失)。tier 完成门 = `done+failed>=total`(见 resume-state 脚本 stdout `tiers`)。
-- **瞄一眼结构** → artifact-inspect 脚本(各壳 stage 流给确切名;`--keys/--sample/--shape/--field`);**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON;
+- **瞄一眼结构** → `describe_artifact.py`(artifact-inspect 脚本;各壳 stage 流给确切调用行;`--keys/--sample/--shape/--field`);**NEVER** `py -c`、**NEVER** `Read` 整份大 JSON;
 - **派生量** → 该量产出者的 stdout 字段;**NEVER** 自写脚本算。
 - **当前步骤 / 下一步** → 该命令的 resume-state 脚本 stdout `step`/`next_action`/`tiers`(进度纯从磁盘该命令运行目录重派生);**NEVER** 靠对话记忆判步骤、**NEVER** `py -c` 重算、**NEVER** `Read` 整份聚合 JSON 倒推进度。`--resume` 或任何压缩事件后**第一步**调之。
 

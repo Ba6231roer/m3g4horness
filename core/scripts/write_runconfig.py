@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024      # 192KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024    # 64KB
-DEFAULT_MAX_AGGREGATE_BYTES = 256 * 1024  # 256KB
+DEFAULT_MAX_AGGREGATE_BYTES = 96 * 1024  # 96KB (= 98304) — uniform --max-aggregate-bytes default
 DEFAULT_SCOUT_BATCH_BYTES = 96 * 1024    # 96KB
 DEFAULT_SCOUT_BATCH_CAP = 40
 DEFAULT_SCOUT_AUDIT_PCT = 15
@@ -145,7 +145,9 @@ def main():
                          "tests/__tests__/__mocks__/spec/specs dir segment)")
     ap.add_argument("--max-unit-bytes", type=int, default=DEFAULT_MAX_UNIT_BYTES)
     ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES)
-    ap.add_argument("--max-aggregate-bytes", type=int, default=DEFAULT_MAX_AGGREGATE_BYTES)
+    ap.add_argument("--max-aggregate-bytes", type=int, default=DEFAULT_MAX_AGGREGATE_BYTES,
+                    help="aggregate-stage input byte cap (default 98304 = 96KB; worst-case "
+                         "~2 bytes/token → ≤ ~48K tokens per dispatched aggregate request)")
     ap.add_argument("--scout-budget", type=int, default=0, help="0 = all targets")
     ap.add_argument("--scout-batch-bytes", type=int, default=DEFAULT_SCOUT_BATCH_BYTES)
     ap.add_argument("--scout-batch-cap", type=int, default=DEFAULT_SCOUT_BATCH_CAP)

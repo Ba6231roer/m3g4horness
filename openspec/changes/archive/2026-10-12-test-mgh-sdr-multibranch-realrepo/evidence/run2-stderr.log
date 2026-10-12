@@ -1,0 +1,57 @@
+[launch] === branch sdr-dryrun ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261012_164905-sdr-dryrun\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[91m[1mError: [0m{
+  "name": "UnknownError",
+  "data": {
+    "message": "Unexpected server error. Check server logs for details.",
+    "ref": "err_13aa6c15"
+  }
+}
+[launch] branch sdr-dryrun: FAILED (host CLI exited 1 for sdr-dryrun)
+[launch] === branch sdr-mb-nonexistent ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261012_164908-sdr-mb-nonexistent\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[91m[1mError: [0m{
+  "name": "UnknownError",
+  "data": {
+    "message": "Unexpected server error. Check server logs for details.",
+    "ref": "err_0a2bdb69"
+  }
+}
+[launch] branch sdr-mb-nonexistent: FAILED (host CLI exited 1 for sdr-mb-nonexistent)
+[launch] === branch sdr-mb-authz ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261012_164911-sdr-mb-authz\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[91m[1mError: [0m{
+  "name": "UnknownError",
+  "data": {
+    "message": "Unexpected server error. Check server logs for details.",
+    "ref": "err_c1e06227"
+  }
+}
+[launch] branch sdr-mb-authz: FAILED (host CLI exited 1 for sdr-mb-authz)
+[launch] === branch sdr-mb-sql-sensitive ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261012_164914-sdr-mb-sql-sensitive\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[91m[1mError: [0m{
+  "name": "UnknownError",
+  "data": {
+    "message": "Unexpected server error. Check server logs for details.",
+    "ref": "err_22c23aa3"
+  }
+}
+[launch] branch sdr-mb-sql-sensitive: FAILED (host CLI exited 1 for sdr-mb-sql-sensitive)
+[launch] FAILED BRANCHES (4):
+  - sdr-dryrun: host CLI exited 1 for sdr-dryrun
+  - sdr-mb-nonexistent: host CLI exited 1 for sdr-mb-nonexistent
+  - sdr-mb-authz: host CLI exited 1 for sdr-mb-authz
+  - sdr-mb-sql-sensitive: host CLI exited 1 for sdr-mb-sql-sensitive

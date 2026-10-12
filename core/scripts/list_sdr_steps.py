@@ -111,7 +111,7 @@ _STEPS = [
         "input": {"artifact": "drafts/*.json", "shape": "[per-unit findings]"},
         "output": {"artifact": "report + sdr_manifest.json",
                    "shape": "{sections[],counts} + terminal manifest",
-                   "path_pattern": "<target>/mgh-sdr-<branch>-<ts>.md + <run-dir>/sdr_manifest.json"},
+                   "path_pattern": "<target>/mgh-sdr-<branch>-<ts>.html + <run-dir>/sdr_manifest.json (+ <run-dir>/sdr_report_data.json)"},
     },
     {
         "step": "done",

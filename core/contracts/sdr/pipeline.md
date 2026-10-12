@@ -47,6 +47,7 @@ py diff_group.py --check <run-dir>
 | slice | 每单元物化只读 slice(diff hunk + 有限邻近上下文 + 文件相对路径 + A/M/D/R 变更类型标注)→ `<run-dir>/slices/<unit_id>.slice.md`;调用链 interface 单元另带 `## Annotation context(branch version)`(路由/权限注解 + 类级 base route) |
 | `pending[]` | 每项 `{unit_id, input_path, draft_path, done_marker, failed_marker, kind, route, unit_bytes}`——**全字段 `Path.resolve()` 绝对**且在 repo 子树内,编排器逐字透传;`unit_id` 文件系统安全命名(`/ \ :` → `_`,NTFS ADS 教训)。**字段 shape 零变**(调用链是内部算法升级) |
 | stdout | `{repo, base, branch, empty, codegraph, total, done, failed, counts:{interface,standalone}, pending[], offset, limit}`;`codegraph` = bool:本次是否走调用链分组;`empty:true` + `pending:[]` = 零变更 diff(退出码 0,编排器不 spawn) |
+| `--summary` | stdout 投影视图(同一执行流跑完、物化与 `grouping.json` 落盘**逐字不变**,缺省形态零回归):`{repo, base, branch, summary{pending_total, done, failed, by_type{interface, standalone, partN}, excluded_count, empty, effective_limit, offset}, pending[]}`。摘要形态 `pending[]` 各项**保持绝对路径逐字**(与缺省同形——非 `slices_dir + 相对后缀`,此选型一经定下不得漂移);仅剔除 `units[]` / `codegraph_stats` / `excluded.by_reason` 明细。分页:diff_group 无按字节自动收页(那是 init `list_*` 家族的能力),故 `--offset/--limit` 是唯一杠杆,`effective_limit` = 本页实返条数 |
 | resume | `.done` marker 存在的单元跳过物化;`failed` 单元(`.failed` marker)终态不重派 |
 | gate | base ref 不存在等 gate 形失败 → 退出码 2 + stderr recipe(fanout_runner 同形透传,NEVER 进重派循环) |
 | `--check` | run 目录自洽:slice 齐备、pending 路径绝对且在子树、marker 与枚举一致;违例退出 2 |
@@ -56,7 +57,7 @@ py diff_group.py --check <run-dir>
 ```
 py sdr_context.py --repo <abs> --run-dir <abs> [--dimensions <inline-json|@path>]
                   [--baseline-budget-bytes B] [--external-budget-bytes B] [--read-root <abs>]...
-                  [--no-codegraph] [--no-external]
+                  [--approve-external <abs>]... [--summary] [--no-codegraph] [--no-external]
 py sdr_context.py --check <run-dir>
 ```
 
@@ -68,6 +69,9 @@ py sdr_context.py --check <run-dir>
 | stdout | `{repo, run_dir, baseline_path, baseline_bytes, baseline_truncated, sensitive_catalog, sensitive_catalog_source, external_repos[], external_skipped}`;`external_repos[]` 每项 `{path, branch_sync_note, summary_path}`——`path` 供编排器/launcher 写哨兵 `read_roots[]`(**只收实际检索过的根**,NEVER 透传任意路径) |
 | 敏感目录 | 解析优先级:① `<repo>/.mgh-sra/sensitive_catalog.json` 存在 → sibling import `sensitive_catalog` 复用解析 + 闭集校验(`sensitive_catalog_source:"project"`;非法 → 退出码 2 早停);② 不存在 → 加载 `sensitive_catalog.json.example` 默认模板(`sensitive_catalog_source:"default-template"`,与 sra/srr 的显式行为分歧) |
 | 运行级状态 co-write | 本步同时**原子写出**两样(脚本副作用;失败退出码 2,**不静默**):哨兵 `<repo>/.mgh-sdr/.active`(`target` = 本脚本 stdout 的 Windows 原生 `repo`;`read_roots[]` = **实际检索过的根** ∪ 操作者 `--read-root`,最小化、NEVER 透传任意路径)与 `<run-dir>/run_config.json`(`{"no_codegraph": bool}`,取自 `--no-codegraph`;**起始态字段 NEVER 写入**)。二者同源同落点——都由「这一步实际发生了什么」决定 |
+| `--approve-external <abs>` | 审批单命令闭环(可重复):检索开始前,用与 `read_roots_config.py --add` **同源**的校验 + 原子写(`_mutate`)把每个路径登记进 `<repo>/.mgh/read-roots.json`(存在 ∧ 是目录,违者退出码 2 零写入;已配置 → 幂等 no-op),登记成功的仓**当次即检索**并随 co-write 进哨兵 `read_roots[]`。**该 flag 仅在宿主会话获用户明示同意后由编排器传入**——脚本/编排器 SHALL NOT 自行批准;既有 `read_roots_config.py --add` + 重跑路径逐字可用(两入口同 schema 同写实现,NEVER 各维护一份) |
+| 未知参数出口 | 未识别 flag 命中词根 `{approve, read, external, root}` → argparse 原生报错后追加可照抄的批准 + 重跑配方(脚本绝对路径自拼),退出码 2;非命中词根维持 argparse 原报错(在册 flag 永不进此路径,故 `--approve-external`/`--read-root` 不误伤) |
+| `--summary` | stdout 投影视图(同参运行、`context.json`/哨兵/`run_config.json` 落盘**逐字不变**,缺省形态零回归):stdout = `{repo, run_dir, base, branch, baseline_path, baseline_bytes, baseline_truncated, sensitive_catalog_source, external_repos[], external_skipped[], pending_approval[]}`,其中 `external_repos[]` 每项仅 `{path, slug, summary_path, diff_files, bytes, truncated}`(**剔除 `route_hits[]` 明细**)、并剔除 `sensitive_catalog` 大对象。完整记录仍在 `<run-dir>/context.json` |
 | `--check` | run 目录自洽:baseline.md 存在且 ≤ 预算、external 结论文件齐备、`sensitive_catalog` 对象 shape 合法;违例退出 2 |
 
 ## `render_sdr_report.py` — 汇总渲染
@@ -81,10 +85,11 @@ py render_sdr_report.py --check <run-dir>
 |---|---|
 | 输入 | `<run-dir>/drafts/*.json`(`.done` 且 JSON 可解析者);`.failed` 单元不阻断,计入 `failed_units[]` |
 | 去重 | findings 按 `{dimension, route, file}` 三元组去重合并(`line_hint` 取并集) |
-| 报告 | `<repo>/mgh-sdr-<branch-safe>-<YYYYMMDD_HHMMSS>.md`(工具名固定 `mgh-sdr`;分支名文件系统安全命名;秒级本地时间戳;同名原子覆盖幂等)。简体中文、面向人:头部(branch/base/时间/检查面/敏感目录来源/外部仓结论摘要)→ 按维度分组问题清单(severity/route/file/line_hint/风险/建议/control_ref)→ 无问题单元清单 → 诚实边界节(**≥6 条**,见下) |
-| manifest | `<run-dir>/sdr_manifest.json`:`{branch, base, dimensions, sensitive_catalog_source, external_repos[], counts:{units, interfaces, standalone, findings_by_severity, failed_units}, boundaries[], failed_units[]}` |
-| 写面 | NEVER 写 `openspec/`、NEVER 写 run 目录与报告文件之外的任何目标仓文件 |
-| `--check` | run 目录自洽:manifest 计数与 draft 实际一致、报告(若已渲染)结构齐备;违例退出 2 |
+| 报告 | `<repo>/mgh-sdr-<branch-safe>-<YYYYMMDD_HHMMSS>.html` **自包含单文件**(工具名固定 `mgh-sdr`;分支名文件系统安全命名;秒级本地时间戳;同名原子覆盖幂等;样式/脚本/数据全内嵌、零外部引用,file:// 浏览器直开)。简体中文、面向人:头部(branch/base/时间/检查面/敏感目录来源/外部仓结论摘要 + 分组概览)→ 章节一简报表(行=单元,severity/维度筛选,P-NN 页内锚点跳转)→ 章节二问题详述(P-NN · 维度 · route · severity;位置/risk/suggestion/control_ref)→ 章节三内嵌 SVG 分支调用链图(缩放平移;线性链不入)→ 无问题单元清单 → 诚实边界节(**≥6 条**,见下) |
+| 数据文件 | `<run-dir>/sdr_report_data.json`:报告全量结构化数据(单元行 `rows[]`、`findings[]` 含 P-NN、分支链图数据、`boundaries[]`、头部元信息),与报告内嵌数据块 **JSON 等价**——下游确定性消费以它为接口,NEVER 解析 HTML |
+| manifest | `<run-dir>/sdr_manifest.json`:`{branch, base, dimensions, sensitive_catalog_source, external_repos[], rows[], counts:{units, interfaces, standalone, findings_by_severity, failed_units}, boundaries[], failed_units[]}`(`rows[]` 的 `entry`/`chain` 保持纯文本短形) |
+| 写面 | NEVER 写 `openspec/`、NEVER 写 run 目录与报告/数据文件之外的任何目标仓文件 |
+| `--check` | run 目录自洽:manifest 计数与 draft 实际一致、数据文件存在可解析且与报告内嵌数据块 JSON 等价、manifest `rows[]` 与数据文件一致、报告(若已渲染)为 `.html` 且含内嵌数据块与各章节锚点标记;违例退出 2 |
 
 ## draft JSON schema(fan-out 单元问题记录)
 

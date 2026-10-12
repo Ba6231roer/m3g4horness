@@ -388,6 +388,8 @@ class ResumeSdrStateTest(unittest.TestCase):
         code, out, err = self._run("--run-dir", str(run), "--rearm-sentinel")
         self.assertEqual(code, 2)
         self.assertIn("context.json absent", err)
+        # the pre-arm entry point is named so a step-0 recovery never dead-ends
+        self.assertIn("--arm-sentinel", err)
 
     def test_rearm_accepts_explicit_repo(self):
         run = self._run_dir()
@@ -401,6 +403,93 @@ class ResumeSdrStateTest(unittest.TestCase):
         self.assertTrue(sp.is_file())
         self.assertEqual(json.loads(sp.read_text(encoding="utf-8"))["target"],
                          str(target.resolve()))
+
+    # --- --arm-sentinel (step-0 pre-arm) ----------------------------------
+
+    def test_arm_writes_minimal_sentinel_and_is_idempotent(self):
+        run = self._run_dir()  # fresh run: no context.json yet
+        code, out, err = self._run("--run-dir", str(run), "--repo", str(self._repo()),
+                                   "--arm-sentinel")
+        self.assertEqual(code, 0, err)
+        res = json.loads(out)
+        self.assertIs(res["armed"], True)
+        self.assertEqual(res["target"], str(self._repo().resolve()))
+        self.assertTrue(Path(res["sentinel_path"]).is_absolute())
+        sp = self._repo() / ".mgh-sdr" / ".active"
+        self.assertEqual(Path(res["sentinel_path"]), sp)
+        body = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(body, {"domain": "mgh-sdr", "target": str(self._repo().resolve()),
+                                "out_roots": [], "read_roots": [], "v": 1})
+        # second call: no-op, file byte-identical
+        code, out2, err = self._run("--run-dir", str(run), "--repo", str(self._repo()),
+                                    "--arm-sentinel")
+        self.assertEqual(code, 0, err)
+        self.assertIs(json.loads(out2)["armed"], False)
+        self.assertEqual(sp.read_text(encoding="utf-8"),
+                         json.dumps(body, ensure_ascii=False))
+
+    def test_arm_noop_never_clears_refined_read_roots(self):
+        # step 1 already refined the sentinel (read_roots non-empty); a re-entry
+        # pre-arm must leave it untouched, not re-strip the authorization.
+        run = self._run_dir()
+        ext = self.tmp / "frontend"
+        ext.mkdir()
+        sp = self._repo() / ".mgh-sdr" / ".active"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({"domain": "mgh-sdr", "target": str(self._repo()),
+                                  "out_roots": [], "read_roots": [str(ext)], "v": 1}),
+                      encoding="utf-8")
+        before = sp.read_text(encoding="utf-8")
+        code, out, err = self._run("--run-dir", str(run), "--repo", str(self._repo()),
+                                   "--arm-sentinel")
+        self.assertEqual(code, 0, err)
+        self.assertIs(json.loads(out)["armed"], False)
+        self.assertEqual(sp.read_text(encoding="utf-8"), before)
+
+    def test_arm_conflicting_target_refused(self):
+        run = self._run_dir()
+        other = self.tmp / "other-repo"
+        sp = self._repo() / ".mgh-sdr" / ".active"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({"domain": "mgh-sdr", "target": str(other),
+                                  "out_roots": [], "read_roots": [], "v": 1}),
+                      encoding="utf-8")
+        before = sp.read_text(encoding="utf-8")
+        code, out, err = self._run("--run-dir", str(run), "--repo", str(self._repo()),
+                                   "--arm-sentinel")
+        self.assertEqual(code, 2)
+        self.assertIn("different target", err)
+        self.assertEqual(sp.read_text(encoding="utf-8"), before,
+                         "conflict must never overwrite the existing anchor")
+
+    def test_arm_without_repo_or_layout_exits_2_with_recipe(self):
+        run = self._run_dir(make_repo_layout=False)
+        code, out, err = self._run("--run-dir", str(run), "--arm-sentinel")
+        self.assertEqual(code, 2)
+        self.assertIn("--repo", err)
+        # explicit --repo makes it effective even outside the standard layout
+        target = self.tmp / "explicit-repo"
+        code, out, err = self._run("--run-dir", str(run), "--repo", str(target),
+                                   "--arm-sentinel")
+        self.assertEqual(code, 0, err)
+        self.assertTrue((target / ".mgh-sdr" / ".active").is_file())
+
+    def test_arm_and_rearm_are_mutually_exclusive(self):
+        run = self._run_dir()
+        code, out, err = self._run("--run-dir", str(run), "--arm-sentinel",
+                                   "--rearm-sentinel")
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with argument", err)
+
+    def test_not_started_next_action_carries_arm_recipe(self):
+        run = self._run_dir()
+        st = self._state(run)
+        self.assertEqual(st["step"], "not-started")
+        desc = st["next_action"]["desc"]
+        self.assertIn("--arm-sentinel", desc)
+        self.assertIn("sdr_context.py", desc)
+        self.assertLess(desc.index("--arm-sentinel"), desc.index("sdr_context.py"),
+                        "pre-arm must come BEFORE step 1 in the recipe")
 
 
 if __name__ == "__main__":

@@ -275,6 +275,49 @@ class DiffGroupTest(unittest.TestCase):
         _commit_all(repo, "feat")
         return repo
 
+    def _dg_args(self, repo, run="t"):
+        run_dir = repo / ".mgh-sdr" / "runs" / run
+        return ["--repo", str(repo), "--base", "master", "--branch", "feature-pay",
+                "--checkpoints", str(run_dir / "markers"),
+                "--materialize", str(run_dir / "slices")]
+
+    # --- --summary stdout projection (design D4; default form byte-unchanged) ---
+    def test_summary_projection_shape_and_default_unchanged(self):
+        repo = self._repo_with_feature()
+        code, out, err = self._run(*self._dg_args(repo, "sm"))
+        self.assertEqual(code, 0, err)
+        full = json.loads(out)
+        # default (no --summary) still carries the full record -> zero regression on the
+        # byte-identical consumer path
+        for heavy in ("units", "codegraph_stats", "budget", "counts"):
+            self.assertIn(heavy, full)
+        code2, out2, err2 = self._run(*self._dg_args(repo, "sm"), "--summary")
+        self.assertEqual(code2, 0, err2)
+        s = json.loads(out2)
+        self.assertEqual(set(s), {"repo", "base", "branch", "summary", "pending"})
+        summ = s["summary"]
+        self.assertEqual(set(summ), {"pending_total", "done", "failed", "by_type",
+                                     "excluded_count", "empty", "effective_limit",
+                                     "offset"})
+        self.assertEqual(summ["by_type"]["interface"], full["counts"]["interface"])
+        self.assertEqual(summ["by_type"]["standalone"], full["counts"]["standalone"])
+        self.assertEqual(summ["excluded_count"], full["excluded"]["count"])
+        self.assertEqual(summ["empty"], full["empty"])
+        self.assertEqual(summ["pending_total"],
+                         full["total"] - full["done"] - full["failed"])
+        # pending[] carried verbatim (absolute paths), identical to the default form
+        self.assertEqual(s["pending"], full["pending"])
+
+    def test_summary_respects_paging(self):
+        repo = self._repo_with_feature()
+        code, out, err = self._run(*self._dg_args(repo, "pg"), "--summary",
+                                   "--offset", "0", "--limit", "1")
+        self.assertEqual(code, 0, err)
+        s = json.loads(out)
+        self.assertEqual(len(s["pending"]), 1)
+        self.assertEqual(s["summary"]["effective_limit"], 1)
+        self.assertGreaterEqual(s["summary"]["pending_total"], 1)
+
     def test_interface_grouping_and_routes(self):
         repo = self._repo_with_feature()
         code, out, err = self._run("--repo", str(repo), "--base", "master",

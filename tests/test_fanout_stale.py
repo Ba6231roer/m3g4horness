@@ -299,6 +299,23 @@ class TestKillStale(unittest.TestCase):
         self.assertEqual(killed, [5001], "only the host-CLI child is killed")
         self.assertFalse(self.env.liveness_path().exists())
 
+    def test_form2_dsh_child_cmdline_is_a_kill_target(self):
+        # the cmdline marker set includes `dsh` (fan-out runtime contract:
+        # --kill-stale covers all three hosts) — a dsh headless child orphaned
+        # by a hard-killed runner is killed exactly like opencode/claude ones
+        self.env.liveness(pid=999, host="dsh", children=[
+            {"pid": 5003, "unit": "scout-003", "tier": "scout"}])
+        killed = _patch_probe(
+            self, {999: False, 5003: True},
+            {5003: r"C:\Users\dev\AppData\Roaming\npm\dsh.cmd --profile mgh "
+                   r"--patch C:\target\mgh-core\dsh\tiers\scout.yml -"}, [])
+        code, out, _ = self._run_kill_stale("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["kill_stale"]["killed"],
+                         [{"pid": 5003, "tier": "scout", "kind": "child"}])
+        self._run_kill_stale()
+        self.assertEqual(killed, [5003])
+
     def test_pid_reuse_guard_no_kill_on_mismatch(self):
         # runner PID reused by an unrelated process -> never killed, file still
         # removed (stale-record cleanup is not destructive)

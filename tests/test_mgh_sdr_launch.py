@@ -357,5 +357,55 @@ class TestLauncherDryRun(unittest.TestCase):
 
 import shutil  # noqa: E402  (tearDown uses it; placed here to keep the header import list stdlib-honest)
 
+
+class TestLauncherReportSurface(unittest.TestCase):
+    """improve-mgh-sdr-report-html-render: the post-run report sweep targets the
+    self-contained HTML form, and --open is a declared default-off contract (--help is
+    the contract surface)."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _main(self, argv):
+        old_argv = sys.argv
+        sys.argv = ["mgh_sdr_launch.py"] + argv
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = self.m.main()
+                except SystemExit as e:
+                    code = e.code
+        finally:
+            sys.argv = old_argv
+        return code, out.getvalue(), err.getvalue()
+
+    def test_help_declares_open(self):
+        code, out, err = self._main(["--help"])
+        self.assertEqual(code, 0)
+        text = out + err
+        self.assertIn("--open", text)
+        # default-off is part of the contract: the launcher stays side-effect-free
+        # unless the flag is explicitly passed
+        self.assertIn("default off", text.lower())
+
+    def test_open_is_default_off(self):
+        # store_true => argparse default False: the flag never fires unless passed
+        import inspect
+        src = inspect.getsource(self.m)
+        self.assertIn('"--open"', src)
+        self.assertIn('action="store_true"', src)
+
+    def test_report_glob_targets_html(self):
+        import inspect
+        src = inspect.getsource(self.m)
+        self.assertIn('repo.glob("mgh-sdr-*.html")', src)
+        self.assertNotIn('mgh-sdr-*.md', src)
+        # --open fires only on a real report file (a --dry-run outcome is the prompt
+        # path and must never be opened)
+        self.assertIn('outcome.endswith(".html")', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

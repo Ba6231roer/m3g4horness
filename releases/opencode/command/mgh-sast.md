@@ -31,7 +31,7 @@ subagents) and run deterministic stage scripts (bash). Shared assets live at
 - `--scope-depth <N>` (default 2), `--scope-direction callers|callees|both` (default both)
 - `--models role=id`
 - `--controls <path>` — optional/advisory: `controls_inventory.json` (from `/mgh-init`); intake + scope-project, inject into s2/s3/s4/s6/s8. Omit = legacy behavior (zero control injection)
-- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize chunk 标 `oversize`+`needs_slice` 切片、verify finding 标 `oversize` 不切)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(s1 scope / s2-s3 hypothesis 聚合输入上限,默认 256KB;P0 软边界,超则建议 `--scope`/`--diff` 收窄 + `boundaries[]`/`report.md` 披露)
+- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize chunk 标 `oversize`+`needs_slice` 切片、verify finding 标 `oversize` 不切)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(s1 scope / s2-s3 hypothesis 聚合输入上限,默认 96KB;P0 软边界,超则建议 `--scope`/`--diff` 收窄 + `boundaries[]`/`report.md` 披露)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
 

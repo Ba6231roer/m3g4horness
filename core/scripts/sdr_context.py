@@ -28,7 +28,11 @@ config <repo>/.mgh/read-roots.json BEFORE retrieval (approved = resolve-normaliz
 in the config list AND exists AND is a directory — the same fail-closed semantics as the
 guard's config reader and read_roots_config.py); an UNAPPROVED repo is NEVER read (zero
 reads), degrades as external_skipped:"unapproved: <path>", and lands in stdout
-pending_approval:[<abs>…] for the host-session user decision. Declaration missing / path
+pending_approval:[<abs>…] for the host-session user decision. After the user consents, a
+re-run with `--approve-external <abs>` registers the root through the SAME validated
+atomic writer `read_roots_config.py --add` uses and retrieves it in that one call
+(consent → approve → search closes single-command; `--approve-external` MUST only be
+passed post-consent — the script never self-approves). Declaration missing / path
 unreachable / not a git dir / not approved => graceful
 degrade: external_repos: [] + external_skipped:<reason>, the flow continues.
 
@@ -72,6 +76,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sdr_tier import codegraph_available, codegraph_probe_reason  # noqa: E402
+# Single-source atomic config writer (design D1): --approve-external reuses the SAME
+# validate-then-atomically-write function read_roots_config.py --add uses, so the two
+# entry points can never drift on schema or write semantics. Import is side-effect free
+# (read_roots_config only parses argv inside its __main__-guarded main()).
+from read_roots_config import _mutate  # noqa: E402
 
 DEFAULT_BASELINE_BUDGET = 32 * 1024   # 32KB
 DEFAULT_EXTERNAL_BUDGET = 64 * 1024   # 64KB per external repo
@@ -109,6 +118,18 @@ _BASELINE_SECTIONS_RX = re.compile(
 
 def _eprint(*a):
     print(*a, file=sys.stderr)
+
+
+# Word-roots that mark an unknown flag as an approval attempt (design D2). Matching only
+# on roots of the token's `-`-split, lowercased name keeps the recipe aimed at the
+# approval gate without enumerating every plausible typo.
+_APPROVAL_ROOTS = {"approve", "read", "external", "root"}
+
+
+def _hits_approval_root(tok: str) -> bool:
+    if not tok.startswith("--"):
+        return False
+    return any(part in _APPROVAL_ROOTS for part in tok[2:].lower().split("-"))
 
 
 def _write_json_atomic(path: Path, body: dict) -> None:
@@ -537,6 +558,21 @@ def _run(args) -> dict:
     base = args.base
     branch = args.branch or _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
+    # --approve-external: the single-command approval loop closure (spec
+    # security-design-review). BEFORE any retrieval, atomically register each passed
+    # path into <repo>/.mgh/read-roots.json via the SAME validated writer
+    # read_roots_config.py --add uses (exist ∧ is-dir, idempotent, exit 2 zero-write).
+    # The orchestrator passes this flag ONLY after explicit user consent in the host
+    # session; the script never self-approves. An invalid target is fail-loud here
+    # (before the baseline write), so nothing half-configured survives.
+    if args.approve_external:
+        _payload, code = _mutate(repo, args.approve_external, [])
+        if code != 0:
+            _eprint("error: --approve-external rejected (config NOT written). This flag "
+                    "must carry an existing absolute directory root that the USER "
+                    "explicitly approved in the host session.")
+            sys.exit(code)
+
     # design sources: declarations + baseline share the same deterministic read set
     texts: list[str] = []
     for name in _DECLARATION_SOURCES:
@@ -576,6 +612,12 @@ def _run(args) -> dict:
                 skipped.append(f"unreachable-or-not-git: {decl['path']}")
                 continue
             external.append(rec)
+            # per-repo one-line progress (design D4 stderr收敛): the retrieval touches
+            # many files internally, but the operator's signal is per-repo geometry, not
+            # a line per file (the old file-level chatter was the 25KB stderr blowup).
+            _eprint(f"[sdr_context] external {rec['slug']}: {rec['diff_files']} diff "
+                    f"file(s), {rec['config_hits']} config hit(s), {rec['bytes']}B"
+                    + (", truncated" if rec["truncated"] else ""))
         # explicit --read-root additions are the operator's confirmation (sdr minimalism:
         # only roots that went through retrieval OR explicit operator confirmation land
         # in read_roots)
@@ -726,7 +768,41 @@ def _check(run_dir: Path) -> int:
                 "(idempotent, deterministic).")
         return 2
     _eprint(f"[sdr_context] --check ok ({run_dir})")
+    # advisory (NOT a violation — unapproved-then-degraded is a legal end state): surface
+    # any external-repo holdover so the orchestrator sees the coverage gap before it
+    # trusts the frontend check face. Exit code stays 0 (spec: does not gate on this).
+    if isinstance(pa, list) and pa:
+        _eprint(f"[sdr_context] WARN: {len(pa)} external repo(s) declared but UNAPPROVED "
+                f"(zero-read degraded) in {run_dir}:")
+        for x in pa:
+            _eprint(f"  - {x}")
+        _eprint("recipe: get USER consent in the host session, then "
+                "`sdr_context.py --repo <abs> --run-dir <abs> --approve-external <abs>` "
+                "(equivalently read_roots_config.py --add then re-run) to close the gap.")
     return 0
+
+
+def _summary_projection(result: dict) -> dict:
+    """--summary stdout view (design D4): a fixed-shape projection of the SAME run's
+    result — drops the heavy `sensitive_catalog` object and each external repo's
+    `route_hits[]` detail. Pure stdout transform: disk artifacts (context.json /
+    sentinel / run_config) are written identically by `_run`, unchanged by this view."""
+    ext = [{k: e.get(k) for k in ("path", "slug", "summary_path",
+                                  "diff_files", "bytes", "truncated")}
+           for e in result.get("external_repos", [])]
+    return {
+        "repo": result["repo"],
+        "run_dir": result["run_dir"],
+        "base": result["base"],
+        "branch": result["branch"],
+        "baseline_path": result["baseline_path"],
+        "baseline_bytes": result["baseline_bytes"],
+        "baseline_truncated": result["baseline_truncated"],
+        "sensitive_catalog_source": result["sensitive_catalog_source"],
+        "external_repos": ext,
+        "external_skipped": result["external_skipped"],
+        "pending_approval": result["pending_approval"],
+    }
 
 
 def main():
@@ -749,6 +825,20 @@ def main():
     ap.add_argument("--read-root", action="append", metavar="<abs>",
                     help="extra confirmed read-only root for the sentinel read_roots[] "
                          "(repeatable; only explicitly confirmed roots)")
+    ap.add_argument("--approve-external", action="append", default=[], metavar="<abs>",
+                    help="authorize an external repo root by writing it into "
+                         "<repo>/.mgh/read-roots.json (repeatable; SAME validated atomic "
+                         "writer as read_roots_config.py --add; must be an existing "
+                         "absolute directory, violator => exit 2 zero-write; idempotent). "
+                         "MUST be passed ONLY after the USER explicitly approved this "
+                         "root in the host session — the script/orchestrator never "
+                         "self-approves. A registered root is retrieved THIS run and "
+                         "lands in the sentinel read_roots[].")
+    ap.add_argument("--summary", action="store_true",
+                    help="stdout a fixed-shape key-figures projection (same side effects, "
+                         "identical disk artifacts): drops sensitive_catalog object and "
+                         "external_repos[].route_hits[] detail for a single-screen read; "
+                         "default (no flag) stdout is byte-identical to the full record")
     ap.add_argument("--no-codegraph", action="store_true",
                     help="mark the codegraph SIGNAL off in <run-dir>/run_config.json "
                          "(the dispatcher derives the per-unit `{{codegraph}}` placeholder "
@@ -764,13 +854,41 @@ def main():
                     help="skip external-repo retrieval entirely")
     ap.add_argument("--check", metavar="<run-dir>",
                     help="validate a run dir's context artifacts (fail-loud exit 2)")
-    args = ap.parse_args()
+    args, unknown = ap.parse_known_args()
 
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+
+    # Unknown-flag出口 (design D2): an invented approval-flavoured flag (a token whose
+    # word-roots hit {approve, read, external, root}) gets the argparse-native error PLUS
+    # a copy-pasteable recipe, so the orchestrator never has to guess the sanctioned
+    # path. Registered flags never reach `unknown` (parse_known_args), so this can never
+    # false-positive on a real flag; every other unknown token keeps argparse's exact
+    # native "unrecognized arguments" failure (exit 2, behavior unchanged).
+    if unknown:
+        hits = [t for t in unknown if _hits_approval_root(t)]
+        if not hits:
+            ap.error("unrecognized arguments: " + " ".join(unknown))
+        ap.print_usage(sys.stderr)
+        print(f"{ap.prog}: error: unrecognized arguments: {' '.join(unknown)}",
+              file=sys.stderr)
+        self_path = Path(__file__).resolve()
+        rrc = self_path.parent / "read_roots_config.py"
+        repo_tok = args.repo or "<abs-repo>"
+        print(
+            "recipe: it looks like you are trying to approve an external repo. Pass "
+            "--approve-external\n"
+            "        ONLY after the USER explicitly approved this root in the host "
+            "session; run ONE of:\n"
+            f"          py {self_path} --repo <abs> --run-dir <abs> "
+            f"--approve-external <abs-dir>\n"
+            f"          py {rrc} --target {repo_tok} --add <abs-dir>   "
+            "(then re-run this command)",
+            file=sys.stderr)
+        return 2
 
     if args.check:
         if args.repo or args.run_dir:
@@ -813,7 +931,8 @@ def main():
             return 2
 
     result = _run(args)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(_summary_projection(result) if args.summary else result,
+                     ensure_ascii=False))
     return 0
 
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 fanout_runner — deterministic tier-aware slot-backfill dispatcher for /mgh-init
-fan-out (tiers: scout | t1 | t2 | t3; sdr for /mgh-sdr).
+fan-out (tiers: scout | scout-merge | t1 | t2 | t3; sdr for /mgh-sdr).
 
 Replaces the per-unit orchestrator LLM turn with a pure-code loop: consume the
 pending work-list from the tier's enumeration script (`--materialize` mode)
@@ -35,6 +35,12 @@ branches in the loop body.
          (marker-aware enumerator: D2a — plan_aggregate excludes terminal
          shards from pending[] and reports total/done/failed; plan_path =
          <init-dir>/run_config.json so the sidecar/liveness home = <init-dir>)
+  scout-merge:
+         plan_aggregate.py --node scout-merge/--init-dir/[--budget]/--materialize
+         (map stage only; rollup is a separate orchestrator step; same
+         marker-aware enumerator + run_config.json home as t2; shards are
+         hard-bounded at candidate granularity)
+         template fanout/scout-merge-task.md; agent init-scout-merge-fanout
   t3:    list_rule_jobs.py --inventory/--format/--rules-dir/--checkpoints/
          --target/--materialize
          template fanout/t3-task.md; agent init-rulewriter-fanout
@@ -46,15 +52,24 @@ message is written to `<inputs-dir>/<unit>.task.md` (small; `--purge-audit`
 lists them).
 
 Host spawn mapping (spike-verified, see change design D3):
-  opencode: `opencode run --agent <tier-agent> "<task>"` (cwd=repo)
+  opencode: `opencode run --agent <tier-agent>` (cwd=repo, task via stdin)
             — the fanout agents are `mode: primary` clones of the stage
               agents (opencode `run` refuses `mode: subagent` agents and
               silently falls back to the default agent).
-  claude:   `claude -p "<task>" --agents <inline JSON> --allowedTools ...`
-            (cwd=repo, stdin redirected from /dev/null)
-Host detection: `--host` explicit > opencode in PATH > claude in PATH
-(shutil.which); neither present → exit 2 + fallback recipe (the orchestrator
-falls back to the existing manual dispatch, behavior unchanged).
+  claude:   `claude -p --agents <inline JSON> --allowedTools ...`
+            (cwd=repo, task via stdin)
+  dsh:      `dsh --profile mgh --patch <mgh-core>/dsh/tiers/<tier>.yml -`
+            (cwd=repo; the task text travels via the child env var
+             `MGH_TASK_TEXT`, NOT stdin/argv — headless has no stdin task
+             channel and multi-line argv truncates at the first newline
+             through the npm `.cmd` shim; the tier mount file's fixed
+             template row `task: !!js process.env.MGH_TASK_TEXT` routes the
+             env var into the headless runner. Pre-spawn gate: mount file or
+             `mgh` profile missing → exit 2 + recipe, zero spawns.)
+Host detection: `--host` explicit > opencode in PATH > claude in PATH > dsh in
+PATH (shutil.which; dsh appended at the chain end — dual-host machines keep
+their existing behavior); none present → exit 2 + fallback recipe (the
+orchestrator falls back to the existing manual dispatch, behavior unchanged).
 
 State machine (disk markers are the ONLY truth source): `ok`/`oversize` ack or
 `.done` marker → done; `failed` ack → this script writes the `.failed` marker
@@ -103,7 +118,7 @@ concurrent.futures/datetime/json/os/pathlib/shutil/signal/subprocess/sys/
 tempfile/threading/time).
 
 CLI contract (`--help` is the contract surface, R5.1):
-  py fanout_runner.py --tier scout|t1|t2|t3|sdr [tier flags] [options]
+  py fanout_runner.py --tier scout|scout-merge|t1|t2|t3|sdr [tier flags] [options]
 
   scout tier (default; existing call shape unchanged):
     --scout-plan <scout_plan.json> --checkpoints <scout-dir>
@@ -116,19 +131,23 @@ CLI contract (`--help` is the contract surface, R5.1):
     --checkpoints <t2-dir> --inputs-dir <inputs/t2>
     (run_config.json under --init-dir anchors the sidecar/liveness home;
     the enumerator reports needs_reduce + marker-aware pending)
+  scout-merge tier (map stage only; call shape identical to t2, enumerator
+  node = scout-merge):
+    --init-dir <target>/.mgh-init [--budget <bytes>]
+    --checkpoints <scout-dir> --inputs-dir <inputs/scout-merge>
   t3 tier:
     --inventory <controls_inventory.json> --format opencode|claude
     --rules-dir <rules-dir> --target <target> --checkpoints <t3-dir>
     --inputs-dir <inputs-dir>
 
-  --tier            scout|t1|t2|t3|sdr (default scout). Selects the
+  --tier            scout|scout-merge|t1|t2|t3|sdr (default scout). Selects the
                    enumeration script, template, placeholder set, and fanout
                    agent.
   --checkpoints     tier checkpoint dir (markers live here; forwarded).
   --inputs-dir      per-unit input dir (forwarded as --materialize; audit
                    copies `<unit>.task.md` land here too).
-  --host            claude|opencode explicit; default: opencode in PATH, else
-                   claude in PATH, else exit 2 + recipe.
+  --host            claude|opencode|dsh explicit; default: opencode in PATH,
+                   else claude in PATH, else dsh in PATH, else exit 2 + recipe.
   --wave            in-flight subprocess cap (default 5) — a slot-backfill
                     concurrency limit, not a batch size.
   --time-budget-ms  soft deadline: stop dispatching new units, drain in-flight,
@@ -220,7 +239,7 @@ CLI contract (`--help` is the contract surface, R5.1):
                     `taskkill /pid <pid> /T /F`; POSIX process-group SIGTERM);
                     form (2) runner PID dead/mismatched BUT a `children[]` PID
                     is alive AND its cmdline is the host CLI (`opencode`/
-                    `claude`) -> kill each such child tree. Covers "the runner
+                    `claude`/`dsh`) -> kill each such child tree. Covers "the runner
                     was hard-killed along with the orchestrator but its host-CLI
                     children keep burning tokens". Mismatched/dead PIDs are
                     NEVER killed (PID-reuse guard: the cmdline must match —
@@ -271,8 +290,8 @@ includes stderr in the Bash result) surface these lines live. stdout contract
 unchanged: still exactly one JSON summary line at the end.
 
 stdout (structured JSON summary; stderr = diagnostics/progress only, R5.3b):
-  {"runner": "fanout_runner", "tier": "scout|t1|t2|t3|sdr", "repo": "...",
-   "host": "claude|opencode|test", "total": N, "done": M, "failed": F,
+  {"runner": "fanout_runner", "tier": "scout|scout-merge|t1|t2|t3|sdr", "repo": "...",
+   "host": "claude|opencode|dsh|test", "total": N, "done": M, "failed": F,
    "pending": P, "wave": W, "waves_run": K, "partial": bool,
    "stall_killed": [units stall-killed this run],
    "runtime_p50_s": S, "runtime_p95_s": S, "runtime_max_s": S
@@ -482,7 +501,10 @@ _RATELIMIT_RECIPE = (
 # Placeholders are pure str.replace, never format()-derived: what the template
 # says is what the subagent gets (D2). Common placeholders every tier fills:
 #  <id-field> (unit identity: batch_id/cluster_id/shard_id/category per tier),
-#  input_path, done_marker, failed_marker, repo. scout/t1 add
+#  input_path, done_marker, failed_marker, repo; the init tiers (scout/t1/t2/t3)
+#  add mgh_core (absolute mgh-core install root of this script — one derivation
+#  covers all three hosts, so templates carry ONE stage-prompt path instead of
+#  guessing the .opencode/.claude prefix). scout/t1 add
 #  checkpoint_path, slice_dir, chunk_sources_abs, codegraph; t2 adds
 #  shard_id, categories (checkpoint_path without slice_dir/chunk_sources —
 #  partial-synthesis reads a bounded shard record, writes a summary
@@ -509,7 +531,7 @@ TIERS = {
         "template_rel": Path("prompts") / "fragments" / "fanout" / "scout-task.md",
         "path_fields": _SCOUT_PATH_FIELDS,
         "placeholders": _SCOUT_PATH_FIELDS + ("batch_id", "chunk_sources_abs",
-                                              "repo", "codegraph"),
+                                              "repo", "codegraph", "mgh_core"),
         "id_field": "batch_id",
         "agent": "init-scout-fanout",
         "agent_desc": "mgh-init S3 scout-reader (fanout dispatch, primary)",
@@ -529,7 +551,7 @@ TIERS = {
         "template_rel": Path("prompts") / "fragments" / "fanout" / "t1-task.md",
         "path_fields": _SCOUT_PATH_FIELDS,
         "placeholders": _SCOUT_PATH_FIELDS + ("cluster_id", "chunk_sources_abs",
-                                              "repo", "codegraph"),
+                                              "repo", "codegraph", "mgh_core"),
         "id_field": "cluster_id",
         "agent": "init-induct-fanout",
         "agent_desc": "mgh-init T1 per-cluster inductor (fanout dispatch, primary)",
@@ -562,10 +584,40 @@ TIERS = {
         "plan_arg": "init_dir",
         "template_rel": Path("prompts") / "fragments" / "fanout" / "t2-task.md",
         "path_fields": _T2_PATH_FIELDS,
-        "placeholders": _T2_PATH_FIELDS + ("shard_id", "categories", "repo"),
+        "placeholders": _T2_PATH_FIELDS + ("shard_id", "categories", "repo",
+                                           "mgh_core"),
         "id_field": "shard_id",
         "agent": "init-synthesis-fanout",
         "agent_desc": "mgh-init T2 per-shard partial synthesis (fanout dispatch, primary)",
+        "agent_tools": "Read Glob Grep Bash Write",
+        "uses_codegraph": False,
+        "uses_chunk_sources": False,
+    },
+    # scout-merge = S4 scout candidate merge MAP stage — same shape as t2
+    # (plan_aggregate enumerator, marker-aware pending; the ROLLUP is a
+    # separate orchestrator step, its terminal marker `merge.json.done` !=
+    # any shard `.done`). Enumerator = plan_aggregate.py --node scout-merge
+    # (hard-bounded candidate-granularity shards). The agent
+    # init-scout-merge-fanout runs a per-shard BOUNDED partial merge
+    # (stages/init-scout-merge-partial.md) — never cross-shard dedup
+    # (uses_codegraph=False, uses_chunk_sources=False).
+    "scout-merge": {
+        "list_script": "plan_aggregate.py",
+        # plan_aggregate --node scout-merge; --budget forwarded only when the
+        # caller set it (else plan_aggregate's own DEFAULT_BUDGET applies).
+        "list_args": lambda a: ["--node", "scout-merge", "--init-dir", a.init_dir]
+            + (["--budget", str(a.budget)] if a.budget is not None else [])
+            + ["--materialize", a.inputs_dir]
+            + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
+        "required_args": ("init_dir", "inputs_dir"),
+        "plan_arg": "init_dir",
+        "template_rel": Path("prompts") / "fragments" / "fanout" / "scout-merge-task.md",
+        "path_fields": _T2_PATH_FIELDS,
+        "placeholders": _T2_PATH_FIELDS + ("shard_id", "batches", "repo",
+                                           "mgh_core"),
+        "id_field": "shard_id",
+        "agent": "init-scout-merge-fanout",
+        "agent_desc": "mgh-init S4 per-shard partial scout merge (fanout dispatch, primary)",
         "agent_tools": "Read Glob Grep Bash Write",
         "uses_codegraph": False,
         "uses_chunk_sources": False,
@@ -584,7 +636,8 @@ TIERS = {
         "plan_arg": "inventory",
         "template_rel": Path("prompts") / "fragments" / "fanout" / "t3-task.md",
         "path_fields": _T3_PATH_FIELDS,
-        "placeholders": _T3_PATH_FIELDS + ("category", "format", "repo"),
+        "placeholders": _T3_PATH_FIELDS + ("category", "format", "repo",
+                                           "mgh_core"),
         "id_field": "category",
         "agent": "init-rulewriter-fanout",
         "agent_desc": "mgh-init T3 per-category rule writer (fanout dispatch, primary)",
@@ -678,15 +731,26 @@ def _chunk_sources_abs() -> str:
     return str(Path(__file__).resolve().parent / "chunk_sources.py")
 
 
+def _mgh_core_root() -> str:
+    """Absolute mgh-core install root = parent dir of scripts/ — on all three
+    hosts this resolves to the tree the unit reads (`.claude/mgh-core`,
+    `.opencode/mgh-core`, or dsh's root-level `mgh-core/`). Single source for
+    the `{{mgh_core}}` placeholder, so templates carry ONE stage-prompt path
+    and no host-prefix guessing."""
+    return str(Path(__file__).resolve().parent.parent)
+
+
 def _fill_template(tier: dict, template: str, unit: dict, repo_str: str,
                    codegraph: str) -> str:
     """Pure verbatim substitution; asserts no residual `{{` after filling."""
     values = {k: unit.get(k, "") for k in tier["placeholders"]
-              if k not in ("repo", "codegraph", "chunk_sources_abs", "format")}
+              if k not in ("repo", "codegraph", "chunk_sources_abs", "format",
+                           "mgh_core")}
     if tier["uses_chunk_sources"]:
         values["chunk_sources_abs"] = _chunk_sources_abs()
     values["repo"] = repo_str
     values["codegraph"] = codegraph
+    values["mgh_core"] = _mgh_core_root()
     values["format"] = unit.get("format", "")
     msg = template
     for ph in tier["placeholders"]:
@@ -734,14 +798,48 @@ def tier_name(tier: dict) -> str:
     return "scout"
 
 
+def _dsh_tier_mount(tier_id: str) -> Path:
+    """dsh tier mount file = install-generated `<mgh-core>/dsh/tiers/<tier>.yml`
+    (built by install.sh from releases/dsh/agents/ via gen_dsh_tiers.py; the
+    dispatcher NEVER generates it at runtime)."""
+    return Path(__file__).resolve().parent.parent / "dsh" / "tiers" / f"{tier_id}.yml"
+
+
+def _dsh_precheck(tier_id: str) -> str | None:
+    """Pre-spawn gate for the dsh host (zero-spawn fail-loud): the tier mount
+    file and the `mgh` profile must exist. Returns a failure message with a
+    regeneration recipe, or None when the dispatch can proceed. The mount is
+    the load-bearing asset (persona + env task channel + tool narrowing all
+    ride it); the profile is dsh's run carrier — `--profile mgh` missing would
+    make every unit die on a host error without a single useful ack."""
+    mount = _dsh_tier_mount(tier_id)
+    if not mount.is_file():
+        return (f"dsh tier mount file missing: {mount}\n"
+                "recipe: rerun `install.sh --dsh <target>` (regenerates "
+                "mgh-core/dsh/tiers/ from releases/dsh/agents/); NEVER "
+                "hand-write the mount")
+    dsh_home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
+    if not (dsh_home / "profiles" / "mgh").is_dir():
+        return (f"dsh profile 'mgh' missing under {dsh_home / 'profiles'}\n"
+                "recipe: rerun `install.sh --dsh <target>` (creates/wires the "
+                "mgh profile; user-owned profiles are never touched)")
+    return None
+
+
 def _spawn_cmd(tier: dict, host: str) -> list[str]:
-    """Host-CLI argv for one unit; the task message travels via STDIN, never
-    argv (npm `.cmd` shims on Windows truncate multi-line argv at the first
-    newline — observed as the subagent receiving only `<!--`). Both hosts read
-    the piped message when no positional message is given (opencode `run`
-    Bun.stdin.text(); claude `-p` stdin mode; spike-verified)."""
+    """Host-CLI argv for one unit; the task message travels via STDIN for
+    opencode/claude, never argv (npm `.cmd` shims on Windows truncate
+    multi-line argv at the first newline — observed as the subagent receiving
+    only `<!--`). Both hosts read the piped message when no positional message
+    is given (opencode `run` Bun.stdin.text(); claude `-p` stdin mode;
+    spike-verified). dsh headless has NO stdin task channel (spike fact): argv
+    carries only the inert `-` placeholder + the `--patch` mount path, and the
+    task text rides the child env `MGH_TASK_TEXT` (see `_run_unit`)."""
     if host == "opencode":
         return [_host_exe("opencode"), "run", "--agent", tier["agent"]]
+    if host == "dsh":
+        return [_host_exe("dsh"), "--profile", "mgh", "--patch",
+                str(_dsh_tier_mount(tier_name(tier))), "-"]
     # claude: -p + --agents inline JSON (the agent definition; the task
     # message arrives via stdin) + tool whitelist.
     agents_json = json.dumps({tier["agent"]: {
@@ -918,13 +1016,26 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     stall_killed[]). `stall_timeout_s` is the run's EFFECTIVE silence window
     for THIS attempt (the caller snapshots it at dispatch, so a mid-run
     widening applies to units dispatched afterwards) — 0 means the criterion
-    is disabled and the silence branch never fires."""
+    is disabled and the silence branch never fires.
+
+    Task delivery is host-shaped: opencode/claude get the task piped to stdin;
+    dsh gets it as child env `MGH_TASK_TEXT` (headless has no stdin task
+    channel — the tier mount's `task: !!js process.env.MGH_TASK_TEXT` row
+    reads the env; argv carries only the inert `-` placeholder so the task
+    text NEVER enters the command line). Stall detection/kill/cooldown are
+    host-agnostic."""
+    env = None
+    stdin_mode = subprocess.PIPE
+    if host == "dsh":
+        env = dict(os.environ)
+        env["MGH_TASK_TEXT"] = task
+        stdin_mode = subprocess.DEVNULL
     proc = None
     try:
         proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            cmd, stdin=stdin_mode, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, cwd=str(cwd), text=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", env=env,
             # POSIX: setsid() so the unit leads its OWN session/process group.
             # `_kill_tree`'s killpg then scopes to this unit's tree — without
             # it the child shares the dispatcher's group and the kill would
@@ -952,16 +1063,17 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     ]
     for th in readers:
         th.start()
-    try:
-        proc.stdin.write(task)
-        proc.stdin.flush()
-    except OSError:
-        pass  # child died before consuming stdin — monitor/reap below handles it
-    finally:
+    if proc.stdin is not None:  # dsh: DEVNULL, task already in env
         try:
-            proc.stdin.close()
+            proc.stdin.write(task)
+            proc.stdin.flush()
         except OSError:
-            pass
+            pass  # child died before consuming stdin — monitor/reap below handles it
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
     status: str | None = None
     detail = ""
     was_stalled = False
@@ -1078,10 +1190,12 @@ def _host_exe(host: str) -> str:
 
 
 def _detect_host(explicit: str | None, tier: dict) -> str:
-    """--host explicit > opencode in PATH > claude in PATH; else exit 2 + recipe."""
+    """--host explicit > opencode in PATH > claude in PATH > dsh in PATH
+    (dsh appended at the chain end: dual-host machines keep their existing
+    probe behavior unchanged); else exit 2 + recipe."""
     if explicit:
-        if explicit not in ("claude", "opencode"):
-            _eprint(f"error: --host must be claude|opencode (got {explicit!r})")
+        if explicit not in ("claude", "opencode", "dsh"):
+            _eprint(f"error: --host must be claude|opencode|dsh (got {explicit!r})")
             sys.exit(2)
         if shutil.which(explicit) is None:
             _eprint(f"error: --host {explicit} not found in PATH")
@@ -1091,7 +1205,9 @@ def _detect_host(explicit: str | None, tier: dict) -> str:
         return "opencode"
     if shutil.which("claude"):
         return "claude"
-    _eprint("error: no host CLI found (neither `opencode` nor `claude` in PATH).\n"
+    if shutil.which("dsh"):
+        return "dsh"
+    _eprint("error: no host CLI found (none of `opencode`/`claude`/`dsh` in PATH).\n"
             f"fallback recipe: dispatch {tier_name(tier)} waves manually per the "
             f"tier's stage fragment (list_* paging + per-unit subagent spawn); "
             "behavior is unchanged.")
@@ -1217,10 +1333,10 @@ def _hb_inflight(t0: float, tier: str, k: int, uid: str, idle_s: int,
 
 
 # Host-CLI cmdline markers for the PID-reuse guard: a child PID is only killed
-# when its cmdline actually is the host CLI (opencode/claude); a runner PID
+# when its cmdline actually is the host CLI (opencode/claude/dsh); a runner PID
 # only when it still names fanout_runner.py.
 _RUNNER_MARK = "fanout_runner"
-_HOST_CLIS = ("opencode", "claude")
+_HOST_CLIS = ("opencode", "claude", "dsh")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1455,16 +1571,19 @@ def _purge_audit(inputs_dir: Path, dry_run: bool) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="deterministic tier-aware slot-backfill dispatcher for /mgh-init "
-                    "+ /mgh-sdr fan-out (tiers: scout/t1/t2/t3/sdr; zero LLM turns; "
+                    "+ /mgh-sdr fan-out (tiers: scout/scout-merge/t1/t2/t3/sdr; zero LLM turns; "
                     "fixed template + verbatim fields; in-flight-capped host-CLI "
                     "spawn; per-unit stall kill)")
-    ap.add_argument("--tier", choices=["scout", "t1", "t2", "t3", "sdr"],
+    ap.add_argument("--tier", choices=["scout", "scout-merge", "t1", "t2", "t3", "sdr"],
                     default="scout",
                     help="fan-out tier (default scout). Selects the enumeration "
                          "script, task template, placeholder set, and fanout agent; "
                          "scout call shape (--scout-plan etc.) is unchanged. t2 tier "
                          "(map stage only): plan_aggregate.py --node t2 "
-                         "--init-dir/[--budget]/--materialize. sdr tier: diff_group.py "
+                         "--init-dir/[--budget]/--materialize. scout-merge tier "
+                         "(map stage only; identical call shape): plan_aggregate.py "
+                         "--node scout-merge --init-dir/[--budget]/--materialize. "
+                         "sdr tier: diff_group.py "
                          "--repo/--base/--branch/--checkpoints/--materialize")
     # scout artifacts (scout tier)
     ap.add_argument("--scout-plan",
@@ -1512,9 +1631,9 @@ def main() -> int:
     ap.add_argument("--inputs-dir", required=True,
                     help="per-unit input dir (forwarded as --materialize; audit "
                          "<unit>.task.md copies land here)")
-    ap.add_argument("--host", choices=["claude", "opencode"],
+    ap.add_argument("--host", choices=["claude", "opencode", "dsh"],
                     help="explicit host CLI; default: opencode in PATH, else claude, "
-                         "else exit 2 + manual-dispatch fallback recipe")
+                         "else dsh, else exit 2 + manual-dispatch fallback recipe")
     ap.add_argument("--wave", type=int, default=DEFAULT_WAVE,
                     help=f"in-flight subprocess cap (default {DEFAULT_WAVE}) - a "
                          f"slot-backfill concurrency limit, not a batch size: any "
@@ -1890,7 +2009,29 @@ def main() -> int:
         host = "test"
     else:
         listing = _list_pending(tier, args)
+        # plan_aggregate nodes (t2 / scout-merge), needs_reduce=false: the aggregate input
+        # fits the budget → single-context path, NOTHING to dispatch. The orchestrator is
+        # not required to pre-check, so a dispatched run converges idempotently: 0 units,
+        # partial:false, exit 0 (never the missing-`repo` error — that path is only for
+        # listings that actually carry work).
+        if listing.get("needs_reduce") is False:
+            _eprint(f"[fanout_runner] {args.tier}: listing needs_reduce=false — nothing "
+                    f"to dispatch (single-context aggregate)")
+            print(json.dumps({"runner": "fanout_runner", "tier": args.tier,
+                              "total": 0, "done": 0, "failed": 0, "pending": 0,
+                              "waves_run": 0, "partial": False, "stall_killed": [],
+                              "stalled": False,
+                              "note": "aggregate input <= budget — single-context path, "
+                                      "no shards dispatched"}, ensure_ascii=False))
+            return 0
         host = _detect_host(args.host, tier)
+        if host == "dsh":
+            # Pre-spawn gate: mount file / mgh profile missing → exit 2 +
+            # recipe with ZERO spawns (never a wave of host-error crashes).
+            problem = _dsh_precheck(args.tier)
+            if problem:
+                _eprint(f"error: dsh dispatch precheck failed: {problem}")
+                return 2
 
     repo_str = listing.get("repo") or ""
     if not repo_str:

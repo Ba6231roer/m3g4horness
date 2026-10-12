@@ -15,12 +15,14 @@ a fresh session that must pick up an interrupted run.
 ```
 py resume_sdr_state.py --run-dir <abs> [--repo <abs>] [--check]
 py resume_sdr_state.py --run-dir <abs> [--repo <abs>] --rearm-sentinel
+py resume_sdr_state.py --run-dir <abs> [--repo <abs>] --arm-sentinel
 ```
 
 `--run-dir` **必填**:sdr 没有唯一缺省运行目录(launcher 每次按时刻新建
 `<repo>/.mgh-sdr/runs/<ts>-<branch>/`)。目录不存在 → 退出码 `1` + recipe。
 `--repo` 可省:`context.json::repo` > `--repo` > 运行目录布局(`<repo>/.mgh-sdr/runs/<…>`);
 三者皆不可得 → `repo` 为空串 + `notes[]` 要求显式传参(**NEVER 编造仓库根**)。
+`--arm-sentinel` 与 `--rearm-sentinel` 由 argparse 互斥组机器保证不同时出现。
 
 ## Run 目录布局假设
 
@@ -65,7 +67,7 @@ py resume_sdr_state.py --run-dir <abs> [--repo <abs>] --rearm-sentinel
 
 | `step` | 判据 | `next_action` |
 |---|---|---|
-| `not-started` | `context.json` 不存在 | `sdr_context.py --repo <abs> --run-dir <abs>`(该步同时写出哨兵与运行目录的 codegraph 信号) |
+| `not-started` | `context.json` 不存在 | 前置行 `resume_sdr_state.py --run-dir <abs> --repo <abs> --arm-sentinel`(step 0 预武装),再 `sdr_context.py --repo <abs> --run-dir <abs>`(该步细化哨兵并写出运行目录的 codegraph 信号) |
 | `group` | `context.json` 在、`grouping.json` 缺 | `diff_group.py --repo --base --branch --checkpoints <run>/markers --materialize <run>/slices` |
 | `fanout` | `grouping.json` 在,单元未全终态 | `fanout_runner.py --tier sdr ...`(带四级超时三参数) |
 | `render` | 单元全终态、`sdr_manifest.json` 缺 | `render_sdr_report.py --run-dir <abs> --repo <abs>` |
@@ -111,6 +113,19 @@ py resume_sdr_state.py --run-dir <abs> [--repo <abs>] --rearm-sentinel
 repo 不可推导时哨兵检查降级为 advisory(位置无法解析),并在 `notes[]` 明说「本检查未生效,
 传 `--repo <abs>` 使其生效」——**NEVER** 静默跳过。
 
+## `--arm-sentinel`(step 0 预武装)
+
+在**任何运行产物存在之前**确定性写最小哨兵 `<repo>/.mgh-sdr/.active`(`target` = `--repo`,
+缺则运行目录布局回退,皆不可得 → 退出码 `2` + recipe;`read_roots:[]`、`out_roots:[]`、
+`domain:"mgh-sdr"`、`v:1`)。目的:闭合「step 1 在参数解析/前置校验阶段即失败 → 哨兵未写 →
+守卫整个试错期休眠」的窗口。**幂等**:同 target 哨兵已存在 → no-op,文件逐字不变
+(`read_roots[]` 即使已被 step 1 细化也**NEVER** 被清空);`target` 不同 → 退出码 `2` + 报错
+(**NEVER** 把守卫锚到第二个树)。原子写(`.tmp` + `os.replace`);路径由 Python 产出
+(Windows 原生),**NEVER** shell 的 MSYS 形态。成功 → 退出码 `0`,stdout 单对象
+`{sentinel_path, armed, target}`,`armed` = 本次新写为 `true`、已存在同 target 为 `false`。
+哨兵的**细化覆盖**仍归 `sdr_context.py`(step 1 co-write 含实际检索根的完整版)与 launcher
+spawn 前写入,本命令不与其争写面。
+
 ## `--rearm-sentinel`(确定性重写哨兵)
 
 据磁盘重写 `<repo>/.mgh-sdr/.active`:`target` = `context.json::repo`,`read_roots[]` =
@@ -120,4 +135,5 @@ repo 不可推导时哨兵检查降级为 advisory(位置无法解析),并在 `n
 MSYS 形态(`/c/…`)。`context.json` 缺失或 repo 不可得 → 退出码 `2` + recipe。
 
 > 哨兵的正常写入者是 `sdr_context.py`(本步是 launcher 与宿主会话两条入口都必经的第一步),
-> 本命令是其**缺失时的确定性补写**入口,内容同源。
+> 本命令是其**run 中途缺失时的确定性补写**入口,内容同源;run 尚未起步(`context.json` 缺)时
+> 本命令退出码 `2` 并指向 `--arm-sentinel` 预武装入口。

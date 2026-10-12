@@ -4,7 +4,7 @@
 
 Asserts: ≤ budget → needs_reduce=false (single-context path); > budget → needs_reduce=true,
 each shard ≤ budget, pending[] carries input_path; paging shrunk/effective_limit; t2 sharding
-by category, scout-merge by batch cluster; absolute paths.
+by category, scout-merge by candidate-granularity greedy packing (hard bound); absolute paths.
 """
 import contextlib, importlib.util, io, json, sys, tempfile, unittest
 from pathlib import Path
@@ -339,8 +339,9 @@ class TestPlanAggregateT2(unittest.TestCase):
         self.assertEqual(len(d2["rollup"]["summary_paths"]), 3)
         self.assertEqual(len(d["rollup"]["summary_paths"]), 3)
 
-    def test_scout_merge_not_marker_aware(self):
-        """scout-merge (non-goal, hand-paged) keeps listing terminal shards — no total/done/failed."""
+    def test_scout_merge_marker_aware_terminal_exclusion(self):
+        """scout-merge is dispatcher-consumed: a shard whose .done marker exists
+        drops out of pending[], total/done/failed appear, summary_paths stays full."""
         a = _Agg()
         records = [{"batch_id": f"scout-{i:03d}", "candidates": [{"pad": "y" * 2000}]}
                    for i in range(4)]
@@ -351,17 +352,21 @@ class TestPlanAggregateT2(unittest.TestCase):
         d = json.loads(out)
         self.assertTrue(d["needs_reduce"])
         self.assertGreater(d["shards"], 1)
-        # terminal-mark a shard → still listed (not marker-aware), no count fields added
+        self.assertEqual(d["total"], d["shards"])
+        self.assertEqual((d["done"], d["failed"]), (0, 0))
+        self.assertEqual(len(d["pending"]), d["shards"])
+        # terminal-mark one shard → re-list excludes it, counts update
         first_done = d["pending"][0]["done_marker"]
         Path(first_done).parent.mkdir(parents=True, exist_ok=True)
         Path(first_done).write_text("{}", encoding="utf-8")
         _, out2, _ = a.run("--node", "scout-merge", "--budget", "3000", "--materialize",
                            str(a.init / "shards"))
         d2 = json.loads(out2)
-        self.assertNotIn("total", d2)
-        self.assertNotIn("done", d2)
-        self.assertNotIn("failed", d2)
-        self.assertEqual(len(d2["pending"]), len(d["pending"]))  # all still pending
+        self.assertEqual(d2["done"], 1)
+        self.assertEqual(d2["total"], d["shards"])
+        self.assertEqual([i["shard_id"] for i in d2["pending"]],
+                         [i["shard_id"] for i in d["pending"][1:]])
+        self.assertEqual(len(d2["rollup"]["summary_paths"]), d["shards"])
 
     def test_paging_and_shrink(self):
         # each category's 2 small records stay within the 500B budget (no part
@@ -398,11 +403,150 @@ class TestPlanAggregateScoutMerge(unittest.TestCase):
         self.assertGreater(d["shards"], 1)
         self.assertTrue(d["rollup"]["output"].endswith("scout_candidates.json"))
         self.assertTrue(d["rollup"]["done_marker"].endswith("merge.json.done"))
+        # `batches` = deduped batch_id list the shard covers (int count retired);
+        # every candidate lands exactly once across shards, in glob order.
+        all_batches = [b for item in d["pending"] for b in item["batches"]]
+        self.assertEqual(sorted(set(all_batches)), sorted(all_batches))
+        seen = [c["pad"] for item in d["pending"]
+                for rec in json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))["records"]
+                for c in rec.get("candidates", [])]
+        self.assertEqual(len(seen), 8)
+        # HARD invariant: the MATERIALIZED file ≤ budget, and bytes == file size
+        for item in d["pending"]:
+            self.assertLessEqual(item["bytes"], 3000)
+            self.assertEqual(item["bytes"], Path(item["input_path"]).stat().st_size)
 
-    def test_scout_merge_envelope_and_stdout_unchanged(self):
-        """Part splitting is a t2-only feature: scout-merge items/inputs carry
-        no part_index/part_count/slimmed and keep the legacy oversize warn+send
-        disclosure (hand-paged non-goal, envelope byte-identical)."""
+    def test_oversize_batch_splits_across_shards(self):
+        # ① one batch whose candidates exceed the budget is cut across shards at
+        # candidate granularity; its `unresolved` rides the shard of its LAST candidate.
+        a = _Agg()
+        a.write_scout([{"batch_id": "scout-000",
+                        "candidates": [{"id": i, "pad": "y" * 1500} for i in range(6)],
+                        "unresolved": ["src/X.java"]}])
+        code, out, _ = a.run("--node", "scout-merge", "--budget", "3000", "--materialize",
+                             str(a.init / "shards"))
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertGreater(d["shards"], 1)
+        ids, shards_with_unres = [], []
+        for item in d["pending"]:
+            recs = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))["records"]
+            self.assertEqual(len(recs), 1)
+            ids += [c["id"] for c in recs[0].get("candidates", [])]
+            if "unresolved" in recs[0]:
+                shards_with_unres.append(item["shard_id"])
+        self.assertEqual(ids, list(range(6)))            # no loss, no duplication
+        self.assertEqual(shards_with_unres, [d["pending"][-1]["shard_id"]])
+        self.assertEqual(d["pending"][0]["batches"], ["scout-000"])
+        # every record keeps its batch identity across the split
+        for item in d["pending"]:
+            recs = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))["records"]
+            self.assertEqual(recs[0]["batch_id"], "scout-000")
+
+    def test_atomic_oversize_candidate_slimmed(self):
+        # ② a single candidate > budget is prose-slimmed at materialization
+        # (evidence_snippet/snippet/entry_points only); structural fields and the
+        # checkpoints/scout original NEVER touched; shard carries `slimmed`.
+        a = _Agg()
+        cand = {"file": "src/Auth.java", "line": 7, "category": "authorization",
+                "anchor": {"class": "Auth", "method": "check"}, "source": "scout",
+                "evidence_snippet": "E" * 20000, "snippet": "S" * 1000,
+                "entry_points": [f"ep{i}" for i in range(40)]}
+        a.write_scout([{"batch_id": "scout-000", "candidates": [cand]}])
+        cp_file = a.init / "checkpoints" / "scout" / "scout-000.json"
+        original = cp_file.read_bytes()
+        code, out, _ = a.run("--node", "scout-merge", "--budget", "8192", "--materialize",
+                             str(a.init / "shards"))
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertEqual(len(d["pending"]), 1)
+        item = d["pending"][0]
+        self.assertFalse(item["oversize"])
+        self.assertLessEqual(item["bytes"], 8192)
+        self.assertEqual(item["bytes"], Path(item["input_path"]).stat().st_size)
+        self.assertEqual(cp_file.read_bytes(), original)  # original NEVER rewritten
+        slim = item["slimmed"]["scout-000.json#0"]
+        self.assertGreater(slim["original_bytes"], 8192)
+        self.assertIn("evidence_snippet", slim["truncated"])
+        self.assertIn("entry_points", slim["truncated"])
+        self.assertNotIn("snippet", slim["truncated"])  # under cap → untouched
+        body = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))
+        sc = body["records"][0]["candidates"][0]
+        self.assertEqual(sc["anchor"], cand["anchor"])       # structural fields intact
+        self.assertEqual(sc["file"], "src/Auth.java")
+        self.assertEqual(len(sc["entry_points"]), 16)
+        self.assertLessEqual(PA._byte_len(sc["evidence_snippet"]), 4096)
+        self.assertEqual(sc["snippet"], "S" * 1000)
+        self.assertEqual(sc["_slimmed"]["evidence_snippet"], 20002)  # "E"*20000 + quotes
+
+    def test_atomic_oversize_candidate_beyond_slim_exits_2(self):
+        # ③ pathological candidate (STRUCTURAL fields alone exceed budget) →
+        # exit 2 fail-loud, zero stdout, zero materialized files.
+        a = _Agg()
+        a.write_scout([{"batch_id": "scout-000",
+                        "candidates": [{"file": "x" * 90000, "line": 1,
+                                        "category": "crypto"}]}])
+        shards_dir = a.init / "shards"
+        code, out, err = a.run("--node", "scout-merge", "--budget", "8192",
+                               "--materialize", str(shards_dir))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("atomic-oversize", err)
+        self.assertIn("scout-000.json", err)
+        self.assertFalse(shards_dir.exists())
+
+    def test_marker_aware_scout_relist(self):
+        # ④ dispatcher convergence: done/failed terminal shards excluded from
+        # re-list; counts marker-derived; --include-failed re-enters canonically.
+        a = _Agg()
+        a.write_scout([{"batch_id": f"scout-{i:03d}", "candidates": [{"pad": "y" * 2000}]}
+                       for i in range(4)])
+        code, out, _ = a.run("--node", "scout-merge", "--budget", "3000", "--materialize",
+                             str(a.init / "shards"))
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        victim = d["pending"][1]
+        Path(victim["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(victim["done_marker"]).write_text("{}", encoding="utf-8")
+        fm = Path(d["pending"][2]["failed_marker"])
+        fm.write_text(json.dumps({"unit": victim["shard_id"], "reason": "r",
+                                  "tier": "scout-merge"}), encoding="utf-8")
+        _, out2, _ = a.run("--node", "scout-merge", "--budget", "3000", "--materialize",
+                           str(a.init / "shards"))
+        d2 = json.loads(out2)
+        self.assertEqual((d2["done"], d2["failed"]), (1, 1))
+        self.assertNotIn(victim["shard_id"], [i["shard_id"] for i in d2["pending"]])
+        _, out3, _ = a.run("--node", "scout-merge", "--budget", "3000", "--materialize",
+                           str(a.init / "shards"), "--include-failed")
+        d3 = json.loads(out3)
+        relisted = {i["shard_id"]: i for i in d3["pending"]}
+        failed_sid = fm.name.removeprefix(".").removesuffix(".json.failed")
+        self.assertIn(failed_sid, relisted)
+        self.assertEqual(relisted[failed_sid]["failed_marker"], str(fm))
+        self.assertEqual(d3["failed"], 1)
+        self.assertEqual(d3["done"], 1)
+
+    def test_scout_merge_under_budget_stdout_byte_identical(self):
+        # ⑤ ≤ budget → needs_reduce=false path byte-identical to pre-adoption
+        # release (no repo/total/done/failed/shard fields leak in).
+        a = _Agg()
+        records = [{"batch_id": "scout-000", "candidates": [{"pad": "y" * 10}]}]
+        a.write_scout(records)
+        total = PA._byte_len([{**r, "__source_file": f"scout-{i:03d}.json"}
+                              for i, r in enumerate(records)])
+        expected = (
+            '{"node": "scout-merge", "total_bytes": %d, "budget": 3000, "needs_reduce": false, '
+            '"shards": 0, "pending": [], "truncated": false, "offset": 0, "limit": 0, '
+            '"effective_limit": 0, "shrunk": false, "note": "aggregate input %dB <= budget '
+            '3000B — use single-context init-scout-merge"}' % (total, total))
+        code, out, _ = a.run("--node", "scout-merge", "--budget", "3000")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), expected)
+
+    def test_scout_merge_envelope_unchanged_no_part_fields(self):
+        """Part splitting stays a t2-only concept: scout-merge items/inputs carry
+        no part_index/part_count (slimmed IS now present, {} when nothing was
+        cut); the input envelope keeps {node, shard_id, records}."""
         a = _Agg()
         a.write_scout([{"batch_id": f"scout-{i:03d}", "candidates": [{"pad": "y" * 2000}]}
                        for i in range(4)])
@@ -414,12 +558,40 @@ class TestPlanAggregateScoutMerge(unittest.TestCase):
         for item in d["pending"]:
             self.assertNotIn("part_index", item)
             self.assertNotIn("part_count", item)
-            self.assertNotIn("slimmed", item)
+            self.assertEqual(item["slimmed"], {})
             body = json.loads(Path(item["input_path"]).read_text(encoding="utf-8"))
             self.assertNotIn("part_index", body)
             self.assertNotIn("part_count", body)
             self.assertEqual(body, {"node": "scout-merge", "shard_id": item["shard_id"],
                                     "records": body["records"]})
+
+
+class TestDefaultBudgetConsistency(unittest.TestCase):
+    """--max-aggregate-bytes default MUST be 98304 (96KB) in EVERY declaring script,
+    asserted on the `--help` contract surface (R5.1) — plan_aggregate.DEFAULT_BUDGET,
+    write_runconfig / write_ut_runconfig / render_report DEFAULT_MAX_AGGREGATE_BYTES."""
+
+    HELPERS = ("plan_aggregate.py", "write_runconfig.py", "write_ut_runconfig.py",
+               "render_report.py")
+
+    def test_help_declares_98304(self):
+        import subprocess
+        for script in self.HELPERS:
+            with self.subTest(script=script):
+                r = subprocess.run([sys.executable, str(SCRIPTS / script), "--help"],
+                                   capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("98304", r.stdout,
+                              f"{script} --help must declare the 98304 aggregate default")
+
+    def test_constants_are_98304(self):
+        wr = _load("write_runconfig")
+        wu = _load("write_ut_runconfig")
+        rr = _load("render_report")
+        self.assertEqual(PA.DEFAULT_BUDGET, 98304)
+        self.assertEqual(wr.DEFAULT_MAX_AGGREGATE_BYTES, 98304)
+        self.assertEqual(wu.DEFAULT_MAX_AGGREGATE_BYTES, 98304)
+        self.assertEqual(rr.DEFAULT_MAX_AGGREGATE_BYTES, 98304)
 
 
 class TestBadInput(unittest.TestCase):

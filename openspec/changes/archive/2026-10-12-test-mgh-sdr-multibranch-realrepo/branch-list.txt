@@ -1,0 +1,9 @@
+# mgh-sdr --multi-branch 真仓验证清单(openspec change: test-mgh-sdr-multibranch-realrepo)
+# 第 1 行:sdr-dryrun —— 既有形状分支(接口聚集 + 多形态调用链)
+# 第 2 行:故意不存在的分支 —— 失败探针,验证确定性早败与失败隔离(不消耗 LLM)
+# 第 3 行:sdr-mb-authz —— 越权与输入校验形状
+# 第 4 行:sdr-mb-sql-sensitive —— SQL 注入与敏感信息形状
+sdr-dryrun
+sdr-mb-nonexistent
+sdr-mb-authz
+sdr-mb-sql-sensitive

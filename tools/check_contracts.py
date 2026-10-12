@@ -8,8 +8,9 @@ that script's `--help` (the contract surface). A shell using a flag the script d
 not declare = contract violation (the agent learns the interface from `--help`, so
 `--help` MUST match the shells exactly).
 
-Default scope: the two /mgh-init shells (claude + opencode). Override with
-`--shells a.md b.md`. Zero runtime deps (Python >=3.10 stdlib).
+Default scope: all mgh-* orchestrator shells across the three dialects (claude + opencode
++ dsh skill shells). Override with `--shells a.md b.md`. Zero runtime deps (Python >=3.10
+stdlib).
 
 Exit: 0 ok · 1 contract violation / shell or script missing.
 Run: py tools/check_contracts.py
@@ -37,6 +38,13 @@ DEFAULT_SHELLS = [
     ROOT / "releases" / "opencode" / "command" / "mgh-ut-init.md",
     ROOT / "releases" / "claude-code" / "commands" / "mgh-sdr.md",
     ROOT / "releases" / "opencode" / "command" / "mgh-sdr.md",
+    # third dialect (add-mgh-dsh-command-surface): flag-existence assertions run
+    # across all three shell faces.
+    ROOT / "releases" / "dsh" / "skills" / "mgh-sdr" / "SKILL.md",
+    ROOT / "releases" / "dsh" / "skills" / "mgh-sast" / "SKILL.md",
+    ROOT / "releases" / "dsh" / "skills" / "mgh-init" / "SKILL.md",
+    ROOT / "releases" / "dsh" / "skills" / "mgh-sra" / "SKILL.md",
+    ROOT / "releases" / "dsh" / "skills" / "mgh-srr" / "SKILL.md",
 ]
 # mgh-sast shells and the shell-level (non-script) flags their flag table MUST advertise
 # (--controls is the shell's own flag, not a *.py flag, so the bash-block extractor below
@@ -124,14 +132,16 @@ FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candi
                                 "--kill-stale", "--pending-file", "--purge-audit",
                                 "--dry-run", "--template",
                                 "--cooldown-s", "--no-rate-limit-stop", "--retry-failed"]
-# The --tier closed set MUST advertise the t2 tier (map stage adoption): argparse prints the
-# choices verbatim in --help's usage line — assert the expanded set textually (a trimmed shell
-# example / prose can't fake it; the usage line is argparse-generated).
-FANOUT_TIER_SET_HELP = "{scout,t1,t2,t3,sdr}"
+# The --tier closed set MUST advertise the t2 + scout-merge tiers (map-stage adoption):
+# argparse prints the choices verbatim in --help's usage line — assert the expanded set
+# textually (a trimmed shell example / prose can't fake it; the usage line is
+# argparse-generated).
+FANOUT_TIER_SET_HELP = "{scout,scout-merge,t1,t2,t3,sdr}"
 # Per-tier task-message templates the dispatcher reads (fanout-dispatch tier adoption);
 # existence asserted so a trimmed mirror cannot silently break dispatch.
 FANOUT_TEMPLATES = [
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "scout-task.md",
+    ROOT / "core" / "prompts" / "fragments" / "fanout" / "scout-merge-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t1-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t2-task.md",
     ROOT / "core" / "prompts" / "fragments" / "fanout" / "t3-task.md",
@@ -144,21 +154,25 @@ DIFF_GROUP_SCRIPT = ROOT / "core" / "scripts" / "diff_group.py"
 DIFF_GROUP_REQUIRED_FLAGS = ["--repo", "--base", "--branch", "--checkpoints",
                              "--materialize", "--max-standalone-bytes",
                              "--max-interface-bytes", "--include-excluded", "--offset",
-                             "--limit", "--resume", "--check", "--include-failed"]
+                             "--limit", "--summary", "--resume", "--check",
+                             "--include-failed"]
 SDR_CONTEXT_SCRIPT = ROOT / "core" / "scripts" / "sdr_context.py"
 SDR_CONTEXT_REQUIRED_FLAGS = ["--repo", "--run-dir", "--base", "--branch", "--dimensions",
                               "--baseline-budget-bytes", "--external-budget-bytes",
-                              "--read-root", "--no-codegraph", "--check"]
+                              "--read-root", "--approve-external", "--summary",
+                              "--no-codegraph", "--check"]
 RENDER_SDR_SCRIPT = ROOT / "core" / "scripts" / "render_sdr_report.py"
 RENDER_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--out-dir", "--check"]
 SDR_LAUNCH_SCRIPT = ROOT / "core" / "scripts" / "mgh_sdr_launch.py"
 SDR_LAUNCH_REQUIRED_FLAGS = ["--repo", "--branch", "--base", "--host", "--dimensions",
-                             "--multi-branch", "--read-root", "--no-codegraph", "--dry-run"]
+                             "--multi-branch", "--read-root", "--no-codegraph",
+                             "--open", "--dry-run"]
 # /mgh-sdr resume surface: the sdr-domain state query + step manifest MUST declare their
 # flags in --help (R5.1 contract surface), so an agent that learns interfaces from --help
 # can always reach them — the same guarantee the init/ut-init siblings carry.
 RESUME_SDR_SCRIPT = ROOT / "core" / "scripts" / "resume_sdr_state.py"
-RESUME_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--check", "--rearm-sentinel"]
+RESUME_SDR_REQUIRED_FLAGS = ["--run-dir", "--repo", "--check", "--rearm-sentinel",
+                             "--arm-sentinel"]
 LIST_SDR_STEPS_SCRIPT = ROOT / "core" / "scripts" / "list_sdr_steps.py"
 LIST_SDR_STEPS_REQUIRED_FLAGS = ["--target", "--step"]
 # /mgh-sdr external-repo authorization gate: the config writer's flags MUST be declared
@@ -170,6 +184,7 @@ READ_ROOTS_REQUIRED_FLAGS = ["--target", "--add", "--remove", "--list", "--check
 SDR_SHELLS = [
     ROOT / "releases" / "claude-code" / "commands" / "mgh-sdr.md",
     ROOT / "releases" / "opencode" / "command" / "mgh-sdr.md",
+    ROOT / "releases" / "dsh" / "skills" / "mgh-sdr" / "SKILL.md",
 ]
 SDR_SHELL_REQUIRED_MARKERS = ["read_roots_config.py", "pending_approval"]
 # /mgh-sdr codegraph signal: the switch MUST NOT go dead again. The carrier is the run dir's
@@ -289,6 +304,84 @@ def extract_invocations(md_text: str):
             if not m:
                 continue
             yield m.group(1), re.findall(_FLAG, line)
+
+
+# ---------------------------------------------------------------------------
+# Recipe-visibility lint (harden-mgh-sdr-orchestrator-affordances, design D6).
+# The guard's block message (_recipe(domain) + that domain's _WORKLIST line) is the
+# orchestrator's ONLY map when a hook fires — every `*.py` it names MUST be reachable
+# verbatim in that domain's instruction surface (both host shells ∪ the shared
+# orchestrator-discipline fragment), or the recipe points at a script the agent has no
+# sanctioned way to locate. Standalone function (separate rule from the flag-existence
+# checks; shares only the failures list). Pure-function core for unit testing.
+# ---------------------------------------------------------------------------
+_GUARD_SCRIPT = ROOT / "releases" / "claude-code" / "hooks" / "block_adhoc_scripts.py"
+_DISCIPLINE_FRAGMENT = ROOT / "core" / "prompts" / "fragments" / "orchestrator-discipline.md"
+_SCRIPT_NAME_RX = re.compile(r"[A-Za-z0-9_]+\.py")
+
+
+def guard_recipe_scripts(guard_src: str):
+    """{domain: set(scripts)} from the guard source text: that domain's `_WORKLIST` line
+    ∪ the shared `_recipe(domain)` body. Parses by region, never imports the guard."""
+    def _region(start_pat: str, end_pat: str) -> str:
+        m = re.search(start_pat, guard_src, re.M)
+        if not m:
+            return ""
+        rel = m.end() - m.start()  # end of the start-match in `rest` coordinates
+        rest = guard_src[m.start():]
+        e = re.search(end_pat, rest[rel:], re.M)
+        return rest[:rel + e.start()] if e else rest
+
+    wl = _region(r"^_WORKLIST = \{", r"^\}")
+    domains = re.findall(r'"(mgh-[a-z-]+)"\s*:', wl)
+    out = {d: set() for d in domains}
+    for d in domains:
+        m = re.search(rf'"{re.escape(d)}"\s*:\s*"([^"]*)"', wl)
+        if m:
+            out[d] |= set(_SCRIPT_NAME_RX.findall(m.group(1)))
+    rc = _region(r"^def _recipe\(domain", r"^def ")
+    shared = set(_SCRIPT_NAME_RX.findall(rc))
+    for d in out:
+        out[d] |= shared
+    return out
+
+
+def recipe_visibility_violations(guard_src: str, shell_texts: dict, fragment_text: str):
+    """Pure core: shell_texts = {domain: concatenated both-face shell text}. Returns a list
+    of (domain, missing_script) pairs — scripts the guard's recipe names that appear
+    NOWHERE in that domain's instruction surface."""
+    violations = []
+    for domain, scripts in sorted(guard_recipe_scripts(guard_src).items()):
+        visible = set(_SCRIPT_NAME_RX.findall(shell_texts.get(domain, "")))
+        visible |= set(_SCRIPT_NAME_RX.findall(fragment_text))
+        violations += [(domain, s) for s in sorted(scripts - visible)]
+    return violations
+
+
+def check_recipe_visibility():
+    """Wire the pure core to the repo layout (domain→shells reuses the guard's _DOMAINS
+    membership, which _WORKLIST already keys by). Returns failure strings."""
+    if not _GUARD_SCRIPT.is_file():
+        return [f"guard not found: {_GUARD_SCRIPT}"]
+    if not _DISCIPLINE_FRAGMENT.is_file():
+        return [f"shared fragment not found: {_DISCIPLINE_FRAGMENT}"]
+    guard_src = _GUARD_SCRIPT.read_text(encoding="utf-8")
+    fragment = _DISCIPLINE_FRAGMENT.read_text(encoding="utf-8")
+    shell_texts = {}
+    for domain in guard_recipe_scripts(guard_src):
+        parts = []
+        for shell in (ROOT / "releases" / "claude-code" / "commands" / f"{domain}.md",
+                      ROOT / "releases" / "opencode" / "command" / f"{domain}.md",
+                      ROOT / "releases" / "dsh" / "skills" / domain / "SKILL.md"):
+            if shell.is_file():
+                parts.append(shell.read_text(encoding="utf-8"))
+            else:
+                parts.append("")
+        shell_texts[domain] = "\n".join(parts)
+    return [f"recipe visibility ({d}): guard recipe names {s} but no shell/fragment text "
+            f"mentions it — the block-time recipe points at an unreachable script "
+            f"(name it literally in {d}'s shells or the shared fragment)"
+            for d, s in recipe_visibility_violations(guard_src, shell_texts, fragment)]
 
 
 def main():
@@ -471,7 +564,8 @@ def main():
             failures.append("fanout_runner.py: `--help` failed")
         elif FANOUT_TIER_SET_HELP not in r.stdout.decode("utf-8", "replace"):
             failures.append(
-                f"fanout_runner.py: --tier choices must advertise t2 ({FANOUT_TIER_SET_HELP})")
+                f"fanout_runner.py: --tier choices must advertise "
+                f"t2 + scout-merge ({FANOUT_TIER_SET_HELP})")
 
     # fanout_runner per-tier task templates MUST exist (tier-aware dispatch reads them).
     for template in FANOUT_TEMPLATES:
@@ -597,6 +691,10 @@ def main():
         for flag in req_flags:
             if flag not in declared:
                 failures.append(f"{script.name}: --help missing required {flag!r}")
+
+    # recipe visibility (design D6): every script the guard's block-time recipe names must
+    # be literally reachable in that domain's shells ∪ the shared discipline fragment.
+    failures += check_recipe_visibility()
 
     if failures:
         print(f"✗ {len(failures)} contract violation(s):", file=sys.stderr)

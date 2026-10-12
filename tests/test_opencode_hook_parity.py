@@ -571,6 +571,32 @@ class TestWiringCoverage(unittest.TestCase):
             f"not carry them — those branches are DEAD on opencode (extend HANDLED + "
             f"normalize in block_adhoc_scripts.ts)")
 
+    DSH_SHIM = ROOT / "releases" / "dsh" / "plugins" / "mgh-guard.ts"
+
+    def _dsh_tool_map(self):
+        """Statically parse the dsh shim's exported TOOL_MAP object literal (id -> guard
+        dispatch name). Same no-execute posture as the opencode HANDLED parse above."""
+        src = self.DSH_SHIM.read_text(encoding="utf-8")
+        m = re.search(r'export const TOOL_MAP = \{(.*?)\} as const', src, re.DOTALL)
+        self.assertIsNotNone(m, "dsh shim TOOL_MAP not found — shim drifted from the "
+                                "statically-parseable constant shape")
+        body = re.sub(r'//[^\n]*', '', m.group(1))  # strip inline comments
+        pairs = re.findall(r'(\w+)\s*:\s*"([A-Za-z_]+)"', body)
+        self.assertTrue(pairs, "no TOOL_MAP pairs parsed — extractor drifted")
+        return dict(pairs)
+
+    def test_every_guard_branch_is_in_dsh_tool_map(self):
+        """Third wiring face (add-mgh-dsh-host-foundation): every guard dispatch name must
+        be a VALUE of the dsh shim's TOOL_MAP — otherwise the branch is unreachable on dsh
+        (dead code). dsh-only names live here naturally; claude/opencode-native names ride
+        the shim's claude-id passthrough entries (multiedit/notebookedit)."""
+        mapped = set(self._dsh_tool_map().values())
+        missing = self._guard_dispatch_tools() - mapped
+        self.assertFalse(missing,
+            f"guard dispatches on {sorted(missing)} but the dsh shim TOOL_MAP does not map "
+            f"any dsh tool id onto them — those branches are DEAD on dsh (extend TOOL_MAP "
+            f"+ normalize in releases/dsh/plugins/mgh-guard.ts)")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

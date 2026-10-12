@@ -2360,5 +2360,167 @@ class TestReadRootsConfig(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
 
+class TestPyInlineHeredocBlock(unittest.TestCase):
+    """Rule (a) shape extension: heredoc / here-string inline code fed to the interpreter
+    (`py - <<EOF`, `py - <<< '…'`, `python3 x.py … | python3 - <<'EOF'`) blocks by SHAPE
+    alone (no body-token sniffing); the existing `py -c` path (body-token gated) is
+    byte-identical in behavior; a bare `-` without `<<` stays a pass (minimal surface)."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _bash_sdr(self, cmd, active="1"):
+        return _run_hook(self.m, {"tool_name": "Bash", "tool_input": {"command": cmd}},
+                         domain="sdr", active=active)
+
+    def test_block_pipe_into_python_stdin_heredoc(self):
+        # the real-machine failure shape from the sdr run
+        code, err = self._bash_sdr(
+            "py collect_worklist.py --check . | "
+            "python3 - <<'EOF'\nimport sys\nprint(sys.stdin.read()[:200])\nEOF")
+        self.assertEqual(code, 2)
+        self.assertIn("inline interpreter code", err)
+
+    def test_block_py_here_string(self):
+        code, _ = self._bash_sdr("py - <<< \"print(open('x').read())\"")
+        self.assertEqual(code, 2)
+
+    def test_block_benign_body_heredoc_still_blocks_on_shape(self):
+        # contrast with -c: NO introspection token required for heredoc
+        code, _ = self._bash_sdr("python3 - <<EOF\nprint('hello')\nEOF")
+        self.assertEqual(code, 2)
+
+    def test_py_c_benign_body_behavior_unchanged(self):
+        code, _ = self._bash_sdr('py -c "print(1)"')
+        self.assertEqual(code, 0)
+
+    def test_py_c_introspection_still_blocks(self):
+        code, err = self._bash_sdr('py -c "import json; json.load(open(\'x.json\'))"')
+        self.assertEqual(code, 2)
+        self.assertIn("py -c", err)
+
+    def test_pipe_to_non_python_tail_not_blocked(self):
+        code, _ = self._bash_sdr("py collect_worklist.py --check . | tail -5")
+        self.assertEqual(code, 0)
+
+    def test_bare_dash_without_heredoc_not_in_rule_face(self):
+        code, _ = self._bash_sdr("git log -")
+        self.assertEqual(code, 0)
+
+    def test_outside_run_domain_zero_change(self):
+        code, _ = self._bash_sdr("py - <<< \"print(1)\"", active="")
+        self.assertEqual(code, 0)
+
+
+class TestDshBypassTools(unittest.TestCase):
+    """dsh-dialect guard branches, rule (n) (add-mgh-dsh-host-foundation). The dsh shim
+    normalizes host tool ids onto guard dispatch names; these tests feed the NORMALIZED
+    payload directly (the guard never sees dsh field names). Coverage:
+      - RunCode (bundled code runner = `py -c` analogue): denied in-domain regardless of
+        body tokens, with a recipe pointing at the leaf-script exit; outside a domain -> 0.
+      - TerminalIO / JobCtl: denied in-domain outright (foreground-bypass surfaces).
+      - Unmapped tool ids: pass through the dispatch (return 0).
+      - pwsh normalized to the Bash face hits the EXISTING verb tables + path net with zero
+        guard-side code (2.2 assertion)."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _run(self, payload, domain="init", active="1"):
+        return _run_hook(self.m, payload, domain=domain, active=active)
+
+    def test_block_runcode_in_domain(self):
+        code, err = self._run({"tool_name": "RunCode", "tool_input": {}})
+        self.assertEqual(code, 2)
+        self.assertIn("bundled code-runner", err)
+        self.assertIn("mgh-core/scripts", err)  # recipe: run the declared leaf scripts
+
+    def test_block_runcode_benign_body_still_denied(self):
+        # shape-based denial (mirrors the heredoc rule): NO body sniffing — the execution
+        # surface itself is the violation inside a run-domain.
+        code, _ = self._run({"tool_name": "RunCode", "tool_input": {"code": "print(1)"}})
+        self.assertEqual(code, 2)
+
+    def test_block_runcode_in_sdr_domain_too(self):
+        code, err = self._run({"tool_name": "RunCode", "tool_input": {}}, domain="sdr")
+        self.assertEqual(code, 2)
+        self.assertIn("mgh-sdr", err)
+
+    def test_runcode_outside_domain_passes(self):
+        code, _ = self._run({"tool_name": "RunCode", "tool_input": {}}, active="")
+        self.assertEqual(code, 0)
+
+    def test_block_terminalio_in_domain(self):
+        code, err = self._run({"tool_name": "TerminalIO", "tool_input": {}})
+        self.assertEqual(code, 2)
+        self.assertIn("interactive terminal", err)
+
+    def test_block_jobctl_in_domain(self):
+        code, err = self._run({"tool_name": "JobCtl", "tool_input": {}})
+        self.assertEqual(code, 2)
+        self.assertIn("background-job", err)
+
+    def test_terminalio_jobctl_outside_domain_pass(self):
+        for tool in ("TerminalIO", "JobCtl"):
+            code, _ = self._run({"tool_name": tool, "tool_input": {}}, active="")
+            self.assertEqual(code, 0, f"{tool} blocked outside a run-domain")
+
+    def test_unmapped_tool_id_passes(self):
+        # the shim never feeds unmapped ids; even if one arrived, the dispatch falls through.
+        code, _ = self._run({"tool_name": "WebFetch", "tool_input": {"url": "https://x"}})
+        self.assertEqual(code, 0)
+
+    def test_pwsh_normalized_to_bash_hits_verb_table(self):
+        # 2.2: pwsh -> Bash normalization requires ZERO guard-side code — the out-of-tree
+        # Set-Content shape is judged by the existing Bash write-verb rule.
+        sonA = TestWriteSideConfinement._SONA
+        out = TestWriteSideConfinement._OUT
+        code, err = TestWriteConfinementHarness(self.m).bash(
+            f'Set-Content {out}\\f.json "x"', target=sonA)
+        self.assertEqual(code, 2)
+        self.assertIn("out-of-tree write", err)
+
+
+class TestWriteConfinementHarness:
+    """Tiny adapter reusing the _RealTreeBashMixin-free Bash harness shape of
+    TestWriteSideConfinement._bash for the pwsh-normalization assertion above."""
+
+    def __init__(self, mod):
+        self.m = mod
+
+    def bash(self, cmd, domain="init", target=None):
+        key = _DOMAIN_ENV[domain]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != domain]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = "1"
+        os.environ["MGH_TARGET"] = target
+        cwd_tmp = tempfile.mkdtemp(prefix="mgh_pwsh_h_")
+        old_cwd, old_stdin = os.getcwd(), sys.stdin
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            os.chdir(cwd_tmp)
+            sys.stdin = io.StringIO(json.dumps(
+                {"tool_name": "Bash", "tool_input": {"command": cmd}}))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.chdir(old_cwd)
+            if old_active is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_active
+            if old_target is None:
+                os.environ.pop("MGH_TARGET", None)
+            else:
+                os.environ["MGH_TARGET"] = old_target
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+
 if __name__ == "__main__":
     unittest.main()

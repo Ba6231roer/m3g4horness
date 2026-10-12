@@ -13,7 +13,7 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/sys/pathlib).
 
 CLI (`--help` is the contract surface):
   py install_hook.py --settings <path> --hook-command <cmd>
-       [--matcher Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep] [--remove]
+       [--matcher Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep|RunCode|TerminalIO|JobCtl] [--remove]
 
 Matcher evolution (idempotent): on reinstall over an existing entry, a matcher that is a
 SUBSET of the current default (by `|`-split set comparison, e.g. the legacy
@@ -33,7 +33,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-_DEFAULT_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep"
+# RunCode/TerminalIO/JobCtl are dsh-dialect guard branches claude never emits — listed
+# only so the wiring invariant "matcher ⊇ guard dispatch set" stays uniformly
+# machine-checkable (same convention as the opencode shim listing multiedit/notebookedit).
+_DEFAULT_MATCHER = ("Bash|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Read|Glob|Grep"
+                    "|RunCode|TerminalIO|JobCtl")
 # idempotency anchor: a PreToolUse entry is "ours" if any of its hook commands references
 # this substring (stable across reinstalls even if the matcher text is edited).
 _OUR_MARKER = "block_adhoc_scripts"

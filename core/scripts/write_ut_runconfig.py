@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024      # 192KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024    # 64KB
-DEFAULT_MAX_AGGREGATE_BYTES = 256 * 1024  # 256KB
+DEFAULT_MAX_AGGREGATE_BYTES = 96 * 1024  # 96KB (= 98304) — uniform --max-aggregate-bytes default
 DEFAULT_UNIFORM_SAMPLE = 4
 DEFAULT_HETERO_SAMPLE = 8
 DEFAULT_SUBSPLIT_THRESHOLD = 0.8
@@ -94,7 +94,9 @@ def main():
                     help="dominant-annotation ratio >= this counts a group uniform (default 0.8)")
     ap.add_argument("--max-unit-bytes", type=int, default=DEFAULT_MAX_UNIT_BYTES)
     ap.add_argument("--orch-budget-bytes", type=int, default=DEFAULT_ORCH_BUDGET_BYTES)
-    ap.add_argument("--max-aggregate-bytes", type=int, default=DEFAULT_MAX_AGGREGATE_BYTES)
+    ap.add_argument("--max-aggregate-bytes", type=int, default=DEFAULT_MAX_AGGREGATE_BYTES,
+                    help="aggregate-stage input byte cap (default 98304 = 96KB; worst-case "
+                         "~2 bytes/token → ≤ ~48K tokens per dispatched aggregate request)")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk).
     # Before parse_args so --help is utf-8 too. No-op on StringIO (in-process tests).
     for stream in (sys.stdout, sys.stderr):

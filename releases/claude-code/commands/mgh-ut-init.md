@@ -33,7 +33,7 @@ live at `.claude/mgh-core/` (mirrored from `core/`).
 - `--scope path:<dir>|package:<pkg>|file:<glob>`(限定测试源码树范围)
 - `--resume` (skip units whose `.done` **or** `.failed` exists — both terminal) · `--merge <partials-dir>`(本版无 ut 合并 stage;传之仅披露后按单 target 继续) · `--skip-consistency` (skip the consistency pass)
 - 抽样预算 flag:`--uniform-sample <N>`(均匀组样本数,默认 4)· `--hetero-sample <N>`(异质组样本数,默认 8)· `--subsplit-threshold <F>`(均匀/异质阈值,默认 0.8)
-- **请求上下文预算**:`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 256KB;synthesize 为软边界——超则披露 + `--scope` 回退)
+- **请求上下文预算**:`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 96KB;synthesize 为软边界——超则披露 + `--scope` 回退)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
 

@@ -7,7 +7,7 @@ the full review without cloning this dev repo:
 
   py mgh_sdr_launch.py --repo <abs-target> [--branch <ref>] [--base <ref>]
       [--host opencode|claude] [--dimensions <json>] [--multi-branch <file>]
-      [--read-root <abs>]... [--dry-run]
+      [--read-root <abs>]... [--open] [--dry-run]
 
 Why a launcher: the two experience/safety problems of an external (frontend) repo are
 solved OUTSIDE the host CLI session —
@@ -20,8 +20,10 @@ solved OUTSIDE the host CLI session —
      configured there is NEVER read (zero reads): this process skips it (stderr warn),
      omits it from the sentinel read_roots[], and discloses it via stdout/
      orchestrator-prompt `pending_approval[]` for the host-session user decision
-     (approve => `read_roots_config.py --add` + re-run this launcher with the same
-     arguments; the config takes effect on the next run). The gate is judged twice with
+     (approve => `sdr_context.py --approve-external <abs>` — one command closing approve +
+     config write + retrieval, ONLY after the USER explicitly approved — or the equivalent
+     `read_roots_config.py --add` + re-run this launcher with the same arguments; the
+     config takes effect on the next run). The gate is judged twice with
      the same resolve-normalized semantics — inside sdr_context.py before retrieval AND
      here before the sentinel write (version-skew defense).
   2. lifecycle ownership: this process writes <repo>/.mgh-sdr/.active (with target +
@@ -277,7 +279,10 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
             "",
             "外部仓待批(存量设计声明、但未经用户写入项目配置;本次零检索,相关检查面未覆盖):",
             *[f"- {p}" for p in pending],
-            "处理:在宿主会话向用户呈现以上清单并请求决策。同意 → 逐仓执行 "
+            "处理:在宿主会话向用户呈现以上清单并请求决策。同意 → 推荐:给 step 1 的 "
+            f"`sdr_context.py` 加 `--approve-external <以上绝对路径>`(逐仓可重复)重跑一次"
+            "——批准 + 写配置 + 检索一条命令闭环(该 flag 仅在宿主会话获用户明示同意后传入);"
+            "等价路径:逐仓执行 "
             f"`py {_script_path('read_roots_config.py')} --target {repo} --add <以上绝对路径>`"
             f"(写 <repo>/.mgh/read-roots.json,即时生效),然后重跑本 launcher 同参数完成检索;"
             "拒绝 → 不写配置,按当前降级继续,报告如实披露。",
@@ -354,9 +359,13 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     for p in pending:
         _eprint(f"[launch] WARN: external repo declared but NOT approved — zero reads, "
                 f"skipped, pending user approval: {p}\n"
-                f"  approve: py {_script_path('read_roots_config.py')} --target {repo} "
-                f"--add {p}   (writes <repo>/.mgh/read-roots.json), then re-run this "
-                f"command unchanged")
+                f"  approve (recommended): re-run sdr_context.py for this run dir with "
+                f"--approve-external {p} (carry it ONLY after the USER explicitly "
+                f"approved in the host session; one command closes approve + config "
+                f"write + retrieval)\n"
+                f"  approve (equivalent): py {_script_path('read_roots_config.py')} "
+                f"--target {repo} --add {p}   (writes <repo>/.mgh/read-roots.json), "
+                f"then re-run this command unchanged")
     # sentinel read_roots = ACTUALLY SEARCHED external roots (+ operator --read-root);
     # NEVER a user-supplied catch-all (read_roots minimalism). Every retrieved root is
     # re-judged against the project config here (second gate judgment — sdr_context
@@ -384,7 +393,7 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     _remove_sentinel(repo)
     if code != 0:
         return False, f"host CLI exited {code} for {branch}", pending
-    reports = sorted(repo.glob("mgh-sdr-*.md"), key=lambda p: p.stat().st_mtime)
+    reports = sorted(repo.glob("mgh-sdr-*.html"), key=lambda p: p.stat().st_mtime)
     report = str(reports[-1]) if reports else "(report not found — check host output)"
     return True, report, pending
 
@@ -417,6 +426,10 @@ def main():
                          "report the same fact without a flag. This flag affects the "
                          "SIGNAL ONLY: grouping always probes for itself, so reviewers "
                          "judge conservatively without the grouping changing")
+    ap.add_argument("--open", action="store_true",
+                    help="open each branch's HTML report in the default browser as it "
+                         "completes (stdlib webbrowser; default off — the launcher "
+                         "stays side-effect-free unless this flag is passed)")
     ap.add_argument("--dry-run", action="store_true",
                     help="gates + sdr_context + sentinel + prompt file, NO host spawn")
     args = ap.parse_args()
@@ -448,6 +461,11 @@ def main():
         if ok:
             reports.append(outcome)
             _eprint(f"[launch] branch {branch}: ok -> {outcome}")
+            # --open only fires on an actual report file (a --dry-run's outcome is the
+            # orchestrator prompt path, never opened)
+            if args.open and outcome.endswith(".html") and Path(outcome).is_file():
+                import webbrowser
+                webbrowser.open(Path(outcome).resolve().as_uri())
         else:
             failed.append(f"{branch}: {outcome}")
             _eprint(f"[launch] branch {branch}: FAILED ({outcome})")

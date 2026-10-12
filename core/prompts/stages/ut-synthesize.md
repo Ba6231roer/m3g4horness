@@ -55,7 +55,7 @@ Write the **absolute** path the orchestrator gives you for the inventory (it pas
 ## Aggregate context budget (soft boundary)
 You see ALL per-group observations (`checkpoints/extract/*.json`) in one context — this is
 the aggregate node of the pipeline. If that aggregate input clearly exceeds
-`--max-aggregate-bytes` (default 256KB) — e.g. many groups / large records — state it back
+`--max-aggregate-bytes` (default 96KB) — e.g. many groups / large records — state it back
 to the orchestrator (a one-line note in your output + checkpoint). The orchestrator then
 advises `--scope` (per-module runs) and discloses "aggregate over budget, not hard-bounded"
 in `ut_manifest.json::boundaries[]` + `report.md`. Do NOT silently drop observations to fit a

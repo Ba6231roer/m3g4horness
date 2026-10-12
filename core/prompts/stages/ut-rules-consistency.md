@@ -29,7 +29,7 @@ editing.
 
 ## Aggregate context budget (soft boundary)
 You see ALL drafted rule files in one context — this is an aggregate node. If that aggregate
-clearly exceeds `--max-aggregate-bytes` (default 256KB), state it back to the orchestrator.
+clearly exceeds `--max-aggregate-bytes` (default 96KB), state it back to the orchestrator.
 The orchestrator then advises `--scope` and discloses "aggregate over budget, not
 hard-bounded" in `ut_manifest.json::boundaries[]` + `report.md`. Do NOT silently skip rule
 files to fit a budget.

@@ -362,6 +362,274 @@ class DiffGroupTest(unittest.TestCase):
         self.assertTrue(all(u["kind"] == "standalone" and u["route"] == ""
                             for u in d["pending"]))
 
+    # --- non-ASCII path fidelity + Windows write safety (fix-mgh-sdr-diffgroup-coverage) ---
+
+    def test_nonascii_path_file_fully_grouped(self):
+        # C1: git's DEFAULT core.quotePath=true emits non-ASCII paths as quoted octal
+        # escapes the parser cannot match — the whole file used to vanish (no grouping,
+        # no excluded count, empty:true). Fixture uses the default config (NEVER preset
+        # quotePath); the fix is the `-c core.quotePath=false` injection in _git.
+        repo = self.tmp / "repo_cjk"
+        _init_repo(repo)
+        _write(repo, "src/妇科/患者控制器.java", CONTROLLER)
+        _write(repo, "src/OrderService.java", "public class OrderService { }\n")
+        _commit_all(repo, "init")
+        _git(repo, "checkout", "-qb", "feature-cjk")
+        _write(repo, "src/妇科/患者控制器.java",
+               CONTROLLER + "    // feature change inside detail method\n")
+        _write(repo, "src/OrderService.java", "public class OrderService { }\n// extra\n")
+        _commit_all(repo, "feat")
+        code, out, err = self._run("--repo", str(repo), "--base", "master",
+                                   "--branch", "feature-cjk",
+                                   "--checkpoints", str(self.tmp / "m"),
+                                   "--materialize", str(self.tmp / "s"))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertFalse(d["empty"], "non-ASCII change silently dropped by the parser")
+        self.assertEqual(d["excluded"]["count"], 0)
+        ifaces = [u for u in d["pending"] if u["kind"] == "interface"]
+        routes = {r for u in ifaces for r in u["route"].split(";")}
+        self.assertIn("/user/detail/{brch_no}", routes)
+        text = "".join(self._slice_text(u) for u in d["pending"])
+        self.assertIn("患者控制器.java", text)
+        self.assertIn("feature change inside detail method", text)
+
+    def test_nonascii_only_change_not_confused_with_zero_diff(self):
+        # C1 tail: with the quoted path dropped, a repo whose ONLY change is a
+        # non-ASCII file reported empty:true exit 0 — indistinguishable from a true
+        # zero diff. It must report empty:false with the file counted.
+        repo = self.tmp / "repo_cjk_only"
+        _init_repo(repo)
+        _write(repo, "src/Keep.java", "class Keep { }\n")
+        _commit_all(repo, "init")
+        _git(repo, "checkout", "-qb", "feature-cjk2")
+        _write(repo, "src/妇科/患者控制器.java", CONTROLLER)
+        _commit_all(repo, "feat")
+        code, out, err = self._run("--repo", str(repo), "--base", "master",
+                                   "--branch", "feature-cjk2",
+                                   "--checkpoints", str(self.tmp / "m"),
+                                   "--materialize", str(self.tmp / "s"))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertFalse(d["empty"])
+        self.assertGreaterEqual(d["total"], 1)
+        self.assertEqual(d["excluded"]["count"], 0)
+
+    def test_catchall_route_writes_slice_on_windows(self):
+        # H4: `@GetMapping("/**")` carried `*` into the slice filename; NTFS rejects
+        # it with a bare OSError (exit contract 0/1/2 broken, half-written artifacts).
+        # The closed cleanup set `/ \ : * ? < > | "` fixes the landing NAME only — the
+        # route string in slice/grouping.json stays verbatim.
+        base = {"src/README.md": "seed\n"}
+        feat = {"src/CatchAllController.java": """@RestController
+@RequestMapping("/catch")
+public class CatchAllController {
+    @GetMapping("/**")
+    public Object any(String id) {
+        return null;
+    }
+}
+"""}
+        repo = self._build(base, feat, cg_on=False)
+        run_dir = repo / ".mgh-sdr" / "runs" / "catchall"
+        code, out, err = self._run("--repo", str(repo), "--base", "master",
+                                   "--branch", "feat",
+                                   "--checkpoints", str(run_dir / "markers"),
+                                   "--materialize", str(run_dir / "slices"))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        ifaces = [u for u in d["pending"] if u["kind"] == "interface"]
+        routes = {u["route"] for u in ifaces}
+        self.assertIn("/catch/**", routes)
+        u = next(u for u in ifaces if u["route"] == "/catch/**")
+        # cleaning touches ONLY the landing filename; route string verbatim everywhere
+        self.assertIn("route: /catch/**", self._slice_text(u))
+        self.assertIn("/catch/**",
+                      [x["route"] for x in d["units"] if x["kind"] == "interface"])
+        name = Path(u["input_path"]).name
+        for ch in '*?<>|:"/\\':
+            self.assertNotIn(ch, name)
+
+    def test_new_controller_single_hunk_keeps_route_cluster(self):
+        # M7: a NEW file's hunk ownership was indexed per-SYMBOL while consumers index
+        # per-HUNK — with a whole-file single hunk only symbol 0 got a real hunk, so a
+        # new controller's later routes anchored units with NO controller hunks (the
+        # route cluster collapsed). After the fix every hunk covers every symbol.
+        feat = {
+            "src/NewController.java": """@RestController
+@RequestMapping("/new")
+public class NewController {
+    @GetMapping("/alpha")
+    public Object alpha(String id) {
+        return sa.query(id);
+    }
+
+    @GetMapping("/beta")
+    public Object beta(String id) {
+        return sb.query(id);
+    }
+}
+""",
+            "src/SaService.java": """public class SaService {
+    public Object query(String id) {
+        return "a:" + id;
+    }
+}
+""",
+            "src/SbService.java": """public class SbService {
+    public Object query(String id) {
+        return "b:" + id;
+    }
+}
+""",
+        }
+        edges = {"callees": {
+            "alpha": [{"name": "query", "kind": "method",
+                       "filePath": "src/SaService.java", "startLine": 3}],
+            "beta": [{"name": "query", "kind": "method",
+                      "filePath": "src/SbService.java", "startLine": 3}],
+            "query": [],
+        }}
+        repo = self._build({"src/README.md": "seed\n"}, feat, cg_on=True, edges=edges)
+        d = self._run_group(repo, "m7")
+        ifaces = [u for u in d["pending"] if u["kind"] == "interface"]
+        self.assertGreaterEqual(len(ifaces), 2)
+        routes = {r for u in ifaces for r in u["route"].split(";")}
+        self.assertEqual(routes, {"/new/alpha", "/new/beta"})
+        # every route unit carries the controller hunk — not just the first symbol's
+        for u in ifaces:
+            self.assertIn("@@ src/NewController.java @@", self._slice_text(u),
+                          f"{u['unit_id']}: route unit lost the controller hunk "
+                          f"(per-symbol ownership collapsed)")
+
+    def test_interface_budget_greedy_split_lossless(self):
+        # C2: the greedy branch (`_new_part` for a member that does not fit the open
+        # part) hung `_fill` under `else` — the part-OPENING member's hunks went into
+        # NO part, while the absorb step had already marked them claimed (residual
+        # sweep skipped them too: a double-silent loss). Fixture: two constituents
+        # each individually UNDER the cap, merged OVER it (the reference shape the old
+        # two-members-each-over-cap fixture never reached).
+        a_str, b_str, s_str = "A" * 700, "B" * 700, "S" * 700
+        pad = "\n".join(f"    private int pad{i} = {i};" for i in range(20))
+        base = {
+            "src/GreedyController.java": f"""@RestController
+@RequestMapping("/big")
+public class GreedyController {{
+    @GetMapping("/a")
+    public Object a(String id) {{
+        return svc.s(id);
+    }}
+
+{pad}
+
+    @GetMapping("/b")
+    public Object b(String id) {{
+        return null;
+    }}
+}}
+""",
+            "src/GreedyService.java": """public class GreedyService {
+    public Object s(String id) {
+        return null;
+    }
+}
+""",
+        }
+        feat = {
+            "src/GreedyController.java": f"""@RestController
+@RequestMapping("/big")
+public class GreedyController {{
+    @GetMapping("/a")
+    public Object a(String id) {{
+        return svc.s(id) + "{a_str}";
+    }}
+
+{pad}
+
+    @GetMapping("/b")
+    public Object b(String id) {{
+        return "{b_str}";
+    }}
+}}
+""",
+            "src/GreedyService.java": """public class GreedyService {
+    public Object s(String id) {
+        return "%s";
+    }
+}
+""" % s_str,
+        }
+        edges = {"callees": {
+            "a": [{"name": "s", "kind": "method",
+                   "filePath": "src/GreedyService.java", "startLine": 3}],
+            "b": [{"name": "s", "kind": "method",
+                   "filePath": "src/GreedyService.java", "startLine": 3}],
+            "s": [],
+        }}
+        repo = self._build(base, feat, cg_on=True, edges=edges)
+        # measured on this fixture: each constituent ~2257-2272 B, merged 3296 B —
+        # the cap sits strictly between so each member is individually under budget
+        # and only the merged unit overflows (the greedy branch's exact shape)
+        cap = 2600
+        run_dir = repo / ".mgh-sdr" / "runs" / "greedy"
+        code, out, err = self._run("--repo", str(repo), "--base", "master",
+                                   "--branch", "feat", "--max-interface-bytes",
+                                   str(cap),
+                                   "--checkpoints", str(run_dir / "markers"),
+                                   "--materialize", str(run_dir / "slices"))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        parts = [u for u in d["pending"] if u["kind"] == "interface"]
+        self.assertEqual(len(parts), 2,
+                         f"greedy branch must yield exactly one part per member; "
+                         f"got {[u['unit_id'] for u in parts]}")
+        by_route = {u["route"]: u for u in parts}
+        self.assertEqual(set(by_route), {"/big/a", "/big/b"})
+        # the lossless promise: every part is real content within the cap
+        for u in parts:
+            self.assertLessEqual(u["unit_bytes"], cap)
+            self.assertGreater(u["unit_bytes"], 1500,
+                               f"{u['unit_id']}: part is a near-empty shell "
+                               f"({u['unit_bytes']}B) — its member's hunks were dropped")
+        # part route label agrees with its loaded member (marker strings disambiguate)
+        self.assertIn(a_str, self._slice_text(by_route["/big/a"]))
+        self.assertNotIn(b_str, self._slice_text(by_route["/big/a"]))
+        self.assertIn(b_str, self._slice_text(by_route["/big/b"]))
+        self.assertNotIn(a_str, self._slice_text(by_route["/big/b"]))
+        # hunk locator union == the un-split run's set (no hunk lost in re-splitting)
+        wide_dir = repo / ".mgh-sdr" / "runs" / "greedy-wide"
+        code, wout, werr = self._run("--repo", str(repo), "--base", "master",
+                                     "--branch", "feat", "--max-interface-bytes",
+                                     "1000000",
+                                     "--checkpoints", str(wide_dir / "markers"),
+                                     "--materialize", str(wide_dir / "slices"))
+        self.assertEqual(code, 0, werr)
+        self.assertEqual(self._hunk_locators(d), self._hunk_locators(json.loads(wout)))
+
+    def test_negative_limit_rejected_exit_2(self):
+        # L6: `--limit -5` used to clamp to an empty page (exit 0, indistinguishable
+        # from "nothing pending"); misuse must be a loud exit 2 with a usable message.
+        repo = self._repo_with_feature()
+        code, out, err = self._run(*self._dg_args(repo, "neg"), "--limit", "-5")
+        self.assertEqual(code, 2)
+        self.assertIn("--limit", err)
+        self.assertEqual(out, "", "misuse must not print a stdout payload")
+
+    def test_check_copassed_flags_warned_not_silent(self):
+        # L6: --check co-passed with enumeration flags silently ignored them; now the
+        # ignored flags are named on stderr (exit semantics unchanged: --check runs).
+        repo = self._repo_with_feature()
+        run_dir = repo / ".mgh-sdr" / "runs" / "ckw"
+        code, _, err = self._run(*self._dg_args(repo, "ckw"))
+        self.assertEqual(code, 0, err)
+        code2, _, err2 = self._run("--check", str(run_dir), "--base", "other",
+                                   "--branch", "feature-pay", "--offset", "1",
+                                   "--limit", "3", "--summary", "--include-excluded")
+        self.assertEqual(code2, 0, err2)
+        for flag in ("--base", "--branch", "--offset", "--limit", "--summary",
+                     "--include-excluded"):
+            self.assertIn(flag, err2, f"co-passed {flag} ignored silently")
+
     def test_include_failed_relists_failed_unit_canonical(self):
         # --include-failed: a unit whose .failed marker exists re-enters
         # pending[] under its canonical unit_id with the same marker path and

@@ -24,12 +24,15 @@ from pathlib import Path
 SOURCE_EXT = {
     ".java", ".kt", ".scala", ".py", ".js", ".jsx", ".ts", ".tsx", ".go",
     ".cs", ".rb", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".m",
-    ".swift", ".rs", ".clj", ".groovy", ".ts", ".sql",
+    ".swift", ".rs", ".clj", ".groovy", ".sql",
 }
 
 
 def _git(repo: Path, *args: str) -> str:
-    r = subprocess.run(["git", "-C", str(repo), *args],
+    # core.quotePath=false: git quotes non-ASCII paths as octal escapes by default and
+    # the quoted `"` tail glued onto the name defeated the extension filter — whole
+    # source files silently vanished from the seed (same defect family as diff_group).
+    r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
                        capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
@@ -58,7 +61,10 @@ def changed_files(repo: Path, ref: str):
         if status.startswith("R") or status.startswith("C"):
             target = paths[-1]
         elif status.startswith("D"):
-            deleted.append(paths[0])
+            # deleted[] honors the SAME source-extension filter as seed[] (it used
+            # to record every deleted path regardless of type)
+            if Path(paths[0]).suffix.lower() in SOURCE_EXT:
+                deleted.append(paths[0].replace("\\", "/"))
             continue
         else:
             target = paths[0]

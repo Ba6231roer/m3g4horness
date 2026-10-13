@@ -120,14 +120,12 @@ call-chain grouping) plus `codegraph_stats{...}` (capture diagnostics; all-zero 
 present when off). Probe failure prints its reason (no .codegraph dir / no binary) to
 stderr.
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/re/shutil/subprocess/sys/pathlib).
+Zero runtime deps (Python >=3.10 stdlib: argparse/json/re/subprocess/sys/pathlib).
 """
 from __future__ import annotations
 import argparse
 import json
-import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -242,14 +240,27 @@ def _eprint(*a):
 
 
 def _safe_name(unit_id: str) -> str:
-    """Filesystem-safe name (`/ \\ :` -> `_`; NTFS ADS lesson — a `:` in a filename is a
-    alternate data stream separator)."""
-    return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    """Filesystem-safe name: the NTFS/Windows illegal closed set `/ \\ : * ? < > | "`
+    -> `_` (`:` is an NTFS alternate-data-stream separator; `*?<>"` arrive via route
+    values like `@GetMapping("/**")` and used to crash the slice write with a bare
+    OSError). The cleanup applies to the landing NAME only — route strings elsewhere
+    stay verbatim."""
+    for ch in ("/", "\\", ":", "*", "?", "<", ">", "|", '"'):
+        unit_id = unit_id.replace(ch, "_")
+    return unit_id
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                          text=True, encoding="utf-8", errors="replace")
+    # core.quotePath=false at the single wrapper: git quotes non-ASCII paths as octal
+    # escapes by default and the parser only knows raw paths, so one quoted path used
+    # to drop whole files from grouping (indistinguishable from a true zero diff).
+    # Injected here so EVERY path-emitting subcommand speaks the same unquoted dialect;
+    # an env-var config (GIT_CONFIG_*) is not portable across machines. Harmless for
+    # commands that print no paths (rev-parse). Decoding stays errors="replace", which
+    # already carries non-UTF-8 bytes.
+    return subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
 
 
 def _gate(repo: Path, base: str, branch: str) -> None:
@@ -811,13 +822,13 @@ class _SliceGate:
     decision uses, the number `pending[].unit_bytes` carries and the number `--check`
     asserts are one number, not three estimates. A renderer change moves the gate with it."""
 
-    __slots__ = ("repo", "base", "branch", "raw_text")
+    __slots__ = ("repo", "base", "branch")
 
-    def __init__(self, repo: Path, base: str, branch: str, raw_text: str):
-        self.repo, self.base, self.branch, self.raw_text = repo, base, branch, raw_text
+    def __init__(self, repo: Path, base: str, branch: str):
+        self.repo, self.base, self.branch = repo, base, branch
 
     def text(self, unit: Unit) -> str:
-        return _render_slice(self.repo, self.base, self.branch, unit, self.raw_text)
+        return _render_slice(self.repo, self.base, self.branch, unit)
 
     def bytes(self, unit: Unit) -> int:
         return len(self.text(unit).encode("utf-8"))
@@ -1166,9 +1177,13 @@ def _split_interface_budget(hosts: list[dict], iface_cap: int, uid,
                 parts.append(acc)
                 acc = None
             if acc is None:
-                acc = _new_part(host, c["route"], c["ann"])
-            else:
-                _fill(acc, c)
+                # new part: the opening constituent lands via `_fill` too (ann passed
+                # empty — `_fill` seeds it). Under the previous `else` the opening
+                # member's files/hunks went into NO part while the absorb step had
+                # already marked them claimed — the residual sweep skipped them as
+                # well: a double-silent loss.
+                acc = _new_part(host, c["route"], [])
+            _fill(acc, c)
         if acc is not None:
             parts.append(acc)
         out.extend(parts)
@@ -1209,11 +1224,16 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
         syms = _java_symbols(content)
         base, is_ctrl = _base_route(content)
         if fd.change_type == "A":
-            # a NEW file: every symbol in it is added — all hunks belong to all symbols
+            # a NEW file: every symbol in it is added — EACH hunk covers ALL symbols
             # (the hunk anchor sits on the package/import header, outside every body;
-            # per-hunk ownership would strand the whole file and silently drop it from
-            # the changed-symbol set)
-            owner = list(range(len(syms))) if syms else [None] * len(fd.hunks)
+            # per-symbol ownership would strand the whole file and silently drop it
+            # from the changed-symbol set). The entry shape is per-hunk like the M
+            # branch: owner[j] = the symbol indices hunk j covers. The old
+            # `list(range(len(syms)))` was a dimension mismatch — with one whole-file
+            # hunk only symbol 0 ever owned a real hunk and a new controller's route
+            # cluster collapsed.
+            owner = ([list(range(len(syms))) for _ in fd.hunks] if syms
+                     else [None] * len(fd.hunks))
         else:
             owner = [_owning_hunk_symbol(syms, h) for h in fd.hunks]
         finfo[fd.path] = {"fd": fd, "syms": syms, "base": base, "owner": owner,
@@ -1226,7 +1246,10 @@ def _build_units_callchain(repo: Path, file_diffs: list[FileDiff], branch: str,
     changed: dict[str, dict] = {}
     for path, info in finfo.items():
         for i, s in enumerate(info["syms"]):
-            owned = [j for j, o in enumerate(info["owner"]) if o == i]
+            # owner entries are per-hunk: an int is a single owning symbol, a list
+            # (new files) covers every symbol in that hunk
+            owned = [j for j, o in enumerate(info["owner"])
+                     if o == i or (isinstance(o, list) and i in o)]
             if not owned:
                 continue
             key = _key(path, s["name"])
@@ -1497,8 +1520,7 @@ def _branch_content(repo: Path, path: str, branch: str) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
-def _render_slice(repo: Path, base: str, branch: str, unit: Unit,
-                  raw_text: str) -> str:
+def _render_slice(repo: Path, base: str, branch: str, unit: Unit) -> str:
     out = [f"# SDR review unit slice — {unit.unit_id}",
            f"kind: {unit.kind}",
            f"route: {unit.route}" if unit.kind == "interface" else "route: (standalone cluster)",
@@ -1750,7 +1772,7 @@ def _enumerate(args) -> dict:
     slices_dir = Path(args.materialize).resolve() if args.materialize else None
     grouping_path = checkpoints.parent / "grouping.json"
 
-    gate = _SliceGate(repo, base, branch, r.stdout)
+    gate = _SliceGate(repo, base, branch)
 
     probe_reason = _codegraph_probe_reason(repo) if not _codegraph_available(repo) else None
     cg_on = bool(file_diffs) and probe_reason is None
@@ -2156,6 +2178,16 @@ def main():
             pass
 
     if args.check:
+        # the enumeration flags below have no effect under --check — when co-passed,
+        # name them on stderr instead of ignoring silently (exit semantics unchanged:
+        # --check still runs). Presence is read off argv so an explicitly passed
+        # default value (`--base master`) is disclosed the same as any other.
+        co_passed = [f for f in ("--base", "--branch", "--offset", "--limit",
+                                 "--summary", "--include-excluded")
+                     if any(a == f or a.startswith(f + "=") for a in sys.argv[1:])]
+        if co_passed:
+            _eprint("warning: --check takes only <run-dir>; ignored flag(s): "
+                    + ", ".join(co_passed))
         if args.repo or args.checkpoints or args.materialize:
             _eprint("error: --check takes only <run-dir> (mutually exclusive with "
                     "enumeration flags)")
@@ -2166,6 +2198,10 @@ def main():
         return 2
     if args.offset < 0:
         _eprint("error: --offset must be >= 0")
+        return 2
+    if args.limit is not None and args.limit < 0:
+        _eprint(f"error: --limit must be >= 0 (got {args.limit}); pass 0 for an "
+                f"empty page or omit --limit for all pending units")
         return 2
     if args.max_standalone_bytes < 0:
         _eprint("error: --max-standalone-bytes must be >= 0")

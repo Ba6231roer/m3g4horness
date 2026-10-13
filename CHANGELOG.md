@@ -16,6 +16,33 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — /mgh-sdr diff 解析层缺陷收口(C1/C2/H4/M7/L6 + sast 侧 M14,2026-10-13 评审) (0.1.63)
+
+- `core/scripts/diff_group.py`:**C1** `_git` 封装单点注入 `-c core.quotePath=false`
+  ——git 默认把非 ASCII 路径输出为引号八进制转义形,解析器不识别导致整文件从分组/
+  `excluded` 计数/`empty` 判定中静默消失(唯一变更时报 `empty:true` 退出 0,与真零
+  diff 不可区分);**C2** `_split_interface_budget` 贪心分支去掉 `_fill` 外层
+  `else`——「开启新 part 的成员」hunk 曾落入零个 part 且 absorb 已记 claimed(残差
+  兜底不再接住,双重静默丢失);**H4** `_safe_name` 清洗集 `/ \ :` 扩为 NTFS 非法字符
+  闭集 `/ \ : * ? < > | "`(`@GetMapping("/**")` 曾致 Windows 写盘裸
+  `OSError [Errno 22]`,违约 0/1/2 退出码契约);**M7** A 文件 hunk 归属从「每符号」
+  量纲改为「每 hunk 覆盖全部符号」+ 消费端兼容 list 形(新增 controller 整文件单
+  hunk 时路由分簇曾坍缩);**L6** `--limit` 负值由静默 clamp 空页改为退出码 2 +
+  可操作报错,`--check` 与互斥旗标(`--base/--branch/--offset/--limit/--summary/
+  --include-excluded`)同传时 stderr 逐个显式提示被忽略旗标(退出语义不变);卫生:
+  删死 import(`os`/`shutil`)与 `raw_text` 死参数链。
+- `core/scripts/diff_seed.py`(sast 侧):**M14** `git diff --name-status` 加
+  `-c core.quotePath=false`(与 C1 同族同修法,非 ASCII 源文件曾因引号尾粘连扩展名
+  匹配失败而静默漏出 seed);`SOURCE_EXT` 去重(重复 `.ts`);`deleted[]` 与
+  `seed[]` 同权适用源码扩展名过滤。
+- 测试:`tests/test_diff_group.py` 新增 7 条回归(中文路径进分组 / 中文路径唯一变更
+  非 empty / `/**` 路由 Windows 写盘 + 路由串保真 / 新增 controller 单 hunk 分簇不
+  坍缩 / 贪心拆分「各成员单独 ≤ cap、合并 > cap」hunk locator 并集无损 + part 路由
+  标签与装载成员一致 / `--limit` 负值拒绝 / `--check` 同传旗标提示),原两成员单独
+  超限用例保留、贪心分支盲区以独立用例补齐;新增 `tests/test_diff_seed.py`(非
+  ASCII 源文件进 seed、deleted[] 同口径)。全部先红后绿。
+- 版本:VERSION 0.1.63。
+
 ### Added — /mgh-sdr 全流程深度代码评审报告落盘(根概览 + docs 明细;3 critical + 6 high,均实机验证) (0.1.62)
 
 - 新增根 `mgh-sdr-review.md`(概览:严重度统计、流水线缺陷落点 mermaid、修复顺序建议

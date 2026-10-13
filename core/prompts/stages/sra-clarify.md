@@ -10,7 +10,7 @@ recur across capabilities and a single context deduplicates them naturally.
 ## Input (given by the orchestrator)
 - `change_context.json`(`capabilities[]`/`requirements[]`/`endpoints[]`/`data_fields[]`/
   `role_hints[]`/`candidate_controls[]` + 已载 `memory`)。
-- 安全维度目录 `core/prompts/fragments/security-dimensions.md`(**逐维度**判断哪些业务事实是分析必需的)。
+- 安全维度目录 同安装 prompts 树兄弟目录 `fragments/` 下的 `security-dimensions.md`(**逐维度**判断哪些业务事实是分析必需的)。
 - `focus.directive`(可选,编排器逐字透传 `change_context.focus.directive`;无 directive = 全 9 维度,不收窄)。
 - `sensitive_catalog`(可选,编排器**逐字透传** `change_context.sensitive_catalog`:含 `directive` + `items[]`;无目录 = `null`)。
 - `clarify_path`(绝对,编排器逐字给定)——你**恰好写**澄清结果到此 JSON 文件。
@@ -36,7 +36,7 @@ log / response 是否脱敏的判定)。每条澄清照常带 `default_guess` �
 ```
 
 ## codegraph enrichment(仅当编排器信号 `codegraph=on`)
-当 task 输入含 `codegraph=on` 信号时,**遵循** `core/prompts/fragments/codegraph-hint.md`:对接口 / 调用方 /
+当 task 输入含 `codegraph=on` 信号时,**遵循** codegraph-hint fragment(同安装 prompts 树内可达:本提示词位于 `<mgh-core 安装根>/prompts/stages/`,所指 fragment 为同树兄弟目录 `fragments/` 下的 `codegraph-hint.md`):对接口 / 调用方 /
 框架路由,**先**用 MCP `codegraph_explore`(主)或 CLI `codegraph explore`(Bash,MCP 不可用时)取逐字源码 +
 调用路径 + blast radius,**仅**对 codegraph 未覆盖项(非索引语言 / 超 `--big-file-bytes` / 索引未含 /
 codegraph `⚠️ pending` 点名的文件)回退 `Read`/`Glob`/`Grep`。**主谓非「可」**——SHALL 优先 codegraph;NEVER

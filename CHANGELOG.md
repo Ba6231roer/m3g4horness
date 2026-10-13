@@ -16,6 +16,39 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — 分发面死链与披露/契约失实收口:codegraph-hint 与 rules-format 死链、dsh 派发披露失实、壳 flag 表死旗、agent/stage 契约对形、run 目录 gitignore 兑现、install 卫生 (0.1.71)
+
+- **死链修复(第 10 类)**:六个 stage 提示词(init-{scout,induct,survey,resolve} + sra-{clarify,augment})的
+  `core/prompts/fragments/codegraph-hint.md` 引用改为「同安装 prompts 树兄弟目录」表述(宿主中立,单源
+  一处修六处);rules-format 四面引用(stage + claude/opencode 三 agent 定义)改各自安装布局路径(dsh
+  `t3.md` 先例形态);三面 init 壳 Output 节 `core/contracts/init/{clusters,unit-inputs}.md` 改安装布局路径;
+  codegraph-hint 头注失实的「Inlined into the task message」机制陈述改为实况(按信号 Read 的独立 fragment);
+  `orchestrator-discipline` 头注「to come」清单改实况(ut-init 已发布,待发布仅 mgh-blst)。
+- **lint 兜底**:`check_distributed_purity.py` 新增第 10 类(`core/(prompts|contracts|scripts)/` 源码树
+  路径前缀,md-only),存量非 init 切片命中(186 行)以 `tools/purity_allowlist.txt` 钉基线放行
+  (自动加载、只减不增,陈旧钉扎由测试检出);`check_contracts.py` 新增 init 壳参数表对账(死旗
+  `--out`/`--config` 显式钉禁 + 三面 flag 表同集 + 条目对账消费脚本 `--help` 并集)。
+- **dsh 派发披露实况**:`releases/dsh/skills/mgh-init/SKILL.md` 已接线 tier 清单补 scout-merge(与
+  fanout_runner TIERS 闭集一致);交互 stage 停止清单闭集补 T2 单上下文 `init-synthesis`、T2 rollup、
+  scout-merge rollup;`--skip-consistency` 注明 run 起始参数、mid-run 不可注入;停在 t3 后 T4 未跳过
+  = 无终态 `init_manifest.json` 的形态与 `--resume` 收尾写明。
+- **壳参数表对账**:`--out`/`--config` 死旗从三面 init 壳移除;claude 面补 `--rules-dir` 行(三面同文);
+  call-graph 缓存句三面统一为实况(缓存跨 run 复用、mtime/size 失效、`--rebuild-cache` 强制重建);
+  claude Output 节与 assemble_rules 表格单元向 opencode/dsh 形态对齐(白名单方言差异保留)。
+- **run 目录 git 隔离兑现**:`write_runconfig.py` step 0 落盘时确定性 co-write `<run-root>/.gitignore`
+  (单行 `*`;已存在则不重写,目标根 .gitignore 零触碰);新增 `--check`(run_config 缺失 exit 2,
+  sentinel/gitignore 缺失 warn 级报告)。
+- **agent/stage 契约对形**:init-scout-fanout / init-induct-fanout / init-scout-audit(双面)删除其
+  stage 未定义的 `oversize` ack 枚举(dispatcher `_parse_ack` 容错不变);`init-scout-audit` 权限钉扎与
+  stage 授权一致(opencode `bash: allow`;claude `tools:` 补 Bash + Write),Input 补编排器透传的
+  `slice_dir`,编排器手派透传清单同步。
+- **install 卫生与自检**:分发拷贝后 prune `__pycache__`(claude/opencode 面辖 DEST,dsh 面仅辖
+  mgh-core/ + .dsh/ 永不扫目标自有目录);claude 补发 `init-scout-merge-rollup.md`(以 opencode 面为源
+  镜像);install 自检新增「mgh-init 壳 subagent inventory 点名的 agent 定义文件必须存在」断言
+  (fail-soft,claude/opencode 面);fan-out payload 成功消息的 agent 清单核准(原 brace 展开列出不存在
+  的 `*-fanout-fanout.md` 形态)。
+
+
 ### Fixed — 扇出派发器 6 缺陷卫生收口:冷却忙等自旋 / 树杀失败无升级无处置 / 越树 marker 反被物化 / kill-stale 子串误杀 / spawn 未剥 PWD / 审计文件名编码漂移 (0.1.70)
 
 - **冷却忙等自旋**:熔断前退避恰在 drain 点武装(队列空、在飞零),旧冷却 gate 要求队列非空

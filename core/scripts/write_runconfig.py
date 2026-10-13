@@ -12,7 +12,18 @@ NEVER re-types flags. It is the START-state counterpart to the terminal `init_ma
 
 Atomic (`.tmp` + `os.replace`): a SIGKILL mid-write leaves at most a stale `.tmp`, never a
 truncated/half-written JSON (承 discover_controls._atomic_write_json). Gitignored with the
-rest of `.mgh-init/`.
+rest of `.mgh-init/` — the gitignore is CO-WRITTEN by this script (see below), making the
+promise mechanical instead of aspirational.
+
+Run-dir gitignore co-write (deterministic side-effect, same posture as the sentinel):
+alongside run_config.json the script ALSO writes `<init-dir>/.gitignore` with the single
+line `*` — the run dir's checkpoints / inputs / progress artifacts stay out of the target
+project's git (bank environments: leaked scan products are a real risk; the shells and
+contracts promise this gitignore and this script is its single deterministic writer).
+Idempotent — an existing `.gitignore` is NEVER rewritten or appended (user-tuned file
+stays); the target project's own root `.gitignore` is zero-touch (the file lands INSIDE
+the run dir only). `--check` reports a missing gitignore at WARN level (not blocking:
+isolation is a promise, not run correctness).
 
 Sentinel co-write (deterministic side-effect): alongside run_config.json the script ALSO
 atomically writes `<init-dir>/.active` — the disk sentinel that activates the
@@ -32,6 +43,7 @@ CLI contract (`--help` is the contract surface, R5.1):
        [--include-tests] [--max-unit-bytes B] [--orch-budget-bytes B] [--max-aggregate-bytes B]
        [--scout-budget N] [--scout-batch-bytes B] [--scout-batch-cap N] [--scout-audit-pct N]
        [--language <lang>] [--rules-dir <path>] [--out <path>]
+  py write_runconfig.py --target <dir> --check   (verify on-disk run state, no writes)
 
   Run-dir resolution priority: --init-dir > <target>/<--run-root> (default <target>/.mgh-init);
   run_config.json then lands at <init-dir>/run_config.json (or --out). Default --run-root
@@ -40,9 +52,12 @@ CLI contract (`--help` is the contract surface, R5.1):
 stdout (structured JSON; stderr = diagnostics only, R5.3b):
   {"run_config": "<abs run_config.json>", "target": "<abs target>", "format": "...",
    "mode": "normal|merge", "no_scout": false, "no_codegraph": false, "skip_consistency": false,
-   "sentinel": "<abs .active>"}
-Exit codes (R5.3b): 0 written · 2 misuse (argparse / bad budget / missing --target).
-Idempotent (create-if-not-exists + overwrite), no TTY.
+   "sentinel": "<abs .active>", "gitignore": "<abs .gitignore>"}
+  --check: {"check": "ok", "run_config": .., "sentinel": .., "gitignore": ..,
+            "sentinel_present": bool, "gitignore_present": bool}
+Exit codes (R5.3b): 0 written · 2 misuse (argparse / bad budget / missing --target) or
+--check on a bootstrapped-less run dir. Idempotent (create-if-not-exists + overwrite),
+no TTY.
 """
 from __future__ import annotations
 import argparse
@@ -157,6 +172,11 @@ def main():
                     help="opencode detail dir (default <target>/docs/security-controls)")
     ap.add_argument("--out", default=None,
                     help="explicit run_config.json path (default <init-dir>/run_config.json)")
+    ap.add_argument("--check", action="store_true",
+                    help="verify on-disk run state (run_config.json + sentinel + "
+                         "gitignore) WITHOUT writing; missing run_config.json exits 2, "
+                         "missing sentinel/gitignore is a warn-level stderr report "
+                         "(gitignore absence = run dir not git-isolated)")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk).
     # Before parse_args so --help is utf-8 too. No-op on StringIO (in-process tests).
     for stream in (sys.stdout, sys.stderr):
@@ -190,6 +210,27 @@ def main():
     else:
         init_dir = (Path(target_abs) / args.run_root).resolve()
     rc_path = Path(args.out).resolve() if args.out else (init_dir / "run_config.json").resolve()
+    sentinel_path = init_dir / ".active"
+    gitignore_path = init_dir / ".gitignore"
+
+    if args.check:
+        if not rc_path.is_file():
+            print(f"error: run_config.json missing at {rc_path} (run not bootstrapped; "
+                  f"re-run write_runconfig without --check)", file=sys.stderr)
+            return 2
+        sent_present = sentinel_path.is_file()
+        gi_present = gitignore_path.is_file()
+        if not sent_present:
+            print(f"warn: sentinel missing at {sentinel_path} (runtime guard dormant; "
+                  f"re-run write_runconfig or resume_state --rearm-sentinel)", file=sys.stderr)
+        if not gi_present:
+            print(f"warn: {gitignore_path} missing (run dir is NOT git-isolated; "
+                  f"re-run write_runconfig without --check to co-write it)", file=sys.stderr)
+        print(json.dumps({"check": "ok", "run_config": str(rc_path),
+                          "sentinel": str(sentinel_path), "gitignore": str(gitignore_path),
+                          "sentinel_present": sent_present,
+                          "gitignore_present": gi_present}, ensure_ascii=False))
+        return 0
 
     run_config = {
         "target": target_abs,
@@ -222,7 +263,6 @@ def main():
     # Sentinel co-write (deterministic side-effect): the disk activation signal for the
     # runtime guard. domain derives from --run-root (init vs ut-init share this writer);
     # target reuses the already-computed Windows-native target_abs. Idempotent overwrite.
-    sentinel_path = init_dir / ".active"
     sentinel = {
         "domain": "mgh-ut-init" if args.run_root == ".mgh-ut-init" else "mgh-init",
         "target": target_abs,
@@ -230,6 +270,13 @@ def main():
         "v": 1,
     }
     _atomic_write_json(sentinel_path, sentinel)
+    # Run-dir gitignore co-write (deterministic side-effect, same posture as the
+    # sentinel): the shells/contracts promise "run dir is gitignored"; this script is
+    # its single deterministic writer. Body `*` ignores everything inside the run dir.
+    # NEVER rewrite/append an existing file (user-tuned stays); the target project's
+    # own root .gitignore is zero-touch — this lands INSIDE the run dir only.
+    if not gitignore_path.exists():
+        gitignore_path.write_text("*\n", encoding="utf-8")
     ack = {
         "run_config": str(rc_path),
         "target": target_abs,
@@ -239,10 +286,11 @@ def main():
         "no_codegraph": run_config["no_codegraph"],
         "skip_consistency": run_config["skip_consistency"],
         "sentinel": str(sentinel_path),
+        "gitignore": str(gitignore_path),
     }
     print(f"[write_runconfig] wrote {rc_path} (mode={run_config['mode']}, "
           f"format={args.format}, no_scout={run_config['no_scout']}) + sentinel "
-          f"{sentinel_path}", file=sys.stderr)
+          f"{sentinel_path} + gitignore {gitignore_path}", file=sys.stderr)
     print(json.dumps(ack, ensure_ascii=False))
     return 0
 

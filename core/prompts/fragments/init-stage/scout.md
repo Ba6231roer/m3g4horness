@@ -45,7 +45,7 @@
          (b) **rollup 段(单一 reduce;编排器一步)**:单一 `init-scout-merge-rollup` subagent 仅吞 plan_aggregate stdout `rollup.summary_paths`(各 shard 摘要路径列表,编排器只透传路径、NEVER 整份读任何 summary 进自身上下文)→ 跨 shard 锚点元组去重 + 归一(从各摘要恢复候选与 `unresolved`)→ 写 `rollup.output`(`scout_candidates.json`)+ touch `rollup.done_marker`(`checkpoints/scout/merge.json.done`)。每个大模型请求 ≤ 预算。
        · **手派回退(仅 dispatcher 退出码 2 = 宿主 CLI 不可用时)**:编排器逐波 spawn `init-scout-merge-fanout`,**逐字节**复制 `pending[]` 对应字段(`input_path`/`checkpoint_path`/`done_marker`/`failed_marker`)逐字透传(同上方逐字节 recipe;NEVER 手拼/改写);agent 定义文件的**唯一位置**= 宿主安装目录(claude `.claude/agents/`、opencode `.opencode/agent/`、dsh `mgh-core/../agents/` 经 profile 挂载),读不到即该单元 `failed`,NEVER 到其他目录翻找。map 全 `.done` 后同一 rollup(行为与 dispatcher 路径等价)。
      · 校验:`py .claude/mgh-core/scripts/merge_scout.py --check <target>/.mgh-init/scout_candidates.json`(每条 `source:"scout"` + file:line;退出码 2 → 回退)。
-     spawn init-scout-audit(随机 ≈--scout-audit-pct 的 scout 拒绝项)→ checkpoints/scout/audit.json + .done
+     spawn init-scout-audit(随机 ≈--scout-audit-pct 的 scout 拒绝项;透传 `audit_targets[]` + repo 根 + `slice_dir` 切片落点——树内绝对、编排器物化后逐字透传,同上方逐字节 recipe)→ checkpoints/scout/audit.json + .done
      py .claude/mgh-core/scripts/merge_scout.py --candidates <target>/.mgh-init/controls_candidates.json \
         --scout <target>/.mgh-init/scout_candidates.json --audit <target>/.mgh-init/checkpoints/scout/audit.json \
         --clusters <target>/.mgh-init/clusters.json

@@ -91,6 +91,18 @@ esac
 mkdir -p "$DEST/mgh-core"
 cp -r "$CORE_SRC/." "$DEST/mgh-core/"
 
+# 3a) Bytecode-cache prune: the local `core/scripts/__pycache__/` rides the wholesale
+#     core/ copy — NEVER land it in the target project (foreign machine cache, pure
+#     noise, and a target-side purity hazard). Pruned AFTER the copy (robust for any
+#     copy implementation), scoped to the trees THIS install owns (dsh's DEST is the
+#     target root itself, so there the sweep is limited to mgh-core/ + .dsh/ — never
+#     the target's own pre-existing dirs).
+case "$PLATFORM" in
+  claude|opencode) _prune_dirs=("$DEST");;
+  dsh)             _prune_dirs=("$TARGET/mgh-core" "$TARGET/.dsh");;
+esac
+find "${_prune_dirs[@]}" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
 # 4) Self-check (fail-soft per R5.8): the /mgh-init discover/scout/assemble pipeline
 #    needs these scripts co-located — discover_controls.py / chunk_sources.py do
 #    `from expand_scope import ...`, merge_scout.py does `from discover_controls import
@@ -144,7 +156,29 @@ fi
 if (( ${#_fanout_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing fan-out tier payload: ${_fanout_missing[*]}" >&2
 else
-  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout,init-induct,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter,sdr-review}-fanout.md" )"
+  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter-fanout,sdr-review-fanout}.md" )"
+fi
+
+# 4b-2) Distribution-completeness self-check (fail-soft; CI enforces via
+#       tests/test_distributed_md_purity.py): every agent definition the mgh-init
+#       shell's subagent inventory names MUST exist in the platform's agent set — a
+#       named-but-missing file is a dangling spawn instruction (claude once shipped
+#       without init-scout-merge-rollup.md). dsh is NOT checked here: its agents are
+#       tier-named (scout.md / t1.md / …) by design, so the 1:1 name mapping only
+#       applies to the claude + opencode faces.
+if [[ "$PLATFORM" == "claude" || "$PLATFORM" == "opencode" ]]; then
+  _init_shell="$DEST/commands/mgh-init.md"
+  _agent_dir="$DEST/agents"
+  [[ "$PLATFORM" == "opencode" ]] && { _init_shell="$DEST/command/mgh-init.md"; _agent_dir="$DEST/agent"; }
+  _agent_missing=()
+  while IFS= read -r _a; do
+    [[ -f "$_agent_dir/$_a.md" ]] || _agent_missing+=("$_a.md")
+  done < <(grep -o '`init-[a-z0-9-]*`' "$_init_shell" | tr -d '`' | sort -u)
+  if (( ${#_agent_missing[@]} )); then
+    echo "⚠ self-check (non-blocking): mgh-init shell inventory names agent files missing from $_agent_dir/: ${_agent_missing[*]} (CI enforces)" >&2
+  else
+    echo "✓ mgh-init subagent inventory complete: every named agent definition exists in $_agent_dir/"
+  fi
 fi
 
 # 4b) Distribution-purity self-check (R5.10; fail-soft per R5.8): shipped md MUST be

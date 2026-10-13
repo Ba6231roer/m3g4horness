@@ -15,7 +15,7 @@ clean; (7) the three scan surfaces dispatch to the right rule family, and the SD
 surface (openspec) skips archived changes + the docs-writing carve-out.
 Run: py tests/test_distributed_md_purity.py
 """
-import ast, importlib.util, json, subprocess, sys, tempfile, unittest
+import ast, importlib.util, json, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -381,6 +381,170 @@ class TestDistributedPurity(unittest.TestCase):
                     violations.append(f"from {node.module} import ...")
         self.assertFalse(violations, "third-party imports in lint:\n  " +
                          "\n  ".join(violations))
+
+
+class TestSourceTreePathPrefix(unittest.TestCase):
+    """Class 10 (fix-mgh-init-distribution-links): `core/(prompts|contracts|scripts)/…`
+    spellings in shipped md are dangling pointers — the content ships as `<host>/mgh-core/`,
+    and no target project has `<target>/core/`. Legal forms: install-layout paths
+    (`mgh-core/…`, `.claude/mgh-core/…`) or sibling-relative wording inside stage prompts.
+    md-only (script comments stay legitimate maintenance shorthand); core/prompts/** gets
+    NO verbatim-prose exemption for this class (the spelling is unreachable everywhere).
+    """
+
+    def test_catches_core_prefix_references(self):
+        for body in ("遵循 `core/prompts/fragments/codegraph-hint.md`\n",
+                     "见 `core/contracts/init/unit-inputs.md`\n",
+                     "wrapper at `core/contracts/init/clusters.md`\n",
+                     "run `core/scripts/list_clusters.py`\n"):
+            with self.subTest(body=body):
+                d = self._assert_caught(body)
+                self.assertIn("source_tree_path",
+                              {h["pattern"] for h in d["violations"][0]["hits"]})
+
+    def test_install_layout_and_sibling_forms_not_flagged(self):
+        body = ("assets at `.claude/mgh-core/prompts/fragments/codegraph-hint.md`\n"
+                "dsh root: `mgh-core/contracts/init/unit-inputs.md`\n"
+                "opencode: `.opencode/mgh-core/scripts/list_clusters.py`\n"
+                "sibling: the fragments/ dir next to this stages/ dir holds "
+                "`codegraph-hint.md`\n")
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "f.md"
+            f.write_text(body, encoding="utf-8")
+            r = run_lint("--files", str(f))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)["violations"], [])
+
+    def test_md_only_script_comments_exempt(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "a.py"
+            f.write_text("# see core/scripts/foo.py for the sibling\n", encoding="utf-8")
+            self.assertEqual(run_lint("--files", str(f)).returncode, 0)
+
+    def test_init_slice_source_tree_refs_fixed(self):
+        # The init-slice hits this batch fixes MUST be clean (removed from the
+        # baseline): 6 stage prompts' codegraph-hint refs + rules-format refs
+        # (1 stage + 3 per-host agents) + the three init shells' Output section.
+        root = HERE.parent
+        files = ([root / "core" / "prompts" / "stages" / f"init-{s}.md"
+                  for s in ("scout", "induct", "survey", "resolve", "rulewriter")]
+                 + [root / "core" / "prompts" / "stages" / f"sra-{s}.md"
+                    for s in ("clarify", "augment")]
+                 + [root / "core" / "prompts" / "fragments" / "codegraph-hint.md"]
+                 + [root / "releases" / "claude-code" / "agents" / "init-rulewriter.md"]
+                 + [root / "releases" / "opencode" / "agent" / n
+                    for n in ("init-rulewriter.md", "init-rulewriter-fanout.md")]
+                 + [root / "releases" / "claude-code" / "commands" / "mgh-init.md",
+                    root / "releases" / "opencode" / "command" / "mgh-init.md",
+                    root / "releases" / "dsh" / "skills" / "mgh-init" / "SKILL.md"])
+        for f in files:
+            self.assertTrue(f.is_file(), f"{f} missing")
+        r = run_lint("--files", *[str(f) for f in files])
+        self.assertEqual(r.returncode, 0,
+                         f"init slice still carries source-tree path refs:\n{r.stderr}")
+
+    # --- baseline allowlist pins legacy class-10 hits without admitting new ones ---
+    def test_baseline_pins_legacy_hits_and_only_shrinks(self):
+        mod = load_lint_module()
+        baseline = mod.DEFAULT_ALLOWLIST
+        self.assertTrue(baseline.is_file(), f"missing baseline file: {baseline}")
+        entries = [ln.strip() for ln in baseline.read_text(encoding="utf-8").splitlines()
+                   if ln.strip() and not ln.strip().startswith("#")]
+        self.assertTrue(entries, "baseline file has no active entries")
+        # every pinned entry must still be a live hit (stale pins = the baseline is
+        # hiding a fixed line, i.e. it can grow back); full lint MUST exit 0.
+        r = run_lint()
+        self.assertEqual(r.returncode, 0, f"baseline misses a violation:\n{r.stderr}")
+        d = json.loads(r.stdout)
+        self.assertEqual(d["allowlisted"], len(entries),
+                         "baseline has stale entries (fixed lines still pinned) — "
+                         "remove them; the baseline only shrinks")
+        # 基线只减不增: pin the count; a batch that fixes hits lowers this number.
+        self.assertLessEqual(len(entries), BASELINE_MAX_ENTRIES,
+                             "baseline grew past the pinned maximum — new class-10 "
+                             "references are NOT allowed; fix the reference instead")
+
+    def test_new_source_tree_hit_is_red_even_with_baseline(self):
+        # a fresh `core/...` reference on a NOT-pinned line must fail the lint even
+        # though the baseline pins legacy hits.
+        mod = load_lint_module()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            f = root / "f.md"
+            f.write_text("see `core/prompts/fragments/new-thing.md`\n", encoding="utf-8")
+            r = run_lint("--files", str(f), "--allowlist", str(mod.DEFAULT_ALLOWLIST))
+            self.assertEqual(r.returncode, 2,
+                             "new class-10 hit escaped the baseline (suppressed by mistake)")
+
+    # --- fragment header must not claim a loading mechanism that does not exist ---
+    def test_codegraph_hint_header_states_real_loading(self):
+        # fix-mgh-init-distribution-links 1.2: the fragment is Read by the stage agent
+        # when the task signals codegraph=on; no inlining mechanism exists anywhere in
+        # the chain, and a false "Inlined …" claim makes a weak model trust a load
+        # path that never happens (same family as a dead link).
+        f = HERE.parent / "core" / "prompts" / "fragments" / "codegraph-hint.md"
+        self.assertTrue(f.is_file(), f"{f} missing")
+        header = f.read_text(encoding="utf-8").split("-->", 1)[0]
+        self.assertNotIn("Inlined", header,
+                         "codegraph-hint.md header claims an inlining mechanism that "
+                         "does not exist — restate the real loading (Read on signal)")
+
+    def _assert_caught(self, body):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "f.md"
+            f.write_text(body, encoding="utf-8")
+            r = run_lint("--files", str(f))
+            self.assertEqual(r.returncode, 2, f"expected violation for: {body!r}")
+            d = json.loads(r.stdout)
+            self.assertEqual(len(d["violations"]), 1)
+            return d
+
+
+# 基线只减不增 (design D10): the class-10 legacy baseline after this batch's init-slice
+# fix. Lower this constant when a later batch fixes more hits; NEVER raise it.
+BASELINE_MAX_ENTRIES = 200
+
+
+class TestDistributionCompleteness(unittest.TestCase):
+    """fix-mgh-init-distribution-links 1.4: every agent definition an init shell's
+    subagent inventory names MUST exist in that platform's release set — a named-but-
+    missing file is a dangling spawn instruction (claude face lacked
+    init-scout-merge-rollup). dsh is out of scope: its agents are tier-named
+    (scout.md/t1.md/…) by design, so the 1:1 name check only applies to
+    claude + opencode."""
+
+    FACES = {
+        "claude": (HERE.parent / "releases" / "claude-code" / "commands" / "mgh-init.md",
+                   HERE.parent / "releases" / "claude-code" / "agents"),
+        "opencode": (HERE.parent / "releases" / "opencode" / "command" / "mgh-init.md",
+                     HERE.parent / "releases" / "opencode" / "agent"),
+    }
+    AGENT_NAME_RX = re.compile(r"`(init-[a-z0-9-]+)`")
+
+    def _inventory_line(self, shell: Path) -> str:
+        for line in shell.read_text(encoding="utf-8").splitlines():
+            if "`init-survey`" in line and "`init-scout`" in line:
+                return line
+        self.fail(f"subagent inventory line not found in {shell}")
+
+    def test_inventory_named_agents_exist(self):
+        for platform, (shell, agent_dir) in self.FACES.items():
+            with self.subTest(platform=platform):
+                names = set(self.AGENT_NAME_RX.findall(self._inventory_line(shell)))
+                self.assertTrue(names, f"{platform}: no agent names parsed")
+                missing = sorted(n for n in names
+                                 if not (agent_dir / f"{n}.md").is_file())
+                self.assertFalse(
+                    missing,
+                    f"{platform}: shell inventory names missing agent files "
+                    f"{missing} (install self-check warns; CI fails here)")
+
+    def test_dsh_inventory_out_of_scope_documented(self):
+        # guard against someone "fixing" the dsh face by renaming its tier-named
+        # agents: the dsh init shell names stages, not agent files, by design.
+        dsh_shell = (HERE.parent / "releases" / "dsh" / "skills" / "mgh-init"
+                     / "SKILL.md")
+        self.assertTrue(dsh_shell.is_file())
 
 
 if __name__ == "__main__":

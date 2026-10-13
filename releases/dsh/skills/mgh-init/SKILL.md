@@ -30,13 +30,12 @@ at `mgh-core/` (mirrored from `core/`).
 
 - `--target <dir>` (default `.`)
 - `--format opencode|claude` (default `opencode`; pass `claude` for `<target>/.claude/rules/security-*.md`)
-- `--out <path>` (opencode default `<target>/AGENTS.md`; claude default `<target>/.claude/rules`)
 - `--rules-dir <path>` (opencode default `<target>/docs/security-controls`; 详述文件目录,透传给 `list_rule_jobs.py`/`assemble_rules.py`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
 - `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)
 - `--include-dotfiles` (默认关;扫描点前缀路径 `.opencode`/`.claude`/`.codegraph`/`.github`/`.env`。默认跳过——tooling/VCS/IDE/build/config/索引 非一方业务代码;控制定义点落在 `.xxx` 内时传此 flag 纳入)
 - `--include-tests` (默认关;扫描测试源码树 `src/test`/`src/tests`(Maven/Gradle/Kotlin)与 `tests`/`__tests__`/`__mocks__`/`spec`/`specs` 目录段。默认跳过——测试代码对「发现生产安全控制」是净噪声:mock/stub(`@MockBean SecurityConfig`、`mock(SecurityChecker)`)把安全组件物化成调用图里的伪控制、故意写脆弱的测试夹具(渗透训练 `VulnerableApp`、禁用 TLS / 放宽 CORS / 占位密钥 / dummy JWT issuer)命中成真实控制特征、且测试码不上线;控制定义点落在测试目录内时传此 flag 纳入)
-- `--resume` · `--rebuild-cache` · `--merge <partials-dir>` · `--skip-consistency` · `--config <profile>` (default `init`)
+- `--resume` · `--rebuild-cache` · `--merge <partials-dir>` · `--skip-consistency`
 - `--no-scout` (skip LLM scout discovery; legacy regex-only) · `--scout-budget <N>` (0=全量) · `--scout-batch-bytes <N>` (默认 96KB) · `--scout-batch-cap <N>` (默认 40) · `--scout-audit-pct <N>` (默认 15)
 - **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize 簇切 `::shard-<n>`、scout 批/T3 category 标 `oversize`)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 96KB;T2/scout-merge 经 `plan_aggregate.py` **硬阈值**——> 预算自动 map-reduce;T4 仍软边界 + `--scope`/`--merge` 回退;触发 + shard 数进 `boundaries[]`/`report.md`)
 - `--no-codegraph` (skip optional codegraph enrichment; legacy behavior). codegraph 检测默认 `auto`:仅当 `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用;`--no-codegraph` 或不可用 → 富化 off(行为等价于引入 codegraph 前)
@@ -51,14 +50,18 @@ at `mgh-core/` (mirrored from `core/`).
 
 > **stage 流细节按需加载(per-step fragment,非同时驻留)**:`--step <id>` 只吃 `resume_state.py` stdout `step` 的**命名 id**;NEVER 数字索引。当前步执行前 `py mgh-core/scripts/resume_state.py --target <target>` → 读 stdout `step` + `stage_flow_files[]` → `py mgh-core/scripts/list_steps.py --step <step>` 取确切调用行 → **Read `stage_flow_files[0]`**(当前步 fragment `mgh-core/prompts/fragments/init-stage/<step>.md`)加载该步纪律。**NEVER 整份加载全部 step fragment、NEVER 从对话记忆判当前步**。**fresh-run(首 run,`<target>/.mgh-init/` 不存在 / resume_state exit 1)不走该循环**:Read `mgh-core/prompts/fragments/init-stage/bootstrap.md`(固定路径)按之执行 bootstrap(run_config 原子写 / 哨兵 / MGH_TARGET / codegraph),再 resume_state → `discover` 进统一循环;NEVER 对 bootstrap 调 `list_steps --step <数字>`。
 
-> **dsh 派发面(实态披露)**:fan-out tier 派发(`fanout_runner` 各波次,scout/t1/t2/t3)已在 dsh
+> **dsh 派发面(实态披露)**:fan-out tier 派发(`fanout_runner` 各波次,scout/scout-merge/t1/t2/t3)已在 dsh
 > 接线——spawn 形 `dsh --profile mgh --patch mgh-core/dsh/tiers/<tier>.yml -`(tier 装载文件由 install
 > 生成落该目录、任务正文经子进程 env 投递);装载缺件在 spawn 前 fail-loud(退出码 2 + recipe、零子进程)。
-> 交互式非波次 stage(`init-survey` / `init-resolve` / scout 收尾 `init-scout-merge` / T4
-> `init-rules-consistency`)本 change **未建具名派发实例**:运行至该类派发步 SHALL 停止并如实报告
-> (进度已在磁盘 `<target>/.mgh-init/` checkpoints + `.done`/`.failed` marker、`--resume` 可跨会话续跑;
-> survey/resolve 为 opt 不入流程即不派发、T4 可 `--skip-consistency` 跳过),**NEVER** 用内联执行假装派发、
-> **NEVER** 自写循环替代 dispatcher。
+> 交互式非波次 stage(`init-survey` / `init-resolve` / T2 单上下文 `init-synthesis` / T2 rollup
+> `init-synthesis-rollup` / scout 收尾 `init-scout-merge` / scout-merge rollup `init-scout-merge-rollup` /
+> T4 `init-rules-consistency`)**未建具名派发实例**:运行至该类 stage SHALL 停止并如实报告(进度已在磁盘
+> `<target>/.mgh-init/` checkpoints + `.done`/`.failed` marker、`--resume` 可跨会话续跑),**NEVER** 用内联
+> 执行假装派发、**NEVER** 自写循环替代 dispatcher。survey/resolve 为 opt 不入流程即不派发;T4 可
+> `--skip-consistency` 跳过——该 flag 属 **run 起始参数**(step 0 由 `write_runconfig.py` 落盘),
+> **mid-run 不可注入**;需要跳过时唯一路径 = 以该 flag 重新 bootstrap(已有磁盘进度按 run_config 幂等承接)。
+> 停在 t3 之后而 T4 未跳过时,run **无终态 `init_manifest.json`**——`--resume` 可跨会话续跑收尾;**NEVER** 把
+> 「波次全部 done」误报为整个命令完成。
 
 ## Orchestration flow
 
@@ -81,13 +84,13 @@ at `mgh-core/` (mirrored from `core/`).
 - Work units: i1 per file, **scout per batch**, T1 per cluster, T2/T4 whole, T3 per category.
 - `<target>/.mgh-init/checkpoints/<tier>/<unit>.json.done`(成功)**或** `.failed`(确认失败)= 终态,gate `--resume`(均跳过、不重派);`run_config.json` 使 `--resume` 免重输 flag。done/failed 判定 = **正向 marker 路径计算**(canonical 单元 id 经与物化同一编码函数算出 marker 路径、`is_file()` 即终态),NEVER 依赖记录体字段或文件名 stem 反推;孤儿 marker 只告警不进计数。
 - **零推进熔断 recipe(双观察点)**:`fanout_runner.py` 每新派发 N×`--wave` 个单元或队列耗尽重列(默认 N=2,`--stall-waves`)重列一次磁盘 `done+failed` 终态计数;连续 N 次零增长且仍有待派 → **退出码 2** + stdout `stalled:true` + `stalled_pending[]`(每卡住单元的 id + 其 `.done`/`.failed` marker 在盘存在性)→ **停止重派该命令**,改跑 `py mgh-core/scripts/resume_state.py --target <target> --check` 诊断磁盘状态,并对照 `stalled_pending[]` 逐单元核对 marker 存在性/可写性;诊断清楚后 `--resume` 续跑。NEVER 在熔断后继续盲目重派(那正是熔断要截断的烧钱循环)。
-- `--rebuild-cache` forces call-graph rebuild.
+- Call-graph cache is reused across runs (invalidated by source mtime/size); `--rebuild-cache` forces a rebuild.
 
 ## Output (per `<target>/.mgh-init/`)
 
 - `controls_candidates.json`(regex + scout,带 `source`)· `skeleton.json` · `scout_plan.json` · `scout_candidates.json` · `clusters.json` · `controls_inventory.json` (`design_controls`-compatible)
-- `clusters.json` 包装结构 `{repo,clusters[],truncated}` 见 `core/contracts/init/clusters.md`(T1 经 `list_clusters.py` 枚举,禁手搓内省)
-- `checkpoints/**` (resume) · `inputs/<tier>/<unit>.input.json`(per-unit 物化扇出输入,subagent 自读;≤ `--max-unit-bytes`;随 `.mgh-init/` gitignore;见 `core/contracts/init/unit-inputs.md`)· `init_manifest.json` · `report.md` (+「competing controls」section)
+- `clusters.json` 包装结构 `{repo,clusters[],truncated}` 见 `mgh-core/contracts/init/clusters.md`(T1 经 `list_clusters.py` 枚举,禁手搓内省)
+- `checkpoints/**` (resume) · `inputs/<tier>/<unit>.input.json`(per-unit 物化扇出输入,subagent 自读;≤ `--max-unit-bytes`;随 `.mgh-init/` gitignore;见 `mgh-core/contracts/init/unit-inputs.md`)· `init_manifest.json` · `report.md` (+「competing controls」section)
 - rules → opencode:`<target>/AGENTS.md` 简洁**惰性索引块** `<!-- security-controls:begin --> … :end -->` + 每实现 category 一个详述文件 `<target>/docs/security-controls/<cat>.md`(由 `assemble_rules.py` 扫 `<rules-dir>/*.md` 建索引;详述文件按需加载);claude:`<target>/.claude/rules/security-*.md`
 
 ## Always disclose

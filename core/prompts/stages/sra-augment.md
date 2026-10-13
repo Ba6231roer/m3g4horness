@@ -16,7 +16,7 @@ capabilities (cross-cap dedup is a4's job), and you do NOT whole-read `change_co
   (`roles[]`/`domains[]`/`sensitive_fields[]`/`interface_authz[]`/`business_rules[]`/`clarifications[]`,
   a2 已把用户答案写回)。其 `bytes` ≤ `--max-unit-bytes`(编排器请求确定性有界)。**NEVER** 整份读
   `change_context.json`——它含全 cap 聚合,会撑爆你的上下文;你所需一切已在该 cap 的 `input_path` 里。
-- 安全维度目录 `core/prompts/fragments/security-dimensions.md`(**逐维度**查缺口)。
+- 安全维度目录 同安装 prompts 树兄弟目录 `fragments/` 下的 `security-dimensions.md`(**逐维度**查缺口)。
 - `focus.directive`(可选,编排器逐字透传 `change_context.focus.directive`;无 directive = 全 9 维度,不收窄)。
 - `sensitive_catalog`(可选,编排器**逐字透传** `change_context.sensitive_catalog`:含 `directive` + `items[]`,每项 `{key,category,label,mask,rule}`;无目录 = `null`,仅现行 6 facet 识别敏感数据)。
 - `draft_path` + `done_marker`(绝对,编排器逐字给定)——你**恰好写** draft 到 `draft_path`、
@@ -59,7 +59,7 @@ sensitive-data 在 focus 范围内时生效**(focus 排除 sensitive-data 时目
 requirement(无控制锚点),不阻断。
 
 ## codegraph enrichment(仅当编排器信号 `codegraph=on`)
-当 task 输入含 `codegraph=on` 信号时,**遵循** `core/prompts/fragments/codegraph-hint.md`:对候选控制 /
+当 task 输入含 `codegraph=on` 信号时,**遵循** codegraph-hint fragment(同安装 prompts 树内可达:本提示词位于 `<mgh-core 安装根>/prompts/stages/`,所指 fragment 为同树兄弟目录 `fragments/` 下的 `codegraph-hint.md`):对候选控制 /
 调用路径 / 框架路由,**先**用 MCP `codegraph_explore`(主)或 CLI `codegraph explore`(Bash,MCP 不可用时)
 取逐字源码 + 调用路径 + blast radius,**仅**对 codegraph 未覆盖项(非索引语言 / 超 `--big-file-bytes` /
 索引未含 / codegraph `⚠️ pending` 点名的文件)回退 `Read`/`Glob`/`Grep`。**主谓非「可」**——SHALL 优先

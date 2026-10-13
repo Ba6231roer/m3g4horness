@@ -20,6 +20,9 @@ paths and stage labels are NOT flagged):
   8. dev-meta         范式锚点 / 承\\s*R\\d+ / 兑现\\s*R\\d+
   9. repo-root docs   this repo's developer-private docs/ tree (man pages, glossary,
                       upstream index, analysis notes) — see repo_docs_hits()
+  10. source-tree ptr core/(prompts|contracts|scripts)/… spellings in shipped md —
+                      the content ships as <host>/mgh-core/, no target has
+                      <target>/core/ (fix-mgh-init-distribution-links); md-only
 
 Items 1–4 and 8 are dev-manual VOCABULARY and items 5–7 and 9 are dangling
 POINTERS. Both families apply to shipped md (the host agent reads it); only the
@@ -49,7 +52,9 @@ Upstream jargon (vvah / vvaharness / design_controls as谱系归因) is NOT a ha
 boundary — same shape as protected `Source:` headers / Apache attribution /
 operational `design_controls`, so a machine cannot tell them apart; it is handled
 manually (design D4) + prompt guardrails. `--allowlist <file>` suppresses per-line
-false positives (default empty).
+false positives (MERGED with the auto-loaded tools/purity_allowlist.txt legacy
+baseline — class-10 hits outside a batch's fix slice stay pinned there; the
+baseline only shrinks).
 
 Contract (R5.3): `--help` IS the CLI surface; stdout=JSON {scanned, violations[],
 allowlisted}; stderr=human diagnostics; exit 0 clean / 2 violations / 1 operational
@@ -260,6 +265,32 @@ def gather_files(explicit):
     return out
 
 
+# --- pattern 10: source-tree path prefix (fix-mgh-init-distribution-links) ---
+# `core/prompts/…` / `core/contracts/…` / `core/scripts/…` spellings in shipped md
+# are dangling pointers: the content ships as `<host>/mgh-core/…` (dsh: root-level
+# `mgh-core/`), and no target project has a `<target>/core/` directory. A reader who
+# follows one hits a dead end — same nature as pattern 9. Legal forms are the
+# install-layout paths (`mgh-core/…`, `.claude/mgh-core/…`, `.opencode/mgh-core/…`)
+# or a sibling-relative wording inside stage prompts ("the fragments/ dir next to
+# this stages/ dir"). md-only: script comments keep the shorthand (same posture as
+# the vocabulary family). `core/prompts/**` gets NO verbatim-prose exemption here —
+# the spelling is unreachable in a target project regardless of who authored it.
+# The lookbehind keeps `mgh-core/…` (legal) and URL paths out of the match.
+SOURCE_TREE_PATTERNS = [
+    ("source_tree_path",
+     re.compile(r"(?<![\w/.\-])core/(prompts|contracts|scripts)/"),
+     "core/prompts/fragments/codegraph-hint.md"),
+]
+
+# Legacy class-10 hits outside the batch's fix slice (design D10): pinned here so
+# the lint stays green while new hits stay red. Format = the `--allowlist` format
+# (`<rel>:<lineno>`, `#` comments). Loaded automatically when present, MERGED with
+# any explicit `--allowlist`. The baseline only shrinks: entries whose line got
+# fixed must be removed (tests/test_distributed_md_purity.py flags stale pins and
+# caps the entry count).
+DEFAULT_ALLOWLIST = HERE / "purity_allowlist.txt"
+
+
 def load_allowlist(path):
     """Each non-empty, non-`#` line: `<rel/path.md>:<lineno>` (forward slashes)."""
     allow = set()
@@ -290,7 +321,8 @@ def main(argv=None):
                          "(default: install-mirrored globs under repo root)")
     ap.add_argument("--allowlist", default=None, metavar="FILE",
                     help="file of `rel/path.md:lineno` lines to suppress "
-                         "(false-positive escape hatch; default empty)")
+                         "(false-positive escape hatch, MERGED with the auto-loaded "
+                         "tools/purity_allowlist.txt legacy baseline; default empty)")
     ap.add_argument("--root", default=None, metavar="DIR",
                     help="repo root for relative-path computation "
                          "(default: parent of this script's dir)")
@@ -305,7 +337,9 @@ def main(argv=None):
 
     root = Path(args.root).resolve() if args.root else ROOT
     files = gather_files(args.files)
-    allow = load_allowlist(args.allowlist)
+    allow = load_allowlist(DEFAULT_ALLOWLIST if DEFAULT_ALLOWLIST.is_file() else None)
+    if args.allowlist:
+        allow |= load_allowlist(args.allowlist)
 
     violations, errors, allowlisted = [], [], 0
     for p in files:
@@ -324,7 +358,7 @@ def main(argv=None):
             if mode == "sdd":
                 hits = repo_docs_hits(line)
             else:
-                active = (POINTER_PATTERNS + VOCAB_PATTERNS
+                active = (POINTER_PATTERNS + VOCAB_PATTERNS + SOURCE_TREE_PATTERNS
                           if mode == "md" else POINTER_PATTERNS)
                 hits = [{"pattern": name, "token": m.group(0)}
                         for name, rx, _ex in active for m in rx.finditer(line)]

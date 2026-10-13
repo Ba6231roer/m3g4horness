@@ -35,7 +35,7 @@ already-resolved candidates, do NOT pick canonical.
   touch after.
 
 ## codegraph enrichment (you are gated on `codegraph=on`)
-**遵循** `core/prompts/fragments/codegraph-hint.md`. For each unresolved entry,
+**遵循** codegraph-hint fragment(同安装 prompts 树内可达:本提示词位于 `<mgh-core 安装根>/prompts/stages/`,所指 fragment 为同树兄弟目录 `fragments/` 下的 `codegraph-hint.md`). For each unresolved entry,
 **先** call MCP `codegraph_explore` (primary) — or CLI `codegraph explore` (Bash,
 when MCP is unavailable) — on the control's symbol / file / class to recover its
 verbatim source + callers + framework route + interface→impl hop. `codegraph_explore`

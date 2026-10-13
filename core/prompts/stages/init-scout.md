@@ -93,7 +93,7 @@ For every confirmed control, emit a Candidate-subset anchor:
 ```
 
 ## codegraph enrichment(仅当派发方信号 `codegraph=on`)
-当 task 输入含 `codegraph=on` 信号时,**遵循** `core/prompts/fragments/codegraph-hint.md`:对 batch
+当 task 输入含 `codegraph=on` 信号时,**遵循** codegraph-hint fragment(同安装 prompts 树内可达:本提示词位于 `<mgh-core 安装根>/prompts/stages/`,所指 fragment 为同树兄弟目录 `fragments/` 下的 `codegraph-hint.md`):对 batch
 里的目标符号 / 调用路径 / 框架路由,**先**用 MCP `codegraph_explore`(主)或 CLI `codegraph explore`
 (Bash,MCP 不可用时)取逐字源码 + 调用路径 + blast radius,**仅**对 codegraph 未覆盖项(非索引语言 /
 超 `--big-file-bytes` / 索引未含 / codegraph `⚠️ pending` 点名的文件)回退 `Read`/`Glob`/`Grep`。

@@ -26,7 +26,10 @@ SHALL 存在唯一 fragment `core/prompts/fragments/orchestrator-discipline.md`,
 `/tmp` / `TMPDIR`)写中间文件,stdout MUST 从 Bash 工具返回值直接消费**。fragment 正文 SHALL **泛化**
 (用「该命令的 `list_*` 枚举脚本」/「resume-state 脚本」等抽象名词),**不**绑定 init 专属脚本名/产物名
 (那些留在各壳 stage 流)。fragment 是分发产物,SHALL 通过分发纯净性 lint:无研发铁律编号、失败/设计 ID、
-openspec 变更夹名、dev-meta 措辞。
+openspec 变更夹名、dev-meta 措辞。**头注的命令覆盖状态 SHALL 随发布事实维护**:头注中「今日已发布 /
+后续待发布」类列举(`… today; … to come`)SHALL 与命令族的实发布状态一致——已发布命令 NEVER 留在
+`to come` 清单里(失实的发布状态与死链同性质:目标读者会据其判断命令可用性);每发布一个新命令,
+该头注随发布 change 一并更新。
 
 #### Scenario: fragment 文件存在且被分发镜像
 
@@ -47,6 +50,13 @@ openspec 变更夹名、dev-meta 措辞。
 - **WHEN** 运行 `tools/check_distributed_purity.py`
 - **THEN** `orchestration-discipline.md` 不含 `R5.x`/`FDn`/`Dn`/变更夹名/`承 R5`/`范式锚点` 等 dev-meta
   (操作性语义如 `--check`/退出码 2/`NEVER` 保留)
+
+#### Scenario: header release-state list matches reality
+
+- **WHEN** 审阅 fragment 头注的命令覆盖列举(mgh-init 已发布;mgh-ut-init 已随其 install 面发布)
+- **THEN** 头注不再把已发布命令列入「to come」;列举只保留确实未发布的条目(或移除整个
+  「to come」段),目标读者据头注判断的命令可用性与实况一致
+
 ### Requirement: 编排器禁止向系统临时目录写中间文件
 
 `orchestrator-discipline.md` SHALL 增显式 `NEVER`:编排器 MUST NOT 把确定性脚本 stdout 重定向到磁盘文件

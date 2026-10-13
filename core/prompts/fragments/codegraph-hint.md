@@ -1,7 +1,10 @@
 <!--
   rewrite-original (mgh-init / codegraph enrichment hint). No vvaharness port.
-  Inlined into the task message of codegraph-aware stages (scout / induct /
-  survey / resolve) ONLY when the orchestrator signals `codegraph=on`.
+  Read by the stage agent when its task input signals `codegraph=on` — an
+  independent fragment in this prompts tree (stages/ sibling dir fragments/);
+  there is NO inlining mechanism. Loading boundary mirrors the stages' own
+  wording: the signal is `codegraph=on` → follow this fragment; `codegraph=off`
+  or absent → ignore it entirely.
   Prescriptive by intent: "codegraph=on → SHALL prefer codegraph, Read only as
   fallback", never the permissive "you may use codegraph" — that wording lets a
   subagent keep self-Reading and turns codegraph into pure overhead.

@@ -384,6 +384,100 @@ def check_recipe_visibility():
             for d, s in recipe_visibility_violations(guard_src, shell_texts, fragment)]
 
 
+# ---------------------------------------------------------------------------
+# Init flag-table reconciliation (fix-mgh-init-distribution-links 1.3, design D4).
+# The three mgh-init shells' argument tables are a closed set that must reconcile
+# against real consumption points: (a) no dead rows — a flag whose shell-level
+# semantics nothing consumes (`--out` claimed per-face rules defaults no script
+# consumes; `--config` no script declares) is a lie the agent learns from;
+# (b) three faces advertise the SAME set (non-whitelist mirror drift — the claude
+# face lacked `--rules-dir`); (c) every non-exempt entry resolves in some init
+# consumer script's --help union. Pure-function core + wiring, mirroring the
+# recipe-visibility rule.
+# ---------------------------------------------------------------------------
+INIT_FLAG_TABLE_FACES = {
+    "claude": ROOT / "releases" / "claude-code" / "commands" / "mgh-init.md",
+    "opencode": ROOT / "releases" / "opencode" / "command" / "mgh-init.md",
+    "dsh": ROOT / "releases" / "dsh" / "skills" / "mgh-init" / "SKILL.md",
+}
+# Shell-level flags with NO *.py consumer, documented here as the closed exemption:
+# --help prints the table and stops. (--max-aggregate-bytes is exempt from nothing —
+# write_runconfig.py declares it; it stays reconciled.)
+INIT_FLAG_TABLE_EXEMPT = {"--help"}
+# Dead rows pinned by name (their shell-row semantics have no consumer — design D4:
+# the run dir rides --init-dir/--run-root; the rules location rides --rules-dir +
+# format-driven defaults). Pass one to the shell = unknown flag fail-loud.
+INIT_FLAG_TABLE_FORBIDDEN = {"--out", "--config"}
+# The closed consumer set for the union check: every script the init shells drive.
+INIT_CONSUMER_SCRIPTS = [
+    "discover_controls", "write_runconfig", "chunk_sources", "plan_scout",
+    "list_scout_batches", "merge_scout", "list_clusters", "plan_aggregate",
+    "list_rule_jobs", "assemble_rules", "fanout_runner", "resume_state",
+    "list_steps", "describe_artifact", "validate_inventory", "validate_t1_records",
+    "expand_scope",
+]
+_INIT_TABLE_SECTION_RX = re.compile(r"## Parse arguments(.*?)(?=\n## )", re.S)
+_BACKTICK_FLAG_RX = re.compile(r"`(--[a-z][a-z0-9-]*)")
+
+
+def init_flag_table_flags(shell: Path):
+    """The set of `--flag` tokens in the shell's `## Parse arguments` table section."""
+    text = shell.read_text(encoding="utf-8")
+    m = _INIT_TABLE_SECTION_RX.search(text)
+    if not m:
+        return set()
+    return set(_BACKTICK_FLAG_RX.findall(m.group(1)))
+
+
+def init_consumer_help_union():
+    """Union of flags declared across the init consumer scripts' --help."""
+    union = set()
+    for name in INIT_CONSUMER_SCRIPTS:
+        declared = declared_flags(SCRIPTS / f"{name}.py")
+        if declared:
+            union |= declared
+    return union
+
+
+def check_init_flag_tables():
+    """Failure strings for the three init shells' argument tables (design D4)."""
+    failures = []
+    union = init_consumer_help_union()
+    tables = {}
+    for name, shell in INIT_FLAG_TABLE_FACES.items():
+        if not shell.is_file():
+            failures.append(f"init flag table: shell not found: {shell}")
+            continue
+        flags = init_flag_table_flags(shell)
+        tables[name] = flags
+        if not flags:
+            failures.append(f"{shell.name}: Parse arguments table not found/empty")
+            continue
+        dead = sorted(flags & INIT_FLAG_TABLE_FORBIDDEN)
+        if dead:
+            failures.append(
+                f"{shell.name}: flag table lists dead flag(s) {dead} — no consumer "
+                f"with this semantics; remove the row (unknown-flag fail-loud is the "
+                f"contract)")
+        unreconciled = sorted(f for f in flags - INIT_FLAG_TABLE_EXEMPT
+                              if f not in union)
+        if unreconciled:
+            failures.append(
+                f"{shell.name}: flag(s) {unreconciled} not declared by any init "
+                f"consumer script --help nor exempt — dead table row")
+    if len(tables) == len(INIT_FLAG_TABLE_FACES):
+        ref = tables.get("opencode", set())
+        for name, flags in tables.items():
+            only_here = sorted(flags - ref)
+            missing_here = sorted(ref - flags)
+            if only_here or missing_here:
+                failures.append(
+                    f"init flag table drift ({name} vs opencode): "
+                    f"only-{name}={only_here} only-opencode={missing_here} — the "
+                    f"three faces MUST advertise the same closed set")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="R5.1 CLI contract lint: shell script flags must be declared in --help")
@@ -695,6 +789,10 @@ def main():
     # recipe visibility (design D6): every script the guard's block-time recipe names must
     # be literally reachable in that domain's shells ∪ the shared discipline fragment.
     failures += check_recipe_visibility()
+
+    # init flag-table reconciliation (design D4): closed set, no dead rows, three faces
+    # advertise the same set, every entry resolves to a consumer --help or the exemption.
+    failures += check_init_flag_tables()
 
     if failures:
         print(f"✗ {len(failures)} contract violation(s):", file=sys.stderr)

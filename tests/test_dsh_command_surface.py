@@ -104,5 +104,58 @@ class TestLazyFragmentPointers(unittest.TestCase):
                              f"{cmd}: dsh-face flow fragment pointer missing")
 
 
+class TestInitDispatchDisclosure(unittest.TestCase):
+    """fix-mgh-init-distribution-links 1.7 / dsh-command-surface delta: the mgh-init
+    SKILL.md dispatch disclosure must state the REAL wiring (dsh-command-surface
+    requirement "dsh dispatch disclosure states the real wiring and stop surface").
+    Four closed-set facts, all text-asserted:
+      ① wired tier list == fanout_runner TIERS closed set (incl. scout-merge);
+      ② stop list enumerates EVERY non-dispatched stage (missing one invites
+         improvised inline execution — the exact shape the disclosure forbids);
+      ③ --skip-consistency is declared run-start-only (mid-run uninjectable);
+      ④ stop-at-t3-with-T4-pending is disclosed as having NO terminal manifest.
+    """
+
+    DISCLOSURE_START = "dsh 派发面"
+
+    def _disclosure(self) -> str:
+        text = (DSH_SKILLS / "mgh-init" / "SKILL.md").read_text(encoding="utf-8")
+        start = text.find(self.DISCLOSURE_START)
+        self.assertGreaterEqual(start, 0, "dispatch disclosure section missing")
+        return text[start:start + 3000]
+
+    def test_wired_tier_list_matches_dispatcher_closed_set(self):
+        # scout-merge is wired (fanout_runner TIERS + the script inventory row say so);
+        # the disclosure listing scout/t1/t2/t3 only contradicts the same document.
+        self.assertIn("scout/scout-merge/t1/t2/t3", self._disclosure(),
+                      "wired tier list must be the TIERS closed set "
+                      "scout/scout-merge/t1/t2/t3")
+
+    def test_stop_list_enumerates_every_undispatched_stage(self):
+        d = self._disclosure()
+        for stage in ("init-survey", "init-resolve",
+                      "init-synthesis", "init-synthesis-rollup",
+                      "init-scout-merge", "init-scout-merge-rollup",
+                      "init-rules-consistency"):
+            self.assertIn(f"`{stage}`", d,
+                          f"stop list missing `{stage}` — an unlisted non-dispatched "
+                          f"stage invites improvised inline execution")
+
+    def test_skip_consistency_declared_run_start_only(self):
+        d = self._disclosure()
+        self.assertIn("--skip-consistency", d)
+        self.assertIn("mid-run 不可注入", d,
+                      "disclosure must state the flag is run-start-only — an "
+                      "orchestrator reading it mid-run cannot inject it")
+
+    def test_stop_before_t4_discloses_no_terminal_manifest(self):
+        d = self._disclosure()
+        self.assertIn("init_manifest.json", d,
+                      "disclosure must name the terminal manifest")
+        self.assertIn("--resume", d,
+                      "disclosure must give the --resume path to finish a run that "
+                      "stopped after t3")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

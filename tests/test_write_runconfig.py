@@ -206,6 +206,50 @@ class TestWriteRunconfig(unittest.TestCase):
         self.assertTrue(sp.is_file())
         self.assertEqual(json.loads(sp.read_text(encoding="utf-8"))["domain"], "mgh-ut-init")
 
+    # ---- run-dir gitignore co-write (fix-mgh-init-distribution-links 1.6 / D5) ----
+
+    def test_gitignore_cowritten_on_fresh_bootstrap(self):
+        # step 0 lands <run-root>/.gitignore (body `*`) so checkpoints/inputs stay out
+        # of the target project's git (the shells/contracts promise this; the script
+        # side effect is the single deterministic writer).
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_git1_")).resolve()
+        code, _, _ = _run("--target", str(target), "--format", "opencode")
+        self.assertEqual(code, 0)
+        gi = target / ".mgh-init" / ".gitignore"
+        self.assertTrue(gi.is_file(), "run-dir .gitignore must co-exist after step 0")
+        self.assertEqual(gi.read_text(encoding="utf-8"), "*\n")
+
+    def test_gitignore_idempotent_never_clobbers(self):
+        # an existing run-dir .gitignore (user-tuned) is NEVER rewritten or appended.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_git2_")).resolve()
+        init = target / ".mgh-init"
+        init.mkdir(parents=True)
+        custom = "# keep my extra rules\n*.custom\n"
+        (init / ".gitignore").write_text(custom, encoding="utf-8")
+        code, _, _ = _run("--target", str(target), "--format", "opencode")
+        self.assertEqual(code, 0)
+        self.assertEqual((init / ".gitignore").read_text(encoding="utf-8"), custom)
+
+    def test_target_root_gitignore_untouched(self):
+        # co-write lands INSIDE the run dir only; the target's own .gitignore is zero-touch.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_git3_")).resolve()
+        root_gi = target / ".gitignore"
+        root_gi.write_text("node_modules/\n", encoding="utf-8")
+        _run("--target", str(target), "--format", "opencode")
+        self.assertEqual(root_gi.read_text(encoding="utf-8"), "node_modules/\n")
+        self.assertEqual((target / ".mgh-init" / ".gitignore").read_text(encoding="utf-8"),
+                         "*\n")
+
+    def test_gitignore_follows_init_dir_override(self):
+        # --init-dir wins: the .gitignore lands beside the run_config it protects.
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_git4_")).resolve()
+        custom = target / "custom"
+        code, _, _ = _run("--target", str(target), "--format", "opencode",
+                          "--init-dir", str(custom))
+        self.assertEqual(code, 0)
+        self.assertTrue((custom / ".gitignore").is_file())
+        self.assertFalse((target / ".mgh-init" / ".gitignore").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

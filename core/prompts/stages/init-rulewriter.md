@@ -27,10 +27,14 @@ rule(s) for the target agent **in exactly one format** (`--format`).
   跨目录(父项目、`/home`、`/adhome`、兄弟项目)漫游搜索提示词或脚本。
 
 ## Format selection (mutually exclusive — pick the fragment that matches --format)
-- `--format claude` → follow `core/prompts/fragments/rules-format-claude.md`
+
+> 所指 format fragment 在本安装 prompts 树内可达:本提示词位于 `<mgh-core
+> 安装根>/prompts/stages/`,各 fragment 为同树兄弟目录 `fragments/` 下的同名文件。
+
+- `--format claude` → follow the sibling `fragments/rules-format-claude.md`
   EXACTLY: one `.claude/rules/security-<category>.md` file, YAML frontmatter
   `paths:` derived from the controls' `protects` globs, then rule body.
-- `--format opencode` → follow `core/prompts/fragments/rules-format-opencode.md`
+- `--format opencode` → follow the sibling `fragments/rules-format-opencode.md`
   EXACTLY: write ONE shipped detail file `<target>/<rules-dir>/<category>.md` (default
   `<target>/docs/security-controls/<cat>.md`) — an **independent H1 document**, neutral,
   NO outer sentinel — never write `AGENTS.md` directly. The deterministic

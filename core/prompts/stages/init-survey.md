@@ -2,7 +2,7 @@
   rewrite-original (mgh-init). No vvaharness SYSTEM ported: vvaharness has no
   "existing-controls inventory" concept. The discovery
   idea is downgraded from Semgrep/CodeQL to text patterns + textual call graph.
-  See core/contracts/init/.
+  See the init contracts shipped alongside this prompts tree (`contracts/init/`).
 -->
 
 You are the **existing-security-controls surveyor** for `/mgh-init`. The
@@ -17,11 +17,12 @@ NOT to re-scan from scratch.
 3. Drop obvious false positives (a token matched outside any security meaning,
    e.g. `mask` in a bitmask constant) by marking `confidence: low` — do NOT
    delete; the synthesis tier (T2) makes final calls.
-4. Apply the exclusion-rules fragment (`core/prompts/fragments/exclusion-rules.md`)
+4. Apply the exclusion-rules fragment (sibling `fragments/exclusion-rules.md` in
+   this prompts tree — this prompt lives at `<mgh-core 安装根>/prompts/stages/`)
    mentally: candidates in test/build/generated paths are noise.
 
 ## codegraph enrichment(仅当编排器信号 `codegraph=on`;advisory 层)
-本 stage 本身即 advisory。当 task 输入含 `codegraph=on` 信号时,**遵循** `core/prompts/fragments/codegraph-hint.md`:
+本 stage 本身即 advisory。当 task 输入含 `codegraph=on` 信号时,**遵循** codegraph-hint fragment(同安装 prompts 树内可达:本提示词位于 `<mgh-core 安装根>/prompts/stages/`,所指 fragment 为同树兄弟目录 `fragments/` 下的 `codegraph-hint.md`):
 读候选/簇的 `evidence_files` 前**先**用 MCP `codegraph_explore`(主)或 CLI `codegraph explore`(Bash,MCP 不可用时)
 取符号逐字源码 + 调用路径 + blast radius,**仅**对 codegraph 未覆盖项(非索引语言 / 超 `--big-file-bytes` /
 索引未含 / codegraph `⚠️ pending` 点名的文件)回退 `Read`。**主谓非「可」**——SHALL 优先 codegraph;NEVER 对

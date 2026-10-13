@@ -15,13 +15,12 @@
 | 1 | `fix-mgh-init-resume-state-machine` | ✅ 已 apply(2ae05fb)+ 归档(15f72b2),VERSION 0.1.68 |
 | 2 | `fix-mgh-guard-enforcement-integrity` | ✅ 已 apply(37a9b9b)+ 归档(4b35700),VERSION 0.1.69 |
 | 3 | `fix-mgh-fanout-dispatcher-hygiene` | ✅ 已 apply + 归档(1557e4d,archive/2026-10-13-fix-mgh-fanout-dispatcher-hygiene),VERSION 0.1.70;specs 5 MODIFIED 已回写主规格 fanout-dispatch 并随该提交推送 |
-| 4-7 | 见第四节 | 未 propose |
+| 4 | `fix-mgh-init-distribution-links` | ✅ 已 apply(VERSION 0.1.71),归档见本行更新时的会话;拍板项 A/B 状态见三.14 |
+| 5-7 | 见第四节 | 未 propose |
 
-**下一步**:指挥部会话 propose 批次 4(`fix-mgh-init-distribution-links`,规划见四;动笔前
-重新核实 HEAD,见三.4)。批次 3 实施裁决已固化在该 change 的 design.md + 归档 tasks.md
-(冷却 gate 单点收敛/杀失败=幸存者拥有单元 + `_breaker_observe` 增 stuck_pending 操作数/
-marker 守卫单点两入口同判/kill-stale argv[0] token 锚定〔引号 span 优先,含空格路径夹具已改
-引号形〕/PWD 镜像姊妹形态/`_safe_name` 别名归一/`_run_unit` 返回 5→6 元组新增 `kill_ok`)。
+**下一步**:指挥部会话处理批次 4 的两个拍板项回执(三.14:A 需维护者参与一次 opencode live
+验证;B 是第 10 类基线 186 行的全家族扫尾范围二选一),然后 propose 批次 5(`fix-mgh-init-
+enumeration-caliber`,规划见四;动笔前重新核实 HEAD,见三.4;runner 新形态基线见三.13)。
 
 ## 二、批次 2 摘要(apply 前必读)
 
@@ -91,6 +90,30 @@ marker 守卫单点两入口同判/kill-stale argv[0] token 锚定〔引号 span
     `repo` 参数且返回 bool;`_safe_name` = `init_tier.safe_unit_filename` 别名;kill-stale
     的 `_classify_targets` 走 `_cmdline_exe_token`(引号 span 优先)。批次 5 动 TIERS/
     转发面时以这些形态为基线,NEVER 按旧记忆改。
+14. **批次 4 落账与两个拍板项回执(VERSION 0.1.71)**:分发死链/披露/对账/gitignore/install
+    卫生全量落地,先红后绿,定向面 + install 三面实机冒烟(opencode/claude/dsh,零
+    `__pycache__` 落标)全绿。**落地增量情报**:(a) 第 10 类死链实测比 propose 多 3 处命中
+    (init-survey 头注注释 `core/contracts/init/`、sra-clarify/sra-augment 的 security-dimensions
+    引用),同形态并入 init 切片修掉——init 切片以外的存量命中以
+    `tools/purity_allowlist.txt` 钉基线(**186 行**,propose 估 209 含 init 切片;lint 自动
+    加载、基线外新增即红、陈旧钉扎与计数上限由 `test_distributed_md_purity` 检出);
+    (b) claude 面 `init-scout-audit.md` 的 `tools:` 白名单同样否定 stage 授权(缺 Bash 与
+    Write,与 opencode `bash: deny` 同病不同方言),已按 stage 授权补齐——M8 的冲突面
+    实为双面而非单面;(c) dsh SKILL.md 派发披露段原含「本 change 未建具名派发实例」
+    dev-meta 措辞(变更夹名族,纯净性 lint 的第 4 类只匹配 kebab 全名故未报),已随 H9
+    改述移除,后续改披露段时勿回填;(d) `write_runconfig.py` 新增 `--check`(run_config
+    缺失 exit 2、sentinel/gitignore 缺失 warn),批次 6 若做该脚本原子写加固时在同一个
+    `--check` 面上扩展。
+    **拍板项 A(不阻塞,待维护者参与)**:opencode `edit: deny` ×22 的 live 验证——真机
+    opencode 会话对 `init-induct-fanout`(T1 波次主力)跑单单元,观察其 Write 是否被拒;
+    被拒 → 按 `init-rulewriter`(`edit: allow` 先例)批量放开 22 面(双分支方案全文见该
+    change 归档 design D8);未被拒 → 保持钉扎,记录「opencode 官方文档对 edit 键覆盖面
+    断言失实」于本情报区。
+    **拍板项 B(范围决策,待维护者选)**:第 10 类基线 186 行(约 30 文件,横跨六命令
+    三面壳 + 契约)的全家族扫尾:(b1) 独立小批机械改写(推荐——与本批同修法:契约引用改
+    安装布局路径、stage/fragment 引用改兄弟相对表述;各命令壳三面镜像须同步核对;零行为
+    风险);(b2) 并入批次 7 顺带扫(批次 7 体量已大,209→186 行机械改写会稀释其评审密度)。
+    两案均须同步把 `tools/purity_allowlist.txt` 对应条目删净(基线只减不增)。
 
 ## 四、剩余批次自包含规划(propose 时直接取用)
 

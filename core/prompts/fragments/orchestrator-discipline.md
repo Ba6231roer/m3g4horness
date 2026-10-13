@@ -1,7 +1,7 @@
 <!--
   Host-agnostic orchestrator discipline — the substrate shared across every mgh-*
   command shell that drives a deterministic-script + subagent fan-out pipeline
-  (mgh-init today; mgh-ut-init / mgh-ut to come). Consumed via
+  (mgh-init / mgh-ut-init today; mgh-blst to come). Consumed via
   `REQUIRED SUB-SKILL: Use orchestrator-discipline` from each shell. The shell keeps
   its OWN stage flow, exact script names, exact product names, run-domain sentinel,
   and boundary disclosures; this fragment holds ONLY the discipline that is identical

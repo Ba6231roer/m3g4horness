@@ -144,8 +144,12 @@ CLI contract (`--help` is the contract surface, R5.1):
                    enumeration script, template, placeholder set, and fanout
                    agent.
   --checkpoints     tier checkpoint dir (markers live here; forwarded).
+                   REQUIRED for dispatch; OPTIONAL for --kill-stale recovery
+                   (scan hint only).
   --inputs-dir      per-unit input dir (forwarded as --materialize; audit
-                   copies `<unit>.task.md` land here too).
+                   copies `<unit>.task.md` land here too). REQUIRED for
+                   dispatch; OPTIONAL for --kill-stale recovery (scan hint
+                   only).
   --host            claude|opencode|dsh explicit; default: opencode in PATH,
                    else claude in PATH, else dsh in PATH, else exit 2 + recipe.
   --wave            in-flight subprocess cap (default 5) — a slot-backfill
@@ -244,10 +248,22 @@ CLI contract (`--help` is the contract surface, R5.1):
                     children keep burning tokens". Mismatched/dead PIDs are
                     NEVER killed (PID-reuse guard: the cmdline must match —
                     a reused PID is only a stale record, the liveness file is
-                    just removed). Needed after a HARD kill only: units lead
-                    their own session, so an interactive Ctrl-C no longer
-                    reaches them through the tty, and the dispatcher's exit
-                    path tree-kills whatever is still registered before
+                    just removed). Process cmdline probes try classic `wmic`
+                    first and fall back to the PowerShell CIM query (wmic is
+                    removed on Windows 11 24H2+); when a PID is alive but
+                    EVERY probe is unavailable the command fails loud (exit 2,
+                    stderr recipe) and NO liveness file is removed —
+                    undecidable orphan ownership preserves the evidence, never
+                    "zero kills + destroy evidence + fake success". The scan
+                    root anchors on the tier plan artifact's run dir (the same
+                    plan-path re-anchoring the dispatch side uses: sdr's
+                    directory-shaped --repo and t2's --init-dir resolve to the
+                    run dir, not its parent), falling back to the
+                    checkpoints/inputs-dir neighbourhoods; both artifact flags
+                    are OPTIONAL in this mode. Needed after a HARD kill only:
+                    units lead their own session, so an interactive Ctrl-C no
+                    longer reaches them through the tty, and the dispatcher's
+                    exit path tree-kills whatever is still registered before
                     deregistering. DESTRUCTIVE: a real kill REQUIRES a prior
                     `--dry-run` review — invoking `--kill-stale` without
                     `--dry-run` when targets are detected exits 2 + recipe
@@ -441,8 +457,19 @@ DEFAULT_HB_INTERVAL_S = 60
 DEFAULT_STALL_WAVES = 2
 # Per-stream run.log tail cap (chars): bounded evidence, never unbounded
 # capture (stdout of an LLM subagent can be huge; the tail answers "what was
-# it doing when it died", which is the only diagnostic question).
 _TAIL_CAP = 8192
+
+# Active per-unit output sinks (uid -> (out_sink, err_sink)): `_dispatch`
+# registers the pair BEFORE calling `_run_unit`, which claims (pops) it —
+# the reader threads then roll the dispatcher-registered dicts and the
+# periodic in-flight heartbeat reads live last-output stamps (design D4:
+# idle = seconds since the child's REAL last byte, never since dispatch).
+# Module-level because `_run_unit`'s call signature is a frozen 9-arg
+# surface (fixed-arity direct callers and test fakes depend on it); the
+# register→claim pair is same-thread sequential in the dispatch path (no
+# lock needed), uids are unique among in-flight units, and `_dispatch`
+# clears any unclaimed entry defensively after the call.
+_UNIT_SINKS: dict = {}
 
 # Context-overflow signature match (P2 diagnosis, ADDITIVE ONLY — never
 # changes any unit's success/failure outcome): a crashed unit's stderr tail is
@@ -577,7 +604,7 @@ TIERS = {
             + (["--budget", str(a.budget)] if a.budget is not None else [])
             + ["--materialize", a.inputs_dir]
             + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
-        "required_args": ("init_dir", "inputs_dir"),
+        "required_args": ("init_dir", "checkpoints", "inputs_dir"),
         # plan_arg attr whose dir = init-dir; the main() special case below
         # re-anchors plan_path onto <init-dir>/run_config.json (D5) so the
         # sidecar + liveness home (plan_path.parent) = <init-dir>.
@@ -609,7 +636,7 @@ TIERS = {
             + (["--budget", str(a.budget)] if a.budget is not None else [])
             + ["--materialize", a.inputs_dir]
             + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
-        "required_args": ("init_dir", "inputs_dir"),
+        "required_args": ("init_dir", "checkpoints", "inputs_dir"),
         "plan_arg": "init_dir",
         "template_rel": Path("prompts") / "fragments" / "fanout" / "scout-merge-task.md",
         "path_fields": _T2_PATH_FIELDS,
@@ -1017,6 +1044,12 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     for THIS attempt (the caller snapshots it at dispatch, so a mid-run
     widening applies to units dispatched afterwards) — 0 means the criterion
     is disabled and the silence branch never fires.
+    Output sinks: the dispatcher registers the unit's active sinks in
+    `_UNIT_SINKS` (uid-keyed) before calling this; the reader threads then
+    roll THOSE dicts, so the dispatcher's periodic heartbeat reads live
+    last-output stamps (idle = seconds since the child's real last byte,
+    not since dispatch — design D4). Unregistered uid (direct / test
+    callers) → private sinks, behavior unchanged.
 
     Task delivery is host-shaped: opencode/claude get the task piped to stdin;
     dsh gets it as child env `MGH_TASK_TEXT` (headless has no stdin task
@@ -1052,9 +1085,14 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
         except Exception:
             pass
     t_start = time.monotonic()
-    lock = threading.Lock()
-    out_sink = {"ts": t_start, "tail": "", "lock": lock}
-    err_sink = {"ts": t_start, "tail": "", "lock": lock}
+    pair = _UNIT_SINKS.pop(uid, None)
+    if pair is not None:
+        out_sink, err_sink = pair          # dispatcher-registered active sinks
+    else:
+        lock = threading.Lock()
+        out_sink = {"ts": t_start, "tail": "", "lock": lock}
+        err_sink = {"ts": t_start, "tail": "", "lock": lock}
+    lock = out_sink["lock"]
     readers = [
         threading.Thread(target=_tail_stream, args=(proc.stdout, out_sink),
                          daemon=True),
@@ -1245,6 +1283,21 @@ def _write_sidecar(init_dir: Path, tier: str, payload: dict) -> None:
         _eprint(f"warn: fanout_progress.{tier}.json write failed (non-fatal): {e}")
 
 
+def _liveness_body(tier: str, host: str) -> dict:
+    """The liveness body dict, single source: the initial write AND the
+    read-back rebuild in main() must stay shape-identical (the dispatcher
+    reuses this dict across children[] refreshes, so started_ts/cmdline
+    stability rides it, not the file)."""
+    return {
+        "pid": os.getpid(),
+        "started_ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "tier": tier,
+        "host": host,
+        "cmdline": list(sys.argv),
+        "children": [],
+    }
+
+
 def _write_liveness(init_dir: Path, tier: str, host: str) -> Path:
     """Atomically write the liveness file `<init-dir>/fanout_runner.<tier>.pid`
     (orphan signal, NOT a lock — a same-run-dir second runner is a user's
@@ -1254,15 +1307,7 @@ def _write_liveness(init_dir: Path, tier: str, host: str) -> Path:
     (same shape as _write_sidecar). Write failure is a stderr warning only —
     it must never break the dispatch loop."""
     target = init_dir / f"fanout_runner.{tier}.pid"
-    body = {
-        "pid": os.getpid(),
-        "started_ts": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "tier": tier,
-        "host": host,
-        "cmdline": list(sys.argv),
-        "children": [],
-    }
-    _atomic_write_json(target, body)
+    _atomic_write_json(target, _liveness_body(tier, host))
     return target
 
 
@@ -1360,12 +1405,36 @@ def _pid_alive(pid: int) -> bool:
     return Path(f"/proc/{pid}").exists()
 
 
-def _pid_cmdline(pid: int) -> str:
-    """Best-effort full cmdline of a PID ("" on any failure / unsupported
-    platform). Windows: `wmic process where processid=<pid> get commandline`
-    (tasklist carries only the image name — not enough to distinguish the
-    runner from another python process); POSIX: /proc/<pid>/cmdline (NUL-
-    separated)."""
+def _pid_cmdline_cim(pid: int) -> str | None:
+    """PowerShell CIM cmdline probe — the fallback for machines where the
+    classic `wmic` tool no longer exists (removed on Windows 11 24H2+; the
+    wmic-only probe silently disabled the whole kill-stale path there while
+    orphans kept burning tokens). PowerShell is a Windows core component:
+    zero added dependency. Returns the command line ("" = probed fine, none
+    reported) or None when the PROBE ITSELF is unusable (powershell missing,
+    the CIM query failed, or it timed out — the caller fail-louds on None)."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}')"
+             f".CommandLine"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip()
+
+
+def _pid_cmdline(pid: int) -> str | None:
+    """Full cmdline of a PID. None = the probe is UNAVAILABLE on this machine
+    (every probe path failed — the caller must fail loud instead of guessing
+    orphan ownership); "" = probed fine but no cmdline retrievable (the
+    process died between the liveness and cmdline probes). Windows: classic
+    `wmic` first, the PowerShell CIM probe on probe-tool failure (wmic removed
+    on Win11 24H2+); POSIX: /proc/<pid>/cmdline (NUL-separated), best-effort
+    "" on failure (H5 is a Windows-shaped defect)."""
     if os.name == "nt":
         try:
             r = subprocess.run(
@@ -1374,7 +1443,7 @@ def _pid_cmdline(pid: int) -> str:
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=30)
         except (OSError, subprocess.TimeoutExpired):
-            return ""
+            return _pid_cmdline_cim(pid)
         for ln in (r.stdout or "").splitlines():
             ln = ln.strip()
             if ln.lower().startswith("commandline="):
@@ -1434,8 +1503,12 @@ def _stale_liveness_files(init_dirs) -> list:
 
 def _inspect_liveness(pid_file: Path) -> dict | None:
     """Parse a liveness file -> {body, runner_alive, runner_matches,
-    live_children:[{pid,unit,tier}]}. Unparsable/missing -> None (the caller
-    then only removes the residual file, never kills)."""
+    live_children:[{pid,unit,tier}], probe_unavailable}. Unparsable/missing ->
+    None (the caller then only removes the residual file, never kills).
+    probe_unavailable=True: a live PID's cmdline could not be probed by ANY
+    available probe — orphan ownership is UNDECIDABLE; the caller fail-louds
+    and preserves the evidence instead of guessing (never the silent
+    "zero kills + destroy evidence + fake success" path)."""
     try:
         body = json.loads(pid_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1445,20 +1518,28 @@ def _inspect_liveness(pid_file: Path) -> dict | None:
     pid = body.get("pid")
     runner_alive = isinstance(pid, int) and _pid_alive(pid)
     runner_matches = False
+    probe_unavailable = False
     if runner_alive:
         cl = _pid_cmdline(pid)
-        runner_matches = _RUNNER_MARK in cl
+        if cl is None:
+            probe_unavailable = True
+        else:
+            runner_matches = _RUNNER_MARK in cl
     live_children = []
     for ch in body.get("children") or []:
         if not isinstance(ch, dict):
             continue
         cpid = ch.get("pid")
         if isinstance(cpid, int) and _pid_alive(cpid):
+            ccl = _pid_cmdline(cpid)
+            if ccl is None:
+                probe_unavailable = True
+                continue
             live_children.append({"pid": cpid, "unit": ch.get("unit"),
-                                  "tier": ch.get("tier"),
-                                  "cl": _pid_cmdline(cpid)})
+                                  "tier": ch.get("tier"), "cl": ccl})
     return {"body": body, "runner_alive": runner_alive,
-            "runner_matches": runner_matches, "live_children": live_children}
+            "runner_matches": runner_matches, "live_children": live_children,
+            "probe_unavailable": probe_unavailable}
 
 
 def _classify_targets(inspected: list) -> list:
@@ -1508,9 +1589,31 @@ def _kill_stale(init_dir: Path, dry_run: bool) -> tuple:
     parent + inputs-dir parent in the standard <init-dir>/ tier-subdir layout
     they coincide; a flat caller-provided layout is covered by scanning both)."""
     init_dirs = init_dir if isinstance(init_dir, (list, tuple)) else [init_dir]
+    if not init_dirs:
+        # No scan root derivable (kill-stale with zero artifact flags): an
+        # honest empty result — there is nothing recorded anywhere to scan.
+        return {"kill_stale": {"killed": [], "removed": [], "none": True}}, 0
     pid_files = _stale_liveness_files(init_dirs)
     inspected = [i for i in (_inspect_liveness(p) for p in pid_files)
                  if i is not None]
+    if any(i.get("probe_unavailable") for i in inspected):
+        # Undecidable orphan ownership: keep EVERY piece of evidence, kill
+        # nothing, and fail loud — the silent "zero kills + delete the
+        # liveness files + exit 0" path is exactly the failure shape this
+        # guard exists to close (wmic-less machines used to hit it every
+        # time; the CIM fallback covers them, and THIS covers the rest).
+        _eprint("error: kill-stale cannot decide orphan ownership — a live "
+                "PID's command line is unprovable on this machine (the "
+                "classic wmic probe is unavailable AND the PowerShell CIM "
+                "probe failed). NOTHING was killed and NO liveness file was "
+                "removed: the evidence stays on disk. Recipe: probe the PIDs "
+                "by hand (`powershell -NoProfile -Command \"Get-CimInstance "
+                "Win32_Process -Filter 'ProcessId=<pid>' | "
+                "Select-Object ProcessId,CommandLine\"`), kill confirmed "
+                "orphans with the host shell, and only then delete the "
+                "`fanout_runner.<tier>.pid` files.")
+        return {"kill_stale": {"killed": [], "removed": [],
+                               "none": False}}, 2
     targets = _classify_targets(inspected)
     marker_dir = init_dirs[0]
     marker = marker_dir / _REVIEW_MARKER
@@ -1625,12 +1728,16 @@ def main() -> int:
                     help="branch ref (sdr tier; default: current branch, resolved by "
                          "diff_group; forwarded verbatim)")
     # shared
-    ap.add_argument("--checkpoints", required=True,
+    ap.add_argument("--checkpoints", default=None,
                     help="tier checkpoint dir (markers; forwarded to the tier's "
-                         "list script)")
-    ap.add_argument("--inputs-dir", required=True,
+                         "list script). REQUIRED for dispatch; OPTIONAL for "
+                         "--kill-stale recovery (scan hint only — the run dir is "
+                         "then anchored by the tier's plan artifact, e.g. "
+                         "--scout-plan/--init-dir/--repo)")
+    ap.add_argument("--inputs-dir", default=None,
                     help="per-unit input dir (forwarded as --materialize; audit "
-                         "<unit>.task.md copies land here)")
+                         "<unit>.task.md copies land here). REQUIRED for dispatch; "
+                         "OPTIONAL for --kill-stale recovery (scan hint only)")
     ap.add_argument("--host", choices=["claude", "opencode", "dsh"],
                     help="explicit host CLI; default: opencode in PATH, else claude, "
                          "else dsh, else exit 2 + manual-dispatch fallback recipe")
@@ -1876,23 +1983,54 @@ def main() -> int:
 
     tier = TIERS[args.tier]
 
+    # Plan-path re-anchoring — ONE anchor shared by the dispatch path AND the
+    # kill-stale scan (the liveness/sidecar home = plan_path.parent on both
+    # sides). Every input is None-tolerant because kill-stale recovery runs
+    # in exactly the broken states where artifact flags may be omitted:
+    # whatever is present anchors, what is missing stays None.
+    plan_raw = getattr(args, tier["plan_arg"], None)
+    checkpoints = Path(args.checkpoints) if args.checkpoints else None
+    inputs_dir = Path(args.inputs_dir) if args.inputs_dir else None
+    plan_path = Path(plan_raw) if plan_raw else None
+    # sdr: plan_arg = repo (a DIRECTORY anchor); the actual plan artifact is the run dir's
+    # grouping.json (<checkpoints>/../grouping.json). liveness/sidecar home (plan_path.parent)
+    # = the run dir — same <init-dir>/ neighbor semantics as the init tiers.
+    if plan_path is not None and tier["list_script"] == "diff_group.py":
+        anchor = checkpoints.parent if checkpoints is not None else plan_path
+        plan_path = (anchor / "grouping.json").resolve()
+    # t2/scout-merge: plan_arg = init_dir (a DIRECTORY anchor); the dispatcher's plan artifact is
+    # <init-dir>/run_config.json (design D5) so the sidecar/liveness home (plan_path.parent)
+    # = <init-dir> — same neighbor semantics as the other init tiers. run_config.json is
+    # written by write_runconfig at step 0, so it always exists under a live run.
+    if plan_path is not None and tier["list_script"] == "plan_aggregate.py":
+        plan_path = (plan_path / "run_config.json").resolve()
+
     # --kill-stale recovery mode: NEVER requires the tier plan artifacts (it
-    # runs in exactly the broken-state contexts where they may be missing) —
-    # only --checkpoints (+ --inputs-dir by argparse). Tier-agnostic by
-    # construction: the liveness scan is a `fanout_runner.*.pid` glob.
+    # runs in exactly the broken-state contexts where they may be missing).
+    # Scan root = plan_path.parent — the run dir where the dispatcher actually
+    # writes the liveness file (the naive "parent of whatever parameter shape
+    # came in" inference scanned the repo parent / repo root for sdr's
+    # directory-shaped --repo and reported none:true while the evidence sat
+    # in the run dir). Without a plan artifact, fall back to the
+    # checkpoints/inputs-dir neighbourhoods (standard <init-dir>/<sub>/
+    # layouts: the parent's parent and parent). Tier-agnostic by
+    # construction: the scan is a `fanout_runner.*.pid` glob.
     if args.kill_stale:
-        plan_flag = getattr(args, tier["plan_arg"], None)
-        if plan_flag:
-            init_dirs = [Path(plan_flag).parent]
+        if plan_path is not None:
+            init_dirs = [plan_path.parent]
         else:
-            # candidate run dirs: checkpoints' grandparent + inputs-dir's
-            # grandparent (they coincide in the standard <init-dir>/<sub>/
-            # layout; both scanned so a flat layout still resolves)
-            cps, ips = Path(args.checkpoints).resolve(), Path(args.inputs_dir).resolve()
             init_dirs = []
-            for p in (cps.parent.parent, ips.parent.parent, cps.parent, ips.parent):
-                if p not in init_dirs:
-                    init_dirs.append(p)
+            for p in (checkpoints, inputs_dir):
+                if p is None:
+                    continue
+                rp = p.resolve()
+                for cand in (rp.parent.parent, rp.parent):
+                    if cand not in init_dirs:
+                        init_dirs.append(cand)
+        if not init_dirs:
+            _eprint("hint: --kill-stale without any artifact flag has no run "
+                    "dir to anchor the scan (pass the tier's plan artifact or "
+                    "--checkpoints to target the run dir); nothing scanned")
         result, code = _kill_stale(init_dirs, args.dry_run)
         print(json.dumps(result, ensure_ascii=False))
         return code
@@ -1964,20 +2102,6 @@ def main() -> int:
                 f"{args.stall_timeout_s}s apply, no host hard-kill clamp above "
                 f"them")
 
-    plan_path = Path(getattr(args, tier["plan_arg"]))
-    checkpoints = Path(args.checkpoints)
-    inputs_dir = Path(args.inputs_dir)
-    # sdr: plan_arg = repo (a DIRECTORY anchor); the actual plan artifact is the run dir's
-    # grouping.json (<checkpoints>/../grouping.json). liveness/sidecar home (plan_path.parent)
-    # = the run dir — same <init-dir>/ neighbor semantics as the init tiers.
-    if tier["list_script"] == "diff_group.py":
-        plan_path = (checkpoints.parent / "grouping.json").resolve()
-    # t2: plan_arg = init_dir (a DIRECTORY anchor); the dispatcher's plan artifact is
-    # <init-dir>/run_config.json (design D5) so the sidecar/liveness home (plan_path.parent)
-    # = <init-dir> — same neighbor semantics as the other init tiers. run_config.json is
-    # written by write_runconfig at step 0, so it always exists under a live run.
-    if tier["list_script"] == "plan_aggregate.py":
-        plan_path = (Path(args.init_dir) / "run_config.json").resolve()
     if not plan_path.is_file():
         _eprint(f"error: {tier['plan_arg'].replace('_', '-')} artifact not found: "
                 f"{plan_path}")
@@ -2188,7 +2312,11 @@ def main() -> int:
         if cost is None:
             cost = _cost_payload()
         done_n = int(snap_dict.get("done", done0))
-        failed_n = int(snap_dict.get("failed", failed0)) + len(set(failed_written))
+        # Same max-of-two-views as the exit summary (design D3): the snapshot
+        # and the write ledger count the same markers — summing double-counts
+        # whenever the snapshot is fresh.
+        failed_n = max(int(snap_dict.get("failed", failed0)),
+                       failed0 + len(set(failed_written)))
         pending_n = len(pending_now)
         avg = (sum(unit_durations) / len(unit_durations)) if unit_durations else 0.0
         return {
@@ -2233,7 +2361,14 @@ def main() -> int:
     # its `children` field) so the started_ts/cmdline stay stable across
     # refreshes.
     liveness_path = _write_liveness(plan_path.parent, args.tier, host)
-    liveness_body = json.loads(liveness_path.read_text(encoding="utf-8"))
+    try:
+        liveness_body = json.loads(liveness_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # L12: the write above already warned (non-fatal contract) — a failed
+        # write leaves nothing to read back (read-only run dir). Rebuild the
+        # same body in place so the run continues and children[] refreshes
+        # keep working; the file simply stays absent until a write succeeds.
+        liveness_body = _liveness_body(args.tier, host)
     children_now: list = []
     children_lock = threading.Lock()
     hb_state = {"done": done0}
@@ -2392,6 +2527,9 @@ def main() -> int:
         err_sink["lock"] = sink_lock
         with sinks_lock:
             sinks[uid] = (out_sink, err_sink, window)
+        # Hand the SAME dicts to _run_unit's reader threads (M2): from here
+        # the heartbeat's idle reads live last-output stamps.
+        _UNIT_SINKS[uid] = (out_sink, err_sink)
         _hb(t0, args.tier, seq, uid, "spawn", _hb_count(), total)
         spawn_t0 = time.monotonic()
         run_log = (Path(args.checkpoints) / args.tier /
@@ -2399,6 +2537,9 @@ def main() -> int:
         status, ack, detail, child_pid, was_stalled = _run_unit(
             host, cmd, task, repo, args.call_timeout_s,
             window, run_log, uid, _register_child(uid))
+        # Defensive clear (a faked/direct _run_unit that never claims leaves
+        # the entry behind; a real one already popped it).
+        _UNIT_SINKS.pop(uid, None)
         elapsed = time.monotonic() - spawn_t0
         unit_durations.append(elapsed)
         if was_stalled:
@@ -2493,6 +2634,14 @@ def main() -> int:
                 break  # cooldown: pause new dispatch; in-flight keep harvesting
             unit = _next_unit()
             if unit is None:
+                break
+            # Re-check AFTER the pop, BEFORE the submit (design D1): the
+            # truncation flag is set by worker threads when a crash's
+            # bookkeeping lands, so the loop-top check can go stale across
+            # the pop's marker stats. The popped unit is NOT put back — a
+            # truncation terminates the whole run, so it stays disk-marker
+            # pending for --resume exactly like its queue-mates behind it.
+            if _rate_limited():
                 break
             waves_run += 1
             inflight[pool.submit(_dispatch, unit, waves_run)] = unit
@@ -2682,11 +2831,13 @@ def main() -> int:
                 # markers are the truth, nothing is pending
                 pending_units = []
         done_now = int(snap.get("done", done0))
-        failed_now = int(snap.get("failed", failed0)) + len(failed_written)
-        # Reconcile: markers written this run may not be reflected in the last
-        # snapshot if the run bailed before re-listing.
-        if failed_written:
-            failed_now = max(failed_now, failed0 + len(set(failed_written)))
+        # Two views of the SAME fact (markers written this run): the disk
+        # re-list already counts them, and so does the in-run write ledger —
+        # take the MAX, never the sum (a full-failure re-list run used to
+        # report every failure twice; --retry-failed and the report gap
+        # disclosure consume this number).
+        failed_now = max(int(snap.get("failed", failed0)),
+                         failed0 + len(set(failed_written)))
         partial = bool(pending_units)
         # Cost visibility (design D4) computed ONCE and shared by the terminal
         # sidecar write and the stdout summary below, so the two agree by

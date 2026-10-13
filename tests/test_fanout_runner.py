@@ -2852,5 +2852,104 @@ class TestStdoutContractKeys(_FakeDispatchBase):
             self.assertIsInstance(data[k], int, k)
 
 
+class TestFailedCountSingleCount(_FakeDispatchBase):
+    """M1: a failure is counted ONCE. The disk re-list already includes the
+    .failed markers this run wrote, so adding the in-run write ledger on top
+    reported every failure twice (a full-failure run said 20 for 10 units);
+    the --retry-failed decision and the report gap disclosure eat this
+    number. Fix shape: max(disk snapshot, start + written), never the sum."""
+
+    N_UNITS = 3
+
+    def _failed_counting_stub(self):
+        """Marker-aware enumerator that counts .failed too (the shared
+        _disk_stub only derives done)."""
+        stub = self.tmp / "stub_failed_enum.py"
+        body = f"""
+import json, sys
+from pathlib import Path
+UNITS = json.loads({json.dumps(self.units)!r})
+failed = [u for u in UNITS if Path(u['failed_marker']).is_file()]
+pending = [u for u in UNITS if not (Path(u['done_marker']).is_file()
+                                    or Path(u['failed_marker']).is_file())]
+print(json.dumps({{'repo': {str(self.repo)!r}, 'total': len(UNITS),
+                   'done': len(UNITS) - len(pending) - len(failed),
+                   'failed': len(failed), 'pending': pending}}))
+"""
+        stub.write_text(body, encoding="utf-8")
+        return stub
+
+    def test_relisted_failures_counted_once_in_summary_and_sidecar(self):
+        # every unit dies on a failed ack -> marker written -> the drain
+        # re-list reports failed=3 on disk; the summary must say 3, not 6
+        stub = self._failed_counting_stub()
+        code, out, err = self._run_main(
+            lambda uid, nth: ("spawn-ok", "failed: boom"), stub=stub)
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["failed"], 3,
+                         "each failure counted once (pre-fix double count: 6)")
+        self.assertEqual(data["pending"], 0)
+        self.assertFalse(data["partial"])
+        # the sidecar derives from the same snapshot — same single count
+        sidecar = json.loads(
+            (self.init / "fanout_progress.scout.json").read_text(encoding="utf-8"))
+        self.assertEqual(sidecar["failed"], 3)
+        self.assertEqual(sidecar["state"], "exited-clean")
+
+
+class TestActiveSinkWiring(unittest.TestCase):
+    """M2: the dispatcher registers each unit's active output sinks in
+    _UNIT_SINKS and _run_unit CLAIMS them — its reader threads roll the
+    dispatcher-registered dicts, so the periodic in-flight heartbeat's `idle`
+    reads seconds since the child's REAL last byte. Pre-fix the heartbeat
+    read a dead dispatch-side copy (never written by any reader) and idle
+    always equalled time-since-dispatch, showing healthy units as
+    "suspected hung". Real child, no fakes."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_sinkwiring")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_sink_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        self.fr._UNIT_SINKS.clear()
+
+    def test_run_unit_claims_registered_sinks_and_rolls_them(self):
+        out_sink = {"ts": 0.0, "tail": "", "lock": threading.Lock()}
+        err_sink = {"ts": 0.0, "tail": "", "lock": threading.Lock()}
+        self.fr._UNIT_SINKS["u1"] = (out_sink, err_sink)
+        cmd = [sys.executable, "-c",
+               "import time\n"
+               "for i in range(6):\n"
+               "    print('tick', i, flush=True)\n"
+               "    time.sleep(0.2)"]
+        status, _, detail, _, _ = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u1.run.log", "u1")
+        self.assertEqual(status, "spawn-ok", detail)
+        self.assertNotIn("u1", self.fr._UNIT_SINKS, "claim = pop")
+        self.assertIn("tick", out_sink["tail"],
+                      "reader threads rolled the REGISTERED sink (pre-fix: "
+                      "they rolled private copies, tail stayed empty)")
+        self.assertGreater(out_sink["ts"], 0.0, "last-byte stamp advanced")
+        # the heartbeat's exact idle formula on the live sinks: the child
+        # emitted its last byte just before exiting -> idle ~0, far below any
+        # stall window (pre-fix the registered ts stayed 0.0 -> idle = now)
+        idle = max(0, int(time.monotonic() - max(out_sink["ts"],
+                                                 err_sink["ts"])))
+        self.assertLess(idle, 2)
+
+    def test_unregistered_uid_builds_private_sinks(self):
+        # direct/test callers (no registration) keep the old behavior
+        cmd = [sys.executable, "-c", "print('hello')"]
+        status, ack, detail, _, _ = self.fr._run_unit(
+            "claude", cmd, "", self.tmp, 60, 0, None, "u2")
+        self.assertEqual(status, "spawn-ok")
+        self.assertIsNone(ack, "non-ack stdout parses to None (unchanged)")
+        self.assertEqual(detail, "hello")
+        self.assertEqual(self.fr._UNIT_SINKS, {})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

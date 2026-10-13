@@ -228,6 +228,26 @@ print(json.dumps({{'repo': {str(self.env.repo)!r}, 'total': len(UNITS),
         FR._write_liveness(self.env.init, "t1", "opencode")
         self.assertEqual(len(FR._stale_liveness_files(self.env.init)), 2)
 
+    def test_liveness_write_failure_readback_rebuilds_not_crashes(self):
+        # L12: the write path already warns and continues (non-fatal
+        # contract); the immediate read-back of the nothing-written file used
+        # to raise FileNotFoundError and take the whole run down. The body is
+        # rebuilt in place instead and the run finishes cleanly.
+        lp = self.env.tmp / "pending.json"
+        lp.write_text(json.dumps({"repo": str(self.env.repo), "total": 0,
+                                  "done": 0, "failed": 0, "pending": []}),
+                      encoding="utf-8")
+        saved = FR._atomic_write_json
+        FR._atomic_write_json = lambda target, body: None  # every write "fails"
+        try:
+            code, out, err = self.env.main("--pending-file", str(lp))
+        finally:
+            FR._atomic_write_json = saved
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        summary = json.loads([ln for ln in out.splitlines() if ln.strip()][-1])
+        self.assertEqual(summary["runner"], "fanout_runner")
+
 
 def _patch_probe(case, alive_map, cmdline_map, killed):
     """Monkeypatch the OS boundary: alive_map/cmdline_map pid->bool/str;
@@ -392,6 +412,218 @@ class TestKillStale(unittest.TestCase):
         self.assertEqual(body["killed"], [])
         self.assertEqual(killed, [])
         self.assertEqual(body["removed"], [str(p)])
+
+
+class TestCmdlineProbeFallback(unittest.TestCase):
+    """H5: Windows cmdline probe availability — classic wmic first, PowerShell
+    CIM fallback, and fail-loud evidence preservation when EVERY probe is
+    unavailable. The wmic-less machine (Win11 24H2+) used to get the triple
+    silent failure on every call: zero kills + liveness evidence deleted +
+    exit 0 fake success."""
+
+    def setUp(self):
+        self.env = _Env()
+        self._saved = {n: getattr(FR, n)
+                       for n in ("_pid_alive", "_pid_cmdline", "_kill_tree",
+                                 "_pid_cmdline_cim")}
+        self._saved_run = FR.subprocess.run
+
+    def tearDown(self):
+        for n, fn in self._saved.items():
+            setattr(FR, n, fn)
+        FR.subprocess.run = self._saved_run
+        self.env.cleanup()
+
+    @staticmethod
+    def _cim_result(out, code=0):
+        class _R:
+            pass
+        r = _R()
+        r.returncode, r.stdout, r.stderr = code, out, ""
+        return r
+
+    def test_wmic_missing_falls_back_to_cim_probe(self):
+        # subprocess boundary: wmic raises FileNotFoundError (removed on
+        # Win11 24H2+), the PowerShell CIM probe answers
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            if argv[0] == "wmic":
+                raise FileNotFoundError("wmic")
+            return self._cim_result(
+                "C:\\DEV\\repo\\fanout_runner.py --tier scout\n")
+
+        FR.subprocess.run = fake_run
+        cl = FR._pid_cmdline(4242)
+        self.assertEqual(calls[0][0], "wmic", "classic probe tried first")
+        self.assertEqual(calls[1][0], "powershell", "CIM fallback second")
+        self.assertIn("Get-CimInstance", " ".join(calls[1]))
+        self.assertIn("fanout_runner.py", cl)
+
+    def test_cim_probe_failure_modes_return_none(self):
+        # None = the PROBE is unusable (caller must fail loud); "" (probed
+        # fine, nothing reported) is a different thing entirely
+        FR.subprocess.run = lambda argv, **kw: self._cim_result("", code=1)
+        self.assertIsNone(FR._pid_cmdline_cim(4242))
+
+        def _timeout(argv, **kw):
+            raise FR.subprocess.TimeoutExpired(argv, 30)
+        FR.subprocess.run = _timeout
+        self.assertIsNone(FR._pid_cmdline_cim(4242))
+
+        FR.subprocess.run = lambda argv, **kw: self._cim_result("  chrome.exe\n")
+        self.assertEqual(FR._pid_cmdline_cim(4242), "chrome.exe")
+
+    def test_wmic_missing_cim_fallback_classifies_runner_and_child(self):
+        # end-to-end orphan classification with wmic gone, BOTH forms: a live
+        # runner whose CIM cmdline names fanout_runner.py (form 1: the tree
+        # kill covers its children, so kind=runner only) and a dead runner
+        # whose recorded child's CIM cmdline names the host CLI (form 2:
+        # kind=child)
+        self.env.liveness(pid=4242)
+        self.env.liveness(tier="t1", pid=999, children=[
+            {"pid": 5001, "unit": "cl-1", "tier": "t1"}])
+        answers = {4242: "py fanout_runner.py --tier scout\n",
+                   5001: "C:\\Program Files\\nodejs\\opencode.cmd run\n"}
+
+        def fake_alive(pid):
+            return pid in (4242, 5001)
+
+        def fake_run(argv, **kw):
+            if argv[0] == "wmic":
+                raise FileNotFoundError("wmic")
+            pid = int(argv[-1].split("ProcessId=")[1].split("'")[0])
+            return self._cim_result(answers[pid])
+
+        FR._pid_alive = fake_alive
+        FR.subprocess.run = fake_run
+        code, out, err = self.env.main("--kill-stale", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            sorted((k["pid"], k["tier"], k["kind"])
+                   for k in json.loads(out)["kill_stale"]["killed"]),
+            [(4242, "scout", "runner"), (5001, "t1", "child")])
+
+    def test_probes_all_unavailable_fail_loud_preserve_evidence(self):
+        # a live PID whose cmdline NO probe can retrieve: exit 2, nothing
+        # killed, NOTHING removed — the evidence stays on disk for the human
+        self.env.liveness(pid=4242)
+        FR._pid_alive = lambda pid: pid == 4242
+        FR._pid_cmdline = lambda pid: None  # every probe unavailable
+        code, out, err = self.env.main("--kill-stale")
+        self.assertEqual(code, 2, "undecidable orphan ownership must fail loud")
+        body = json.loads(out)["kill_stale"]
+        self.assertEqual(body["killed"], [])
+        self.assertEqual(body["removed"], [])
+        self.assertFalse(body["none"])
+        self.assertTrue(self.env.liveness_path().exists(),
+                        "evidence preserved (never deleted on undecidable)")
+        self.assertIn("unprovable", err)
+        self.assertIn("Recipe", err)
+
+    def test_removed_non_empty_means_none_false(self):
+        # D2 附带更正: a stale record with nothing to kill still removes the
+        # file on the real pass — `removed` non-empty -> `none:false`
+        self.env.liveness(pid=999)
+        FR._pid_alive = lambda pid: False
+        code, out, _ = self.env.main("--kill-stale")
+        self.assertEqual(code, 0)
+        body = json.loads(out)["kill_stale"]
+        self.assertEqual(body["killed"], [])
+        self.assertEqual(body["removed"], [str(self.env.liveness_path())])
+        self.assertFalse(body["none"])
+
+
+class TestKillStaleScanRootAnchor(unittest.TestCase):
+    """M3/M5: the kill-stale scan anchors on the run dir via the SAME
+    plan-path re-anchoring the dispatch side uses (sdr's directory-shaped
+    --repo used to scan the repo PARENT and report none:true while the
+    evidence sat in the run dir; t2's --init-dir scanned its parent), and the
+    recovery recipes run without --inputs-dir/--checkpoints (M5: they used to
+    die in argparse)."""
+
+    def setUp(self):
+        self.env = _Env()
+        self._saved = {n: getattr(FR, n)
+                       for n in ("_pid_alive", "_pid_cmdline", "_kill_tree")}
+
+    def tearDown(self):
+        for n, fn in self._saved.items():
+            setattr(FR, n, fn)
+        self.env.cleanup()
+
+    def _argv_main(self, argv):
+        if "--cooldown-s" not in argv:
+            argv = argv + ["--cooldown-s", "0"]
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = FR.main()
+        except SystemExit as e:  # argparse exits surface here pre-fix
+            code = e.code if isinstance(e.code, int) else 1
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def test_sdr_run_dir_shape_detects_liveness(self):
+        # canonical sdr recovery call shape: --repo (DIRECTORY anchor) +
+        # --checkpoints <run-dir>/markers; the liveness file lives in the
+        # run dir next to grouping.json
+        run_dir = self.env.repo / ".mgh-sdr" / "runs" / "20261013-1200-main"
+        (run_dir / "markers").mkdir(parents=True, exist_ok=True)
+        (run_dir / "fanout_runner.sdr.pid").write_text(
+            json.dumps({"pid": 4242, "tier": "sdr", "children": []}),
+            encoding="utf-8")
+        FR._pid_alive = lambda pid: pid == 4242
+        FR._pid_cmdline = lambda pid: "py fanout_runner.py --tier sdr"
+        code, out, err = self._argv_main(
+            ["fanout_runner.py", "--kill-stale", "--dry-run", "--tier", "sdr",
+             "--repo", str(self.env.repo), "--base", "master", "--branch",
+             "main", "--checkpoints", str(run_dir / "markers")])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["kill_stale"]["killed"],
+                         [{"pid": 4242, "tier": "sdr", "kind": "runner"}],
+                         "run-dir liveness must be found (pre-fix scanned the "
+                         "repo parent -> none:true)")
+
+    def test_t2_init_dir_shape_anchors_init_dir(self):
+        run = self.env.init  # .mgh-init layout doubles as the t2 --init-dir
+        (run / "fanout_runner.t2.pid").write_text(
+            json.dumps({"pid": 4243, "tier": "t2", "children": []}),
+            encoding="utf-8")
+        FR._pid_alive = lambda pid: pid == 4243
+        FR._pid_cmdline = lambda pid: "py fanout_runner.py --tier t2"
+        code, out, err = self._argv_main(
+            ["fanout_runner.py", "--kill-stale", "--dry-run", "--tier", "t2",
+             "--init-dir", str(run)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["kill_stale"]["killed"],
+                         [{"pid": 4243, "tier": "t2", "kind": "runner"}])
+
+    def test_recovery_recipe_without_inputs_dir_runs(self):
+        # sanctioned recipe shape: `--kill-stale --checkpoints <dir>` with no
+        # --scout-plan and no --inputs-dir (pre-M5 argparse exited 2); a dead
+        # runner's residual needs no review and is removed
+        self.env.liveness(pid=999)
+        FR._pid_alive = lambda pid: False
+        code, out, err = self._argv_main(
+            ["fanout_runner.py", "--kill-stale",
+             "--checkpoints", str(self.env.init / "checkpoints" / "scout")])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["kill_stale"]["removed"],
+                         [str(self.env.liveness_path())])
+
+    def test_no_artifact_flags_at_all_still_runs(self):
+        # `--kill-stale --tier scout` alone: no anchor derivable -> honest
+        # empty scan, exit 0 (pre-M5 argparse exited 2)
+        code, out, err = self._argv_main(
+            ["fanout_runner.py", "--kill-stale", "--tier", "scout"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["kill_stale"],
+                         {"killed": [], "removed": [], "none": True})
+        self.assertIn("no run dir to anchor the scan", err)
 
 
 class TestHeartbeatAndStdoutContract(unittest.TestCase):

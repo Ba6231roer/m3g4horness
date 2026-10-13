@@ -16,6 +16,39 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — fanout_runner 派发器七缺陷收口(M4/H5/M1/M2/M3/M5/L12,2026-10-13 评审;六域共用基座) (0.1.65)
+
+- `core/scripts/fanout_runner.py` 单文件收口,先红后绿:**M4** 限流截断竞态——
+  补位循环 pop 之后、`pool.submit` 之前复查截断旗标,命中即丢弃本次提交(单元留
+  磁盘 marker 语义待 `--resume`),「取单元→提交」窗口不再越过已生效旗标;
+  `TestRateLimitStorm` 连跑 5 次全绿。**H5** `_pid_cmdline` Windows 分支改
+  「wmic 先试 + PowerShell CIM(`Get-CimInstance Win32_Process`,单次超时 + 确定
+  性解析)回退」——wmic 已于 Win11 24H2+ 移除,探测恒空串曾致 `--kill-stale`
+  永远零杀却照删证据文件、退出码 0 假成功;现 PID 存活但两种探测均不可用 →
+  fail-loud(退出码 2 + 手工探测 recipe)、不删任何 liveness 文件;
+  `removed` 非空 ⇒ `none:false` 对齐 spec。**M1** 退出摘要与 sidecar 的
+  `failed` 计数改 `max(磁盘快照, 起始 + 本 run 写入)`(双源相加曾把全败 10 单元
+  报成 20;`--retry-failed` 决策与报告缺口披露消费该字段)。**M2** 活跃输出 sink
+  经 `_UNIT_SINKS` 注册表接入 `_run_unit` reader 线程(`_run_unit` 9 参调用形
+  冻结不变,注册→claim 同线程顺序),心跳 `idle` 恢复「距子进程真实末字节的
+  秒数」承诺语义(此前读从未接线的死副本,持续输出的健康单元恒显示「疑似
+  卡死」);心跳行字段名与 stdout 契约零变化。**M3** plan-path 再锚定逻辑前移
+  到 kill-stale 分支之前、扫描根改 `plan_path.parent`(sdr 目录形 `--repo`/
+  t2 `--init-dir` 曾按朴素父目录推断扫到仓父目录/仓根报 `none:true`,而
+  liveness 实际在 run 目录);scout/t1/t3 文件形参数行为不变。**M5**
+  `--checkpoints/--inputs-dir` 改可选(默认 None;kill-stale 恢复模式下二者仅
+  是扫描提示),仓内全部恢复配方原样可跑(此前 `--inputs-dir` argparse 必填,
+  配方退出 2);非 kill-stale 路径缺参仍走闭集校验可操作报错(t2/scout-merge
+  `required_args` 补 `checkpoints`,派发行为与原必填逐字等价);零锚定 → 诚实
+  空结果 + stderr 提示。**L12** liveness 读回包 try/except,写失败(契约声明仅
+  警告)后读回失败就地重建 body,只读 run 目录不再整 run traceback。新增回归
+  13 条(test_fanout_stale +10:wmic 缺失 CIM 回退分类/CIM 失败模式/探测全不可用
+  证据保全/removed⇒none:false/sdr 与 t2 扫描根锚定/配方省参可跑/零锚定空转/
+  读回重建;test_fanout_runner +3:failed 单计(摘要+sidecar)/sink 注册表 claim
+  与滚动/未注册私有 sink);定向面全绿(fanout_runner 160 / fanout_stale 29 /
+  zero_deps / no_compile_warnings),contracts 459 flag / purity lint 过;
+  VERSION 0.1.65
+
 ### Fixed — /mgh-sdr 报告渲染器缺陷收口(C3/H1/H2/H3/M11/L7/L8,2026-10-13 评审) (0.1.64)
 
 - `core/scripts/render_sdr_report.py` 单文件收口,全部先红后绿:**C3** `_href_of`

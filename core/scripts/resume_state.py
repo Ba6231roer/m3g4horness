@@ -25,7 +25,16 @@ CLI contract (`--help` is the contract surface, R5.1):
              delete stale downstream t2/t3/t4 aggregate `.done` markers (scout enabled +
              incomplete → those markers were produced from regex-only input); combine
              with --dry-run to preview. Same marker set as the merge_scout fold-in cascade.
-  --dry-run  with --invalidate-stale: list the markers that would be removed, delete nothing.
+             PRECONDITION (same predicate as --check's stale-credential violation): scout
+             enabled AND incomplete — otherwise an honest no-op that removes ZERO files
+             and exits 0 (never deletes valid downstream credentials). Any unlink failure
+             → exit 2 fail-loud (stderr lists the failed paths). Mutually exclusive with
+             --check / --rearm-sentinel (combination = misuse exit 2).
+  --dry-run  with --invalidate-stale: list the markers that would be removed, delete
+             nothing. Alone (without --invalidate-stale) → misuse exit 2.
+  --rearm-sentinel
+             deterministically rewrite <init-dir>/.active from the persisted run_config
+             (target + rules_dir-derived out_roots); idempotent.
 
   Run-dir resolution priority: --init-dir > <target>/<--run-root> (default <target>/.mgh-init).
   Default --run-root .mgh-init is byte-equivalent to the prior hard-coded behavior.
@@ -47,31 +56,39 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   EMPTY structure (field恒存在, shape stable). `--check` (R5.9) does not cover this field.
   stage_flow_files = the CURRENT step's SINGLE per-step stage-flow fragment
   (<mgh-core>/prompts/fragments/init-stage/<step>.md, `Path.resolve()` absolute, Windows
-  native) for step ∈ discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge; EMPTY [] for
-  `not-started` (bootstrap is loaded by the shell's fresh-run recipe via fixed-path Read of
-  `init-stage/bootstrap.md`) and `done` (no further load). NON all-remaining (current step
-  only, never the not-started step / never the rest). Also a RESUME DERIVED value — NOT
-  persisted to any `<target>/.mgh-init/` file, `--check` does not cover it.
+  native) for step ∈ discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done; EMPTY []
+  for `not-started` (bootstrap is loaded by the shell's fresh-run recipe via fixed-path Read
+  of `init-stage/bootstrap.md`). `done` loads `init-stage/done.md` — the teardown discipline
+  (manifest finalization + fan-out failure disclosure + sentinel `.active` removal) is
+  reachable again after a long-run compaction via the shell's Read stage_flow_files[0]
+  recipe. NON all-remaining (current step only, never the not-started step / never the
+  rest). Also a RESUME DERIVED value — NOT persisted to any `<target>/.mgh-init/` file,
+  `--check` does not cover it.
   The orchestrator Reads stage_flow_files[0] to load ONLY the current step's discipline
   (non-co-residency; the file is NOT existence-checked here so an abnormal install surfaces
   naturally as a Read failure, not a silent skip).
 
 --invalidate-stale stdout (R5.3b):
   dry-run: {"invalidate_stale":{"dry_run":true,"markers":["<abs>",...]}}
-  real:    {"invalidate_stale":{"dry_run":false,"removed":["<abs>",...]}}
+  real:    {"invalidate_stale":{"dry_run":false,"removed":["<abs>",...],"failed":["<abs>",...]}}
+  (failed[] lists the markers a filesystem error prevented deleting — present and empty
+  on success, non-empty ⇒ exit 2. Precondition not met (scout disabled or complete) →
+  the same shapes with empty lists + stderr reason, exit 0, zero files touched.)
 
 --rearm-sentinel stdout (R5.3b; idempotent):
   {"rearm_sentinel":{"sentinel":"<abs .active>","domain":"mgh-init","target":"<abs>",
                      "out_roots":["<abs>",...]}}
 
-Sentinel existence check (--check, and advisory in the resolve path): a run in progress
-(run_config.json present, step != done) with <init-dir>/.active MISSING means the runtime
-guard is dormant for the whole run on hosts that do not inherit mid-session env (opencode)
-— scripts read-only / subtree confinement silently disabled. --check fails loud (exit 2)
-with a re-arm recipe; a done step without the sentinel is NOT a violation (the run has been
-torn down; the guard SHOULD be dormant). `--rearm-sentinel` deterministically rewrites the
-sentinel from the persisted run_config (target + rules_dir/out-derived out_roots) — the
-`/mgh-init --resume` first step MAY invoke it after compaction or a clean stop removed it.
+Sentinel lifecycle double closure (--check): a run in progress (run_config.json present,
+step != done) with <init-dir>/.active MISSING means the runtime guard is dormant for the
+whole run on hosts that do not inherit mid-session env (opencode) — scripts read-only /
+subtree confinement silently disabled. --check fails loud (exit 2) with a re-arm recipe.
+The INVERSE is also a violation: init_manifest.json present (run complete) with the
+sentinel STILL present keeps the guard armed and write-locks the target project's normal
+development sessions — exit 2 + removal recipe (`rm <init-dir>/.active`). `--rearm-sentinel`
+deterministically rewrites the sentinel from the persisted run_config (target +
+rules_dir/out-derived out_roots) — the `/mgh-init --resume` first step MAY invoke it after
+compaction or a clean stop removed it.
 
 stale_fanout (resolve-path stdout, additive field — base shape unchanged): scan of
 `<init-dir>/fanout_runner.*.pid` liveness files left by fanout_runner runs (one per
@@ -94,6 +111,21 @@ Count semantics (why `tiers.<tier>.done` can differ from the file count you see 
      `total - done - failed`. Identity NEVER from a record-body field or a
      filename stem (an overlong id's truncated stem ≠ its canonical id — the old
      glob+stem fallback permanently misjudged such finished units as pending).
+     The canonical id SETS are producer-side recomputations, shared with the
+     enumerators (never degraded local copies):
+       - t1 = list_clusters's canonical collector over the REAL candidates at
+         the SHARED DEFAULT unit budget — exactly the materializable unit set
+         (whole-cluster ids for fitting clusters; `::shard-<n>` shard ids ONLY
+         for oversize clusters). tiers.t1.total is the UNIT count (shards
+         included) and the t1 gate converges when every unit is terminal — the
+         prior degraded call (empty candidates, zero budget → whole ids only)
+         never counted shard markers and parked sharded runs at step=t1 forever
+         while the enumerator reported pending=0. A run with no shard has the
+         same totals as before (whole ids unchanged).
+       - t3 = list_rule_jobs's formula over the inventory categories × run
+         format (`<category>.<fmt>`); a marker matching no category is an
+         orphan (audit note), never a done count.
+       - scout = scout_plan.json batch ids (unchanged).
   2. `ls checkpoints/<tier>/` entry count = done markers + `.failed` markers +
      `<id>.json` record bodies (+ shard siblings) + orphan markers (disk markers
      whose encoded filename maps to no canonical unit id; listed as --check
@@ -104,7 +136,10 @@ entries = 472 done + `.failed` markers + record bodies — no data loss.
 
 step ∈ not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done. The blocking
 sequence is discover→scout→t1→t2→t3→assemble→t4→done; survey/resolve are optional/non-fatal
-(surfaced in notes[], never gate progress). Each fan-out tier (scout/t1/t3) is "complete
+(surfaced in notes[], never gate progress). `init_manifest.json` present → step=done
+SHORT-CIRCUITS every tier gate probe (the manifest IS the run's terminal credential; tier
+counts still report honestly but never pull a completed run back into an executing step).
+Each fan-out tier (scout/t1/t3) is "complete
 enough to proceed" when `done + failed >= total` (a `.failed` unit is terminal — confirmed
 failure, NOT retried on --resume, NOT blocking); discover/t2/t4 carry `failed: 0` (not
 applicable). Any non-zero `failed` is surfaced in `notes[]` (advisory; a rate > half the
@@ -113,9 +148,11 @@ absolute values reusing the same resolution list_*/describe_artifact emit (NEVER
 templated <target>). `run_config.json` missing/unparseable → exit 2 + stderr recipe (re-run
 /mgh-init --<flags>); NEVER silently guess the step graph.
 
-Exit codes (R5.3b): 0 ok · 1 init-dir missing/not a dir · 2 misuse / run_config missing /
---check self-consistency violation (incl. a unit carrying BOTH .done and .failed; incl. an
-in-progress run whose sentinel .active is missing — guard dormant).
+Exit codes (R5.3b): 0 ok · 1 init-dir missing/not a dir · 2 misuse (incl. flag
+combinations: --invalidate-stale with --check/--rearm-sentinel, or --dry-run alone) /
+run_config missing / --check self-consistency violation (incl. a unit carrying BOTH .done
+and .failed; incl. an in-progress run whose sentinel .active is missing; incl. a completed
+run whose sentinel .active still exists) / --invalidate-stale unlink failure.
 Read-only (except the explicit --invalidate-stale / --rearm-sentinel actions), idempotent,
 no TTY.
 """
@@ -138,9 +175,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # semantics agree by construction).
 from init_tier import (scout_complete, stale_marker_paths, forward_marker_paths,
                        forward_done_ids, forward_failed_ids, orphan_markers)  # noqa: E402
-# The canonical T1 unit-id set is a SHARED producer (list_clusters owns it; resume_state
-# imports — never a second copy, else count caliber and enumeration pending[] drift).
-from list_clusters import collect_canonical_ids  # noqa: E402
+# The canonical T1 unit-id set is a SHARED producer recomputation (list_clusters
+# owns it — real candidates + the shared default unit budget, EXACTLY the
+# materializable unit set; resume_state imports, never a second copy, else count
+# caliber and enumeration pending[] drift). The canonical T3 unit-id formula is
+# likewise list_rule_jobs's (inventory categories × run format).
+from list_clusters import canonical_unit_ids_for_run  # noqa: E402
+from list_rule_jobs import rule_unit_ids  # noqa: E402
 # Shared static per-step discipline table (single source of truth, D1): the
 # current step's gate shapes / path recipes / applicable NEVER subset, re-derived
 # after compaction so the "how to execute THIS step" survives head-summary loss.
@@ -409,22 +450,27 @@ def _stale_fanout(init_dir: Path) -> list:
 # host-specific code — the fragment set is mirrored by install.sh `cp -r core/`.
 _STAGE_FLOW_DIR = Path(__file__).resolve().parent.parent / "prompts" / "fragments" / "init-stage"
 # Step keys that map 1:1 to a per-step fragment file (single source of truth =
-# the runtime step enum). not-started (bootstrap) and done are excluded: bootstrap
-# is loaded by the shell's fresh-run recipe via fixed-path Read of
-# init-stage/bootstrap.md, done has no further load.
+# the runtime step enum). not-started is excluded: bootstrap is loaded by the
+# shell's fresh-run recipe via fixed-path Read of init-stage/bootstrap.md.
+# `done` IS in the set — its fragment carries the teardown discipline (manifest
+# finalization + fan-out failure disclosure + sentinel `.active` removal), so a
+# long-run compaction that resumes into the teardown state still loads it via
+# the shell's Read stage_flow_files[0] recipe (previously done was excluded and
+# that discipline was reachable only from a fresh run).
 _FRAGMENT_STEPS = frozenset({
     "discover", "survey", "scout", "resolve", "t1", "t2", "t3", "assemble",
-    "t4", "merge",
+    "t4", "merge", "done",
 })
 
 
 def _stage_flow_files(step: str) -> list:
     """Current step's single per-step fragment absolute path (Path.resolve()),
     or [] for not-started (bootstrap loaded by the shell's fresh-run recipe via
-    fixed-path Read of init-stage/bootstrap.md) / done (no further load). NEVER
-    all-remaining, NEVER the not-started step. The file is NOT existence-checked
-    (an abnormal install yields an absolute path the orchestrator's Read fails on
-    naturally, not a silent skip); stderr advisory is left to the caller."""
+    fixed-path Read of init-stage/bootstrap.md). done maps to init-stage/done.md
+    (teardown discipline load). NEVER all-remaining, NEVER the not-started step.
+    The file is NOT existence-checked (an abnormal install yields an absolute
+    path the orchestrator's Read fails on naturally, not a silent skip); stderr
+    advisory is left to the caller."""
     if step not in _FRAGMENT_STEPS:
         return []
     return [str((_STAGE_FLOW_DIR / f"{step}.md").resolve())]
@@ -466,6 +512,9 @@ def resolve(init_dir: Path):
                 f"merge partial inventories from {partials} (evidence-anchor merge) then STOP",
                 [Path(target)]),
             "notes": notes,
+            # field-always-present promise covers EVERY step branch, incl. this
+            # short-circuit (a consumer subscripting stdout must never KeyError).
+            "stale_fanout": _stale_fanout(init_dir),
             "discipline_reminders": get_discipline("merge"),
             "stage_flow_files": _stage_flow_files("merge"),
         }
@@ -495,30 +544,22 @@ def resolve(init_dir: Path):
         scout_failed_count = len(forward_failed_ids(scout_cp, scout_ids))
     scout_terminal_count = scout_done_count + scout_failed_count  # gates scout tier (D3)
 
-    clusters_total = 0
-    t1_ids: list = []
-    if clusters_p.is_file():
-        cl, err = _load_json(clusters_p)
-        if not err and isinstance(cl, dict) and isinstance(cl.get("clusters"), list):
-            clusters_total = len(cl["clusters"])
-            # SHARED canonical-id collector (whole clusters; cands empty → shard
-            # derivations need none here — shard markers are counted inside the
-            # same list_clusters caliber when their cluster's shards exist, and
-            # `total` counts CLUSTERS, matching the enumerator's total).
-            t1_ids = [c.get("cluster_id") for c in cl["clusters"]
-                      if isinstance(c, dict) and c.get("cluster_id")]
-    # t1 done/failed = forward marker-path computation over the SHARED canonical id
-    # set (whole clusters + `::shard-<n>` derivations via list_clusters's collector —
-    # an overlong id judged by its truncated-stem glob was the infinite-re-dispatch
-    # defect; the caliber is list_clusters's by import, not by copy).
-    if clusters_p.is_file():
-        cl, err = _load_json(clusters_p)
-        if not err and isinstance(cl, dict) and isinstance(cl.get("clusters"), list):
-            t1_ids = collect_canonical_ids(cl["clusters"], {}, 0, None)
+    # t1 done/failed = forward marker-path computation over the SHARED canonical
+    # unit-id set, recomputed via list_clusters's producer-side composite (real
+    # candidates + the shared default unit budget → EXACTLY the materializable
+    # unit set: whole-cluster ids for fitting clusters, `::shard-<n>` ids ONLY
+    # for oversize clusters). The prior degraded call (empty candidates, zero
+    # budget → whole ids only) never counted shard markers, so a sharded run
+    # parked at step=t1 forever while list_clusters reported pending=0 — the
+    # review's only Critical. tiers.t1.total is the UNIT count (shards included);
+    # a run with no shards keeps its previous totals (whole ids unchanged).
+    t1_ids: list = canonical_unit_ids_for_run(clusters_p) if clusters_p.is_file() else []
+    t1_total = len(t1_ids)
     t1_done_count = len(forward_done_ids(t1_cp, t1_ids))
     t1_failed_count = len(forward_failed_ids(t1_cp, t1_ids))
 
     t3_total = 0
+    t3_ids: list = []
     if inventory.is_file():
         inv, err = _load_json(inventory)
         if not err and isinstance(inv, dict) and isinstance(inv.get("controls"), list):
@@ -527,8 +568,14 @@ def resolve(init_dir: Path):
                 if isinstance(c, dict) and c.get("category") and c["category"] not in seen:
                     seen.append(c["category"])
             t3_total = len(seen)
-    t3_done_count = _count_markers(t3_cp, f"*.{fmt}.json.done") if inventory.is_file() else 0
-    t3_failed_count = _count_markers(t3_cp, f"*.{fmt}.json.failed") if inventory.is_file() else 0
+            # forward ids from list_rule_jobs's single-source formula: done/failed
+            # judged by marker existence per canonical unit — a disk marker that
+            # matches no category is an orphan (--check notes), never a done count
+            # (the prior bare glob let orphans raise done and silently skip a
+            # pending category).
+            t3_ids = rule_unit_ids(seen, fmt)
+    t3_done_count = len(forward_done_ids(t3_cp, t3_ids))
+    t3_failed_count = len(forward_failed_ids(t3_cp, t3_ids))
 
     scout_tier = {"done": scout_done_count if not no_scout else 0,
                   "failed": scout_failed_count if not no_scout else 0,
@@ -543,7 +590,7 @@ def resolve(init_dir: Path):
     tiers = {
         "discover": {"done": 1 if discover_done else 0, "failed": 0, "total": 1},
         "scout": scout_tier,
-        "t1": {"done": t1_done_count, "failed": t1_failed_count, "total": clusters_total},
+        "t1": {"done": t1_done_count, "failed": t1_failed_count, "total": t1_total},
         "t2": {"done": 1 if _t2_done(init_dir) else 0, "failed": 0, "total": 1},
         "t3": {"done": t3_done_count, "failed": t3_failed_count, "total": t3_total},
         "t4": {"done": 1 if _t4_done(init_dir) else 0, "failed": 0,
@@ -552,7 +599,7 @@ def resolve(init_dir: Path):
 
     # --- fan-out failure disclosure (terminal failures; advisory, never a gate) ---
     for tier_name, tier_total in (("scout", scout_total if not no_scout else 0),
-                                  ("t1", clusters_total), ("t3", t3_total)):
+                                  ("t1", t1_total), ("t3", t3_total)):
         failed_n = tiers[tier_name]["failed"]
         if failed_n > 0:
             if tier_total and failed_n > tier_total / 2:
@@ -596,7 +643,14 @@ def resolve(init_dir: Path):
             notes.append("resolve: codegraph=on, unresolved empty — nothing to resolve.")
 
     # --- step resolution (blocking sequence) ---
-    if not discover_done:
+    # manifest short-circuit: init_manifest.json IS the run's terminal credential —
+    # a completed run is NEVER pulled back into an executing step by downstream
+    # count drift (tier counts above still report honestly; they no longer drive
+    # the step once the manifest exists). This probe precedes EVERY tier gate.
+    if manifest.is_file():
+        step = "done"
+        nxt = _next("done", "pipeline complete — all terminal artifacts present.", [])
+    elif not discover_done:
         step = "discover"
         hint = "--resume" if discover_partial else "(fresh)"
         nxt = _next("bash",
@@ -607,7 +661,7 @@ def resolve(init_dir: Path):
     elif (not no_scout) and not scout_complete(init_dir):
         step, nxt = _scout_step(init_dir, scout_plan, scout_candidates, candidates,
                                 clusters_p, scout_cp, scout_total, scout_terminal_count, notes)
-    elif clusters_total and (t1_done_count + t1_failed_count) < clusters_total:
+    elif t1_total and (t1_done_count + t1_failed_count) < t1_total:
         step = "t1"
         nxt = _next("bash",
                     "fan out init-induct per pending cluster via list_clusters.py --materialize",
@@ -637,9 +691,6 @@ def resolve(init_dir: Path):
                     "run assemble_rules.py --target <target> --format <fmt>, then spawn "
                     "init-rules-consistency (T4)",
                     [Path(target), init_dir / "checkpoints" / "t4"])
-    elif manifest.is_file():
-        step = "done"
-        nxt = _next("done", "pipeline complete — all terminal artifacts present.", [])
     else:
         # all stages done (or T4 skipped) but manifest not yet written
         step = "done"
@@ -735,6 +786,8 @@ def check(init_dir: Path) -> dict:
     if cfg is None:
         return {"ok": False, "violations": [{"issue": recipe}], "notes": []}
     no_scout = bool(cfg.get("no_scout"))
+    fmt = cfg.get("format") or "opencode"
+    manifest = init_dir / "init_manifest.json"
     candidates = init_dir / "controls_candidates.json"
     clusters_p = init_dir / "clusters.json"
     inventory = init_dir / "controls_inventory.json"
@@ -776,12 +829,18 @@ def check(init_dir: Path) -> dict:
                          if isinstance(b, dict) and b.get("batch_id")]
     t1_ids: list = []
     if clusters_p.is_file():
-        cl, cl_err = _load_json(clusters_p)
-        if not cl_err and isinstance(cl, dict) and isinstance(cl.get("clusters"), list):
-            from list_clusters import collect_canonical_ids as _ccids
-            t1_ids = _ccids(cl["clusters"], {}, 0, None)
+        t1_ids = canonical_unit_ids_for_run(clusters_p)
+    t3_ids: list = []
+    if inventory.is_file():
+        inv, inv_err = _load_json(inventory)
+        if not inv_err and isinstance(inv, dict) and isinstance(inv.get("controls"), list):
+            seen = []
+            for c in inv["controls"]:
+                if isinstance(c, dict) and c.get("category") and c["category"] not in seen:
+                    seen.append(c["category"])
+            t3_ids = rule_unit_ids(seen, fmt)
     for cp, ids, label in ((scout_cp, scout_ids, "scout"),
-                           (t1_cp, t1_ids, "t1")):
+                           (t1_cp, t1_ids, "t1"), (t3_cp, t3_ids, "t3")):
         for name in orphan_markers(cp, ids,
                                    exclude=("merge.json", "audit.json") if label == "scout"
                                    else ()):
@@ -791,7 +850,8 @@ def check(init_dir: Path) -> dict:
     # marker path says no marker FILE) BUT the checkpoints dir contains a file whose
     # encoded name IS that unit's marker path — enumeration and disk truth have
     # diverged (the deterministic signal of the identity-drift defect class).
-    for cp, ids, label in ((scout_cp, scout_ids, "scout"), (t1_cp, t1_ids, "t1")):
+    for cp, ids, label in ((scout_cp, scout_ids, "scout"),
+                           (t1_cp, t1_ids, "t1"), (t3_cp, t3_ids, "t3")):
         violations.extend(check_init_markers(cp, ids, label))
     # ambiguous terminal: a unit carrying BOTH .done and .failed (D5) — scout reader batches,
     # t1 clusters, t3 categories. (merge.json/audit.json have no .failed sibling in practice.)
@@ -801,18 +861,28 @@ def check(init_dir: Path) -> dict:
     if clusters_p.is_file() != candidates.is_file():
         violations.append({"issue": "discover products inconsistent: controls_candidates.json and "
                                     "clusters.json must both exist or both be absent"})
-    # sentinel existence: a run in progress with the guard-activation sentinel missing means
-    # the runtime guard is dormant (scripts read-only / subtree confinement silently
-    # disabled on hosts that do not inherit mid-session env). Fail loud with a re-arm recipe
-    # — NEVER silently continue. A done run without the sentinel is NOT a violation.
+    # sentinel lifecycle double closure: (a) a run IN PROGRESS with the sentinel
+    # missing means the runtime guard is dormant (scripts read-only / subtree
+    # confinement silently disabled on hosts that do not inherit mid-session env)
+    # — fail loud with a re-arm recipe; (b) a COMPLETED run (init_manifest.json
+    # present) with the sentinel still present keeps the guard armed and write-
+    # locks the target project's normal development sessions — fail loud with a
+    # removal recipe. A done step without the sentinel (normal teardown) is fine.
     state, _ = resolve(init_dir)
+    sentinel_p = init_dir / ".active"
     if state is not None and state.get("step") != "done":
-        if not (init_dir / ".active").is_file():
+        if not sentinel_p.is_file():
             violations.append({"issue": "run in progress but <init-dir>/.active sentinel "
                                         "missing — the runtime guard is DORMANT (script writes "
                                         "read-only / subtree confinement disabled on opencode); "
                                         "re-arm: `resume_state.py --rearm-sentinel` (or re-run "
                                         "write_runconfig.py), NEVER silently continue"})
+    elif state is not None and manifest.is_file() and sentinel_p.is_file():
+        violations.append({"issue": "run complete (init_manifest.json present) but "
+                                    "<init-dir>/.active sentinel still exists — the residual "
+                                    "sentinel keeps the runtime guard armed and write-locks the "
+                                    "target project's normal development sessions; remove it: "
+                                    "`rm <init-dir>/.active` (the done-step teardown discipline)"})
     # stale-fanout advisory (NOT a gate, design D6): an alive liveness residual
     # means a fanout runner (or its host-CLI children) may still be running —
     # disclosed in notes[] so the resuming orchestrator kills stale trees first.
@@ -869,27 +939,40 @@ def main():
         epilog="Count semantics: tiers.<tier>.done = canonical unit ids judged done "
                "by FORWARD marker-path computation (same predicate as "
                "list_clusters.py / list_scout_batches.py pending[] — shared, not "
-               "copied). It can differ from the checkpoints/<tier>/ entry count "
-               "(done + .failed + record bodies + orphans) — a difference is NOT "
-               "data loss. See this file's docstring for the full measure table.")
+               "copied). t1 total = the UNIT count (shards included), recomputed "
+               "from real candidates via list_clusters's producer-side composite "
+               "at the shared default unit budget; t3 = inventory categories × "
+               "run format (list_rule_jobs formula). It can differ from the "
+               "checkpoints/<tier>/ entry count (done + .failed + record bodies "
+               "+ orphans) — a difference is NOT data loss. See this file's "
+               "docstring for the full measure table.")
     ap.add_argument("--target", default=".", help="target project root (default .)")
     ap.add_argument("--init-dir",
                     help="explicit run dir (full path; highest priority, overrides --run-root)")
     ap.add_argument("--run-root", default=".mgh-init",
                     help="run dir NAME under <target> (default .mgh-init; used when --init-dir absent)")
-    ap.add_argument("--check", action="store_true",
-                    help="boundary check (R5.9): validate on-disk state self-consistency, exit 0/2")
-    ap.add_argument("--invalidate-stale", action="store_true",
-                    help="delete stale downstream t2/t3/t4 aggregate .done markers (scout "
-                         "enabled + incomplete → regex-only credentials); combine with "
-                         "--dry-run to preview (same marker set as merge_scout fold-in)")
+    action = ap.add_mutually_exclusive_group()
+    action.add_argument("--check", action="store_true",
+                        help="boundary check (R5.9): validate on-disk state self-consistency, "
+                             "exit 0/2; covers the sentinel lifecycle both ways (in-progress "
+                             "run missing .active = guard dormant; completed run with .active "
+                             "still present = residual write-lock) + orphan/judgment audits "
+                             "over scout/t1/t3")
+    action.add_argument("--invalidate-stale", action="store_true",
+                        help="delete stale downstream t2/t3/t4 aggregate .done markers (scout "
+                             "enabled + incomplete → regex-only credentials); precondition is "
+                             "the same predicate as --check's stale-credential violation — "
+                             "scout disabled or already complete → honest no-op, removes ZERO "
+                             "files, exit 0; any unlink failure → exit 2 (stderr lists the "
+                             "paths). Mutually exclusive with --check/--rearm-sentinel")
+    action.add_argument("--rearm-sentinel", action="store_true",
+                        help="deterministically rewrite <init-dir>/.active from run_config "
+                             "(target + rules_dir-derived out_roots); the /mgh-init --resume "
+                             "first step after compaction / clean-stop")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --invalidate-stale: list the markers that would be removed, "
-                         "delete nothing")
-    ap.add_argument("--rearm-sentinel", action="store_true",
-                    help="deterministically rewrite <init-dir>/.active from run_config "
-                         "(target + rules_dir-derived out_roots); the /mgh-init --resume "
-                         "first step after compaction / clean-stop")
+                         "delete nothing; alone (without --invalidate-stale) it is a misuse "
+                         "→ exit 2")
     # Emit JSON / glyphs cleanly regardless of host console codepage (e.g. cp936/gbk on
     # Chinese Windows) so stdout JSON parses everywhere. Before parse_args so --help is
     # utf-8 too. No-op on StringIO (in-process tests).
@@ -901,6 +984,13 @@ def main():
 
     args = ap.parse_args()
 
+    if args.dry_run and not args.invalidate_stale:
+        print("error: --dry-run is only meaningful with --invalidate-stale (closed set, "
+              "no silent no-ops). recipe: `resume_state.py --invalidate-stale --dry-run` "
+              "previews the stale-marker removal; without --invalidate-stale this "
+              "combination is a misuse", file=sys.stderr)
+        return 2
+
     if args.init_dir:
         init_dir = Path(args.init_dir).resolve()
     else:
@@ -910,6 +1000,23 @@ def main():
         return 1
 
     if args.invalidate_stale:
+        # precondition (same predicate as --check's stale-credential violation):
+        # scout enabled AND incomplete — otherwise there are NO regex-only
+        # downstream credentials to clear, and deleting them would force a full
+        # T2-T4 re-run. Honest no-op: zero files removed, exit 0.
+        cfg, recipe = _run_config(init_dir)
+        if cfg is None:
+            print(f"error: {recipe}", file=sys.stderr)
+            return 2
+        if bool(cfg.get("no_scout")) or scout_complete(init_dir):
+            print("[resume_state --invalidate-stale] precondition not met (scout disabled "
+                  "via no_scout, or scout tier already complete) — no stale credentials "
+                  "to clear; removed 0 files", file=sys.stderr)
+            print(json.dumps({"invalidate_stale": {
+                "dry_run": bool(args.dry_run),
+                **({"markers": []} if args.dry_run
+                   else {"removed": [], "failed": []})}}, ensure_ascii=False))
+            return 0
         markers = stale_marker_paths(init_dir)
         if args.dry_run:
             print(f"[resume_state --invalidate-stale --dry-run] {len(markers)} stale marker(s) "
@@ -918,16 +1025,27 @@ def main():
                                                    "markers": [str(p) for p in markers]}},
                              ensure_ascii=False))
             return 0
-        removed = []
+        removed, failed = [], []
         for p in markers:
             try:
                 p.unlink()
                 removed.append(str(p))
             except OSError as e:
-                print(f"warn: cannot remove {p}: {e}", file=sys.stderr)
+                failed.append(str(p))
+                print(f"error: cannot remove {p}: {e}", file=sys.stderr)
+        if failed:
+            print(f"[resume_state --invalidate-stale] {len(removed)} removed, "
+                  f"{len(failed)} FAILED (filesystem error) — fail-loud exit 2; fix the "
+                  f"filesystem issue and re-run (stdout removed[]/failed[] report both "
+                  f"truthfully)", file=sys.stderr)
+            print(json.dumps({"invalidate_stale": {"dry_run": False, "removed": removed,
+                                                   "failed": failed}},
+                             ensure_ascii=False))
+            return 2
         print(f"[resume_state --invalidate-stale] removed {len(removed)} stale marker(s)",
               file=sys.stderr)
-        print(json.dumps({"invalidate_stale": {"dry_run": False, "removed": removed}},
+        print(json.dumps({"invalidate_stale": {"dry_run": False, "removed": removed,
+                                               "failed": []}},
                          ensure_ascii=False))
         return 0
 

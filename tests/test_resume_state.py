@@ -98,6 +98,23 @@ class _State:
             sys.argv = old
         return code, out.getvalue(), err.getvalue()
 
+    def main_sysexit(self, *extra):
+        """Like main(), but survives argparse's own misuse exit (mutually
+        exclusive group violations call parser.error → SystemExit instead of
+        returning from main). Returns (exit_code, stdout, stderr)."""
+        argv = ["resume_state.py", "--init-dir", str(self.init)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = RS.main()
+                except SystemExit as e:
+                    code = e.code
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
 
 class TestResumeState(unittest.TestCase):
     def test_run_config_only_is_discover(self):
@@ -1001,7 +1018,11 @@ class TestStageFlowFiles(unittest.TestCase):
             self.assertNotIn(self._frag(later), st["stage_flow_files"])
 
     def test_done_step_empty(self):
-        # ② done → [] (no further load)
+        # ② done → done.md (flipped by fix-mgh-init-resume-state-machine: the
+        # teardown discipline — manifest finalization + sentinel removal — is
+        # reachable again via the shell's Read stage_flow_files[0] recipe; the
+        # prior "done has no further load" exclusion stranded that discipline
+        # after a long-run compaction)
         s = _State(no_scout=True, skip_consistency=True)
         s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
                                                   "truncated": False, "unresolved": []})
@@ -1012,13 +1033,14 @@ class TestStageFlowFiles(unittest.TestCase):
         s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
         st = s.state()
         self.assertEqual(st["step"], "done")
-        self.assertEqual(st["stage_flow_files"], [])
+        self.assertEqual(st["stage_flow_files"], [self._frag("done")])
 
     def test_not_started_empty_direct(self):
         # ② not-started → [] (bootstrap shell self-hosts step 0; resolve() never
-        # emits not-started — earliest resolved step is discover)
+        # emits not-started — earliest resolved step is discover). done is IN the
+        # fragment set since fix-mgh-init-resume-state-machine (teardown load).
         self.assertEqual(RS._stage_flow_files("not-started"), [])
-        self.assertEqual(RS._stage_flow_files("done"), [])
+        self.assertEqual(RS._stage_flow_files("done"), [self._frag("done")])
 
     def test_merge_mode_carries_merge_fragment(self):
         s = _State(merge="/tmp/partials")
@@ -1042,6 +1064,253 @@ class TestStageFlowFiles(unittest.TestCase):
         self.assertIn("stage_flow_files", data)
         self.assertEqual(data["step"], "t1")
         self.assertEqual(data["stage_flow_files"], [self._frag("t1")])
+
+
+# ---- sharded-cluster caliber + state-machine closure (fix-mgh-init-resume-state-machine) ----
+
+
+class TestShardedClusterCaliber(unittest.TestCase):
+    """CR-1: a cluster sharded into `::shard-<n>` units (real candidates ~110KB
+    each under the shared default 192KB unit budget) deadlocked the resume state
+    machine — the degraded collector call (empty candidates, zero budget) could
+    only derive whole-cluster ids, so shard markers were never counted:
+    tiers.t1={done:0,total:1} + step=t1 forever while list_clusters reported
+    pending=0. The fix recomputes the id set via list_clusters's producer-side
+    composite (real candidates + shared default budget) and switches tiers.t1 to
+    the UNIT caliber ({done,failed,total=len(ids)}, shards included)."""
+
+    CID = "auth::BIG::aa"
+
+    def _sharded(self, n_shards=3):
+        s = _State(no_scout=True)
+        payload = "x" * 110_000
+        cands = [{"id": f"C-{i}", "file": f"src/F{i}.java", "snippet": payload}
+                 for i in range(n_shards)]
+        s.write_json("controls_candidates.json",
+                     {"repo": str(s.target), "candidates": cands,
+                      "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": self.CID, "category": "authorization", "kind": "auth",
+             "shape": "centralized", "evidence_files": ["src/F0.java"],
+             "usage_sites": ["src/F0.java"],
+             "candidate_ids": [c["id"] for c in cands]}], "truncated": False})
+        return s
+
+    def _shard_ids(self, s):
+        """The unit ids the SHARED collector derives for the fixture (test-side
+        mirror of the recomputation; whole-cluster id excluded — an oversize
+        cluster never materializes a whole-cluster unit)."""
+        clusters = json.loads((s.init / "clusters.json").read_text(encoding="utf-8"))["clusters"]
+        cands = json.loads(
+            (s.init / "controls_candidates.json").read_text(encoding="utf-8"))["candidates"]
+        ids = LC.collect_canonical_ids(clusters, {c["id"]: c for c in cands},
+                                       LC.DEFAULT_MAX_UNIT_BYTES, s.target)
+        shard_ids = sorted(set(ids) - {self.CID})
+        self.assertEqual(len(shard_ids), 3, f"fixture must shard into 3 units: {ids}")
+        return shard_ids
+
+    def _touch_shards(self, s, n_done, n_failed):
+        shard_ids = self._shard_ids(s)
+        for i, uid in enumerate(shard_ids):
+            enc = _enc(uid)
+            if i < n_done:
+                s.touch(f"checkpoints/t1/{enc}.json.done")
+            elif i < n_done + n_failed:
+                s.write_json(f"checkpoints/t1/{enc}.json.failed",
+                             {"unit": uid, "reason": "r", "tier": "t1"})
+        return shard_ids
+
+    def test_all_shards_done_step_passes_t1(self):
+        # (a) 3 shard .done → step past t1, UNIT caliber {done:3,failed:0,total:3}
+        # (pre-fix: {done:0,total:1} + step=t1 — the deadlock)
+        s = self._sharded()
+        self._touch_shards(s, n_done=3, n_failed=0)
+        st = s.state()
+        self.assertEqual(st["step"], "t2")
+        self.assertEqual(st["tiers"]["t1"], {"done": 3, "failed": 0, "total": 3})
+
+    def test_partial_shards_stay_t1(self):
+        # (b) 2/3 terminal → step stays t1
+        s = self._sharded()
+        self._touch_shards(s, n_done=2, n_failed=0)
+        st = s.state()
+        self.assertEqual(st["step"], "t1")
+        self.assertEqual(st["tiers"]["t1"], {"done": 2, "failed": 0, "total": 3})
+
+    def test_failed_shard_counts_toward_pass_with_disclosure(self):
+        # (c) 2 done + 1 failed → passes t1 (.failed terminal), failed disclosed
+        s = self._sharded()
+        self._touch_shards(s, n_done=2, n_failed=1)
+        st = s.state()
+        self.assertEqual(st["step"], "t2")
+        self.assertEqual(st["tiers"]["t1"], {"done": 2, "failed": 1, "total": 3})
+        joined = " ".join(st["notes"])
+        self.assertIn("t1", joined)
+        self.assertIn("failed", joined)
+        self.assertIn("1/3", joined)
+
+    def test_manifest_present_short_circuits_to_done(self):
+        # manifest short-circuit BEFORE every tier gate: even the deadlock disk
+        # shape (zero shard markers) with a manifest derives step=done +
+        # resumable=false (pre-fix the t1 gate ran first and parked at t1)
+        s = self._sharded()
+        s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
+        st = s.state()
+        self.assertEqual(st["step"], "done")
+        self.assertFalse(st["resumable"])
+
+    def test_check_legal_shard_markers_not_orphans(self):
+        # legal shard markers match recomputed canonical ids → NOT flagged as
+        # orphan advisories by --check (pre-fix the degraded id set flagged all 3)
+        s = self._sharded()
+        for uid in self._shard_ids(s):
+            s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
+        code, out, _ = s.main("--check")
+        body = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertFalse(any("orphan marker" in n and "shard" in n for n in body["notes"]),
+                         body["notes"])
+
+    def test_check_completed_run_sentinel_residual_violation(self):
+        # manifest (run complete) + <init-dir>/.active still present → exit 2 +
+        # removal recipe (a residual sentinel keeps the guard armed and write-
+        # locks the target project's normal development sessions)
+        s = self._sharded()
+        for uid in self._shard_ids(s):
+            s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
+        s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
+        self.assertTrue((s.init / ".active").is_file())   # co-written at step 0
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 2)
+        violations = json.loads(out)["violations"]
+        self.assertTrue(any(".active" in v["issue"] and "rm" in v["issue"]
+                            for v in violations), [v["issue"] for v in violations])
+
+
+class TestT3ForwardCaliber(unittest.TestCase):
+    """t3 done/failed = forward marker-path judgment over inventory categories ×
+    run format (list_rule_jobs.rule_unit_ids, single source): an orphan
+    `<x>.<fmt>.json.done` that matches no category never raises tiers.t3.done
+    (pre-fix a bare glob counted it), and --check's orphan audit covers t3 like
+    scout/t1 (pre-fix t3 was outside the audit surface)."""
+
+    def _inv(self):
+        s = _State(no_scout=True)
+        s.write_json("controls_inventory.json", {"repo": str(s.target),
+                                                 "format": "opencode",
+                                                 "controls": [
+            {"category": "authorization", "kind": "auth"}]})
+        s.touch("checkpoints/t2/synthesis.json.done")
+        return s
+
+    def test_orphan_marker_does_not_raise_done_and_is_disclosed(self):
+        s = self._inv()
+        s.touch("checkpoints/t3/bogus.opencode.json.done")   # matches no category
+        st = s.state()
+        self.assertEqual(st["tiers"]["t3"]["done"], 0)       # pre-fix: 1
+        self.assertEqual(st["tiers"]["t3"]["total"], 1)
+        code, out, _ = s.main("--check")
+        self.assertEqual(code, 0)
+        body = json.loads(out)
+        self.assertTrue(any("orphan marker" in n and "bogus.opencode.json.done" in n
+                            for n in body["notes"]), body["notes"])
+
+    def test_real_category_marker_counts(self):
+        s = self._inv()
+        s.touch("checkpoints/t3/authorization.opencode.json.done")
+        st = s.state()
+        self.assertEqual(st["tiers"]["t3"], {"done": 1, "failed": 0, "total": 1})
+
+
+class TestDoneStepReachability(unittest.TestCase):
+    """done step loads init-stage/done.md via stage_flow_files[] (teardown
+    discipline — manifest finalization + sentinel removal — reachable again
+    after compaction); the merge short-circuit branch carries stale_fanout
+    (field-always-present promise covers every step branch)."""
+
+    def _finalizing(self, with_manifest):
+        s = _State(no_scout=True, skip_consistency=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                   "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [],
+                                       "truncated": False})
+        s.write_json("controls_inventory.json", {"repo": str(s.target), "format": "opencode",
+                                                  "controls": []})
+        s.touch("checkpoints/t2/synthesis.json.done")
+        if with_manifest:
+            s.write_json("init_manifest.json", {"version": 7, "format": "opencode"})
+        return s
+
+    def _done_frag(self):
+        return str((SCRIPTS.parent / "prompts" / "fragments" / "init-stage"
+                    / "done.md").resolve())
+
+    def test_done_manifest_branch_loads_done_md(self):
+        s = self._finalizing(with_manifest=True)
+        st = s.state()
+        self.assertEqual(st["step"], "done")
+        self.assertEqual(st["stage_flow_files"], [self._done_frag()])
+
+    def test_done_finalize_branch_loads_done_md(self):
+        # all stages complete but manifest not yet written (finalize branch)
+        s = self._finalizing(with_manifest=False)
+        st = s.state()
+        self.assertEqual(st["step"], "done")
+        self.assertTrue(st["resumable"])
+        self.assertEqual(st["stage_flow_files"], [self._done_frag()])
+
+    def test_merge_branch_carries_stale_fanout(self):
+        s = _State(merge="/tmp/partials")
+        st = s.state()
+        self.assertEqual(st["step"], "merge")
+        self.assertEqual(st["stale_fanout"], [])
+
+
+class TestInvalidateStaleGuard(unittest.TestCase):
+    """--invalidate-stale closure: precondition gate (scout enabled AND
+    incomplete — same predicate as --check's stale-credential violation) makes
+    no_scout / scout-complete runs an honest zero-deletion no-op; unlink
+    failure fails loud exit 2; --check/--rearm-sentinel/--dry-run combinations
+    are argparse misuse exit 2."""
+
+    def test_no_scout_run_noop_removes_zero(self):
+        s = _State(no_scout=True)
+        t2 = s.touch("checkpoints/t2/synthesis.json.done")
+        t4 = s.touch("checkpoints/t4/consistency.json.done")
+        code, out, err = s.main("--invalidate-stale")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["invalidate_stale"]["removed"], [])
+        self.assertTrue(t2.exists() and t4.exists())   # zero deletions
+        self.assertIn("precondition", err.lower())
+
+    def test_unlink_failure_exit2(self):
+        from unittest import mock
+        s = _State()   # scout enabled, no plan → incomplete → precondition met
+        s.touch("checkpoints/t2/synthesis.json.done")
+        with mock.patch.object(Path, "unlink", side_effect=OSError(13, "denied")):
+            code, out, err = s.main("--invalidate-stale")
+        self.assertEqual(code, 2)
+        self.assertIn("synthesis.json.done", err)       # failed path listed
+        data = json.loads(out)["invalidate_stale"]
+        self.assertEqual(data["removed"], [])
+        self.assertTrue(data["failed"])
+
+    def test_combo_with_check_is_misuse_exit2(self):
+        s = _State()
+        code, _, err = s.main_sysexit("--invalidate-stale", "--check")
+        self.assertEqual(code, 2)
+        self.assertIn("--check", err)                   # argparse names the conflict
+
+    def test_combo_with_rearm_is_misuse_exit2(self):
+        s = _State()
+        code, _, err = s.main_sysexit("--invalidate-stale", "--rearm-sentinel")
+        self.assertEqual(code, 2)
+        self.assertTrue(err.strip())                    # actionable stderr
+
+    def test_dry_run_alone_is_misuse_exit2(self):
+        s = _State()
+        code, _, _ = s.main("--dry-run")
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,16 @@ def _byte_len(obj) -> int:
     return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
 
+def rule_unit_ids(categories, fmt):
+    """Canonical T3 unit ids for one run format: `<category>.<fmt>` per category.
+    Single source of the id formula, shared with resume_state's t3 caliber
+    (imported there, never a second copy): the forward marker computation encodes
+    `<safe(id)>.json.done/failed`, and canonical categories are ASCII
+    lowercase-hyphen slugs so the encoding is identity — the marker name on disk
+    is exactly `<cat>.<fmt>.json.done`."""
+    return [f"{cat}.{fmt}" for cat in categories]
+
+
 def _safe_name(unit_id: str) -> str:
     """Filesystem-safe input filename (category names are slugs, but guard anyway)."""
     return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
@@ -242,7 +252,7 @@ def main():
     all_units = []
     failed_count = 0
     reincluded = 0
-    for cat in categories:
+    for cat, uid in zip(categories, rule_unit_ids(categories, args.format)):
         if cat in done:
             continue
         if cat in failed:  # confirmed failure (terminal; NOT retried on --resume)
@@ -258,8 +268,8 @@ def main():
             "category": cat,
             "format": args.format,
             "rule_path": _rule_path(target_abs, rules_dir_abs, cat, args.format),
-            "done_marker": str(checkpoints_dir / f"{cat}.{args.format}.json.done"),
-            "failed_marker": str(checkpoints_dir / f"{cat}.{args.format}.json.failed"),
+            "done_marker": str(checkpoints_dir / f"{uid}.json.done"),
+            "failed_marker": str(checkpoints_dir / f"{uid}.json.failed"),
         }
         if args.materialize:
             ipath, nbytes = _write_category_input(inputs_dir, cat, by_cat.get(cat, []))

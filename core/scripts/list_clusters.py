@@ -278,22 +278,64 @@ def _cluster_header(cluster: dict) -> dict:
 
 
 def collect_canonical_ids(clusters, cands, max_unit_bytes: int, repo_root):
-    """The canonical unit-id set for the T1 tier — the identity truth source the
-    forward done/failed judgment walks: every whole-cluster id + every oversize
-    `<cid>::shard-<n>` derivation (shard plan shared with `_resolve_units`, so the
-    id set judgment uses is by construction the id set materialization can write).
-    Single shared entry point: resume_state imports THIS (count caliber and
-    enumeration pending[] semantics agree by construction — NEVER a second copy)."""
+    """The canonical unit-id set for the T1 tier — EXACTLY the materializable
+    unit set, per cluster: the whole-cluster id when the cluster fits the unit
+    budget (including clusters with no candidate hits — they materialize as
+    cluster-fields-only whole units); ONLY the `<cid>::shard-<n>` shard ids when
+    the absolutized whole-fits body exceeds the budget (the whole id is never
+    materialized once sharded, so it must not be judged — a unit-caliber
+    consumer counting it would never converge). The shard plan is shared with
+    `_resolve_units` (same `_shard_plan`, same whole-fits guard), so the id set
+    the forward done/failed judgment walks is by construction the id set
+    materialization can write. Single shared entry point: resume_state imports
+    THIS via `canonical_unit_ids_for_run` (count caliber and enumeration
+    pending[] semantics agree by construction — never a second copy)."""
     ids = []
     for cluster in clusters or []:
         if not isinstance(cluster, dict) or not cluster.get("cluster_id"):
             continue
         cid = cluster["cluster_id"]
-        ids.append(cid)
         hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
-        ids.extend(uid for uid, _ in
-                   _shard_plan(cid, cluster, hits, max_unit_bytes, repo_root))
+        plan = _shard_plan(cid, cluster, hits, max_unit_bytes, repo_root)
+        if plan:
+            ids.extend(uid for uid, _ in plan)
+        else:
+            ids.append(cid)
     return ids
+
+
+def canonical_unit_ids_for_run(clusters_path):
+    """Producer-side recomposition of the canonical T1 unit-id set from a run
+    dir (the single source resume_state's t1 caliber recomputes from): reads
+    clusters.json ONCE + controls_candidates.json from the same dir
+    (`_load_candidates`), then `collect_canonical_ids` over the REAL candidates
+    at the SHARED DEFAULT unit budget. The budget anchors `DEFAULT_MAX_UNIT_BYTES`
+    — deliberately NOT run_config.budgets.max_unit_bytes — because the dispatch
+    path materializes with the default today (fanout_runner does not forward
+    --max-unit-bytes), so recomputing with a custom run_config value would
+    misalign with the sharded plan already on disk and re-deadlock exactly the
+    "custom budget + oversize cluster" runs. COUPLING LOCKSTEP: when the runner
+    gains --max-unit-bytes forwarding, materialization AND this recomputation
+    MUST switch to the run_config value in the SAME change.
+    Returns the unit-id list ([] when clusters.json is missing / malformed /
+    not a wrapper — the caller's counts degrade to zero, never a traceback)."""
+    p = Path(clusters_path)
+    if not p.is_file():
+        return []
+    try:
+        wrapper = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(wrapper, dict) or not isinstance(wrapper.get("clusters"), list):
+        return []
+    cands = _load_candidates(p.parent / "controls_candidates.json")
+    try:
+        repo_root = Path(wrapper["repo"]).resolve() \
+            if isinstance(wrapper.get("repo"), str) and wrapper["repo"] else None
+    except (OSError, ValueError):
+        repo_root = None
+    return collect_canonical_ids(wrapper["clusters"], cands,
+                                 DEFAULT_MAX_UNIT_BYTES, repo_root)
 
 
 def _shard_plan(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
@@ -303,7 +345,19 @@ def _shard_plan(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
     shards — [] when the cluster fits whole (the caller then uses `cid` itself).
     Both the canonical-id collector and `_resolve_units` consume THIS plan, so the
     id set the forward done/failed judgment walks is by construction the id set
-    materialization can write."""
+    materialization can write.
+
+    Whole-fits guard (top): the guard measures the SAME body `_resolve_units`
+    measures — header + ALL candidate hits, absolutized, `_byte_len` — with the
+    SAME budget, and returns [] when it fits; a fitting cluster materializes as
+    ONE whole-cluster unit, so its shard plan is empty and no `<cid>::shard-<n>`
+    id (not even a `shard-0` holding all hits) is ever derived for it. The
+    judge-side plan and the materializer's whole-vs-shard decision therefore
+    share one measure and cannot drift ("plan says shard, materializer says
+    whole" or the reverse)."""
+    full = _absolutize_paths(dict(_cluster_header(cluster), candidates=hits), repo_path)
+    if _byte_len(full) <= max_unit_bytes or not hits:
+        return []
     header = _cluster_header(cluster)
     header_bytes = _byte_len(header)
     shards, cur, cur_b, n = [], [], header_bytes, 0
@@ -796,13 +850,14 @@ def main():
                                  ensure_ascii=False))
                 return 2
 
-    # canonical unit-id set (identity truth source): whole clusters + oversize
-    # `<cid>::shard-<n>` derivations (same `_shard_plan` the materializer splits
-    # with — the two sides cannot drift). Done/failed judgment = forward
-    # marker-path computation over THIS set (init_tier.forward_*); never a
-    # glob+stem reverse lookup (an overlong id's truncated stem ≠ canonical id →
-    # the old fallback misjudged finished units as forever-pending → infinite
-    # re-dispatch).
+    # canonical unit-id set (identity truth source): EXACTLY the materializable
+    # units — whole-cluster ids for fitting clusters, `::shard-<n>` ids ONLY for
+    # oversize clusters (same `_shard_plan` + whole-fits guard the materializer
+    # splits with — the two sides cannot drift, and no ghost `<cid>::shard-0`
+    # exists for fitting clusters). Done/failed judgment = forward marker-path
+    # computation over THIS set (init_tier.forward_*); never a glob+stem reverse
+    # lookup (an overlong id's truncated stem ≠ canonical id → the old fallback
+    # misjudged finished units as forever-pending → infinite re-dispatch).
     materialize = bool(args.materialize)
     cands = _load_candidates(args.candidates) if materialize else {}
     inputs_dir = Path(args.materialize).resolve() if materialize else None

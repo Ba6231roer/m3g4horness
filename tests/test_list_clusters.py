@@ -493,5 +493,61 @@ class TestListClustersPacking(unittest.TestCase):
         self.assertTrue(data["shrunk"])  # pack items carry members[] -> heavy items
         self.assertEqual(data["effective_limit"], 1)
 
+# ---- canonical-id collector whole-fits guard (fix-mgh-init-resume-state-machine) ----
+
+class TestCanonicalIdCollector(unittest.TestCase):
+    """collect_canonical_ids returns EXACTLY the materializable unit set:
+    fitting clusters contribute their whole id only (no ghost `<cid>::shard-0` —
+    the pre-fix collector derived a shard plan for EVERY cluster with hits, even
+    ones far under budget, poisoning any consumer that counts ids); oversize
+    clusters contribute ONLY their `::shard-<n>` shard ids (the whole id is
+    never materialized once sharded) — per-id equal to what `_resolve_units`
+    writes, so the resume recomputation counts exactly the markers on disk."""
+
+    def _lc(self):
+        spec = importlib.util.spec_from_file_location("list_clusters_guard", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_fitting_clusters_whole_ids_only_no_ghost_shards(self):
+        # two far-under-budget clusters + real candidates + default budget →
+        # id set is exactly [c1, c2] (pre-fix: + c1::shard-0 / c2::shard-0 ghosts)
+        m = self._lc()
+        cands = {"C-1": {"id": "C-1", "file": "a.java", "snippet": "x" * 500},
+                 "C-2": {"id": "C-2", "file": "b.java", "snippet": "y" * 500}}
+        clusters = [
+            {"cluster_id": "authorization::A::ab12", "category": "authorization",
+             "kind": "auth", "evidence_files": ["a.java"], "usage_sites": ["a.java"],
+             "candidate_ids": ["C-1"]},
+            {"cluster_id": "crypto::B::cd34", "category": "crypto",
+             "kind": "other", "evidence_files": ["b.java"], "usage_sites": ["b.java"],
+             "candidate_ids": ["C-2"]}]
+        ids = m.collect_canonical_ids(clusters, cands, m.DEFAULT_MAX_UNIT_BYTES,
+                                      Path(tempfile.mkdtemp(prefix="mgh_guard_")))
+        self.assertEqual(ids, ["authorization::A::ab12", "crypto::B::cd34"])
+
+    def test_oversize_cluster_shard_ids_match_materialized_units(self):
+        # a genuinely oversize cluster: collector shard ids == `_resolve_units`
+        # materialized unit ids, and the whole-cluster id is excluded (it would
+        # be a永无-marker unit that re-deadlocks any unit-caliber consumer)
+        m = self._lc()
+        payload = "x" * 110_000
+        cands = {f"C-{i}": {"id": f"C-{i}", "file": f"F{i}.java", "snippet": payload}
+                 for i in range(3)}
+        cid = "auth::BIG::zz"
+        cluster = {"cluster_id": cid, "category": "authorization", "kind": "auth",
+                   "evidence_files": ["F0.java"], "usage_sites": ["F0.java"],
+                   "candidate_ids": ["C-0", "C-1", "C-2"]}
+        hits = [cands[i] for i in cluster["candidate_ids"]]
+        repo = Path(tempfile.mkdtemp(prefix="mgh_guard2_"))
+        ids = m.collect_canonical_ids([cluster], cands, m.DEFAULT_MAX_UNIT_BYTES, repo)
+        units = m._resolve_units(cid, cluster, hits, m.DEFAULT_MAX_UNIT_BYTES,
+                                 repo / "inputs", repo)
+        self.assertEqual(sorted(ids), sorted(u[0] for u in units))
+        self.assertNotIn(cid, ids)
+        self.assertGreaterEqual(len(ids), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

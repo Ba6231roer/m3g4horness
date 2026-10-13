@@ -237,5 +237,44 @@ class TestListSteps(unittest.TestCase):
             spec.loader.exec_module(mod)
 
 
+    # ---- Step→IO contract-table sync (fix-mgh-init-resume-state-machine) ----
+
+    def test_step_manifest_contract_table_sync(self):
+        """core/contracts/init/step-manifest.md's Step→IO table stays in lockstep
+        with list_steps.py's static step table: every tabulated step's kind +
+        script must equal the stdout fields (the fan-out dispatch steps scout/t1/
+        t2/t3 record fanout_runner.py — dispatcher-first; the table had drifted
+        to the enumerator scripts for ~7 weeks across 4 architecture evolutions)."""
+        import re
+        contract = (HERE.parent / "core" / "contracts" / "init"
+                    / "step-manifest.md").read_text(encoding="utf-8")
+        rows = {}
+        for line in contract.splitlines():
+            s = line.strip()
+            if not s.startswith("|"):
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+            m = re.match(r"`([a-z][a-z0-9-]*)`$", cells[0])
+            if not m:
+                continue
+            rows[m.group(1)] = (cells[1], cells[2])
+        self.assertIn("t1", rows)  # parser sanity: the table was actually parsed
+        code, out, _ = self._run()
+        self.assertEqual(code, 0)
+        impl = {s["step"]: s for s in self._json(out)["steps"]}
+        for step_id, (kind_cell, script_cell) in sorted(rows.items()):
+            self.assertIn(step_id, impl,
+                          f"contract row {step_id}: absent from list_steps stdout")
+            self.assertEqual(impl[step_id]["kind"], kind_cell,
+                             f"step {step_id}: kind drift contract={kind_cell!r} "
+                             f"impl={impl[step_id]['kind']!r}")
+            want_script = None if script_cell in ("—", "-") else script_cell.strip("`")
+            self.assertEqual(impl[step_id]["script"], want_script,
+                             f"step {step_id}: script drift contract={script_cell!r} "
+                             f"impl={impl[step_id]['script']!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

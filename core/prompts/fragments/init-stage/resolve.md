@@ -1,6 +1,8 @@
 <!--
   mgh-init stage-flow — resolve (step 3c, optional, codegraph-gated). Install mirrors to <mgh-core>/prompts/fragments/init-stage/.
-  Loaded per-step via resume_state.py stdout stage_flow_files[] (current-step single file).
+  Reachability: resolve is an optional/non-fatal, codegraph-gated stage — resume_state.py
+  step derivation NEVER routes here (it never gates progress); the ORCHESTRATOR decides to
+  run this stage and loads this file by fixed-path Read.
 -->
 
 ## resolve (step 3c)

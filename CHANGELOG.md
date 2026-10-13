@@ -16,6 +16,53 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — /mgh-init resume 状态机 CR-1 分片簇死锁 + 口径合一/done 可达/哨兵闭环/契约同步(CR-1+H12+t3 裸 glob 等 11 项,2026-10-13 评审批次 1) (0.1.68)
+
+- **CR-1(唯一 Critical)分片簇死锁**:`resume_state.py` 的 t1 id 集从「空候选集 + 零预算退化
+  调用收集器」改为经 `list_clusters.py` 生产者侧共享函数 `canonical_unit_ids_for_run` 按真实候选 +
+  共享默认单元预算**复算**;`tiers.t1` 改**单元口径**(整簇 id + 真超预算簇 `::shard-<n>` 分片 id,
+  `total`=单元数),t1 闸门按单元总数收敛——修复前分片簇只写分片级 marker、状态机永判
+  `done+failed < total`,`--resume` 无限空转重派(数百万行 Java 仓注解簇超预算切分是常态)。
+  预算锚共享默认常量(runner 今日不透传自定义预算,复算与物化口径严格一致;转发落地时两处
+  锁步切换已写注记)。
+- **幽灵 shard-0(评审实验新发现)**:`list_clusters.py` `_shard_plan` 补整装守卫——绝对化整装体
+  ≤ 预算返回 `[]`(判据与 `_resolve_units` 整装短路同度量,杜绝「判据说切、物化说整装」漂移);
+  `collect_canonical_ids` 改产**恰为可物化单元集**(整装簇 → 整簇 id;超预算簇 → **仅**分片 id,
+  整簇 id 不再混入)。修复前每个含候选簇都派生一个永无 marker 的 `::shard-0`。
+- **manifest 短路(D4)**:`init_manifest.json` 在 → step=done 提到全部 tier 闸门之前,完成态 run
+  不再被下游计数口径漂移拉回执行态重派(tier 计数照实披露)。
+- **t3 前向口径(D5)**:t3 done/failed 从裸 glob 改为 inventory categories × format 的 canonical id
+  正向判定(id 公式由 `list_rule_jobs.py` 单一来源导出 `rule_unit_ids`,枚举器 marker 路径同函数
+  消费,逐字节等价);孤儿 marker 不再抬高 done 静默跳过 pending category;`--check` 孤儿/判定
+  一致性审计扩到 t3 目录(此前仅 scout/t1)。
+- **done 步可达(H12)**:`_FRAGMENT_STEPS` 增 `done`,step=done(含 finalize 分支)→
+  `stage_flow_files[]` 返回 done.md——manifest 收尾 + 失败落账 + **移除哨兵**纪律经既有
+  「Read stage_flow_files[0]」壳配方恢复可达(长跑压缩后恢复到收尾态不再失联,残留哨兵不再
+  写锁目标项目);merge 短路分支补 `stale_fanout` 字段(「字段恒存在」承诺兑现,消费方不再
+  KeyError)。
+- **`--check` 哨兵生命周期双向闭环**:新增「完成态哨兵残留」违例(manifest 在 + `.active` 在 →
+  exit 2 + `rm` 移除 recipe),与既有「进行中缺哨兵」违例构成闭环。
+- **`--invalidate-stale` 收口(D8)**:前置判定复用「scout 启用 + 未完成」同判据(不满足 → 诚实
+  空转删零文件 exit 0,不再删有效下游凭证迫使 T2-T4 全量重跑);unlink 失败收集 → exit 2 +
+  stdout `removed[]`/`failed[]` 如实区分;`--check`/`--rearm-sentinel` argparse 互斥组、
+  `--dry-run` 单独传 exit 2。
+- **t2 闸门前置 + fragment 头注如实化(D7)**:`t2.md` 头部补无条件 `validate_t1_records
+  --strip-bom`+`--check` 前置闸门(resume 直落 t2 不再跳闸门);survey/resolve/t4 头注删
+  「Loaded per-step via resume_state」虚假声明改如实可达性陈述;`assemble.md` 尾部补「进 T4 前
+  Read t4.md」固定路径配方。
+- **两份契约同步 + 防再漂移(D9)**:`resume-state.md` 补 `--run-root`/`--rearm-sentinel`、
+  `discipline_reminders`/`stage_flow_files`/`stale_fanout` 三个恒存在 stdout 字段、t1 单元口径
+  真值表、哨兵双向违例与 t3 审计、`--invalidate-stale` 新语义;`step-manifest.md` Step→IO 表
+  scout/t1/t2/t3 四行按实态纠偏(fanout_runner 派发优先、scout 补 extra_invocations,失同步
+  约 7 周);`tests/test_list_steps.py` 新增契约表↔实现同步回归断言防再漂移。
+- 新增回归 17 条先红后绿(`test_resume_state` 12 + `test_list_clusters` 2 + `test_list_steps` 1,
+  另断言翻转 2 条:done 步 stage_flow_files 由 `[]` 翻为 done.md 路径)+ harness 增 SystemExit
+  捕获助手;定向面 6 文件全绿(resume_state 80 / list_clusters 27 / list_steps 13 /
+  list_scout_batches / zero_deps / no_compile_warnings);contracts 465 flag / purity 328 文件 /
+  budget 17 壳过,plain_language 输出与改前逐字节一致;实机抽查:真实物化器切 3 shard 全
+  `.done` → step 收敛 t2 + `--check` 零孤儿误报;残缺 t1 + manifest → step=done/ resumable=false;
+  manifest + 残留 `.active` → 新违例命中。
+
 ### Fixed — /mgh-sdr 文档/壳/契约面披露对齐 + launcher/describe 健壮性收口(M6/M15–M20/L9/L10 + L1/L2/M12/M13/L3,2026-10-13 评审) (0.1.67)
 
 - **M6+L3 敏感目录物化与路径透传**:`sdr_context.py` 把解析后敏感目录对象物化为

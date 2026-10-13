@@ -1,6 +1,8 @@
 <!--
   mgh-init stage-flow — survey (step 3, optional). Install mirrors to <mgh-core>/prompts/fragments/init-stage/.
-  Loaded per-step via resume_state.py stdout stage_flow_files[] (current-step single file).
+  Reachability: survey is an optional/advisory stage — resume_state.py step derivation NEVER
+  routes here (it never gates progress); the ORCHESTRATOR decides to run this stage and loads
+  this file by fixed-path Read.
 -->
 
 ## survey (step 3)

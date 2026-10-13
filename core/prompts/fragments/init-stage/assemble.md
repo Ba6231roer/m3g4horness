@@ -14,4 +14,8 @@
      (`found_controls`/`evidence_count`)/ 过程散文(`扫描器模式定义` 等)/ 无源码锚点的控制;lint 覆盖
      工具内部 token + schema 字段 + 特征过程散文(opencode 另查 `---` YAML 围栏;claude `paths:` frontmatter 豁免)。
      回 T3 修正后重跑
+   · 进 T4 前(T4 纪律不依赖 step 派生路由,固定路径 Read):Read
+     `<mgh-core>/prompts/fragments/init-stage/t4.md`
+     (T4 = spawn init-rules-consistency 一致性修订 + touch `checkpoints/t4/consistency.json.done`;
+     `--skip-consistency` 时跳过 T4 直接收尾)
 ```

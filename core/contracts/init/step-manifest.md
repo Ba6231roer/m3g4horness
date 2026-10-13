@@ -82,19 +82,24 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 | `not-started` | bash | `discover_controls.py` | — | `controls_candidates.json` {candidates[],source} |
 | `discover` | bash | `discover_controls.py` | — | `controls_candidates.json` {candidates[],source} |
 | `survey` | subagent | — | `controls_candidates.json` {candidates[]} | `i1_enriched.json` {summary[]} |
-| `scout` | bash | `list_scout_batches.py` | `scout_plan.json` {batches[]} | `scout_candidates.json` {candidates[],source} |
+| `scout` | bash | `fanout_runner.py` | `scout_plan.json` {batches[]} | `scout_candidates.json` {candidates[],source} |
 | `resolve` | subagent | — | `controls_candidates.json::unresolved` [unresolved[]] | `resolved.json` {resolved[],unresolved_residual[]} |
-| `t1` | bash | `list_clusters.py` | `clusters.json` {repo,clusters[]} | `checkpoints/t1/*.json` [checkpoint per cluster] |
-| `t2` | subagent | — | `checkpoints/t1/*.json` [T1 records] | `controls_inventory.json` {controls[],category} |
-| `t3` | bash | `list_rule_jobs.py` | `controls_inventory.json` {controls[]} | `checkpoints/t3/*.<fmt>.json` [checkpoint per category] |
+| `t1` | bash | `fanout_runner.py` | `clusters.json` {repo,clusters[]} | `checkpoints/t1/*.json` [checkpoint per cluster] |
+| `t2` | bash | `fanout_runner.py` | `checkpoints/t1/*.json` [T1 records] | `controls_inventory.json` {controls[],category} |
+| `t3` | bash | `fanout_runner.py` | `controls_inventory.json` {controls[]} | `checkpoints/t3/*.<fmt>.json` [checkpoint per category] |
 | `assemble` | bash | `assemble_rules.py` | `checkpoints/t3/*.<fmt>.json` [T3 records] | `rules` (claude: `.claude/rules/security-*.md` / opencode: `docs/security-controls/*.md`) |
 | `t4` | subagent | — | `rules` (rule files) | `checkpoints/t4/consistency.json.done` (marker) |
 | `merge` | bash | `merge_inventories.py` | `<partials-dir>` [partial inventory JSONs] | `controls_inventory.json` {controls[],merged[]} |
 | `done` | bash | — | — | `init_manifest.json` {version,counts,boundaries[]} |
 
-> 注:`scout` 行的 `list_scout_batches.py` 是**枚举器脚本**,扇出 reader subagents;
-> 真正的 scout-merge 脚本是 `merge_scout.py`(见 `resume_state.py` scout 子状态)。
-> `merge` 是 `--merge` 模式的专用步骤(常规 pipeline 不经过)。
+> **dispatcher-first 扇出步**:scout/t1/t2/t3 四行的 script = `fanout_runner.py`(确定性派发器,
+> 与 `list_steps.py` stdout `script` 字段一致,回归测同步把守)——各扇出 tier 的枚举/物化脚本
+> (`list_scout_batches.py` / `list_clusters.py` / `list_rule_jobs.py` / `plan_aggregate.py`)
+> 由 runner 的 tier 配置**内部调用**,NEVER 编排器直调。t2 行的 bash = map 段派发
+> (`fanout_runner.py --tier t2`);小仓(needs_reduce=false)single-context `init-synthesis`
+> 子代理分支见 t2 fragment。scout 步另载 `extra_invocations`(scout-merge map 段驱动:
+> `fanout_runner.py --tier scout-merge`)。`merge` 是 `--merge` 模式的专用步骤(常规 pipeline
+> 不经过);真正的 scout-merge 聚合脚本是 `merge_scout.py`(见 `resume_state.py` scout 子状态)。
 
 ## Pattern portability
 

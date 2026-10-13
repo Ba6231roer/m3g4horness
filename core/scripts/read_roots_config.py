@@ -151,7 +151,6 @@ def _mutate(target: Path, adds: list[str], removes: list[str]) -> tuple[dict, in
 
     if len(final) != len(current) or removed:
         body["read_roots"] = [str(p) for p in final]
-        path.parent.mkdir(parents=True, exist_ok=True)
         for a in add_paths:
             _eprint(f"[read-roots] add: {a}")
         for r in removed:
@@ -161,11 +160,17 @@ def _mutate(target: Path, adds: list[str], removes: list[str]) -> tuple[dict, in
                 f"after: {_audit([str(p) for p in final])})")
         tmp = path.with_name(path.name + ".tmp")
         try:
+            # config-dir creation is part of the guarded write: a FILE named `.mgh` at
+            # the target root makes mkdir raise (FileExistsError) — that must surface as
+            # the human diagnostic + contract exit code below, never a bare traceback
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(body, ensure_ascii=False, indent=1) + "\n",
                            encoding="utf-8")
             os.replace(tmp, path)
         except OSError as e:
-            _eprint(f"error: config write failed: {e}")
+            _eprint(f"error: config write failed: {e}\n"
+                    f"recipe: ensure the config dir is creatable — if a FILE named "
+                    f"`.mgh` exists at the target root, remove or rename it first.")
             return {}, 1
     else:
         _eprint(f"[read-roots] no changes ({len(current)} entries, idempotent no-op)")

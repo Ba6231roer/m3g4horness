@@ -20,8 +20,10 @@ controlled retrieval IN THIS PROCESS: the external repo's same-name-branch `git 
 --name-status` file list (vs the same base), permission-config hit lines (a config file
 named in the declaration, e.g. buttonAuth.properties, scanned for the branch's new routes),
 and occurrence counts of the new routes across the external repo's text files. Conclusions
-materialize as small files under <run-dir>/external/<repo-slug>/ (per-repo byte budget,
-default 64KB, over-cap truncation disclosed). stdout carries external_repos[] = the ACTUAL
+materialize as small files under <run-dir>/external/<repo-slug>/ (slug = basename + a
+short hash of the resolved path, so two approved repos sharing a basename can never
+collide; per-repo byte budget, default 64KB, over-cap truncation disclosed). stdout
+carries external_repos[] = the ACTUAL
 searched roots (for the sentinel read_roots[] declaration) — NEVER any user-supplied
 catch-all path. AUTHORIZATION GATE: each declared repo is checked against the project
 config <repo>/.mgh/read-roots.json BEFORE retrieval (approved = resolve-normalized entry
@@ -60,13 +62,16 @@ message and the grouping that produced its slice describing the same run.
 Exit codes (R5.3b): 0 ok · 1 input error (--repo/--run-dir missing) · 2 misuse (argparse)
 or closed-set violation (project catalog invalid / --check violations) or an unwritable
 run-level state file.
---check <run-dir>: baseline.md exists within budget, external conclusion files complete,
+--check <run-dir>: baseline.md exists within the run's effective baseline budget
+(recorded in context.json; older artifacts without that field are judged against the
+built-in default budget), external conclusion files complete,
 sensitive_catalog object shape valid, pending_approval[] shape + skip-consistency (R5.9).
 
-Zero runtime deps (Python >=3.10 stdlib: argparse/json/os/re/sys/pathlib).
+Zero runtime deps (Python >=3.10 stdlib: argparse/hashlib/json/os/re/sys/pathlib).
 """
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -274,8 +279,12 @@ def _git(repo: Path, *args: str):
 def _parse_declarations(texts: list[str]) -> tuple[list[dict], list[str]]:
     """(declarations, skips). Extract external-repo declarations (path + branch
     convention + named config file) from the design texts. A declared path that does not
-    exist becomes a skip reason (\"not-found: <path>\") so the degradation is disclosed,
-    never silent."""
+    exist becomes a skip reason ("not-found: <path>") so the degradation is disclosed,
+    never silent. The dedup key is the RESOLVED path: the same repo declared via two
+    equivalent spellings (incl. `..` variants) is ONE retrieval, never two writing into
+    one dir. URL-shaped tokens (containing `://`) are web addresses, not paths — they
+    never become candidates (the drive-letter regex would otherwise slice `s://…` out of
+    an `https://…` URL and emit a bogus not-found entry)."""
     decls: dict[str, dict] = {}
     skips: list[str] = []
     for text in texts:
@@ -286,6 +295,8 @@ def _parse_declarations(texts: list[str]) -> tuple[list[dict], list[str]]:
                 continue
             for m in _EXT_PATH_RX.finditer(para):
                 path = m.group(1).rstrip(".,;、)")
+                if "://" in path:
+                    continue
                 cand = Path(path)
                 if not cand.is_absolute():
                     continue
@@ -293,7 +304,7 @@ def _parse_declarations(texts: list[str]) -> tuple[list[dict], list[str]]:
                     if path not in skips:
                         skips.append(f"not-found: {path}")
                     continue
-                entry = decls.setdefault(str(cand), {
+                entry = decls.setdefault(str(cand.resolve()), {
                     "path": str(cand), "branch_sync": bool(_BRANCH_CONV_RX.search(para)),
                     "config_files": [], "source_snippet": para.strip()[:300],
                 })
@@ -305,7 +316,15 @@ def _parse_declarations(texts: list[str]) -> tuple[list[dict], list[str]]:
 
 
 def _external_slug(decl: dict) -> str:
-    return _safe_slug(Path(decl["path"]).name)
+    """Conclusion-dir key: human-readable basename + a short SHA-256 of the RESOLVED
+    path. Two approved repos sharing a basename (projA/front, projB/front) get distinct
+    dirs, so neither repo's evidence is ever overwritten by the other's retrieval; one
+    repo's `..`-variant spellings resolve to the same hash, matching the declaration
+    dedup key."""
+    name = _safe_slug(Path(decl["path"]).name)
+    resolved = str(Path(decl["path"]).resolve())
+    sha8 = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:8]
+    return f"{name}-{sha8}"
 
 
 def _approved_read_roots(repo: Path) -> set[str]:
@@ -430,7 +449,7 @@ def _external_retrieve(decl: dict, repo: Path, base: str, branch: str,
     # 1) external diff file list (same base, its branch)
     lines: list[str] = [f"# 外部仓检索结论: {slug}", f"external_path: {decl['path']}",
                         f"branch: {target_branch}" +
-                        ("(同名分支缺失,回退默认分支)" if branch_fallback else ""),
+                        ("(同名分支缺失,回退当前检出分支)" if branch_fallback else ""),
                         f"base: {base}", ""]
     d = _git(ext, "diff", "--no-color", "--name-status", f"{base}..{target_branch}")
     file_list: list[str] = []
@@ -438,51 +457,44 @@ def _external_retrieve(decl: dict, repo: Path, base: str, branch: str,
         file_list = [l for l in d.stdout.splitlines() if l.strip()]
         lines += ["## 外部 diff 文件清单(变更类型)", *[f"- {l}" for l in file_list], ""]
 
-    # 2) permission-config hit lines (config files named in the declaration)
+    # 2)+3) ONE pruned walk collects BOTH the permission-config hit lines (config files
+    # named in the declaration) and the route-occurrence scan across the repo's text
+    # files. Pruning removes skip_dirs in place BEFORE descending, so .git/node_modules
+    # are never even enumerated — the previous shape ran one unpruned rglob per declared
+    # config name plus another rglob for occurrences (up to six full-tree passes per
+    # repo). The walk only ever sees components INSIDE the repo, so an ancestor dir
+    # named build/dist can no longer zero the whole repo's counts. Route matching itself
+    # (the _new_routes regex + class base-route join) is untouched. dirs/files are
+    # sorted: identical input => byte-identical conclusions.
     routes = _new_routes(repo, base, branch)
     hits: list[str] = []
-    if routes:
-        lines += ["## 本分支新增接口路由", *[f"- {rt}" for rt in routes], ""]
-        for root_name in decl["config_files"][:5]:
-            for cfg in ext.rglob(root_name):
-                if not cfg.is_file():
-                    continue
-                try:
-                    cfg_text = _read_text(cfg)
-                except OSError:
-                    continue
-                rel = str(cfg.relative_to(ext))
-                for i, ln in enumerate(cfg_text.splitlines(), 1):
-                    for rt in routes:
-                        if rt and rt in ln:
-                            hits.append(f"{rel}:{i}: {ln.strip()[:200]}")
-        lines += ["## 权限配置命中(buttonAuth.properties 类)"]
-        lines += ([f"- {h}" for h in hits[:200]] or ["- (无命中)"])
-        lines.append("")
-
-    # 3) route occurrence counts across the external repo's text files — the
-    #    route_hits[] list ({route, count}) is MATERIALIZED into the record so the
-    #    renderer can join it by route (previously this lived only in hits.md text,
-    #    unconsumable by render_sdr_report)
     counts: list[str] = []
     route_hits: list[dict] = []
     if routes:
+        lines += ["## 本分支新增接口路由", *[f"- {rt}" for rt in routes], ""]
         text_exts = (".js", ".vue", ".ts", ".jsx", ".tsx", ".html", ".json")
         skip_dirs = {".git", "node_modules", "dist", "build"}
+        config_names = set(decl["config_files"][:5])
         occurrence: dict[str, list[str]] = {rt: [] for rt in routes}
-        for p in ext.rglob("*"):
-            if not p.is_file() or p.suffix.lower() not in text_exts:
-                continue
-            if any(part in skip_dirs for part in p.parts):
-                continue
-            try:
-                txt = _read_text(p)
-            except OSError:
-                continue
-            rel = str(p.relative_to(ext))
-            for rt in routes:
-                if rt and rt in txt:
-                    occurrence[rt].append(rel)
+        for root, dirs, files in os.walk(ext):
+            dirs[:] = sorted(d for d in dirs if d not in skip_dirs)
+            for fname in sorted(files):
+                p = Path(root) / fname
+                rel = str(p.relative_to(ext))
+                if fname in config_names:
+                    cfg_text = _read_text(p)
+                    for i, ln in enumerate(cfg_text.splitlines(), 1):
+                        for rt in routes:
+                            if rt and rt in ln:
+                                hits.append(f"{rel}:{i}: {ln.strip()[:200]}")
+                if p.suffix.lower() in text_exts:
+                    txt = _read_text(p)
+                    for rt in routes:
+                        if rt and rt in txt:
+                            occurrence[rt].append(rel)
+        lines += ["## 权限配置命中(buttonAuth.properties 类)"]
+        lines += ([f"- {h}" for h in hits[:200]] or ["- (无命中)"])
+        lines.append("")
         for rt in sorted(occurrence):
             locs = occurrence[rt]
             route_hits.append({"route": rt, "count": len(locs)})
@@ -504,7 +516,7 @@ def _external_retrieve(decl: dict, repo: Path, base: str, branch: str,
         "path": str(ext),
         "slug": slug,
         "branch_sync_note": ("同名分支" if not branch_fallback
-                             else f"同名分支缺失,回退默认分支 {target_branch}"),
+                             else f"同名分支缺失,回退当前检出分支 {target_branch}"),
         "branch_fallback": branch_fallback,
         "summary_path": str((out_dir / "hits.md").resolve()),
         "diff_files": len(file_list),
@@ -652,6 +664,9 @@ def _run(args) -> dict:
         "branch": branch,
         "baseline_path": str(baseline_path.resolve()),
         "baseline_bytes": baseline_path.stat().st_size,
+        # the budget THIS run actually applied — --check judges the baseline size by it,
+        # so a legal bigger-budget run is never vetoed against the built-in default
+        "effective_baseline_budget": args.baseline_budget_bytes,
         "baseline_truncated": truncated,
         "baseline_truncated_bytes": trunc_bytes,
         "sensitive_catalog": catalog,
@@ -707,8 +722,16 @@ def _check(run_dir: Path) -> int:
     bp = ctx.get("baseline_path", "")
     if not bp or not Path(bp).is_file():
         violations.append(f"baseline missing: {bp!r}")
-    elif ctx.get("baseline_bytes", 0) > DEFAULT_BASELINE_BUDGET * 4:
-        violations.append(f"baseline unexpectedly huge: {ctx.get('baseline_bytes')}B")
+    else:
+        # the recorded EFFECTIVE budget of this run drives the size judgment; artifacts
+        # from before the field existed (or a malformed value) fall back to the built-in
+        # default — same backward-compat shape as the other incremental fields
+        budget = ctx.get("effective_baseline_budget")
+        if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+            budget = DEFAULT_BASELINE_BUDGET
+        if ctx.get("baseline_bytes", 0) > budget * 4:
+            violations.append(f"baseline unexpectedly huge: "
+                              f"{ctx.get('baseline_bytes')}B (effective budget {budget}B)")
     for e in ctx.get("external_repos", []):
         sp = e.get("summary_path", "")
         if sp and not Path(sp).is_file():

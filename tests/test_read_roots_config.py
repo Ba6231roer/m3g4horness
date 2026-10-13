@@ -222,6 +222,17 @@ class ReadRootsConfigTest(unittest.TestCase):
         code, _, err = self._run("--target", str(self.tmp / "nope"), "--list")
         self.assertEqual(code, 2)
 
+    # --- `.mgh` exists as a FILE: human diagnostic + contract exit code, never a
+    #     bare traceback (the config-dir mkdir happens inside the guarded write) ---
+    def test_dot_mgh_as_file_fails_with_diagnostic_not_traceback(self):
+        (self.proj / ".mgh").write_text("not a directory", encoding="utf-8")
+        code, out, err = self._run("--target", str(self.proj), "--add",
+                                   str(self.proj / "sub"))
+        self.assertEqual(code, 1)
+        self.assertIn("config write failed", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(self.cfg.exists())
+
     # --- non-script-dir cwd subprocess import robustness (R5.8) ---
     def test_subprocess_any_cwd(self):
         r = subprocess.run(

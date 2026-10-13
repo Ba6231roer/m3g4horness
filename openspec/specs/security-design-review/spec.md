@@ -727,6 +727,7 @@ step 1 **之前**的失败(含 argparse 退出码 2)SHALL 由编排器按命令�
 - **THEN** 它跑 `diff_group.py --check <run-dir>`(域内可执行,退出码 0/2),NEVER 跑在 sdr 运行目录下
   必然以退出码 1 失败的跨域脚本;该命令的语义边界(校验产物完整性、非运行进度自洽性)SHALL 在该指引
   处就近披露,使编排器不会把它读成完整的恢复面
+
 ### Requirement: sdr 运行目录无起始态文件;codegraph 信号由脚本确定性写出
 
 `/mgh-sdr` 的运行目录 SHALL NOT 携带**起始态**文件:`run_config.json` 内的起始态字段
@@ -863,7 +864,6 @@ SHALL 复用与物化同一个渲染逻辑(单一真相源),**NEVER** 并行维�
 - **THEN** 渲染报告的诚实边界列出被瘦身单元及其"上下文经截断、输入完整度低于常规单元"的说明;未发生
   瘦身时该条目不出现
 
-
 ### Requirement: 外部仓审批单命令闭环与未知参数报错出口
 
 `sdr_context.py` SHALL 新增 `--approve-external <abs>`(可重复):在检索开始前,对每个传入路径执行
@@ -904,7 +904,6 @@ SHALL NOT 自行批准;`read_roots_config.py --add` + 重跑的既有路径保�
 - **WHEN** 对已写入配置的仓再次传 `--approve-external <同一路径>`
 - **THEN** 配置不变(`added:[]` 语义),当次照常检索该仓,退出码 0
 
-
 ### Requirement: 产出者 stdout 摘要视图与审批滞留提醒
 
 `sdr_context.py` 与 `diff_group.py` SHALL 各支持 `--summary`:与完整调用同参数运行(含幂等重跑的
@@ -943,7 +942,6 @@ SHALL NOT 自行批准;`read_roots_config.py --add` + 重跑的既有路径保�
   `sdr_context.py --check <run-dir>`
 - **THEN** 退出码仍为 0(产物完好),stderr 出现含该路径的未批提醒行;若 `pending_approval` 为空则
   无该行
-
 
 ### Requirement: sdr 命令壳暴露产物内省与 stdout 直消费配方
 
@@ -1147,3 +1145,63 @@ severity 等,引述受审仓库与外部前端仓源码)视为**敌意输入**:
   仅覆盖其中之一
 - **THEN** 仅被计量的路由在前端两列显示命中,另一路由不因子串包含而显示命中;「无前端使用」
   SHALL NOT 被标为「有」
+
+### Requirement: 外部仓检索物化与过滤的正确性
+
+外部仓受控检索的结论物化与遍历 SHALL 满足以下正确性约束(「存量安全设计基线投影与外部仓
+受控检索」既有检索/授权/降级行为不变):
+
+- **结论物化唯一性**:每个已批准外部仓的结论目录 SHALL 以**解析后全路径**唯一确定(basename
+  同名仓以确定性消歧后缀区分)——两个已批准仓 SHALL NEVER 共享结论目录,任何仓的结论记录
+  (`summary_path` 等)SHALL 指向该仓自己的证据文件;前仓证据 SHALL NOT 因后仓检索被覆盖或
+  丢失。声明去重 SHALL 以解析后路径为键:同一仓的等价路径写法(含 `..` 变体)SHALL 去重为
+  一次检索,SHALL NOT 双倍检索或互相错配。
+- **目录过滤相对性**:外部仓内的目录跳过判定 SHALL 基于仓内相对路径的组件——外部仓的祖先
+  目录名(仓外路径段)SHALL NOT 触发跳过;命中过滤规则的目录 SHALL 按同一规则如实跳过并
+  保持既有披露语义。命中计数 SHALL NEVER 因祖先目录名产生静默假零。
+- **下钻前剪枝**:外部仓遍历 SHALL 应用目录剪枝于下钻之前——被跳过目录(构建产物、依赖目录、
+  `.git` 等)SHALL NOT 被遍历读取;同一仓的配置文件命中收集与文本文件收集 SHALL 合并为
+  单遍遍历,SHALL NOT 对同一棵树做多遍无剪枝全树扫描。
+- **校验判定与运行时一致**:`--check` 对基线产物尺寸的断言 SHALL 依据本次运行**实际生效**的
+  基线预算(产物中记录;缺失时按默认预算向后兼容),SHALL NEVER 以硬编码的默认倍数否决按
+  显式更大预算合法产出的产物。
+- **回退归因诚实**:同名分支缺失时的检索回退 SHALL 如实归因(实际使用的参照分支),SHALL NOT
+  在结论文件中声称使用了未实际使用的分支参照。
+- **候选提取卫生**:外部仓路径候选提取 SHALL 排除 URL 形态 token(含 scheme 分隔符),
+  `external_skipped` SHALL NOT 出现以 URL 拼造的伪路径条目。
+
+#### Scenario: 同名外部仓结论互不覆盖
+
+- **WHEN** 两个已批准外部仓的 basename 同名(如 `D:/work/projA/front` 与 `D:/other/projB/front`),
+  各含不同标记的权限配置命中
+- **THEN** 结论目录下存在两个各自独立的结论目录,两份记录的 `summary_path` 分别指向各自
+  仓的证据文件且内容与各仓命中一致;`--check` exit 0 且证据链可追溯
+
+#### Scenario: 同一仓的路径变体写法去重
+
+- **WHEN** 存量设计对同一外部仓以两种等价写法声明(其一含 `..` 中间段)
+- **THEN** 去重为一次检索、一份结论;NEVER 双倍检索或共享错配目录
+
+#### Scenario: 祖先目录名不误伤整仓
+
+- **WHEN** 外部仓位于祖先目录名含 `build`(如 `D:/ci/build/front`)的路径下,仓内无该名目录
+- **THEN** 该仓正常检索,路由命中计数为真实值;命中为零时为零(NEVER 因祖先目录名静默假零)
+
+#### Scenario: 被剪枝目录不被读取
+
+- **WHEN** 外部仓含 `.git`、`node_modules` 等规则内目录
+- **THEN** 遍历不进入这些目录(其内文件不参与命中计数与文本收集);检索结果与全量扫描但
+  过滤产出的结果一致
+
+#### Scenario: 大预算合法产物通过校验
+
+- **WHEN** 以 `--baseline-budget-bytes 400000` 运行产出 162KB 基线(truncated=false),对该
+  run 执行 `--check`
+- **THEN** 尺寸断言按记录的生效预算判定,exit 0(NEVER 以默认预算倍数的硬编码阈值误报
+  「unexpectedly huge」)
+
+#### Scenario: 回退分支如实归因
+
+- **WHEN** 外部仓不存在同名分支,检索回退到该仓当前检出分支
+- **THEN** 结论文件的归因描述与实际使用的分支一致(如实表述当前检出分支,NEVER 声称
+  「默认分支」)

@@ -304,6 +304,182 @@ class SdrContextTest(unittest.TestCase):
         self.assertEqual(d["external_repos"], [])
         self.assertTrue(any("not-found" in s for s in d["external_skipped"]))
 
+    # --- H6: conclusion-dir uniqueness for same-basename external repos ---
+    def _make_named_front(self, parent: Path, marker: str) -> Path:
+        """A minimal approved external repo at an arbitrary parent (basename always
+        `front`) whose permission-config hit carries its own marker."""
+        front = parent / "front"
+        _init_repo(front)
+        (front / "config").mkdir()
+        (front / "src").mkdir()
+        (front / "src" / "pay.vue").write_text("axios.post('/pay/quick')\n",
+                                               encoding="utf-8")
+        _commit_all(front, "init")
+        _git(front, "checkout", "-qb", "feature-pay")
+        (front / "config" / "buttonAuth.properties").write_text(
+            f"/pay/quick=allow,{marker}\n", encoding="utf-8")
+        _commit_all(front, "branch")
+        (self.repo / "docs" / "security-controls").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "security-controls" /
+         f"ext-{parent.name}.md").write_text(
+            f"本地前端项目地址 {front.as_posix()},前端分支名与本项目一致;\n"
+            f"垂直越权以 buttonAuth.properties 配置为准。\n", encoding="utf-8")
+        self._approve(front)
+        return front
+
+    def test_same_basename_repos_get_independent_conclusions(self):
+        front_a = self._make_named_front(self.tmp / "projA", "markerA")
+        front_b = self._make_named_front(self.tmp / "projB", "markerB")
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(len(d["external_repos"]), 2)
+        recs = {r["path"]: r for r in d["external_repos"]}
+        self.assertEqual(len({r["slug"] for r in recs.values()}), 2,
+                         "same-basename repos must get disambiguated slugs")
+        self.assertEqual(len({r["summary_path"] for r in recs.values()}), 2,
+                         "each repo must materialize its own conclusion dir")
+        for front, marker in ((front_a, "markerA"), (front_b, "markerB")):
+            rec = recs[str(front)]
+            hits = Path(rec["summary_path"]).read_text(encoding="utf-8")
+            self.assertIn(marker, hits,
+                          "each record's summary_path must carry ITS OWN repo's "
+                          "evidence, never the other repo's content")
+            self.assertEqual(rec["config_hits"], 1)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_dotdot_variant_of_same_repo_dedupes_to_one_retrieval(self):
+        self._make_named_front(self.tmp / "proj", "markerA")
+        variant = (self.tmp / "proj" / "path-spell" / ".." / "front").as_posix()
+        (self.repo / "docs" / "security-controls" / "ext-variant.md").write_text(
+            f"本地前端项目地址 {variant},前端分支名与本项目一致,"
+            f"以 buttonAuth.properties 为准。\n", encoding="utf-8")
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(len(d["external_repos"]), 1,
+                         "one repo via two equivalent spellings = ONE retrieval")
+        self.assertEqual(len(list((self.run_dir / "external").glob("*/summary.json"))),
+                         1, "one conclusion dir, not two colliding writes")
+
+    # --- M8: dir-name filtering judges the path WITHIN the repo ---
+    def test_ancestor_dir_named_build_does_not_zero_the_repo(self):
+        front = self._make_named_front(self.tmp / "build", "markerA")  # .../build/front
+        (front / "build").mkdir()                                      # in-repo build/
+        (front / "build" / "bundle.js").write_text("x('/pay/quick')\n",
+                                                   encoding="utf-8")
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        rec = d["external_repos"][0]
+        self.assertEqual(rec["route_hits"], [{"route": "/pay/quick", "count": 1}],
+                         "ancestor `build` must not zero the count; the in-repo "
+                         "build/ dir must still be skipped")
+        hits = Path(rec["summary_path"]).read_text(encoding="utf-8")
+        self.assertIn("src/pay.vue", hits.replace("\\", "/"))
+        self.assertNotIn("bundle.js", hits)
+
+    # --- M10: single pruned walk — pruned dirs never read; results stable; rerun
+    #     byte-identical ---
+    def test_pruned_dirs_never_read_and_results_stable(self):
+        front = self._make_named_front(self.tmp / "proj", "markerA")
+        (front / "node_modules" / "pkg").mkdir(parents=True)
+        (front / "node_modules" / "pkg" / "pay.js").write_text("x('/pay/quick')\n",
+                                                               encoding="utf-8")
+        (front / ".git" / "leak.vue").write_text("x('/pay/quick')\n",
+                                                 encoding="utf-8")
+        read_calls: list[str] = []
+        real_read = self.m._read_text
+
+        def counting(p):
+            read_calls.append(str(p))
+            return real_read(p)
+
+        self.m._read_text = counting
+        try:
+            code, out, err = self._run(*self._base_args())
+        finally:
+            self.m._read_text = real_read
+        self.assertEqual(code, 0, err)
+        rec = json.loads(out)["external_repos"][0]
+        self.assertEqual(rec["route_hits"], [{"route": "/pay/quick", "count": 1}])
+        low = " | ".join(read_calls).lower()
+        self.assertNotIn("node_modules", low, "pruned dirs must never be read")
+        self.assertNotIn(".git", low)
+        first = Path(rec["summary_path"]).read_bytes()
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        rec2 = json.loads(out)["external_repos"][0]
+        self.assertEqual(Path(rec2["summary_path"]).read_bytes(), first,
+                         "idempotent rerun must be byte-identical")
+
+    # --- M9: --check judges the baseline size by the recorded effective budget ---
+    def test_check_honors_effective_budget_big_baseline_ok(self):
+        ctl = self.repo / "docs" / "security-controls"
+        ctl.mkdir(parents=True, exist_ok=True)
+        (ctl / "big.md").write_text("## 安全设计\n" + ("权限与校验细节行\n" * 9000),
+                                    encoding="utf-8")
+        code, out, err = self._run(*self._base_args(),
+                                   "--baseline-budget-bytes", "400000")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertFalse(d["baseline_truncated"])
+        self.assertGreater(d["baseline_bytes"], 4 * 32 * 1024,
+                           "fixture must exceed the old hardcoded 4x-default bar")
+        self.assertEqual(d["effective_baseline_budget"], 400000)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_check_budget_field_absent_defaults(self):
+        self._make_front(reachable=True)
+        self._run(*self._base_args())
+        ctx_path = self.run_dir / "context.json"
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx.pop("effective_baseline_budget", None)   # old-artifact shape
+        ctx_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_check_budget_field_drives_the_judgment(self):
+        self._make_front(reachable=True)
+        self._run(*self._base_args())
+        ctx_path = self.run_dir / "context.json"
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx["effective_baseline_budget"] = 10         # tiny recorded budget
+        ctx_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("unexpectedly huge", err)
+
+    # --- L4: fallback attribution names the checked-out branch, not "default" ---
+    def test_branch_fallback_attributed_to_checked_out_branch(self):
+        front = self._make_named_front(self.tmp / "proj", "markerA")
+        _git(front, "checkout", "-q", "master")
+        _git(front, "branch", "-D", "feature-pay")   # same-name branch absent here
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        rec = json.loads(out)["external_repos"][0]
+        self.assertTrue(rec["branch_fallback"])
+        self.assertIn("回退当前检出分支", rec["branch_sync_note"])
+        self.assertNotIn("回退默认分支", rec["branch_sync_note"])
+        self.assertIn("回退当前检出分支",
+                      Path(rec["summary_path"]).read_text(encoding="utf-8"))
+
+    # --- L5: URL tokens never become path candidates ---
+    def test_url_token_not_extracted_as_path_candidate(self):
+        (self.repo / "docs" / "security-controls").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "security-controls" / "ext-url.md").write_text(
+            "前端仓库见 https://github.com/example/front,"
+            "垂直越权以 buttonAuth.properties 为准。\n", encoding="utf-8")
+        code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["external_repos"], [])
+        for s in d["external_skipped"]:
+            self.assertNotIn("://", s, "URL tokens must not become path entries")
+        self.assertEqual(d["pending_approval"], [])
+
     # --- sensitive catalog ---
     def test_default_template_fallback(self):
         code, out, _ = self._run(*self._base_args())
@@ -561,7 +737,8 @@ class SdrContextTest(unittest.TestCase):
         self._make_front(reachable=True)
         code, out, err = self._run(*self._base_args())
         self.assertEqual(code, 0, err)
-        self.assertIn("[sdr_context] external front:", err)
+        # slug = basename + resolved-path short hash (H6 disambiguation)
+        self.assertRegex(err, r"\[sdr_context\] external front-[0-9a-f]{8}:")
         self.assertIn("diff file(s)", err)
 
     # --- --check advisory WARN on unapproved holdover ---

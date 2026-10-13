@@ -16,6 +16,40 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — /mgh-sdr 外部仓受控检索层六缺陷收口(H6/M8/M9/M10/L4/L5 + read_roots_config L11,2026-10-13 评审) (0.1.66)
+
+- `core/scripts/sdr_context.py` 单文件收口,先红后绿:**H6** 外部仓结论目录键从裸
+  basename 改 `basename + "-" + sha8(resolved 路径前 8 位十六进制)` 消歧形态——两个
+  同名 basename 的已批准仓(projA/front 与 projB/front)不再共享同一结论目录互相
+  覆盖(前仓人读证据不可恢复丢失、记录指向他仓内容、`--check` 仅存在性检查照常
+  放行);声明去重键同步改 resolved 字符串,同一仓含 `..` 的变体写法去重为一次
+  检索一份结论(此前双倍检索 + 同目录错配)。**M8** 目录跳过判定不再看绝对路径
+  全组件——遍历只发生在仓内,外部仓祖先目录名叫 build/dist(如 `D:\ci\build\front`)
+  不再把整仓误跳成静默假零(「前端是否引用新路由」信号曾被无声否定);仓内真实
+  `build/` 目录照常跳过。**M10** 每仓遍历从「每个声明配置名一次无剪枝 rglob(≤5 次)
+  + 一次 `rglob("*")` 出现计数」最多 6 遍全树 I/O 改为单遍 `os.walk(topdown=True)`:
+  `dirs[:]` 原位删除 skip_dirs 实现下钻前真剪枝(.git/node_modules 不再被枚举),
+  配置命中与文本收集一趟完成;dirs/files 排序保证幂等重跑产物字节一致;路由出现
+  计数逻辑(`_new_routes` 正则 + 类级 base 拼接)零变化。**M9** 实际生效的
+  `--baseline-budget-bytes` 写入 `context.json` 新增 `effective_baseline_budget`
+  字段,`--check` 基线尺寸断言按记录值判定(字段缺失/错型按默认预算向后兼容,旧
+  产物不误报)——合法调大预算的运行不再被硬编码「默认值 ×4」误否决成 exit 2。
+  **L4** 同名分支缺失的回退归因改「回退当前检出分支」(如实描述实际行为;否决探测
+  origin/HEAD,不引入远端/网络依赖与不确定分支语义)。**L5** 外部路径候选提取排除
+  含 `://` 的 token,存量文本里的 GitHub URL 不再被盘符 regex 切出
+  `not-found: s://github.com/...` 伪条目噪声。
+- `core/scripts/read_roots_config.py` **L11**:配置目录 `mkdir(parents=True)` 挪进
+  受护写块,`.mgh` 已作为文件存在时从裸 traceback 改为 stderr 人类诊断(含 recipe)
+  + 契约退出码 1,零行为语义变化。
+- 回归:新增 10 条先红后绿(test_sdr_context 9 条:同名双仓独立结论+证据各指其仓/
+  `..` 变体去重单检索/祖先 build 不误伤+仓内 build 照常跳过/剪枝目录零读取+结果
+  对拍+幂等字节一致/大预算 check 过/字段驱动判定/旧产物缺字段兼容/回退归因串/
+  URL 候选排除;test_read_roots_config 1 条:`.mgh` 为文件 → 诊断+退出码 1 非裸
+  traceback),断言翻转 1 条(stderr 逐仓行按新 slug 形态改正则);修复前 8 红,
+  修复后定向面 47+17+13+1 测全绿,授权/fail-closed 面既有用例零改动通过;
+  contracts 459 flag/purity 330 文件过;specs 同步 1 条 ADDED requirement(外部仓
+  检索物化与过滤的正确性)。
+
 ### Fixed — fanout_runner 派发器七缺陷收口(M4/H5/M1/M2/M3/M5/L12,2026-10-13 评审;六域共用基座) (0.1.65)
 
 - `core/scripts/fanout_runner.py` 单文件收口,先红后绿:**M4** 限流截断竞态——

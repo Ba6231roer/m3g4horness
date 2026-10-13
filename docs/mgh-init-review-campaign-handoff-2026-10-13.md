@@ -13,11 +13,15 @@
 | 批次 | change | 状态 |
 | --- | --- | --- |
 | 1 | `fix-mgh-init-resume-state-machine` | ✅ 已 apply(2ae05fb)+ 归档(15f72b2),VERSION 0.1.68 |
-| 2 | `fix-mgh-guard-enforcement-integrity` | ⏸ **已 propose 未 apply**(工件 4/4,`openspec validate --strict` 过、purity 零违例) |
-| 3-7 | 见第四节 | 未 propose |
+| 2 | `fix-mgh-guard-enforcement-integrity` | ✅ 已 apply(37a9b9b)+ 归档(4b35700),VERSION 0.1.69 |
+| 3 | `fix-mgh-fanout-dispatcher-hygiene` | ✅ 已 apply + 归档(1557e4d,archive/2026-10-13-fix-mgh-fanout-dispatcher-hygiene),VERSION 0.1.70;specs 5 MODIFIED 已回写主规格 fanout-dispatch 并随该提交推送 |
+| 4-7 | 见第四节 | 未 propose |
 
-**下一步(今晚)**:新会话 `/opsx:apply fix-mgh-guard-enforcement-integrity` → `/opsx:archive`
-→ 指挥部会话说「propose 批次 3」。
+**下一步**:指挥部会话 propose 批次 4(`fix-mgh-init-distribution-links`,规划见四;动笔前
+重新核实 HEAD,见三.4)。批次 3 实施裁决已固化在该 change 的 design.md + 归档 tasks.md
+(冷却 gate 单点收敛/杀失败=幸存者拥有单元 + `_breaker_observe` 增 stuck_pending 操作数/
+marker 守卫单点两入口同判/kill-stale argv[0] token 锚定〔引号 span 优先,含空格路径夹具已改
+引号形〕/PWD 镜像姊妹形态/`_safe_name` 别名归一/`_run_unit` 返回 5→6 元组新增 `kill_ok`)。
 
 ## 二、批次 2 摘要(apply 前必读)
 
@@ -73,10 +77,26 @@
     与本战役各批次无范围交集(其 launcher PWD 剥离是 `mgh_sdr_launch.py` 面,批次 3 的
     `fanout_runner` spawn PWD 项仍然开放)。换环境前本战役需提交的内容 = 本文档 +
     `openspec/changes/fix-mgh-guard-enforcement-integrity/`。
+12. **存量测试失败(批次 3 实测,勿追查)**:`TestRateLimitStorm.
+    test_all_rate_limit_storm_truncates_fast`(test_fanout_runner)在本机 Python 3.14 上
+    **HEAD 4b35700 即失败**(waves_run 3 != 2,干净 worktree 5/5 复现;屏障构造拦不住两次
+    crash 记账窗口之间的第三次补位派发)——批次 3 落地后依旧失败,与本批改动零关联。批次 5
+    (runner 预算转发)与任何要跑 `test_fanout_runner` 的批次都会撞上:对照 worktree 确认
+    非自己引入即跳过,是否修测试确定性留维护者拍板。
+13. **批次 3 落地后的 runner 新形态(批次 5 必读)**:`_run_unit` 返回 5→**6 元组**
+    (新增第 6 元 `kill_ok`,杀失败 False;17 处测试 unpack 已同步);`_dispatch` 消费
+    `kill_ok=False` 走「幸存者拥有单元」分支(不回队 + drain re-list 排除 +
+    `_breaker_observe(wsnap, stuck_pending)` 新操作数);`_kill_tree` POSIX 侧有
+    `_KILL_TREE_GRACE_S=1.5` 宽限(真杀最坏多 ~1.5s);`_write_failed_marker` 签名多了
+    `repo` 参数且返回 bool;`_safe_name` = `init_tier.safe_unit_filename` 别名;kill-stale
+    的 `_classify_targets` 走 `_cmdline_exe_token`(引号 span 优先)。批次 5 动 TIERS/
+    转发面时以这些形态为基线,NEVER 按旧记忆改。
 
 ## 四、剩余批次自包含规划(propose 时直接取用)
 
 ### 批次 3 — fanout_runner 派发器剩余(change 名建议 `fix-mgh-fanout-dispatcher-hygiene`)
+
+✅ **已完成**(0.1.70,1557e4d;落地形态与增量情报见三.13,历史规划保留于下):
 
 评审行号失效(见三.1),按内容重定位:
 

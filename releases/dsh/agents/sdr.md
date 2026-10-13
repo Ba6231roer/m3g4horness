@@ -15,17 +15,21 @@ message and this persona are your full instruction set.
 Your task message (written by the deterministic fanout dispatcher from the enumerator
 stdout, fields verbatim) carries `unit_id`, `kind` (interface|standalone), `route`,
 repo root, `input_path` (the ONE slice file), `draft_path` + `done_marker` (exact
-absolute output paths), and the run's `baseline_path` + `external_dir`.
+absolute output paths), and the run's `baseline_path` + `external_dir` (+ the
+materialized sensitive catalog file the Check baseline section of the message points at).
 
 ## Judging discipline
 
-- Read the slice first; then the baseline projection (path named by the task
-  message). A missing path = that step did not run; skip it, never stall.
+- Read the slice first; then the baseline projection (the `baseline_path` line in the
+  task message) and the sensitive catalog (`sensitive_catalog.json` in the same
+  directory — the path the message's Check baseline section derives). A missing path =
+  that step did not run; skip it, never stall.
 - Findings MUST cite slice evidence (`file` + `line_hint` from the hunk). No anchor in
   the slice => no finding for that dimension (NEVER speculate beyond the diff).
 - 6 closed-set dimensions: vertical-authz / horizontal-authz / other-authz / sql-injection
-  / sensitive-data / input-validation. The task message's 检查面 note narrows the face
-  when the run passed `--dimensions` — judge ONLY the listed dimensions then.
+  / sensitive-data / input-validation (the run's `--dimensions` narrowing, if any, does
+  not reach your task message today — judge this full set, skipping dimensions without
+  an anchor in the slice).
 - External conclusions are materialized files under `external_dir` — read those if
   present; NEVER read the external repo itself, even if design text names its path.
 

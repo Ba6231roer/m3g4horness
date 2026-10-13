@@ -16,6 +16,63 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — /mgh-sdr 文档/壳/契约面披露对齐 + launcher/describe 健壮性收口(M6/M15–M20/L9/L10 + L1/L2/M12/M13/L3,2026-10-13 评审) (0.1.67)
+
+- **M6+L3 敏感目录物化与路径透传**:`sdr_context.py` 把解析后敏感目录对象物化为
+  `<run-dir>/sensitive_catalog.json`(与 context.json 同步确定性单遍;stdout/context 新增
+  `sensitive_catalog_path`;`--check` 增量校验物化文件存在 + shape,旧产物缺字段兼容),
+  任务模板 `sdr-task.md` 检查基线路径组新增该文件只读路径(经既有 `{{baseline_path}}`
+  槽位派生同目录文件名——**fanout_runner 占位符集零改动**,残留 `{{` 检查不触);launcher
+  `_build_prompt` 删除目录对象内嵌与 `[:4000]` 静默截断、改只读路径指认(「逐字透传」声称
+  恢复成立);三面 agent 定义 Input/判定纪律同步。修复前主路径 sensitive-data 维度永远
+  拿不到项目敏感目录且无任何披露。
+- **M18+L9 dimensions 披露对齐**:`pipeline.md` `--dimensions` 段改写为与三面壳同口径
+  (收窄仅闭集校验 + manifest 记录,**不**进入评审单元任务消息;真正接线后恢复现文的备注
+  留存);三面 agent 定义删「检查面 note 收窄维度」句(描述永不触发的机制),任务模板同族
+  句一并改正;对照验收 grep 零残留。
+- **M15 dsh SKILL launcher 披露**:补「launcher 仅 spawn opencode/claude 宿主,dsh-only
+  部署直接走壳内路径」,同段等量精简(召唤语义/派发面引用同步收紧),token budget
+  lint 过(4998/5000 贴顶)。
+- **M16/M17 三面措辞对齐**:opencode/dsh 壳 step 3 超时不变式段对齐 claude 完整规范形
+  (`--call-timeout-s` MUST 显式传且 < budget×0.8、`--stall-timeout-s`(≥60) MUST < call,
+  宿主具体数值落调用行 720000/540/300),消除压缩括号注形绑定歧义;三面 agent 判定纪律
+  统一 claude 精确散文形,opencode 面删运行时永不替换的 `{{ baseline path … }}` 字面占位符。
+- **M19/M20 契约文档补全**:`pipeline.md` 三处字段清单按脚本实际产出逐项核对补全——
+  diff_group `pending[]` 补 `slimmed/chain/baseline_path/external_dir`;sdr_context stdout 补
+  `base/branch/effective_baseline_budget/baseline_truncated_bytes/pending_approval[]/`
+  `sensitive_catalog_path` 与 `external_repos[]` 完整 item 形;render manifest `counts` 补
+  `findings/excluded_files`;run 目录布局/`--summary`/`--check` 行同步。`runtime-enforcement.md`
+  补 sdr 哨兵确定性生命周期六步(预武装 → co-write → launcher 二次闸门刷新 → re-arm →
+  存在性校验 → 完成移除),Authoring 行改「两个已落地确定性写入器」(`read_roots_config
+  --add` 与 `sdr_context --approve-external` 共享同一原子写实现),target 来源清单补
+  sdr_context stdout `repo`。
+- **L10 壳参数表转发槽位**:三面壳 step 2 调用行与示例块补 `--max-standalone-bytes`/
+  `--max-interface-bytes`/`--include-excluded` 槽位(示例块补默认值 65536/262144,
+  contracts lint 465 flag 全过——此前三 flag 仅参数表声明、无任何转发面)。
+- **L1/L2 launcher 健壮性**:空 `try/finally` 死代码外壳删除(哨兵生存语义**零变化**——
+  异常路径 NEVER 一律移哨兵,运行中 run 不失守,残留经恢复入口检出/下次启动复用);
+  sdr_context stdout 消费(`json.loads` + 字段下标)包 `_UpstreamOutputError` →
+  per-branch FAILED(stderr 原因、多分支清单继续后续分支、退出码语义不变、非 traceback);
+  新增回归 3 条(单分支错形 FAILED 不崩且残哨保留 / multi-branch 首分支错形后续分支照常
+  跑完整流程 / 空 JSON 对象同形 FAILED)。
+- **M12/M13 describe_artifact 健壮性**:`--field` 列表索引守卫从 `isdigit()` 预判改
+  try-int(`isdigit` 收 `²`/`٥` 而 `int()` 拒收的 traceback 面消除,畸形段优雅退出 1);
+  补全族最后一个缺的控制台 utf-8 reconfigure 块(与兄弟脚本同形——`ensure_ascii=False`
+  中文值在 cp936 控制台即崩);新增回归 3 条(unicode 数字段优雅报错 / 负索引不崩 /
+  中文值正常输出)。
+- **卫生(零行为变化)**:`resume_sdr_state.py` STEPS 死常量与 `_resolve_repo` grp 死参数
+  删除;`sdr_tier.py` probe 失败原因如实区分(`MGH_CODEGRAPH_BIN` 指向陈旧路径 vs PATH 无
+  binary,不再统一报 "no binary";断言翻转 1 条);`mgh_sdr_launch.py` 函数内重复
+  `import os` 收敛模块头。
+- 回归:新增 11 条先红后绿(test_sdr_context 4 + test_mgh_sdr_launch 4 +
+  test_describe_artifact 3)+ 断言翻转/扩充 2 条(sdr_tier probe 理由、summary projection
+  字段集);定向面全绿(sdr_context 51 / launch 33 / describe 11 / sdr_tier 11 /
+  resume_sdr_state 35 / list_sdr_steps 9 / failure_chain 2 / distributed_md_purity 30 /
+  dsh_command_surface 6 + zero_deps / no_compile_warnings);contracts 465 flag /
+  prompt_budget 17 壳 / purity 326 文件过;plain_language 输出与本 change 改动前逐字节
+  一致(exit 2 系四个其他活跃 change 的 proposal 缺人话序,先前已存在、非本 change 引入)。
+  specs 同步 security-design-review 1 MODIFIED + 2 ADDED requirement。
+
 ### Fixed — /mgh-sdr 外部仓受控检索层六缺陷收口(H6/M8/M9/M10/L4/L5 + read_roots_config L11,2026-10-13 评审) (0.1.66)
 
 - `core/scripts/sdr_context.py` 单文件收口,先红后绿:**H6** 外部仓结论目录键从裸

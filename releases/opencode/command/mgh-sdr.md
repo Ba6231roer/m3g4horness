@@ -115,7 +115,7 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
    · 无 external_repos 且 external_skipped 非空 → 记住该披露(报告会声明)。
    · `export MGH_TARGET=<abs>`;`--dry-run` → 到此处 STOP(跑 `--check` 后移除哨兵)。
 2. diff_group(Bash,确定性;pending 唯一来源):
-     py .opencode/mgh-core/scripts/diff_group.py --repo <abs> --base <ref> --branch <ref> --checkpoints <run-dir>/markers --materialize <run-dir>/slices
+     py .opencode/mgh-core/scripts/diff_group.py --repo <abs> --base <ref> --branch <ref> --checkpoints <run-dir>/markers --materialize <run-dir>/slices [--max-standalone-bytes <N>] [--max-interface-bytes <N>] [--include-excluded]
    · stdout `pending[]` **直消费**(Bash 工具返回值即全部 stdout);过大 → 同参加 `--summary`
      重跑(投影视图:计数摘要 + 当页 `pending[]`;物化照常执行、落盘产物逐字不变),分页仅由
      `--offset/--limit` 驱动;要瞄结构 → `py .opencode/mgh-core/scripts/describe_artifact.py
@@ -127,10 +127,10 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
      probe 失败原因在 stderr)。
    · 校验:`py .opencode/mgh-core/scripts/diff_group.py --check <run-dir>`(退出码 2 → 回退)。
 3. fan-out(dispatcher;逐字转发调用,**NEVER** 手工循环):
-     py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --time-budget-ms <宿主标定,如 opencode 900s 宿主 → 720000> --call-timeout-s <MUST 显式传,< budget×0.8,如 720000→540> --stall-timeout-s <MUST < --call-timeout-s,如 300> [--resume]
-   · 四级超时不变式(spawn 前 fail-loud,违反退出码 2):`--call-timeout-s`(≥60 的
-     `--stall-timeout-s` 须更小)不显式传 = 退出码 2;带 per-call `timeout` ≥
-     `--time-budget-ms` 跑。STALLED → 报告 degraded,非 ok 单元证据在
+     py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300 [--resume]
+   · 四级超时不变式(spawn 前 fail-loud,违反退出码 2):`--call-timeout-s` MUST 显式传且
+     < budget×0.8,`--stall-timeout-s`(≥60) MUST < `--call-timeout-s`;带 per-call `timeout`
+     ≥ `--time-budget-ms` 跑。STALLED → 报告 degraded,非 ok 单元证据在
      `<run-dir>/markers/sdr/<unit>.run.log`。
    · 软时限早退(stdout `partial:true`)→ 同参重派(resume 语义);STALLED(退出码 2)→
      停止重派,报告 degraded(诚实披露)。gate 形退出码 2 → 转述 stderr recipe,停止。
@@ -190,7 +190,7 @@ py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> -
 py .opencode/mgh-core/scripts/read_roots_config.py --target <abs> --add <abs-外部仓>
 py .opencode/mgh-core/scripts/read_roots_config.py --target <abs> --list
 py .opencode/mgh-core/scripts/read_roots_config.py --target <abs> --check
-py .opencode/mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices
+py .opencode/mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices --max-standalone-bytes 65536 --max-interface-bytes 262144
 py .opencode/mgh-core/scripts/diff_group.py --check .mgh-sdr/runs/<ts>
 py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base master --checkpoints .mgh-sdr/runs/<ts>/markers --inputs-dir .mgh-sdr/runs/<ts>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300
 py .opencode/mgh-core/scripts/render_sdr_report.py --run-dir .mgh-sdr/runs/<ts> --repo <abs>

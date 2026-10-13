@@ -86,6 +86,34 @@ class TestDescribeArtifact(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["value"], "scout-001")
 
+    def test_field_unicode_digit_segment_fails_gracefully(self):
+        # fix-mgh-sdr-docs-shell-alignment M12: isdigit() accepts `²` but int() rejects
+        # it — the old guard/apply mismatch escaped as a bare traceback; now the
+        # malformed segment is the ordinary graceful field-path error (exit 1)
+        self._wrap({"batches": [{"batch_id": "x"}]})
+        for bad in ("batches.²", "batches.٥", "batches."):
+            with self.subTest(bad=bad):
+                code, out, err = self._run(["--field", bad])
+                self.assertEqual(code, 1)
+                self.assertIn("field path not found", err)
+                self.assertNotIn("Traceback", err)
+
+    def test_field_negative_index_is_out_of_range_not_crash(self):
+        self._wrap({"batches": [{"batch_id": "x"}]})
+        code, _, err = self._run(["--field", "batches.-1"])
+        self.assertEqual(code, 1)
+        self.assertIn("field path not found", err)
+
+    def test_chinese_value_output_under_reconfigure(self):
+        # fix-mgh-sdr-docs-shell-alignment M13: this script is the family's only one
+        # without the console utf-8 reconfigure — ensure_ascii=False Chinese values
+        # crashed on a cp936 console. The block now matches every sibling's shape.
+        self._wrap({"风险": "密码明文存储:高危,须加密", "batches": []})
+        code, out, err = self._run(["--field", "风险"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["value"], "密码明文存储:高危,须加密")
+        self.assertIn("密码明文存储", out)   # ensure_ascii=False passthrough, not \u escapes
+
     def test_no_mode_exit2(self):
         self._wrap({"a": 1})
         code, _, _ = self._run([])

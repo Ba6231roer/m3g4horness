@@ -3,8 +3,11 @@
 Producer: for `/mgh-init` (and `/mgh-ut-init`, which shares the writer), the sentinel is a
 **deterministic side-effect of `write_runconfig.py`** (co-written atomically with
 `run_config.json`; `resume_state.py --check` validates its existence mid-run and
-`--rearm-sentinel` rewrites it from the persisted `run_config.target` on resume); other
-domains write it from the orchestrator shell step 0 (Bash). Consumer: the shared guard
+`--rearm-sentinel` rewrites it from the persisted `run_config.target` on resume); the
+remaining domains' writer surface is per-domain and pinned in the Lifecycle section —
+sra/srr/sast write it from the orchestrator shell step 0 (Bash), and **sdr has a fully
+scripted lifecycle with no `printf` recipe anywhere** (see "sdr sentinel lifecycle"
+below). Consumer: the shared guard
 `core/scripts/block_adhoc_scripts.py` — the canonical copy; the three distributed guard
 copies (claude `hooks/`, opencode `hooks/`, dsh `mgh-core/dsh/` sibling) are byte-identical
 to it, asserted by `tests/test_dsh_hook_parity.py`. The opencode `.ts` plugin and the dsh
@@ -54,7 +57,7 @@ Optional field (absent by default; absence preserves the shape byte-for-byte):
 | Field | Purpose |
 |---|---|
 | `domain` | `mgh-init` / `mgh-sast` / `mgh-sra` / `mgh-srr` / `mgh-ut-init` / `mgh-sdr` (advisory; discovery is by path) |
-| `target` | abs project root (Windows-native; **MUST** come from a Python leaf-script stdout — `describe_artifact --field repo` / `prepare_augment`/`ingest_requirements` stdout `project_root` / `write_runconfig` stdout `target` — never bash `pwd`, which emits MSYS `/c/...` that pathlib mis-resolves on Windows) |
+| `target` | abs project root (Windows-native; **MUST** come from a Python leaf-script stdout — `describe_artifact --field repo` / `prepare_augment`/`ingest_requirements` stdout `project_root` / `write_runconfig` stdout `target` / sdr: `sdr_context` stdout `repo` (the launcher and `resume_sdr_state` re-use that same source) — never bash `pwd`, which emits MSYS `/c/...` that pathlib mis-resolves on Windows) |
 | `out_roots[]` | abs roots for customized `--out` / `--rules-dir` (init & ut-init; honors custom output locations without over-blocking) |
 | `read_roots[]` | **optional** abs external READ-ONLY roots (sdr: confirmed external repos the launcher/sdr_context actually searched). BOTH read faces honor them: the tool face (`Read`/`Glob`/`Grep`) AND the Bash face (search/listing verbs + the catch-all path-token allowset, rule m) — **语义反转** (the prior "tool-face only; Bash search verbs judged against `MGH_TARGET` alone" decision is reversed; what is readable at all is readable through any tool). The write side (tool + Bash verb + redirect + delete) is NEVER honored — judged against `MGH_TARGET` alone; likewise the leaf-source / `py -c` / temp-I/O / file-assoc blocks. **read_roots 最小化纪律**: declare only roots actually searched in this run — NEVER a user-supplied catch-all / drive root. Fail-closed: a declared root must exist and be a directory at judgment time; a missing root grants zero. |
 | `v` | schema version |
@@ -78,7 +81,7 @@ A per-project, hand-editable config extends the unified read allow-set in EVERY 
 | Read-only | a config root NEVER grants write access (write side judges `MGH_TARGET` alone) and NEVER relaxes the leaf-source / `py -c` / temp-I/O / file-assoc blocks |
 | Fail-closed | missing file = behavior identical to no config; malformed JSON / `read_roots` not a list / non-dict body = zero grants, no crash, no other judgment altered; each entry needs exist-and-is-dir containment at judgment time (a missing entry grants zero) |
 | Tolerance | unknown fields ignored; non-string / blank entries skipped |
-| Authoring | hand-editable by the user; the deterministic writer (sdr approval flow) is a follow-up change and not required |
+| Authoring | hand-editable by the user; TWO deterministic writers are landed — `read_roots_config.py --add` and `sdr_context.py --approve-external` (ONE shared validated atomic-write implementation behind both entry points, NEVER two drifting copies; both demand an existing absolute directory, exit 2 zero-write otherwise, idempotent) |
 
 **语义反转注记**: with rule m in place the Bash face judges paths directly (verb-independently),
 so the prior decision that a declared root NEVER becomes a Bash-searchable location is REVERSED —
@@ -143,6 +146,27 @@ guard NEVER sees a dsh-native id, and fields are renamed to the snake_case tool_
 - **completion / clean-stop (orchestrator, Bash)**: `rm <sentinel>` so a stale sentinel does
   not arm the guard during subsequent day-to-day dev. Residual (crash without cleanup) only
   blocks script writes, never JSON/`.md`/reads; user may `rm` manually.
+- **sdr sentinel lifecycle (fully scripted — no `printf` recipe exists in any sdr shell)**:
+  pre-arm → co-write → second-gate refresh → re-arm → existence check → completion removal.
+  ① **pre-arm** (shell step 0, BEFORE step 1 wakes the guard — closes the "step-1 args are
+  wrong → sentinel never written → guard dormant for the whole run" window):
+  `resume_sdr_state.py --run-dir <abs> --repo <abs> --arm-sentinel` (same-target re-run =
+  no-op; an already-refined `read_roots[]` is never emptied). ② **co-write**: `sdr_context.py`
+  — the one step both entries (launcher and host shell) pass through — refines the SAME
+  sentinel (`target` = its stdout `repo`; `read_roots[]` = the roots it ACTUALLY searched ∪
+  operator `--read-root`) and atomically writes the sibling `<run-dir>/run_config.json`
+  codegraph signal; both fail-loud (exit 2), never silent. ③ **launcher second-gate
+  refresh**: `mgh_sdr_launch.py` re-judges every root against the project config
+  immediately before spawning the host CLI (idempotent same-source refresh — a
+  version-skewed sibling cannot leak an unapproved root into `read_roots[]`). ④ **re-arm**:
+  `resume_sdr_state.py --rearm-sentinel` deterministically rewrites the sentinel from the
+  persisted run state (post-compaction / new-session resume). ⑤ **existence check**:
+  `resume_sdr_state.py --check` — a run in progress (step ∈ group|fanout|render) with the
+  sentinel missing = guard DORMANT → fail-loud (exit 2) + re-arm recipe. ⑥ **completion /
+  clean stop**: the host-shell step 5 `rm`s the sentinel AND the launcher removes it after
+  the host CLI exits; a crash residual is a detectable state (⑤ catches it; the next
+  launcher start reuses + refreshes a same-target residual) — never a silent lock of
+  day-to-day dev.
 
 ## MGH_TARGET resolution (subtree check)
 

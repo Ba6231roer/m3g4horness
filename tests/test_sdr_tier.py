@@ -261,8 +261,22 @@ class CodegraphProbeTest(unittest.TestCase):
             self.assertEqual(codegraph_probe_reason(self.repo), "no .codegraph dir")
             (self.repo / ".codegraph").mkdir()
             self.assertIsNone(codegraph_probe_reason(self.repo))
+        # fix-mgh-sdr-docs-shell-alignment 9.2: the failure reason is attributed
+        # honestly — a stale env override and a PATH-missing binary are different
+        # operator mistakes with different recipes; the old blanket "no binary" hid
+        # which one fired (assertion flipped from the old uniform "no binary")
         with _env("MGH_CODEGRAPH_BIN", self._missing_bin()):
-            self.assertEqual(codegraph_probe_reason(self.repo), "no binary")
+            reason = codegraph_probe_reason(self.repo)
+            self.assertIn("MGH_CODEGRAPH_BIN", reason)
+            self.assertIn("missing path", reason)
+        with _env("MGH_CODEGRAPH_BIN", None):
+            import sdr_tier as _st
+            real_which = _st.shutil.which
+            _st.shutil.which = lambda name: None
+            try:
+                self.assertEqual(codegraph_probe_reason(self.repo), "no binary")
+            finally:
+                _st.shutil.which = real_which
 
     def test_diff_group_and_sdr_context_agree_on_the_same_repo(self):
         """The structural claim, not a coincidence: both sides import THIS predicate.

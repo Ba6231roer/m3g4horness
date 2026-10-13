@@ -43,8 +43,11 @@ exists => sibling-import sensitive_catalog and reuse (parse + closed-set validat
 => exit 2 BEFORE any LLM token); missing => fall back to the DEFAULT TEMPLATE shipped by
 install (.mgh-sra/sensitive_catalog.json.example = PIPL/GB-T 35273 37 items). This fallback
 is the DELIBERATE sdr-vs-sra/srr divergence (code-diff review falls back to the wider
-default template instead of narrowing to 6 facets); the resolved object + source
-(project|default-template) ride stdout verbatim into subagent task messages.
+default template instead of narrowing to 6 facets). The resolved object is MATERIALIZED
+as the standalone file <run-dir>/sensitive_catalog.json (written in the same pass as
+context.json; stdout carries its absolute path in `sensitive_catalog_path`) — subagent
+task messages carry that READ-ONLY PATH, never the object body (same path-passthrough
+philosophy as the external-repo conclusions).
 
 (d) Run-level state co-write — this step is the ONE place both entries (launcher and
 host shell) pass through, so it owns the two run-level state files, as a script side
@@ -65,7 +68,9 @@ run-level state file.
 --check <run-dir>: baseline.md exists within the run's effective baseline budget
 (recorded in context.json; older artifacts without that field are judged against the
 built-in default budget), external conclusion files complete,
-sensitive_catalog object shape valid, pending_approval[] shape + skip-consistency (R5.9).
+sensitive_catalog object shape valid + the materialized <run-dir>/sensitive_catalog.json
+present and shape-valid (incremental: runs whose context.json predates the field are
+judged without it), pending_approval[] shape + skip-consistency (R5.9).
 
 Zero runtime deps (Python >=3.10 stdlib: argparse/hashlib/json/os/re/sys/pathlib).
 """
@@ -671,12 +676,20 @@ def _run(args) -> dict:
         "baseline_truncated_bytes": trunc_bytes,
         "sensitive_catalog": catalog,
         "sensitive_catalog_source": source,
+        # the resolved object's standalone materialization: subagent task messages carry
+        # THIS read-only path, never the object body (same path-passthrough shape as the
+        # external-repo conclusions)
+        "sensitive_catalog_path": str((run_dir / "sensitive_catalog.json").resolve()),
         "external_repos": external,
         "external_skipped": skipped,
         "pending_approval": pending_approval,
     }
     (run_dir / "context.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    # materialization rides the SAME deterministic pass as context.json (one run, one
+    # write per artifact; the resolved object is already closed-set valid here)
+    (run_dir / "sensitive_catalog.json").write_text(
+        json.dumps(catalog, ensure_ascii=False, indent=1), encoding="utf-8")
     # The codegraph signal is DERIVED, never assumed: this step is the one both entries
     # (launcher and host shell) pass through, so probing here is what makes the signal
     # identical on both — and what keeps it equal to the fact `diff_group.py` will act
@@ -703,7 +716,7 @@ def _run(args) -> dict:
     _eprint(f"[sdr_context] baseline={result['baseline_bytes']}B truncated={truncated}; "
             f"external={len(external)} repo(s) skipped={skipped or 'none'}; "
             f"pending_approval={pending_approval or 'none'}; "
-            f"sensitive_catalog_source={source}")
+            f"sensitive_catalog_source={source} -> {result['sensitive_catalog_path']}")
     return result
 
 
@@ -783,6 +796,23 @@ def _check(run_dir: Path) -> int:
     if ctx.get("sensitive_catalog_source") not in ("project", "default-template"):
         violations.append(f"sensitive_catalog_source invalid: "
                           f"{ctx.get('sensitive_catalog_source')!r}")
+    # the materialized catalog file is an incremental artifact: runs whose context.json
+    # predates sensitive_catalog_path are judged without it; a recorded path MUST point
+    # at an existing file whose content revalidates (it is what every subagent reads)
+    scp = ctx.get("sensitive_catalog_path")
+    if scp:
+        if not Path(scp).is_file():
+            violations.append(f"sensitive_catalog materialization missing: {scp!r}")
+        else:
+            try:
+                mat = json.loads(Path(scp).read_text(encoding="utf-8"))
+                import sensitive_catalog
+                v = sensitive_catalog.validate_resolved(mat)
+                violations.extend(f"materialized sensitive_catalog.json: {m}" for m in v)
+            except (OSError, ValueError) as ex:
+                violations.append(f"sensitive_catalog materialization unparsable: {ex}")
+            except Exception as ex:  # noqa: BLE001 — shape/import failure = violation
+                violations.append(f"sensitive_catalog materialization shape invalid: {ex}")
     if violations:
         _eprint(f"error: sdr_context --check: {len(violations)} violation(s):")
         for v in violations:
@@ -822,6 +852,7 @@ def _summary_projection(result: dict) -> dict:
         "baseline_bytes": result["baseline_bytes"],
         "baseline_truncated": result["baseline_truncated"],
         "sensitive_catalog_source": result["sensitive_catalog_source"],
+        "sensitive_catalog_path": result["sensitive_catalog_path"],
         "external_repos": ext,
         "external_skipped": result["external_skipped"],
         "pending_approval": result["pending_approval"],

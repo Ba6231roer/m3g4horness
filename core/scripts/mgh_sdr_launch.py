@@ -103,6 +103,23 @@ def _eprint(*a):
     print(*a, file=sys.stderr)
 
 
+class _UpstreamOutputError(Exception):
+    """sdr_context stdout missing/misshaped (fix-mgh-sdr-docs-shell-alignment L2):
+    consumed as a per-branch FAILED record (stderr reason, later branches continue,
+    exit-code semantics unchanged) — NEVER a bare traceback out of the launcher."""
+
+
+def _req(ctx: dict, key: str):
+    """Hard field access over upstream stdout with a typed failure (L2)."""
+    try:
+        v = ctx[key]
+    except (KeyError, TypeError) as e:
+        raise _UpstreamOutputError(f"sdr_context stdout missing field {key!r}") from e
+    if v is None:
+        raise _UpstreamOutputError(f"sdr_context stdout field {key!r} is null")
+    return v
+
+
 def _safe_name(s: str) -> str:
     import re
     return re.sub(r"[/\\:*?\"<>|]", "_", s).strip("_") or "branch"
@@ -166,7 +183,6 @@ def _write_sentinel(repo: Path, read_roots: list[str]) -> Path:
     tmp = sp.with_suffix(".tmp")
     tmp.write_text(json.dumps(_sentinel_body(repo, read_roots), ensure_ascii=False),
                    encoding="utf-8")
-    import os
     os.replace(tmp, sp)
     return sp
 
@@ -257,11 +273,18 @@ def _run_context(repo: Path, run_dir: Path, base: str, branch: str, dims: str | 
     if r.returncode != 0:
         _eprint(f"error: sdr_context.py exited {r.returncode}:\n{(r.stderr or '')[-600:]}")
         sys.exit(1 if r.returncode == 1 else 2)
-    ctx = json.loads(r.stdout)
-    _eprint(f"[launch] baseline={ctx['baseline_bytes']}B truncated={ctx['baseline_truncated']}; "
-            f"external={len(ctx['external_repos'])}; "
-            f"pending_approval={len(ctx.get('pending_approval') or [])}; "
-            f"catalog={ctx['sensitive_catalog_source']}")
+    # L2 upstream-output guard: a missing/garbled/misshaped stdout (version-skewed
+    # sibling, broken install) is a per-branch FAILED — never a bare traceback.
+    try:
+        ctx = json.loads(r.stdout)
+        _eprint(f"[launch] baseline={ctx['baseline_bytes']}B truncated={ctx['baseline_truncated']}; "
+                f"external={len(ctx['external_repos'])}; "
+                f"pending_approval={len(ctx.get('pending_approval') or [])}; "
+                f"catalog={ctx['sensitive_catalog_source']}")
+    except (ValueError, KeyError, TypeError) as e:
+        raise _UpstreamOutputError(
+            f"sdr_context stdout unparsable or misshaped ({e!r}) — upstream artifact "
+            f"unusable; run dir kept on disk for inspection") from e
     return ctx
 
 
@@ -270,9 +293,14 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
     """Orchestrator prompt file: verbatim absolute paths from the sdr_context stdout.
     The host agent's ONLY job is steps 2-5 of the shell (diff_group -> fanout -> render);
     step 1 (external retrieval) is ALREADY done here — the prompt says so explicitly so
-    the orchestrator never re-reads an external repo."""
+    the orchestrator never re-reads an external repo. The sensitive catalog is pointed
+    at as a read-only file path, NEVER embedded (no truncation happens on this object):
+    the task template carries the path to every subagent, same shape as the external
+    conclusions."""
     ext = ctx.get("external_repos", [])
     skipped = ctx.get("external_skipped", [])
+    catalog_path = ctx.get("sensitive_catalog_path") \
+        or str((run_dir / "sensitive_catalog.json").resolve())
     lines = [
         "执行 /mgh-sdr 编排(单分支)。运行域已激活(哨兵已由 launcher 写入,含 read_roots);"
         "sdr_context 已完成——**NEVER** 重跑外部仓检索、**NEVER** 读外部仓原文路径。",
@@ -281,11 +309,12 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
         f"branch: {branch}",
         f"base: {base}",
         f"run 目录(绝对,产物全部落此): {run_dir}",
-        f"检查基线(已投影): {ctx['baseline_path']}"
-        f" (truncated={ctx['baseline_truncated']})",
-        f"敏感目录来源: {ctx['sensitive_catalog_source']}"
-        f"(敏感目录对象逐字透传给 subagent task,见下)",
-        f"敏感目录对象: {json.dumps(ctx['sensitive_catalog'], ensure_ascii=False)[:4000]}",
+        f"检查基线(已投影): {_req(ctx, 'baseline_path')}"
+        f" (truncated={_req(ctx, 'baseline_truncated')})",
+        f"敏感目录来源: {_req(ctx, 'sensitive_catalog_source')}"
+        f"(解析后目录已物化为 run 目录内独立文件——subagent 任务消息只携带该文件只读路径,"
+        f"NEVER 内嵌对象本体,NEVER 截断)",
+        f"敏感目录文件(只读,绝对路径): {catalog_path}",
         f"外部仓结论目录: {run_dir / 'external'}"
         + (f"({len(ext)} 仓: {', '.join(e['slug'] for e in ext)})"
            if ext else "(无:未声明/不可达降级)"),
@@ -399,6 +428,12 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
         ctx = _run_context(repo, run_dir, base, branch, dims, read_roots, no_codegraph)
     except SystemExit:
         return False, f"sdr_context failed for {branch}", []
+    except _UpstreamOutputError as e:
+        # L2: upstream stdout unusable => this branch records FAILED (reason on
+        # stderr via the summary), later branches continue; a sentinel the step
+        # already wrote stays for the recovery entries to detect (same failure-path
+        # sentinel semantics as the sdr_context-exit branch above)
+        return False, f"sdr_context upstream output unusable for {branch}: {e}", []
     pending = list(ctx.get("pending_approval") or [])
     for p in pending:
         _eprint(f"[launch] WARN: external repo declared but NOT approved — zero reads, "
@@ -420,7 +455,13 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
                    | set(read_roots))
     _write_sentinel(repo, roots)
     _eprint(f"[launch] sentinel written (read_roots={len(roots)} root(s))")
-    prompt = _build_prompt(repo, run_dir, base, branch, ctx, host)
+    try:
+        prompt = _build_prompt(repo, run_dir, base, branch, ctx, host)
+    except _UpstreamOutputError as e:
+        # L2: hard field access over the upstream record failed => per-branch FAILED,
+        # not a traceback; the just-refreshed sentinel stays (recovery entries detect
+        # + re-arm it; the next launcher start reuses it)
+        return False, f"sdr_context upstream output unusable for {branch}: {e}", []
     prompt_path = run_dir / "orchestrator_prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
     _eprint(f"[launch] orchestrator prompt: {prompt_path}")
@@ -428,10 +469,7 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
         _eprint("[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; "
                 "NOT spawning the host CLI (sentinel kept for the next real run)")
         return True, str(prompt_path), pending
-    try:
-        code = _spawn_host(host, repo, prompt, model)
-    finally:
-        pass
+    code = _spawn_host(host, repo, prompt, model)
     # the host session's step 5 also removes the sentinel; this is the launcher-side
     # guarantee (covers host crash-exit paths that skip step 5)
     _remove_sentinel(repo)

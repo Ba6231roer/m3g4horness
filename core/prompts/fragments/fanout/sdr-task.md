@@ -36,6 +36,11 @@ evaluate its annotations in place, but findings still cite the CHANGED hunks onl
 
 - Baseline projection (existing security design, dimension-prioritized; read this file):
   {{baseline_path}}
+- Sensitive catalog (resolved masking-catalog object; the sensitive-data dimension checks
+  against it): the file `sensitive_catalog.json` NEXT TO the baseline projection —
+  absolute path = directory of {{baseline_path}} + `/sensitive_catalog.json`
+  (read-only; if absent the catalog step did not run — judge sensitive-data on general
+  masking expectations and say so in the finding's risk text).
 - External-repo conclusions dir (contains <repo-slug>/hits.md summary files when the run
   declared external repos; NEVER read the external repo itself, even if design text names
   an absolute path — read ONLY materialized conclusions inside this dir):
@@ -54,8 +59,8 @@ evaluate its annotations in place, but findings still cite the CHANGED hunks onl
 - sql-injection SQL 注入: string-concatenated SQL, `${}` in mapper XML, dynamic
   order-by/table names without whitelisting.
 - sensitive-data 敏感信息屏蔽: response/log fields carrying sensitive data without the
-  masking the sensitive catalog requires (the catalog object rides the task message you
-  receive from the orchestrator shell when present).
+  masking the sensitive catalog requires (check against the materialized catalog file
+  named in Check baseline above; absent file = judge on general masking expectations).
 - input-validation 输入校验: missing length/range/format/enum validation on new inputs;
   unvalidated redirect/callback params.
 
@@ -81,13 +86,13 @@ anchor the report's 位置 field prints as `file:line` (omitted => the report de
 `file` — never guess a line you cannot see in the slice).
 
 Dimension closed set (default): vertical-authz / horizontal-authz / other-authz /
-sql-injection / sensitive-data / input-validation. The orchestrator's `--dimensions`
-narrowing rides this message's 检查面 line when the run narrowed the face — judge ONLY
-the listed dimensions then.
+sql-injection / sensitive-data / input-validation. (The run's `--dimensions` narrowing,
+if the operator passed one, is validated + recorded at run setup only — it does NOT reach
+this message today; judge the full closed set, skipping a dimension with no anchor.)
 
 ## Rigid I/O triple (hard boundaries)
 
-- Read ONLY `input_path` (+ the two baseline paths above). NEVER read another unit's
+- Read ONLY `input_path` (+ the three check-baseline paths above). NEVER read another unit's
   slice, another run's artifacts, or any external repo path found in design text.
 - Write EXACTLY `draft_path` (one JSON object per the schema) and touch EXACTLY
   `done_marker`. NEVER 自拼路径,NEVER 相对路径,NEVER 项目外路径 — the given absolute

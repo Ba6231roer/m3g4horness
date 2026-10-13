@@ -15,8 +15,9 @@ disable-model-invocation: true
 > **输出是 LLM 候选,非已确认漏洞。引用存量控制断言存在、不断言有效。每次总结都声明。**
 
 > **零打断优选入口**:存量设计引用外部前端仓时,首选 `py mgh-core/scripts/mgh_sdr_launch.py`
-> (人/cron 入口,外部仓检索在 launcher 进程完成、宿主会话零权限确认)。本壳是宿主会话内的
-> 功能等价兜底:step 1 的外部仓检索发生在宿主 Bash,可能触发一次宿主权限确认(诚实披露)。
+> (人/cron 入口,外部仓检索在其进程完成、宿主会话零权限确认;**仅 spawn opencode/claude 宿主**,
+> dsh-only 部署直接走本壳内路径)。本壳是宿主会话内的功能等价兜底:step 1 外部仓检索在宿主
+> Bash,可能触发一次权限确认(诚实披露)。
 
 > **dsh 执行边界(替代 claude 端 `allowed-tools` 白名单)**:dsh 壳无工具白名单声明面;执行边界
 > = 守卫三面执法(读/写/Bash 净网,单一判定源 `mgh-core/dsh/block_adhoc_scripts.py`,由 profile
@@ -24,7 +25,7 @@ disable-model-invocation: true
 > stderr 的 recipe(可执行出口清单)继续,**NEVER** 重试绕行。
 
 > **召唤语义(dsh)**:`/mgh-sdr` 由用户显式召唤(本 skill 对模型自触发关闭);其后同一用户消息的
-> 余文即参数,**step 0 从触发消息逐字读取**(dsh 无 `$ARGUMENTS` 模板、参数零预处理)。
+> 余文即参数,**step 0 从触发消息逐字读取**(dsh 无 `$ARGUMENTS` 模板)。
 
 ## Parse arguments(validate BEFORE spending tokens)
 
@@ -47,8 +48,7 @@ disable-model-invocation: true
 - `--dry-run`(默认 off;仅跑 step 0–1(sdr_context + diff_group materialize)+ `--check`,不 fan-out 不渲染)
 
 `--help` → 打印参数表后 **STOP**(零 token、零解析);**无任何参数** → 按参数表逐项标注的
-默认集直接进入编排流(base=`master` / branch=当前分支 / 全 6 维)——零参 = 显式传默认值的
-等价路径,**NEVER** 因缺参停止索取输入。
+默认集直接进入编排流(base=`master` / branch=当前分支 / 全 6 维),**NEVER** 因缺参停止索取输入。
 
 ## Orchestrator discipline(铁律)
 
@@ -77,7 +77,7 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
 > **dsh 派发面(已接线)**:step 3 扇出经 `fanout_runner --tier sdr` 在 dsh 派发——spawn 形
 > `dsh --profile mgh --patch mgh-core/dsh/tiers/sdr.yml -`(tier 装载文件由 install 生成落该目录、
 > 任务正文经子进程 env 投递);装载缺件在 spawn 前 fail-loud(退出码 2 + recipe、零子进程)。
-> 进度语义不变:磁盘 marker、可跨会话续跑(见「中断恢复」`resume_sdr_state.py`),**NEVER** 用
+> 进度语义不变:磁盘 marker、可跨会话续跑(见「中断恢复」),**NEVER** 用
 > 内联执行假装派发、**NEVER** 自写循环替代 dispatcher。
 
 ## Orchestration flow
@@ -132,7 +132,7 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
    · 无 external_repos 且 external_skipped 非空 → 记住该披露(报告会声明)。
    · `export MGH_TARGET=<abs>`;`--dry-run` → 到此处 STOP(跑 `--check` 后移除哨兵)。
 2. diff_group(Bash,确定性;pending 唯一来源):
-     py mgh-core/scripts/diff_group.py --repo <abs> --base <ref> --branch <ref> --checkpoints <run-dir>/markers --materialize <run-dir>/slices
+     py mgh-core/scripts/diff_group.py --repo <abs> --base <ref> --branch <ref> --checkpoints <run-dir>/markers --materialize <run-dir>/slices [--max-standalone-bytes <N>] [--max-interface-bytes <N>] [--include-excluded]
    · stdout `pending[]` **直消费**(Bash 工具返回值即全部 stdout);过大 → 同参加 `--summary`
      重跑(投影视图:计数摘要 + 当页 `pending[]`;物化照常执行、落盘产物逐字不变),分页仅由
      `--offset/--limit` 驱动;要瞄结构 → `py mgh-core/scripts/describe_artifact.py
@@ -144,10 +144,10 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
      probe 失败原因在 stderr)。
    · 校验:`py mgh-core/scripts/diff_group.py --check <run-dir>`(退出码 2 → 回退)。
 3. fan-out(dispatcher;逐字转发调用,**NEVER** 手工循环):
-     py mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --time-budget-ms <宿主标定,如 opencode 900s 宿主 → 720000> --call-timeout-s <MUST 显式传,< budget×0.8,如 720000→540> --stall-timeout-s <MUST < --call-timeout-s,如 300> [--resume]
-   · 四级超时不变式(spawn 前 fail-loud,违反退出码 2):`--call-timeout-s`(≥60 的
-     `--stall-timeout-s` 须更小)不显式传 = 退出码 2;带 per-call `timeout` ≥
-     `--time-budget-ms` 跑。STALLED → 报告 degraded,非 ok 单元证据在
+     py mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300 [--resume]
+   · 四级超时不变式(spawn 前 fail-loud,违反退出码 2):`--call-timeout-s` MUST 显式传且
+     < budget×0.8,`--stall-timeout-s`(≥60) MUST < `--call-timeout-s`;带 per-call `timeout`
+     ≥ `--time-budget-ms` 跑。STALLED → 报告 degraded,非 ok 单元证据在
      `<run-dir>/markers/sdr/<unit>.run.log`。
    · 软时限早退(stdout `partial:true`)→ 同参重派(resume 语义);STALLED(退出码 2)→
      停止重派,报告 degraded(诚实披露)。gate 形退出码 2 → 转述 stderr recipe,停止。
@@ -207,7 +207,7 @@ py mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> --repo <abs
 py mgh-core/scripts/read_roots_config.py --target <abs> --add <abs-外部仓>
 py mgh-core/scripts/read_roots_config.py --target <abs> --list
 py mgh-core/scripts/read_roots_config.py --target <abs> --check
-py mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices
+py mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices --max-standalone-bytes 65536 --max-interface-bytes 262144
 py mgh-core/scripts/diff_group.py --check .mgh-sdr/runs/<ts>
 py mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base master --checkpoints .mgh-sdr/runs/<ts>/markers --inputs-dir .mgh-sdr/runs/<ts>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300
 py mgh-core/scripts/render_sdr_report.py --run-dir .mgh-sdr/runs/<ts> --repo <abs>

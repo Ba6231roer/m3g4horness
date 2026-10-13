@@ -57,10 +57,17 @@ def codegraph_available(repo: Path) -> bool:
 
 
 def codegraph_probe_reason(repo: Path) -> str | None:
-    """Why call-chain grouping is off (None = available). Diagnostic only."""
+    """Why call-chain grouping is off (None = available). Diagnostic only. A binary
+    failure is attributed honestly: `codegraph` missing from PATH and an
+    `MGH_CODEGRAPH_BIN` override pointing at a stale path are different operator
+    mistakes with different recipes — one blanket "no binary" hid which."""
     if not (Path(repo) / CODEGRAPH_DIR).is_dir():
         return "no .codegraph dir"
-    if codegraph_bin() is None:
+    env = os.environ.get(CODEGRAPH_BIN_ENV)
+    if env:
+        return None if Path(env).is_file() else \
+            f"env {CODEGRAPH_BIN_ENV} points to a missing path: {env}"
+    if shutil.which("codegraph") is None:
         return "no binary"
     return None
 

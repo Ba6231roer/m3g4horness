@@ -167,6 +167,9 @@ class TestLauncherDryRun(unittest.TestCase):
         ctx = json.loads((run_dir / "context.json").read_text(encoding="utf-8"))
         self.assertTrue(Path(ctx["baseline_path"]).is_file())
         self.assertEqual(ctx["sensitive_catalog_source"], "default-template")
+        # the resolved catalog is materialized as a standalone run-dir file
+        self.assertTrue(Path(ctx["sensitive_catalog_path"]).is_file(),
+                        "resolved catalog must be materialized into the run dir")
         self.assertEqual(len(ctx["external_repos"]), 1)
         self.assertTrue(Path(ctx["external_repos"][0]["summary_path"]).is_file())
         # sentinel written WITH read_roots (the searched external root) and KEPT by dry-run
@@ -353,6 +356,26 @@ class TestLauncherDryRun(unittest.TestCase):
         self.assertEqual(payload["branches"], ["feature-pay", "feature-b2"])
         run_dirs = list((self.repo / ".mgh-sdr" / "runs").iterdir())
         self.assertEqual(len(run_dirs), 2, f"expected 2 run dirs, got {run_dirs}")
+
+    def test_prompt_points_at_materialized_catalog_never_embeds_it(self):
+        # fix-mgh-sdr-docs-shell-alignment 1.3/M6+L3: the orchestrator prompt CARRIES the
+        # materialized catalog file's read-only path and NEVER embeds the object body —
+        # the old [:4000] silent truncation is deleted, so "verbatim passthrough" of
+        # paths is honest again at the launcher layer
+        self._approve_front()
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        ctx = json.loads((run_dir / "context.json").read_text(encoding="utf-8"))
+        prompt = (run_dir / "orchestrator_prompt.md").read_text(encoding="utf-8")
+        self.assertIn(str(ctx["sensitive_catalog_path"]), prompt)
+        self.assertNotIn("敏感目录对象:", prompt, "the object body must not be embedded")
+        import inspect
+        src = inspect.getsource(self.m)
+        self.assertNotIn("[:4000]", src, "silent truncation must be gone")
+        self.assertNotIn("'sensitive_catalog']", src,
+                         "the object body is never read back for embedding")
 
 
 import shutil  # noqa: E402  (tearDown uses it; placed here to keep the header import list stdlib-honest)
@@ -702,6 +725,120 @@ class TestSpawnEnvAndFlags(unittest.TestCase):
                            errors="replace")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--model <provider/model>", r.stdout)
+
+
+class TestUpstreamOutputGuard(unittest.TestCase, _FakeHostMixin):
+    """fix-mgh-sdr-docs-shell-alignment L1/L2: (a) the empty try/finally dead shell
+    around the spawn is deleted with sentinel semantics untouched; (b) a missing/
+    garbled/misshaped sdr_context stdout (version-skewed sibling, broken install) is a
+    per-branch FAILED with the reason on stderr — NEVER a bare traceback; later
+    branches continue; exit-code semantics unchanged; a pre-existing residual sentinel
+    is left for the recovery entries (never silently removed on a failure path)."""
+
+    def setUp(self):
+        self.m = _load()
+        self._two_branch_repo()
+        self.spawned = []
+        self.run_dirs = []
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _no_dead_shell(self):
+        import inspect
+        src = inspect.getsource(self.m)
+        self.assertNotIn("finally:\n        pass", src,
+                         "the empty try/finally dead shell must be deleted")
+
+    def _fake_upstream(self, first_branch_output: str):
+        """Stub subprocess.run so sdr_context.py invocations return canned stdout:
+        the FIRST branch gets `first_branch_output`, later ones a valid minimal
+        record; the fake spawn renders manifest+report for its run dir."""
+        real_run = self.m.subprocess.run
+        calls = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            if any("sdr_context.py" in str(c) for c in cmd):
+                calls["n"] += 1
+                rd = Path(cmd[cmd.index("--run-dir") + 1])
+                self.run_dirs.append(rd)
+                if calls["n"] == 1:
+                    return subprocess.CompletedProcess(cmd, 0,
+                                                       stdout=first_branch_output,
+                                                       stderr="")
+                payload = {"external_repos": [], "external_skipped": [],
+                           "pending_approval": [],
+                           "baseline_path": str(rd / "baseline.md"),
+                           "baseline_bytes": 0,
+                           "baseline_truncated": False,
+                           "sensitive_catalog_source": "default-template",
+                           "sensitive_catalog_path": str(rd / "sensitive_catalog.json")}
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload),
+                                                   stderr="")
+            return real_run(cmd, **kwargs)
+
+        def fake_spawn(host, repo, prompt, model=None):
+            self.spawned.append(host)
+            rd = self.run_dirs[-1]
+            (rd / "report.html").write_text("<html></html>", encoding="utf-8")
+            (rd / "sdr_manifest.json").write_text(
+                json.dumps({"report": str(rd / "report.html")}), encoding="utf-8")
+            return 0
+
+        self.m.subprocess.run = fake_run
+        self.m._spawn_host = fake_spawn
+        return real_run
+
+    def test_garbled_stdout_single_branch_failed_not_traceback(self):
+        self._no_dead_shell()
+        # residual sentinel from a crashed prior run: a failure path must NOT remove it
+        (self.repo / ".mgh-sdr").mkdir(exist_ok=True)
+        residual = self.repo / ".mgh-sdr" / ".active"
+        residual.write_text(json.dumps({"domain": "mgh-sdr", "target": str(self.repo),
+                                        "out_roots": [], "read_roots": [], "v": 1}),
+                            encoding="utf-8")
+        real_run = self._fake_upstream(first_branch_output="")
+        try:
+            code, out, err = self._launch(["--repo", str(self.repo),
+                                           "--branch", "feature-pay"])
+        finally:
+            self.m.subprocess.run = real_run
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out, "", "a failed run prints no stdout payload")
+        self.assertIn("FAILED BRANCHES (1)", err)
+        self.assertIn("upstream output unusable for feature-pay", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.spawned, [], "an unusable upstream record spawns nothing")
+        self.assertTrue(residual.is_file(),
+                        "the failed path must leave a residual sentinel for recovery")
+
+    def test_multibranch_garbled_first_branch_later_branches_continue(self):
+        mb = self.tmp / "branches.txt"
+        mb.write_text("feature-pay\nfeature-b2\n", encoding="utf-8")
+        real_run = self._fake_upstream(first_branch_output="<<<not json>>>")
+        try:
+            code, out, err = self._launch(["--repo", str(self.repo),
+                                           "--multi-branch", str(mb)])
+        finally:
+            self.m.subprocess.run = real_run
+        self.assertEqual(code, 1, err)
+        self.assertIn("upstream output unusable for feature-pay", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(self.spawned), 1,
+                         "the healthy branch still runs its full flow")
+        self.assertNotIn("upstream output unusable for feature-b2", err)
+        # exit-code semantics unchanged: >=1 branch FAILED => launcher exit 1
+        self.assertIn("FAILED BRANCHES (1)", err)
+
+    def test_empty_json_object_stdout_is_branch_failed(self):
+        real_run = self._fake_upstream(first_branch_output="{}")
+        try:
+            ok, outcome, _ = self.m._run_one(self.repo, "feature-pay", "master",
+                                             "claude", None, [], True)
+        finally:
+            self.m.subprocess.run = real_run
+        self.assertFalse(ok)
+        self.assertIn("upstream output unusable", outcome)
 
 
 if __name__ == "__main__":

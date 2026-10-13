@@ -87,7 +87,6 @@ RUN_ROOT_NAME = ".mgh-sdr"
 RUNS_DIRNAME = "runs"
 SENTINEL = Path(RUN_ROOT_NAME) / ".active"
 
-STEPS = ("not-started", "group", "fanout", "render", "done")
 # Steps during which the runtime guard is expected to be armed: the run already has
 # products on disk, so a missing sentinel means the guard is silently asleep (the
 # read-confinement / script-read-only defenses do not apply ⇒ not an operational
@@ -191,7 +190,7 @@ def _next(kind: str, desc: str, paths) -> dict:
     return {"kind": kind, "desc": desc, "absolute_paths": [str(p) for p in paths]}
 
 
-def _resolve_repo(ctx, grp, args, run_dir: Path, notes: list) -> str:
+def _resolve_repo(ctx, args, run_dir: Path, notes: list) -> str:
     """Repo root, in priority order: context.json (disk truth) > --repo > the run-dir
     layout. A disagreement between context.json and --repo is disclosed. Returns ""
     when underivable — the caller MUST NOT invent one."""
@@ -235,7 +234,7 @@ def resolve(run_dir: Path, args) -> tuple:
                           f"`diff_group.py ... --checkpoints {checkpoints} "
                           f"--materialize {slices}`; NEVER guess the step graph.")
 
-    repo = _resolve_repo(ctx, grp, args, run_dir, notes)
+    repo = _resolve_repo(ctx, args, run_dir, notes)
 
     # --- start state (base/branch) -------------------------------------------
     base = ctx.get("base") or grp.get("base") or ""

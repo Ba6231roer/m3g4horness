@@ -511,6 +511,66 @@ class SdrContextTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("unknown category", err)
 
+    # --- resolved catalog materialization (fix-mgh-sdr-docs-shell-alignment 1.1) ---
+    def test_resolved_catalog_materialized_into_run_dir(self):
+        # both sources materialize: the resolved object is written as a standalone
+        # run-dir file IN THE SAME PASS as context.json, and stdout carries its
+        # absolute read-only path (what every subagent task message will point at)
+        code, out, _ = self._run(*self._base_args())
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertTrue(Path(d["sensitive_catalog_path"]).is_file())
+        self.assertEqual(Path(d["sensitive_catalog_path"]).parent, self.run_dir)
+        mat = json.loads(Path(d["sensitive_catalog_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(mat, d["sensitive_catalog"])
+        self.assertEqual(set(mat), {"version", "source", "categories", "items",
+                                    "counts", "directive"})
+        # deterministic single pass: identical re-run into the same run dir rewrites a
+        # byte-identical file at the same path
+        first = Path(d["sensitive_catalog_path"]).read_bytes()
+        code2, out2, _ = self._run(*self._base_args())
+        self.assertEqual(code2, 0)
+        self.assertEqual(json.loads(out2)["sensitive_catalog_path"],
+                         d["sensitive_catalog_path"])
+        self.assertEqual(Path(d["sensitive_catalog_path"]).read_bytes(), first)
+
+    def test_materialized_catalog_project_source_roundtrip(self):
+        sra = self.repo / ".mgh-sra"
+        sra.mkdir(parents=True, exist_ok=True)
+        (sra / "sensitive_catalog.json").write_text(json.dumps({
+            "version": 1,
+            "items": {"financial/card-no": {"label": "银行卡卡号", "mask": "partial",
+                                            "rule": "保留后4位"}},
+        }), encoding="utf-8")
+        code, out, _ = self._run(*self._base_args())
+        d = json.loads(out)
+        self.assertEqual(d["sensitive_catalog_source"], "project")
+        mat = json.loads(Path(d["sensitive_catalog_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(mat, d["sensitive_catalog"])
+        self.assertEqual(mat["items"][0]["label"], "银行卡卡号")
+
+    def test_check_flags_missing_materialized_catalog(self):
+        code, out, _ = self._run(*self._base_args())
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        Path(d["sensitive_catalog_path"]).unlink()
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("materialization missing", err)
+
+    def test_check_old_context_without_materialization_still_ok(self):
+        # incremental field: a context.json from before sensitive_catalog_path existed
+        # is judged without the file (backward compat, same shape as route_hits)
+        self._run(*self._base_args())
+        d = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        d.pop("sensitive_catalog_path")
+        (self.run_dir / "context.json").write_text(json.dumps(d, ensure_ascii=False,
+                                                              indent=1),
+                                                   encoding="utf-8")
+        (self.run_dir / "sensitive_catalog.json").unlink()
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
     # --- dimensions gate ---
     def test_illegal_dimensions_key_exits_2(self):
         code, _, err = self._run(*self._base_args(),
@@ -712,10 +772,12 @@ class SdrContextTest(unittest.TestCase):
         d = json.loads(out)
         self.assertEqual(set(d), {
             "repo", "run_dir", "base", "branch", "baseline_path", "baseline_bytes",
-            "baseline_truncated", "sensitive_catalog_source", "external_repos",
-            "external_skipped", "pending_approval"})
+            "baseline_truncated", "sensitive_catalog_source", "sensitive_catalog_path",
+            "external_repos", "external_skipped", "pending_approval"})
         self.assertNotIn("sensitive_catalog", d)
         self.assertNotIn("baseline_truncated_bytes", d)
+        # the materialized file the path points at is the subagent-facing artifact
+        self.assertTrue(Path(d["sensitive_catalog_path"]).is_file())
         for e in d["external_repos"]:
             self.assertNotIn("route_hits", e)
             self.assertIn("diff_files", e)

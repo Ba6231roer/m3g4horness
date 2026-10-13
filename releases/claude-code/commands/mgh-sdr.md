@@ -115,7 +115,7 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
    · 无 external_repos 且 external_skipped 非空 → 记住该披露(报告会声明)。
    · `export MGH_TARGET=<abs>`;`--dry-run` → 到此处 STOP(跑 `--check` 后移除哨兵)。
 2. diff_group(Bash,确定性;pending 唯一来源):
-     py .claude/mgh-core/scripts/diff_group.py --repo <abs> --base <ref> --branch <ref> --checkpoints <run-dir>/markers --materialize <run-dir>/slices
+     py .claude/mgh-core/scripts/diff_group.py --repo <abs> --base <ref> --branch <ref> --checkpoints <run-dir>/markers --materialize <run-dir>/slices [--max-standalone-bytes <N>] [--max-interface-bytes <N>] [--include-excluded]
    · stdout `pending[]` **直消费**(Bash 工具返回值即全部 stdout);过大 → 同参加 `--summary`
      重跑(投影视图:计数摘要 + 当页 `pending[]`;物化照常执行、落盘产物逐字不变),分页仅由
      `--offset/--limit` 驱动;要瞄结构 → `py .claude/mgh-core/scripts/describe_artifact.py
@@ -190,7 +190,7 @@ py .claude/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> --r
 py .claude/mgh-core/scripts/read_roots_config.py --target <abs> --add <abs-外部仓>
 py .claude/mgh-core/scripts/read_roots_config.py --target <abs> --list
 py .claude/mgh-core/scripts/read_roots_config.py --target <abs> --check
-py .claude/mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices
+py .claude/mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices --max-standalone-bytes 65536 --max-interface-bytes 262144
 py .claude/mgh-core/scripts/diff_group.py --check .mgh-sdr/runs/<ts>
 py .claude/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base master --checkpoints .mgh-sdr/runs/<ts>/markers --inputs-dir .mgh-sdr/runs/<ts>/slices --time-budget-ms 480000 --call-timeout-s 360 --stall-timeout-s 300
 py .claude/mgh-core/scripts/render_sdr_report.py --run-dir .mgh-sdr/runs/<ts> --repo <abs>

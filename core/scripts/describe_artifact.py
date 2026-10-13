@@ -58,13 +58,18 @@ def _type_name(v) -> str:
 
 
 def _navigate(data, path: str):
-    """Follow a dotted path (dict keys + int indices). Returns (value, ok)."""
+    """Follow a dotted path (dict keys + int indices). Returns (value, ok).
+
+    The list-index segment is judged by int() itself (try/except), NOT by a digit
+    guard: `str.isdigit()` accepts unicode digits (`²`, `٥`) that int() rejects, so
+    a guard/apply mismatch turned malformed segments into a bare traceback."""
     cur = data
     for seg in path.split("."):
         if isinstance(cur, list):
-            if not (seg.lstrip("-").isdigit() and len(seg.lstrip("-")) > 0):
+            try:
+                idx = int(seg)
+            except ValueError:
                 return None, False
-            idx = int(seg)
             if idx < 0 or idx >= len(cur):
                 return None, False
             cur = cur[idx]
@@ -103,6 +108,14 @@ def main():
     ap.add_argument("--shape", action="store_true", help="lightweight schema")
     ap.add_argument("--field", metavar="a.b.c", help="narrow target via dotted path first")
     args = ap.parse_args()
+
+    # console utf-8 reconfigure (same shape as every sibling script): `ensure_ascii=False`
+    # Chinese values crash on a cp936 console without it
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     if not any([args.keys, args.count, args.sample is not None, args.shape, args.field]):
         print("error: pick at least one of --keys/--count/--sample/--shape/--field",

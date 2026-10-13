@@ -172,7 +172,11 @@ SHALL 保持既有 claude/opencode 相对次序不变、`dsh` 仅追加在链末
 (npm `.cmd` shim 实测在首个换行处截断多行 argv,对 dsh 同样成立):claude/opencode 经 stdin
 管道传递;dsh headless 无 stdin 任务通道(实测),经**进程环境注入**投递——dispatcher 把任务
 全文放入子进程 env 的 `MGH_TASK_TEXT`,tier 装载文件的固定模板行以该 env 覆盖任务来源,
-argv 仅携带无内容占位符 `-`。子进程 cwd SHALL 为 `repo`(目标项目根)。任一宿主 CLI 均不可用
+argv 仅携带无内容占位符 `-`。子进程 cwd SHALL 为 `repo`(目标项目根);子进程 env SHALL
+剥离 `PWD`(全部 host 形一致,dsh 形继续附加 `MGH_TASK_TEXT`)——opencode 按
+`PWD ?? cwd` 解析项目归属,继承的 `PWD`(宿主外从其它目录的 shell 拉起 runner 时指向别处)
+会使子会话把非 repo 目录认成项目;剥离后归属回落到显式 cwd = `repo`(claude/dsh 不读
+`PWD`,剥离无副作用)。任一宿主 CLI 均不可用
 → 退出码 2 fail-loud,stderr 给出 recipe(回退 = 编排器现状波次式手派,行为不变)。spawn 的
 子进程 SHALL 继承运行域守卫激活(经磁盘哨兵 `<target>/.mgh-init/.active`,env 不跨进程亦不
 失效)。
@@ -196,6 +200,13 @@ argv 仅携带无内容占位符 `-`。子进程 cwd SHALL 为 `repo`(目标项�
 - **WHEN** 机器同时装有 opencode 与 dsh
 - **THEN** 自动探测仍选 opencode(dsh 在链末);`--host dsh` 显式指定才切 dsh
 
+#### Scenario: 宿主外手动运行时子进程项目归属正确
+
+- **WHEN** 维护者从非 repo 目录的 shell(其 `PWD` 指向别处)手动拉起
+  `fanout_runner.py --tier t1`,host 探测为 opencode
+- **THEN** spawn 的 opencode 子进程 env 不含 `PWD`,项目归属按 cwd = `repo` 解析(NEVER 把
+  继承的 `PWD` 目录认成项目);dsh 形子进程 env 同样不含 `PWD` 且仍携带 `MGH_TASK_TEXT`
+
 ### Requirement: ack 状态机与 marker 真相源语义承接
 
 dispatcher SHALL 承接既有 fan-out 状态语义:`ok`/`oversize` ack 或磁盘 `.done` marker → 单元
@@ -208,6 +219,13 @@ partial/通用错/误用),stderr 进度与 stdout JSON 严格分流。dispatcher
 与其写入同源**:dispatcher 每波重派生 pending 时消费的枚举脚本 stdout,其 done/failed
 判定 SHALL 由正向 marker 路径计算产生(见 `request-context-budget` 能力同名 requirement);
 dispatcher SHALL NEVER 自行从记录体字段或文件名 stem 反推单元身份。
+
+**marker 写入的 repo 锚定守卫**:dispatcher 的 `.failed` marker 写入(显式 `failed:` ack 与
+spawn 前路径越树拦截两入口)SHALL 在任何 mkdir/写盘动作前校验目标 marker 路径 resolve 后
+落在枚举 stdout `repo` 锚树内:树内 → 照旧写;树外 → NEVER 创建目录、NEVER 写文件,
+stderr fail-loud 披露该路径与处置 recipe,该单元留磁盘 pending(无 marker)——有界性由既有
+零推进熔断承担(`stalled_pending[]` 披露)。理由〔路径越树拦截的存在意义是防投毒输入;
+响应动作若物化被检出的越树路径(mkdir + 写 marker),等于检测到投毒后反而执行投毒路径〕。
 
 #### Scenario: failed ack 终态且不阻断
 
@@ -225,6 +243,20 @@ dispatcher SHALL NEVER 自行从记录体字段或文件名 stem 反推单元身
 - **WHEN** 上一波某单元已写 `.json` 记录 + touch `.done` marker(含超长 id 截断编码文件名),
   dispatcher 进入下一波重派生 pending
 - **THEN** 该单元不在新 `pending[]` 中(正向 marker 路径判定 done),NEVER 再次 spawn
+
+#### Scenario: 越树 marker 路径不被物化
+
+- **WHEN** 投毒/损坏的 pending 清单里某单元的 `failed_marker` resolve 后落在 repo 锚树外,
+  dispatcher 对其判定路径越树(path-drift)
+- **THEN** dispatcher NEVER 在该越树路径创建目录或写文件,stderr fail-loud 披露路径与处置
+  recipe;该单元无 marker 留磁盘 pending,由零推进熔断以 `stalled_pending[]` 有界披露
+
+#### Scenario: 树内 marker 照旧写入
+
+- **WHEN** 某单元仅非 marker 路径字段(如 input_path)越树,其 `failed_marker` 本身 resolve
+  在 repo 锚树内
+- **THEN** 该单元标 failed(reason=path-drift)且 NEVER spawn 的既有语义不变,`.failed`
+  marker 照旧写在树内路径
 
 ### Requirement: 波次零推进收敛熔断(滚动磁盘进度窗口)
 
@@ -384,7 +416,7 @@ artifact flag 同派发模式;`--checkpoints`/`--inputs-dir` 在 kill-stale 恢�
 ① runner PID 仍存活且 cmdline 含 `fanout_runner.py` → 杀整个进程树(Windows
 `taskkill /pid <pid> /T /F`,POSIX 进程组 SIGTERM)——覆盖「runner 还在跑」形态;
 ② runner PID 已死(或 cmdline 不匹配)但其 `children[]` 记录的宿主 CLI 子进程 PID 仍存活
-且 cmdline 是宿主 CLI(`opencode`/`claude`)→ 逐个连树杀——覆盖「runner 与编排器被连带
+且 cmdline 是宿主 CLI(`opencode`/`claude`/`dsh`)→ 逐个连树杀——覆盖「runner 与编排器被连带
 硬杀(如用户杀掉整个 opencode 进程)、子进程 LLM 调用仍在烧 token」形态。两形态处理后均
 删除 liveness 文件。stdout JSON 报 `{"kill_stale": {"killed": [{"pid","tier","kind":
 "runner"|"child"}], "removed": [pid-file], "none": bool}}`;无任何 stale → `killed:[]`
@@ -392,6 +424,14 @@ artifact flag 同派发模式;`--checkpoints`/`--inputs-dir` 在 kill-stale 恢�
 破坏性守卫(R5.3b):真实杀进程 SHALL 先经 `--dry-run`(列出将杀 PID,不杀);缺
 `--dry-run` 且检出将杀目标 → 退出码 2 + recipe。`--kill-stale` SHALL 对全部 tier 同构适用
 (含未来新增 tier——机制只依赖 liveness 文件名约定,不含 tier 分支)。
+
+**宿主 CLI 身份匹配锚定可执行 token**:② 形态的「cmdline 是宿主 CLI」判定 SHALL 锚定在
+cmdline **首个空白分隔 token(可执行路径)的基名**:大小写不敏感比较,基名剥
+`.exe`/`.cmd`/`.bat` 扩展后 ∈ {`opencode`, `claude`, `dsh`} 才判为宿主 CLI(spawn 侧经
+`shutil.which` 解析,Windows 上 npm CLI 是 `.cmd`/`.exe` 绝对路径形)。匹配 SHALL NOT 使用
+全命令行子串包含——命令行任意位置含宿主名的无关进程(编辑器打开 `claude-notes.txt`、
+脚本路径恰含 `dsh` 字样等)会被整树强杀;不匹配的存活子进程按既有「PID 复用防护」路径处理
+(不杀、清 liveness 文件)——漏杀是安全方向,误杀不可接受。
 
 **cmdline 探测的跨版本可用性(Windows)**:进程命令行探测 SHALL 不依赖单一平台工具——
 SHALL 先试经典探测途径,失败(工具缺失/不可执行)时 SHALL 回退到 Windows CIM 探测
@@ -429,6 +469,15 @@ SHALL 锚定到 liveness 文件实际所在的 run 目录(经既有 plan-path �
 - **WHEN** liveness 文件残留但其中某 PID 已被操作系统复用为一个非 fanout/宿主 CLI 进程
 - **THEN** `--kill-stale` 不杀该进程,仅删除残留 liveness 文件(runner 按 cmdline 含
   `fanout_runner.py`、子进程按 cmdline 为宿主 CLI 双条件才杀)
+
+#### Scenario: 命令行含宿主名的无关进程不被误杀
+
+- **WHEN** liveness 文件残留的 `children[]` 中某 PID 已被复用,其 cmdline 为
+  `notepad C:\notes\claude-meeting.txt`(可执行 token 基名是 `notepad`,宿主名只出现在
+  参数里)
+- **THEN** 可执行 token 锚定匹配不命中,该进程 NEVER 被杀;其记录按 PID 复用防护路径处理
+  (不杀、liveness 文件照常清理);真宿主 CLI 子进程(`opencode run --agent …`、
+  `C:\…\opencode.cmd run …`、`dsh --profile mgh …`)仍被正确分类连树杀
 
 #### Scenario: 经典探测工具缺失时 CIM 回退检出目标
 
@@ -754,6 +803,14 @@ MUST NOT 使健康单元被判失活),→ **仅杀该单元的整个进程树**(
 真进程必成孤儿)。失活判定 SHALL 对全部 tier 一致;误杀边界由余量承担(healthy 单元分钟级,
 默认阈值 ~5×),被误杀单元重派自愈且 run.log 留痕可查,并另有下述自适应宽限以假杀自证收敛。
 
+**树杀失败的检测与升级**:树杀调用 SHALL 检查其成败:POSIX 侧 SIGTERM 后 SHALL 在短宽限内
+复查该进程组存活性,仍存活 SHALL 升级 `SIGKILL`;Windows 侧 `taskkill` 失败 SHALL 重试一次。
+升级后仍确认杀失败时,dispatcher SHALL:① 该单元本 run 内 NEVER 再重派(不回队、不进 drain
+re-list 再队——幸存进程拥有该单元,其终态 marker 由幸存者落盘或由后续 `--resume` 重派收口);
+② 该子进程 PID SHALL 保留在 liveness `children[]`(供 `--kill-stale` 检出清理,NEVER 摘除成
+不可追踪孤儿);③ stderr fail-loud 披露 + stdout 摘要新增 `kill_failed:[unit…]`(仅确认杀
+失败时出现,无则省略)。杀成功路径的重派与 liveness 摘除语义逐字不变。
+
 **判据语义与失效面**:字节静默 SHALL 被解释为「该单元此刻无产出」,**SHALL NOT** 被当作
 「该单元卡死」的充分证据——在限流网关上静默的常见成因是调用排在网关队列里等待,与真卡死在
 本地信号上不可分。`--help` 文案 SHALL 明写该语义与失效面,并披露该判据的正当用途是**为本 run
@@ -768,8 +825,10 @@ MUST NOT 使健康单元被判失活),→ **仅杀该单元的整个进程树**(
 `--stall-timeout-s 0`(关闭态)下本段 SHALL NOT 适用。
 
 **每单元运行留痕**:dispatcher SHALL 将每单元子进程的 stdout/stderr 尾部(各自截断上限)落盘
-`<checkpoints>/<tier>/<单元 id 文件名安全形>.run.log`(文件名净化规则与 audit 副本同源,
-`/ \ :` → `_`);ok 终态亦写(体积小),timeout/stall/crash/failed 终态 MUST 写;失活/超时的
+`<checkpoints>/<tier>/<单元 id 文件名安全形>.run.log`(文件名编码与枚举器 marker 路径、audit
+副本**同源单一函数**:替代 `/ \ :` 为 `_` 且超长 stem 按 200 上限截断保判别尾——
+`init_tier.safe_unit_filename` 的别名;超长 id 的留痕/审计文件 NEVER 超 NTFS 255 上限写失败);
+ok 终态亦写(体积小),timeout/stall/crash/failed 终态 MUST 写;失活/超时的
 stderr 诊断行 SHALL 附 run.log 绝对路径——事后定位以证据为准,NEVER 依赖事后猜测。
 
 **stdout/心跳披露**:stdout 摘要 SHALL 新增 `stall_killed:[<unit>…]`(本次 run 失活树杀的
@@ -805,6 +864,25 @@ stderr 诊断行 SHALL 附 run.log 绝对路径——事后定位以证据为准
 - **WHEN** 某单元以 timeout/stall/crash 终态结束
 - **THEN** `<checkpoints>/<tier>/<unit>.run.log` 存在且含该子进程输出尾部;stderr 诊断行
   附该文件绝对路径;事后可从日志尾部读出子进程最后行为(如权限拒绝、流停摆前的输出)
+
+#### Scenario: POSIX SIGTERM 后短宽限内升级 SIGKILL
+
+- **WHEN** POSIX 下某失活单元的进程组对 SIGTERM 无响应(宽限窗口内仍存活)
+- **THEN** 树杀升级为对同进程组的 SIGKILL;升级仍失败才走「杀失败」处置(不重派 + PID
+  保留 + `kill_failed` 披露)
+
+#### Scenario: 杀失败时单元不重派且 PID 保留可追踪
+
+- **WHEN** 某单元失活树杀,但 SIGKILL 升级后仍确认失败(幸存进程继续运行)
+- **THEN** 该单元本 run 内不再被重派(不回队、drain re-list 不再收),stdout 摘要
+  `kill_failed` 含其 id;其 PID 留在 liveness `children[]`,`--kill-stale --dry-run` 可
+  检出;幸存进程若自行完成,marker 照常落盘,后续 resume 按 marker 判定
+
+#### Scenario: 超长 id 的 run.log 与 audit 副本可写
+
+- **WHEN** 某单元 canonical id 超过 200 字符(stem 上限)
+- **THEN** 其 `.task.md`/`.run.log` 文件名经共享安全编码(截断保判别尾)落盘成功,路径总长
+  ≤ NTFS 255 上限;短 id 的文件名与既有形态逐字节一致
 
 #### Scenario: 周期在飞心跳披露静默时长
 
@@ -888,7 +966,8 @@ spawn 前锚校验失败 SHALL NOT 计入（两者终态化不回队，无风暴
 假触发冷却）。窗口内 requeue 事件 ≥ 3（实现常量）时，dispatcher SHALL 暂停派发新单元
 `--cooldown-s` 秒（默认 300；`0` = 关闭；取值 SHALL 按「剩余时间预算 − 在飞收敛余量」封顶，
 预算不足时冷却退化为立即继续并如实 stderr 披露）；冷却期间在飞单元照常运行、照常收割——
-冷却只停**新派发**。每次冷却 SHALL 向 stderr 打一行披露（触发原因 + 实际冷却秒数），stdout
+冷却只停**新派发**;冷却生效期间无在飞单元时(含队列空的熔断前退避挂起态),派发循环 SHALL
+以分片 sleep 休眠等待冷却到期,**NEVER** 零 sleep 自旋空转。每次冷却 SHALL 向 stderr 打一行披露（触发原因 + 实际冷却秒数），stdout
 摘要新增 `cooldowns:<n>`（本 run 冷却次数；既有字段零增删）。
 
 **熔断前有界退避**：零推进熔断准备以退出码 2 收束时，若剩余时间预算允许，dispatcher SHALL
@@ -911,6 +990,12 @@ NEVER 无限退避（跨配额窗口的收敛 SHALL 仍归编排器 `--resume` �
 
 - **WHEN** 冷却触发时剩余时间预算 < `--cooldown-s` + 在飞收敛余量
 - **THEN** 冷却时长被截到预算允许值；预算耗尽则跳过等待立即继续，stderr 如实披露截断
+
+#### Scenario: 退避挂起空队列期间休眠而非自旋
+
+- **WHEN** 熔断前退避在 drain 点武装（队列空、在飞零）且冷却窗口（默认 300s）未到期
+- **THEN** 派发循环以 ≤1s 分片 sleep 休眠等待冷却到期，期间进程处于休眠等待而非忙等自旋
+  （NEVER 零 sleep 的 100% CPU 空转）；冷却到期后的退避重列判定行为逐字不变
 
 #### Scenario: 熔断前一次退避自愈
 

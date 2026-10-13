@@ -21,6 +21,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -317,6 +318,56 @@ class TestAnchorCheck(unittest.TestCase):
         self.assertIsNone(self.fr._anchor_check(self.fr.TIERS["t3"], unit, repo))
 
 
+class TestWriteFailedMarkerAnchor(unittest.TestCase):
+    """The `.failed` marker write is repo-anchored: the response to a DETECTED
+    poisoned path must never be to materialize it. Out-of-tree marker →
+    refuse (no mkdir, no write, False return, stderr recipe — the caller must
+    not count the unit failed-written, a count without disk evidence would be
+    a fabrication); in-tree marker → written (or already present) exactly as
+    before. The guard lives in the single write point both entries share
+    (path-drift interception + explicit failed ack)."""
+
+    def setUp(self):
+        import tempfile
+        self.fr = _load("fanout_runner_marker")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_marker_"))
+        self.repo = self.tmp / "repo"
+        (self.repo / ".mgh-init").mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_out_of_tree_marker_refused_never_materialized(self):
+        outside = self.tmp / "outside" / "poison" / "u.json.failed"
+        unit = {"batch_id": "scout-001", "failed_marker": str(outside)}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ok = self.fr._write_failed_marker(self.fr.TIERS["scout"], unit,
+                                              "path-drift: x", self.repo)
+        self.assertFalse(ok, "out-of-tree marker must be refused")
+        self.assertFalse(outside.parent.exists(), "NEVER mkdir the poisoned path")
+        self.assertFalse(outside.exists(), "NEVER write the poisoned path")
+        self.assertIn("outside repo anchor", err.getvalue())
+        self.assertIn("recipe", err.getvalue().lower())
+
+    def test_in_tree_marker_written_and_reported(self):
+        fm = self.repo / ".mgh-init" / "checkpoints" / "u2.json.failed"
+        unit = {"batch_id": "scout-002", "failed_marker": str(fm)}
+        ok = self.fr._write_failed_marker(self.fr.TIERS["scout"], unit,
+                                          "failed: boom", self.repo)
+        self.assertTrue(ok)
+        body = json.loads(fm.read_text(encoding="utf-8"))
+        self.assertEqual(body["unit"], "scout-002")
+        self.assertEqual(body["tier"], "scout")
+        # idempotent second write: still True, existing body untouched
+        ok2 = self.fr._write_failed_marker(self.fr.TIERS["scout"], unit,
+                                           "failed: again", self.repo)
+        self.assertTrue(ok2)
+        self.assertEqual(json.loads(fm.read_text(encoding="utf-8"))["reason"],
+                         "failed: boom")
+
+
 class TestAckParsing(unittest.TestCase):
     def setUp(self):
         self.fr = _load()
@@ -382,6 +433,23 @@ class TestStateMachineCli(unittest.TestCase):
         self.assertIn("path-drift", body["reason"])
         out = json.loads(r.stdout)
         self.assertEqual(out["failed"], 1)
+
+    def test_path_drift_out_of_tree_marker_never_materialized(self):
+        # poisoned listing: the unit's failed_marker points OUTSIDE the repo
+        # anchor — the path-drift interception must refuse to mkdir/write it
+        # (pre-fix the response to a detected poisoned path was to execute it:
+        # mkdir parents + write the marker at the very path flagged as drift)
+        outside = self.tmp / "outside" / "poison" / "u.json.failed"
+        bad = dict(self.units[0], checkpoint_path="D:/.mgh-init/x.json",
+                   failed_marker=str(outside))
+        lp = self._write_listing(_listing(self.tmp, [bad]))
+        r = _run_cli(self.tmp, lp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(outside.parent.exists(), "NEVER mkdir the poisoned dir")
+        self.assertFalse(outside.exists(), "NEVER write the poisoned marker")
+        self.assertIn("outside repo anchor", r.stderr)
+        self.assertEqual(json.loads(r.stdout)["failed"], 0,
+                         "refused marker must not inflate the failed count")
 
     def test_purge_audit_dry_run_lists_and_guard_blocks_bare(self):
         audit = self.tmp / "repo" / ".mgh-init" / "inputs" / "scout" / "scout-001.task.md"
@@ -795,7 +863,16 @@ class _FakeDispatchBase(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _fake_run(self, behavior):
-        """behavior(uid, nth_call) -> (status, ack); ok acks write .done."""
+        """behavior(uid, nth) -> (status, ack); ok acks write .done.
+
+        Arity-adaptive: the fixed module's _run_unit returns a 6th kill_ok
+        element (kill-failure disclosure, TestKillFailureDisposition), the
+        pre-fix module returns 5. Adapting keeps the red-first tests running
+        each version's REAL dispatch flow — a fixed 6-tuple fake would crash
+        the pre-fix dispatch thread with an unpack error and route the run
+        through states the fix never exercised."""
+        arity6 = hasattr(self.fr, "_KILL_TREE_GRACE_S")
+
         def fake(host, cmd, task, cwd, call_timeout_s, stall_timeout_s=0,
                  run_log_path=None, uid="", on_spawn=None):
             nth = fake.state.get(uid, 0) + 1
@@ -810,8 +887,9 @@ class _FakeDispatchBase(unittest.TestCase):
             pid = 700000 + len(self.calls)
             if on_spawn is not None:
                 on_spawn(pid)
-            return (status, ack if status == "spawn-ok" else None, status,
+            tail = (status, ack if status == "spawn-ok" else None, status,
                     pid, status == "stall")
+            return tail + (True,) if arity6 else tail
         fake.state = {}
         return fake
 
@@ -829,12 +907,12 @@ print(json.dumps({{'repo': {str(self.repo)!r}, 'total': len(UNITS),
         stub.write_text(body, encoding="utf-8")
         return stub
 
-    def _run_main(self, behavior, *extra, wave="1", stub=None):
+    def _run_main(self, behavior, *extra, wave="1", stub=None, fake=None):
         stub = stub or self._disk_stub()
         saved_list = dict(self.fr.TIERS["scout"])
         saved_run = self.fr._run_unit
         self.fr.TIERS["scout"]["list_script"] = str(stub)  # absolute → join keeps it
-        self.fr._run_unit = self._fake_run(behavior)
+        self.fr._run_unit = (fake or self._fake_run)(behavior)
         # --cooldown-s 0 harness default: the storm-resilience cooldown/backoff
         # layer stays OFF unless a test opts in explicitly (its default 300s
         # gate would stall every breaker test); cooldown tests pass their own
@@ -936,6 +1014,69 @@ class TestStallCircuitBreaker(_FakeDispatchBase):
         self.assertEqual(self.fr.DEFAULT_STALL_WAVES, 2)
 
 
+class TestCooldownWaitCoversDrainedBackoff(_FakeDispatchBase):
+    """The cooldown wait gate must cover the DRAINED state: queue empty +
+    in-flight zero + cooldown still active. The pre-breaker backoff arms at
+    exactly such a point (its trip observation fires right after the queue's
+    last requeue was re-dispatched), so the old gate condition —
+    `(queue or inflight) and not inflight`, i.e. "queue non-empty" — skipped
+    the sleep and the loop spun with ZERO time.sleep calls until the cooldown
+    expired (default: 300s of one core).
+
+    Construction (single unit, wave=1, K=--stall-waves x --wave=1): the unit
+    crashes twice — each requeue feeds the next dispatch and the K=1 window
+    observes at every pop — so the SECOND zero-growth observation trips with
+    the just-re-dispatched attempt in flight and an EMPTY queue (two requeues
+    stay below the storm threshold, so only the pre-breaker backoff cooldown
+    arms). The third attempt completes mid-cooldown without a marker
+    (consumed, never requeued), leaving exactly the drained backoff state.
+    Assertion is call-counting, never wall-clock: time.sleep must be called
+    at least once during that window (pre-fix: zero calls). ~4s wall clock
+    (real cooldown slice, sleep-capped at 50ms per call)."""
+
+    N_UNITS = 1
+
+    def test_drained_backoff_cooldown_sleeps_instead_of_spinning(self):
+        e_mid = threading.Event()   # releases the post-trip attempt mid-cooldown
+        timer = threading.Timer(0.9, e_mid.set)
+        sleeps = []
+        real_sleep = time.sleep
+        script_file = str(SCRIPT)
+
+        def counting_sleep(s):
+            # count only sleeps issued by fanout_runner's own code: subprocess
+            # wait internals and stdlib polling also call time.sleep and would
+            # fake a pass on the pre-fix build
+            if sys._getframe(1).f_code.co_filename != script_file:
+                return real_sleep(s)
+            sleeps.append(s)
+            real_sleep(min(s, 0.05))  # cap: keep the test fast, count stays honest
+
+        def behavior(uid, nth):
+            if nth <= 2:
+                return ("crash", None)      # requeue → feeds the K=1 windows
+            e_mid.wait(30)
+            return ("spawn-ok", None)       # consumed mid-cooldown, NO marker
+
+        timer.start()
+        try:
+            with mock.patch("time.sleep", counting_sleep):
+                code, out, err = self._run_main(
+                    behavior, "--stall-waves", "1", "--cooldown-s", "4")
+        finally:
+            timer.join()
+        # the scenario shape must hold: only the pre-breaker backoff armed
+        # (two requeues stay below the storm threshold of three)
+        self.assertIn("cooldown #1 (pre-breaker backoff", err)
+        self.assertEqual(code, 2, err)          # breaker truncates the stuck tail
+        self.assertTrue(json.loads(out)["stalled"])
+        self.assertGreaterEqual(
+            len(sleeps), 1,
+            "cooldown wait with an empty queue and no in-flight units must "
+            "sleep, never zero-sleep spin (pre-fix: 0 sleep calls while the "
+            "backoff cooldown burned CPU)")
+
+
 class TestSlotBackfillDispatch(_FakeDispatchBase):
     N_UNITS = 3
 
@@ -992,6 +1133,84 @@ class TestSlotBackfillDispatch(_FakeDispatchBase):
                         "drift diagnostic: disk markers all exist")
 
 
+class TestKillFailureDisposition(_FakeDispatchBase):
+    """Kill-failed disposition — the survivor OWNS the unit: when _kill_tree
+    reports False on the stall/timeout path, the unit must NOT re-enter the
+    queue (a re-dispatch would run concurrently with the process the kill
+    failed on and race its checkpoint), its pid must STAY in the liveness
+    children[] (--kill-stale must still find it — pre-fix the terminal path
+    unconditionally removed it, minting an untrackable orphan), stderr must
+    fail loud with the recovery recipe, and the summary must disclose
+    kill_failed[]. The disk-pending-but-never-queueable tail is bounded by
+    the zero-progress breaker (stuck-pending operand)."""
+
+    N_UNITS = 2
+
+    def _fake_run6(self, behavior):
+        """Like _fake_run but behavior returns (status, ack, kill_ok)."""
+        def fake(host, cmd, task, cwd, call_timeout_s, stall_timeout_s=0,
+                 run_log_path=None, uid="", on_spawn=None):
+            nth = fake.state.get(uid, 0) + 1
+            fake.state[uid] = nth
+            status, ack, kill_ok = behavior(uid, nth)
+            self.calls.append((uid, status, ack))
+            if ack == "ok":
+                unit = next(u for u in self.units if u.get("batch_id") == uid)
+                Path(unit["done_marker"]).write_text("done", encoding="utf-8")
+            pid = 700000 + len(self.calls)
+            if on_spawn is not None:
+                on_spawn(pid)
+            return (status, ack if status == "spawn-ok" else None, status,
+                    pid, status == "stall", kill_ok)
+        fake.state = {}
+        return fake
+
+    def test_kill_failed_not_redispatched_pid_kept_and_disclosed(self):
+        def behavior(uid, nth):
+            if uid == "scout-001":
+                return ("timeout", None, False)   # kill FAILS every attempt
+            return ("spawn-ok", "ok", True)       # scout-002 completes normally
+
+        liveness_writes = []
+        real_update = self.fr._update_liveness_children
+
+        def spy_update(path, body, children):
+            liveness_writes.append([dict(c) for c in children])
+            real_update(path, body, children)
+
+        saved_update = self.fr._update_liveness_children
+        self.fr._update_liveness_children = spy_update
+        try:
+            code, out, err = self._run_main(behavior, fake=self._fake_run6)
+        finally:
+            self.fr._update_liveness_children = saved_update
+        data = json.loads(out)
+        self.assertEqual(data["kill_failed"], ["scout-001"],
+                         "kill-failed unit must be disclosed (optional key)")
+        u1_calls = [c for c in self.calls if c[0] == "scout-001"]
+        self.assertEqual(len(u1_calls), 1,
+                         "kill-failed unit must NOT be re-dispatched in-run")
+        self.assertEqual(code, 2)
+        self.assertTrue(data["stalled"],
+                        "stuck disk-pending tail is bounded by the breaker")
+        self.assertTrue(any(e["id"] == "scout-001"
+                            for e in data.get("stalled_pending", [])),
+                        "stuck unit must appear in stalled_pending[]")
+        # writes: [u1 spawn], [u1+u2 spawn], [u2 terminal removal], [exit clear].
+        # The third write must STILL hold scout-001's pid — its kill-failed
+        # terminal must not run _terminal_children_rm
+        self.assertEqual([c["pid"] for c in liveness_writes[2]], [700001],
+                         "kill-failed pid must stay in liveness children[]")
+        self.assertIn("TREE-KILL FAILED", err)
+        self.assertIn("--kill-stale", err)   # recipe names the recovery path
+
+    def test_kill_failed_key_absent_when_kills_succeed(self):
+        # optional-key discipline: no kill failure → the key is absent, not []
+        code, out, err = self._run_main(lambda uid, nth: ("spawn-ok", "ok"))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("kill_failed", json.loads(out))
+
+
 class TestContextOverflowClassification(_FakeDispatchBase):
     """P2 overflow-signature diagnosis at the dispatch-loop boundary: a crash
     whose detail carries the reason:context-overflow mark (set by _run_unit)
@@ -1009,7 +1228,7 @@ class TestContextOverflowClassification(_FakeDispatchBase):
             pid = 700000 + len(self.calls)
             if on_spawn is not None:
                 on_spawn(pid)
-            return ("crash", None, detail, pid, False)
+            return ("crash", None, detail, pid, False, True)
         return fake
 
     def _run(self, detail):
@@ -1073,11 +1292,12 @@ class TestRunUnitTreeKill(unittest.TestCase):
         cmd = [sys.executable, "-c",
                "import time; print('hello', flush=True); time.sleep(300)"]
         t0 = time.monotonic()
-        status, ack, detail, pid, was_stalled = self.fr._run_unit(
+        status, ack, detail, pid, was_stalled, kill_ok = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 300, 2, self.tmp / "u1.run.log", "u1")
         elapsed = time.monotonic() - t0
         self.assertEqual(status, "stall")
         self.assertTrue(was_stalled)
+        self.assertTrue(kill_ok, "kill success path must report kill_ok=True")
         self.assertIsNone(ack)
         self.assertGreaterEqual(elapsed, 2)
         self.assertLess(elapsed, 30)  # 2s silence threshold + kill/reap slack
@@ -1088,7 +1308,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
 
     def test_call_timeout_kills_child(self):
         cmd = [sys.executable, "-c", "import time; time.sleep(300)"]
-        status, ack, _, pid, was_stalled = self.fr._run_unit(
+        status, ack, _, pid, was_stalled, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 2, 0, self.tmp / "u2.run.log", "u2")
         self.assertEqual(status, "timeout")
         self.assertFalse(was_stalled)
@@ -1099,7 +1319,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
 
     def test_clean_completion_writes_ok_evidence(self):
         cmd = [sys.executable, "-c", "print('hello')"]
-        status, _, detail, _, was_stalled = self.fr._run_unit(
+        status, _, detail, _, was_stalled, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u3.run.log", "u3")
         self.assertEqual(status, "spawn-ok")
         self.assertFalse(was_stalled)
@@ -1111,7 +1331,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
     def test_crash_nonzero_exit_no_ack(self):
         cmd = [sys.executable, "-c",
                "import sys; sys.stderr.write('boom'); sys.exit(3)"]
-        status, ack, detail, _, was_stalled = self.fr._run_unit(
+        status, ack, detail, _, was_stalled, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u4.run.log", "u4")
         self.assertEqual(status, "crash")
         self.assertIsNone(ack)
@@ -1128,7 +1348,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
         cmd = [sys.executable, "-c",
                "import sys; sys.stderr.write('request failed: prompt is too "
                "long: 512000 tokens > 200000 maximum'); sys.exit(1)"]
-        status, ack, detail, _, was_stalled = self.fr._run_unit(
+        status, ack, detail, _, was_stalled, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u6.run.log", "u6")
         self.assertEqual(status, "crash")
         self.assertIsNone(ack)
@@ -1142,7 +1362,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
     def test_crash_without_signature_stays_generic(self):
         cmd = [sys.executable, "-c",
                "import sys; sys.stderr.write('boom: prompt is too spicy'); sys.exit(1)"]
-        status, _, detail, _, _ = self.fr._run_unit(
+        status, _, detail, _, _, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u7.run.log", "u7")
         self.assertEqual(status, "crash")
         self.assertNotIn("reason:context-overflow", detail)
@@ -1151,7 +1371,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
         filler = "x" * 20000  # well over the 8192 tail cap, under argv limits
         cmd = [sys.executable, "-c",
                f"print({filler!r}); print('END-MARK')"]
-        status, _, _, _, _ = self.fr._run_unit(
+        status, _, _, _, _, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u5.run.log", "u5")
         self.assertEqual(status, "spawn-ok")
         log = (self.tmp / "u5.run.log").read_text(encoding="utf-8")
@@ -1171,7 +1391,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
                "    print('tick', flush=True)\n"
                "    time.sleep(0.5)\n"]
         t0 = time.monotonic()
-        status, _, _, pid, was_stalled = self.fr._run_unit(
+        status, _, _, pid, was_stalled, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 2, self.tmp / "u8.run.log", "u8")
         elapsed = time.monotonic() - t0
         self.assertFalse(was_stalled, "one idle stream must not read as a stall")
@@ -1187,7 +1407,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
         emits nothing at all on either stream from spawn is still tree-killed."""
         cmd = [sys.executable, "-c", "import time; time.sleep(300)"]
         t0 = time.monotonic()
-        status, ack, _, pid, was_stalled = self.fr._run_unit(
+        status, ack, _, pid, was_stalled, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 300, 2, self.tmp / "u9.run.log", "u9")
         self.assertEqual(status, "stall")
         self.assertTrue(was_stalled)
@@ -1204,12 +1424,12 @@ class TestRunUnitTreeKill(unittest.TestCase):
         The window is the only difference between the two legs — which is what
         makes the disabled mode a real mode."""
         cmd = [sys.executable, "-c", "import time; time.sleep(300)"]
-        s1, _, _, pid1, killed1 = self.fr._run_unit(
+        s1, _, _, pid1, killed1, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 2, None, "u11a")
         self.assertEqual((s1, killed1), ("stall", True))
         self.assertFalse(self.fr._pid_alive(pid1))
         t0 = time.monotonic()
-        s2, ack2, _, pid2, killed2 = self.fr._run_unit(
+        s2, ack2, _, pid2, killed2, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 2, 0, None, "u11b")
         self.assertEqual((s2, killed2), ("timeout", False))
         self.assertIsNone(ack2)
@@ -1225,7 +1445,7 @@ class TestRunUnitTreeKill(unittest.TestCase):
         killpg to the unit's own tree instead of the caller's."""
         cmd = [sys.executable, "-c",
                "import os; print(os.getsid(0), os.getpid(), os.getpgrp())"]
-        status, _, detail, _, _ = self.fr._run_unit(
+        status, _, detail, _, _, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, None, "u10")
         self.assertEqual(status, "spawn-ok", detail)
         sid, pid, pgid = (int(x) for x in detail.split())
@@ -1266,6 +1486,108 @@ class TestRunUnitTreeKill(unittest.TestCase):
         self.assertIn("alive", r.stdout,
                       "the caller of _kill_tree MUST survive (POSIX session "
                       "isolation); stderr: " + r.stderr)
+
+
+class TestKillTreeEscalation(unittest.TestCase):
+    """Kill-failure detection needs a real escalation ladder: POSIX SIGTERM
+    alone is advisory — a wedged group must be re-checked inside a short
+    grace window and escalated to SIGKILL; Windows taskkill retries once.
+    The signal layer is monkeypatched — no real process is touched; the
+    monkeypatched os.name also lets the POSIX ladder run on Windows
+    (signal constants ride module-level getattr fallbacks)."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_killtree")
+
+    def _posix(self, killpg, kill=None):
+        return (
+            mock.patch.object(self.fr.os, "name", "posix"),
+            # create=True: os.getpgid/killpg don't exist on Windows — the
+            # patched-in stand-ins ARE the POSIX surface under test
+            mock.patch.object(self.fr.os, "getpgid",
+                              lambda pid: pid + 1000, create=True),
+            mock.patch.object(self.fr.os, "killpg", killpg, create=True),
+            mock.patch.object(self.fr.os, "kill", kill or (lambda p, s: None)),
+        )
+
+    def test_posix_escalates_to_sigkill_when_group_survives_sigterm(self):
+        calls = []
+
+        def killpg(pgid, sig):
+            calls.append(("killpg", pgid, sig))  # sig-0 probe never raises: alive
+
+        ctx = self._posix(killpg)
+        with ctx[0], ctx[1], ctx[2], ctx[3], \
+                mock.patch.object(self.fr.time, "sleep", lambda s: None), \
+                mock.patch.object(self.fr, "_KILL_TREE_GRACE_S", 0.01), \
+                mock.patch.object(self.fr, "_KILL_TREE_POLL_S", 0.001):
+            ok = self.fr._kill_tree(4242)
+        self.assertTrue(ok, "SIGKILL delivered → True")
+        sigs = [c[2] for c in calls]
+        self.assertEqual(sigs[0], self.fr._SIGTERM, "ladder starts with SIGTERM")
+        self.assertIn(0, sigs, "grace window must re-check group liveness")
+        self.assertEqual(sigs[-1], self.fr._SIGKILL,
+                         "surviving group must be escalated to SIGKILL")
+        self.assertEqual(calls[-1][0], "killpg", "escalation hits the GROUP")
+
+    def test_posix_group_gone_after_sigterm_needs_no_sigkill(self):
+        calls = []
+
+        def killpg(pgid, sig):
+            calls.append(("killpg", pgid, sig))
+            if sig == 0:
+                raise ProcessLookupError()       # group confirmed gone
+
+        ctx = self._posix(killpg)
+        with ctx[0], ctx[1], ctx[2], ctx[3], \
+                mock.patch.object(self.fr.time, "sleep", lambda s: None):
+            ok = self.fr._kill_tree(4242)
+        self.assertTrue(ok)
+        self.assertNotIn(self.fr._SIGKILL, [c[2] for c in calls],
+                         "confirmed-gone group must not be blind-fired")
+
+    def test_posix_escalation_failure_reports_kill_failed(self):
+        def killpg(pgid, sig):
+            if sig == 0:
+                return                           # still alive through the grace
+            raise PermissionError(13, "Operation not permitted")
+
+        def kill(pid, sig):
+            raise PermissionError(13, "Operation not permitted")
+
+        ctx = self._posix(killpg, kill)
+        with ctx[0], ctx[1], ctx[2], ctx[3], \
+                mock.patch.object(self.fr.time, "sleep", lambda s: None), \
+                mock.patch.object(self.fr, "_KILL_TREE_GRACE_S", 0.01), \
+                mock.patch.object(self.fr, "_KILL_TREE_POLL_S", 0.001):
+            ok = self.fr._kill_tree(4242)
+        self.assertFalse(ok, "surviving every attempt must report kill-failure")
+
+    def test_windows_taskkill_retries_once_then_reports(self):
+        runs = []
+
+        class _R:
+            def __init__(self, code):
+                self.returncode = code
+
+        def fake_run(argv, **kw):
+            runs.append(argv)
+            return _R(1)                          # taskkill keeps failing
+
+        with mock.patch.object(self.fr.os, "name", "nt"), \
+                mock.patch.object(self.fr.subprocess, "run", fake_run):
+            self.assertFalse(self.fr._kill_tree(999))
+        self.assertEqual(len(runs), 2, "taskkill failure must retry exactly once")
+        runs.clear()
+
+        def fake_run_retry_ok(argv, **kw):
+            runs.append(argv)
+            return _R(0 if len(runs) == 2 else 1)  # retry succeeds
+
+        with mock.patch.object(self.fr.os, "name", "nt"), \
+                mock.patch.object(self.fr.subprocess, "run", fake_run_retry_ok):
+            self.assertTrue(self.fr._kill_tree(999))
+        self.assertEqual(len(runs), 2)
 
 
 class TestExitPathChildCleanup(_FakeDispatchBase):
@@ -1309,7 +1631,7 @@ class TestExitPathChildCleanup(_FakeDispatchBase):
             unit = next(u for u in self.units if u["batch_id"] == uid)
             Path(unit["done_marker"]).write_text("done", encoding="utf-8")
             self.calls.append((uid, "spawn-ok", "ok"))
-            return ("spawn-ok", "ok", "ok", None, False)
+            return ("spawn-ok", "ok", "ok", None, False, True)
         return fake
 
     def test_exit_path_tree_kills_still_registered_children(self):
@@ -1815,7 +2137,7 @@ class TestDshHost(unittest.TestCase):
         task = "line one\nline two “” — 中文 \"q\" 'a'"
         probe = ("import os\n"
                  "print('ok', len(os.environ['MGH_TASK_TEXT']))\n")
-        status, ack, detail, _, _ = self.fr._run_unit(
+        status, ack, detail, _, _, _ = self.fr._run_unit(
             "dsh", [sys.executable, "-c", probe], task, self.tmp, 60, 0)
         self.assertEqual(status, "spawn-ok")
         self.assertEqual(ack, "ok")
@@ -1828,7 +2150,7 @@ class TestDshHost(unittest.TestCase):
                  "print('ok', len(sys.stdin.read()))\n")
         tmp = Path(tempfile.mkdtemp(prefix="fanout_dsh_stdin_"))
         try:
-            status, ack, detail, _, _ = self.fr._run_unit(
+            status, ack, detail, _, _, _ = self.fr._run_unit(
                 "opencode", [sys.executable, "-c", probe], task, tmp, 60, 0)
         finally:
             import shutil
@@ -1903,6 +2225,148 @@ class TestDshHost(unittest.TestCase):
     def test_kill_stale_markers_include_dsh(self):
         # --kill-stale cmdline 标记集含 dsh (fan-out runtime contract row)
         self.assertEqual(self.fr._HOST_CLIS, ("opencode", "claude", "dsh"))
+
+
+class TestSpawnEnvStripsPwd(unittest.TestCase):
+    """The spawned host CLI's env must NOT carry the inherited PWD: opencode
+    resolves project identity as PWD ?? cwd, so a runner launched from another
+    directory's shell (Git Bash always exports PWD) made the child treat THAT
+    directory as the project despite cwd=repo. All three host forms strip it;
+    the dsh form still adds MGH_TASK_TEXT (claude/dsh don't read PWD —
+    stripping is side-effect-free for them). Popen is wrapped and the child is
+    a trivial `python -c pass`."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_pwd")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_pwd_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_all_host_forms_strip_pwd_dsh_keeps_task_env(self):
+        captured = []
+        real_popen = subprocess.Popen
+
+        def spy_popen(cmd, **kw):
+            captured.append(dict(kw["env"]) if kw.get("env") is not None
+                            else None)
+            kw = dict(kw)
+            kw.pop("env", None)
+            return real_popen([sys.executable, "-c", "pass"], **kw)
+
+        with mock.patch.dict(os.environ, {"PWD": "C:/definitely/not/the/repo"}), \
+                mock.patch.object(self.fr.subprocess, "Popen", spy_popen):
+            for host in ("opencode", "claude", "dsh"):
+                status, _, _, _, _, _ = self.fr._run_unit(
+                    host, ["host-cli", "run"], "TASK-TEXT", self.tmp, 30, 0)
+                self.assertEqual(status, "spawn-ok", host)
+        self.assertEqual(len(captured), 3)
+        for host, env in zip(("opencode", "claude", "dsh"), captured):
+            self.assertIsNotNone(
+                env, f"{host}: env must be an explicit dict "
+                     f"(pre-fix: None for opencode/claude = full inheritance)")
+            self.assertNotIn("PWD", env, f"{host}: inherited PWD must be stripped")
+        self.assertEqual(captured[2].get("MGH_TASK_TEXT"), "TASK-TEXT",
+                         "dsh env task channel unchanged")
+
+
+class TestSafeNameEncoding(unittest.TestCase):
+    """_safe_name must BE the enumerator's encoding
+    (init_tier.safe_unit_filename — 200-stem cap with a discriminant tail):
+    audit .task.md copies and run.log evidence files then stay name-identical
+    to the marker paths and writable for ids of any length. Pre-fix private
+    copy (only / \\ : replaced, no cap) produced >255-char filenames that
+    failed on NTFS with just a warn."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_safename")
+        sys.path.insert(0, str(SCRIPTS))
+        import init_tier
+        self.encoding = init_tier.safe_unit_filename
+
+    def test_parity_with_init_tier_and_short_ids_byte_identical(self):
+        cases = ["scout-001", "a/b:c\\d", "x" * 250, "pre::" + "y" * 250,
+                 "A" * 140 + "-MID-" + "x" * 106, ""]
+        for c in cases:
+            self.assertEqual(self.fr._safe_name(c), self.encoding(c),
+                             f"parity broken for id of len={len(c)}")
+        # short ids: byte-identical to the pre-fix encoding
+        self.assertEqual(self.fr._safe_name("a/b:c\\d"), "a_b_c_d")
+        # overlong: capped at the shared stem limit
+        self.assertLessEqual(len(self.fr._safe_name("x" * 250)), 200)
+        # discriminant tail: ids sharing the head but differing in the tail
+        # must not collide after truncation
+        a = "A" * 140 + "-MID1-" + "x" * 115
+        b = "A" * 140 + "-MID2-" + "y" * 115
+        self.assertNotEqual(self.fr._safe_name(a), self.fr._safe_name(b))
+
+    def test_overlong_id_audit_copy_lands_on_disk(self):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="fanout_safename_"))
+        try:
+            repo = tmp / "repo"
+            init = repo / ".mgh-init"
+            (init / "checkpoints" / "scout").mkdir(parents=True)
+            (init / "inputs" / "scout").mkdir(parents=True)
+            (init / "scout_plan.json").write_text("{}", encoding="utf-8")
+            long_id = "scout-" + "z" * 244
+            unit = {
+                "batch_id": long_id,
+                "input_path": str(init / "inputs" / "scout" / "u.input.json"),
+                "checkpoint_path": str(init / "checkpoints" / "scout" / "u.json"),
+                "done_marker": str(init / "checkpoints" / "scout" / "u.json.done"),
+                "failed_marker": str(init / "checkpoints" / "scout" / "u.json.failed"),
+                "slice_dir": str(init / "slices"),
+            }
+            Path(unit["input_path"]).write_text("{}", encoding="utf-8")
+            lp = tmp / "pending.json"
+            lp.write_text(json.dumps({"repo": str(repo), "total": 1, "done": 0,
+                                      "failed": 0, "pending": [unit]}),
+                          encoding="utf-8")
+            saved_list = dict(self.fr.TIERS["scout"])
+            old_argv = sys.argv
+            sys.argv = ["fanout_runner.py",
+                        "--scout-plan", str(init / "scout_plan.json"),
+                        "--checkpoints", str(init / "checkpoints" / "scout"),
+                        "--inputs-dir", str(init / "inputs" / "scout"),
+                        "--pending-file", str(lp), "--cooldown-s", "0"]
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    code = self.fr.main()
+            finally:
+                sys.argv = old_argv
+                self.fr.TIERS["scout"].update(saved_list)
+            self.assertEqual(code, 0)
+            audit = init / "inputs" / "scout" / \
+                f"{self.fr._safe_name(long_id)}.task.md"
+            self.assertTrue(audit.is_file(),
+                            "audit copy must land for an overlong id "
+                            "(pre-fix: write failed with only a warn)")
+            self.assertLessEqual(len(audit.name), 255)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_overlong_id_run_log_lands(self):
+        # the run.log path is built with the same encoding — a direct _run_unit
+        # call with a real trivial child proves the evidence file lands
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="fanout_safename_log_"))
+        try:
+            long_id = "scout-" + "z" * 244
+            run_log = (tmp / "cp" / "scout"
+                       / f"{self.fr._safe_name(long_id)}.run.log")
+            status, _, _, _, _, _ = self.fr._run_unit(
+                "claude", [sys.executable, "-c", "print('hello')"], "", tmp,
+                30, 0, run_log, long_id)
+            self.assertEqual(status, "spawn-ok")
+            self.assertTrue(run_log.is_file())
+            self.assertIn("hello", run_log.read_text(encoding="utf-8"))
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestAgentCloneParity(unittest.TestCase):
@@ -2545,7 +3009,7 @@ class _StormBase(_FakeDispatchBase):
             if on_spawn is not None:
                 on_spawn(pid)
             return (status, ack if status == "spawn-ok" else None, detail,
-                    pid, status == "stall")
+                    pid, status == "stall", True)
         fake.state = {}
         return fake
 
@@ -2925,7 +3389,7 @@ class TestActiveSinkWiring(unittest.TestCase):
                "for i in range(6):\n"
                "    print('tick', i, flush=True)\n"
                "    time.sleep(0.2)"]
-        status, _, detail, _, _ = self.fr._run_unit(
+        status, _, detail, _, _, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, self.tmp / "u1.run.log", "u1")
         self.assertEqual(status, "spawn-ok", detail)
         self.assertNotIn("u1", self.fr._UNIT_SINKS, "claim = pop")
@@ -2943,7 +3407,7 @@ class TestActiveSinkWiring(unittest.TestCase):
     def test_unregistered_uid_builds_private_sinks(self):
         # direct/test callers (no registration) keep the old behavior
         cmd = [sys.executable, "-c", "print('hello')"]
-        status, ack, detail, _, _ = self.fr._run_unit(
+        status, ack, detail, _, _, _ = self.fr._run_unit(
             "claude", cmd, "", self.tmp, 60, 0, None, "u2")
         self.assertEqual(status, "spawn-ok")
         self.assertIsNone(ack, "non-ack stdout parses to None (unchanged)")

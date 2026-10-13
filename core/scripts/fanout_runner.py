@@ -84,9 +84,15 @@ the run's EFFECTIVE silence window (initial value = `--stall-timeout-s`,
 default 900) or total runtime >= `--call-timeout-s` kills that unit's WHOLE
 process tree (`taskkill /pid <pid> /T /F` — the npm `.cmd` shim chain's real
 host-CLI process dies too, never an orphan burning tokens; POSIX that unit's
-own process group). The kill NEVER reaches the dispatcher: units are spawned
-with `start_new_session`, so each leads its own session. "No ack, no marker" →
-the unit stays pending for re-dispatch.
+own process group: SIGTERM, then a short grace re-check and SIGKILL
+escalation while the group still survives). The kill NEVER reaches the
+dispatcher: units are spawned with `start_new_session`, so each leads its own
+session. "No ack, no marker" → the unit stays pending for re-dispatch —
+UNLESS the kill itself FAILED (survived SIGKILL / both taskkill passes): then
+the survivor OWNS the unit — no re-dispatch this run, the pid stays in the
+liveness children[] for `--kill-stale`, and the summary's `kill_failed[]`
+names it (the unit's marker lands whenever the survivor finishes, else a
+later `--resume` re-dispatches).
 
 The silence criterion means "this unit has produced nothing for that long", NOT
 "this unit is hung": on a rate-limited gateway the usual cause is the call
@@ -240,9 +246,13 @@ CLI contract (`--help` is the contract surface, R5.1):
                     `fanout_runner.<tier>.pid` and kill what it records:
                     form (1) runner PID alive AND cmdline matches
                     `fanout_runner.py` -> kill the whole tree (Windows
-                    `taskkill /pid <pid> /T /F`; POSIX process-group SIGTERM);
-                    form (2) runner PID dead/mismatched BUT a `children[]` PID
-                    is alive AND its cmdline is the host CLI (`opencode`/
+                    `taskkill /pid <pid> /T /F`; POSIX process-group
+                    SIGTERM, re-checked and escalated to SIGKILL while the
+                    group survives); form (2) runner PID dead/mismatched BUT
+                    a `children[]` PID is alive AND its cmdline's EXECUTABLE
+                    TOKEN (argv[0] path basename — case-insensitive,
+                    .exe/.cmd/.bat stripped, never a substring match over the
+                    whole command line) is the host CLI (`opencode`/
                     `claude`/`dsh`) -> kill each such child tree. Covers "the runner
                     was hard-killed along with the orchestrator but its host-CLI
                     children keep burning tokens". Mismatched/dead PIDs are
@@ -323,6 +333,9 @@ stdout (structured JSON summary; stderr = diagnostics/progress only, R5.3b):
    "stalled": bool,
    "stalled_pending": [{"id", "done_marker_exists", "failed_marker_exists"}]
                      (only when stalled:true),
+   "kill_failed": [units whose tree-kill FAILED (only when non-empty; the
+                   survivor owns each — no re-dispatch this run, pid kept in
+                   liveness children[] for --kill-stale)],
    "context_overflow": [units whose crash stderr matched a context-overflow
                      signature (only when non-empty; additive diagnosis —
                      the narrow---budget recipe rides the unit's run.log and
@@ -401,6 +414,8 @@ from pathlib import Path
 # Self-locate this script's dir so sibling scripts / the prompts tree resolve
 # under any cwd / host-agent invocation (R5.3a).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from init_tier import safe_unit_filename  # noqa: E402 — sibling import (below)
 
 DEFAULT_WAVE = 5
 # Calibrated for slow intranet LLM endpoints (one unit = one full LLM subagent
@@ -706,8 +721,14 @@ def _eprint(*a):
 
 
 def _safe_name(unit_id: str) -> str:
-    """Filesystem-safe audit filename (mirrors list_scout_batches._safe_name)."""
-    return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    """Filesystem-safe audit/run-log filename — ALIAS of the enumerator's
+    encoding (`init_tier.safe_unit_filename`: `/ \\ :` sanitize + 200-stem cap
+    with a discriminant tail). One encoding source shared with the marker
+    paths: audit copies and run.logs stay name-identical to what the
+    enumerator materializes, and an id of ANY length yields a writable
+    filename (the pre-fix private copy had no cap → a >249-char unit id wrote
+    a >255-char filename that failed on NTFS with only a warn)."""
+    return safe_unit_filename(unit_id)
 
 
 def _in_tree(path_str: str | None, repo: Path) -> bool:
@@ -801,19 +822,41 @@ def _anchor_check(tier: dict, unit: dict, repo: Path) -> str | None:
     return None
 
 
-def _write_failed_marker(tier: dict, unit: dict, reason: str) -> None:
+def _write_failed_marker(tier: dict, unit: dict, reason: str,
+                         repo: Path) -> bool:
     """Write the terminal `.failed` marker (same body shape the orchestrator
     writes on a failed ack: {unit, reason, tier}; `tier` = current --tier
-    value). Idempotent."""
+    value). Idempotent. REPO-ANCHORED GUARD: the marker path is checked
+    against the repo anchor BEFORE any mkdir/write — an out-of-tree marker
+    (poisoned/tampered pending listing) is NEVER materialized: the response to
+    a detected poisoned path must not be to execute it. Both entries (the
+    path-drift interception and the explicit failed ack) share this one write
+    point. Returns True when the marker is in-tree (written or already
+    present) — on False the caller MUST NOT count the unit as failed-written
+    (the marker is the only truth source; a count without disk evidence is a
+    fabrication) and the unit stays disk-pending, bounded by the zero-progress
+    breaker."""
     fm = unit.get("failed_marker")
+    uid = unit.get(tier["id_field"])
     if not fm:
-        return
+        _eprint(f"warn: unit {uid}: no failed_marker field — no marker written")
+        return False
+    if not _in_tree(fm, repo):
+        _eprint(f"error: unit {uid}: refused to materialize out-of-tree failed "
+                f"marker {fm!r} (outside repo anchor {repo}) — the path-drift "
+                f"response never executes the detected poisoned path. Recipe: "
+                f"check whether the --checkpoints root was pointed outside the "
+                f"anchor tree or the pending listing was tampered with; the "
+                f"unit stays disk-pending (no marker) and the zero-progress "
+                f"breaker bounds the run")
+        return False
     p = Path(fm)
     p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists():
-        p.write_text(json.dumps({"unit": unit.get(tier["id_field"]),
+        p.write_text(json.dumps({"unit": uid,
                                  "reason": reason, "tier": tier_name(tier)},
                                 ensure_ascii=False), encoding="utf-8")
+    return True
 
 
 def tier_name(tier: dict) -> str:
@@ -1025,7 +1068,7 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
               run_log_path: Path | None = None, uid: str = "",
               on_spawn=None) -> tuple[str, str | None, str, int | None, bool]:
     """Spawn one subprocess with the task message piped to stdin; returns
-    (status, ack, detail, child_pid, stall_killed).
+    (status, ack, detail, child_pid, stall_killed, kill_ok).
 
     status ∈ spawn-ok | spawn-error | timeout | stall | crash — ack is the
     parsed bounded ack (None if unparsable or the child was killed). Two
@@ -1033,7 +1076,11 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     loop (1s granularity) tree-kills the child on output silence >=
     stall_timeout_s (stall) or total runtime >= call_timeout_s (timeout) —
     both via `_kill_tree` (whole tree: the npm .cmd shim chain's real host-CLI
-    process dies too, NEVER an orphan burning tokens). A killed child gets NO
+    process dies too, NEVER an orphan burning tokens). `kill_ok` is that
+    kill's reported outcome on the stall/timeout paths (True = tree gone or
+    SIGKILL delivered; False = the process survived every attempt — the
+    caller must NOT re-dispatch, see TestKillFailureDisposition semantics);
+    True whenever no kill was attempted. A killed child gets NO
     ack (trust nothing after a kill); the caller re-derives truth from disk.
     on_spawn(pid) fires immediately after a successful Popen (the caller
     registers the liveness children[] entry at SPAWN time, not terminal).
@@ -1055,12 +1102,15 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     dsh gets it as child env `MGH_TASK_TEXT` (headless has no stdin task
     channel — the tier mount's `task: !!js process.env.MGH_TASK_TEXT` row
     reads the env; argv carries only the inert `-` placeholder so the task
-    text NEVER enters the command line). Stall detection/kill/cooldown are
+    text NEVER enters the command line). The child env strips `PWD` for ALL
+    host forms: opencode resolves project identity as PWD ?? cwd, so an
+    inherited PWD (out-of-host manual launch from another directory's shell —
+    Git Bash always exports it) overrode cwd=repo; claude/dsh don't read PWD,
+    stripping is side-effect-free for them. Stall detection/kill/cooldown are
     host-agnostic."""
-    env = None
+    env = {k: v for k, v in os.environ.items() if k != "PWD"}
     stdin_mode = subprocess.PIPE
     if host == "dsh":
-        env = dict(os.environ)
         env["MGH_TASK_TEXT"] = task
         stdin_mode = subprocess.DEVNULL
     proc = None
@@ -1078,7 +1128,7 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
             # branch's behavior byte-identical (it kills via taskkill /T /F).
             start_new_session=(os.name != "nt"))
     except OSError as e:
-        return "spawn-error", None, f"spawn failed: {e}", None, False
+        return "spawn-error", None, f"spawn failed: {e}", None, False, True
     if on_spawn is not None:
         try:
             on_spawn(proc.pid)
@@ -1115,6 +1165,7 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     status: str | None = None
     detail = ""
     was_stalled = False
+    kill_ok = True          # only a kill that FAILED flips this to False
     call_deadline = t_start + call_timeout_s
     while True:
         try:
@@ -1131,13 +1182,13 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
             # as "the unit is silent" and kill it at spawn + stall-timeout.
             last_out = max(out_sink["ts"], err_sink["ts"])
         if stall_timeout_s and now - last_out >= stall_timeout_s:
-            _kill_tree(proc.pid)
+            kill_ok = _kill_tree(proc.pid)
             status, was_stalled = "stall", True
             detail = (f"output silent >= {stall_timeout_s}s (stall-timeout; "
                       "tree-killed; no ack)")
             break
         if now >= call_deadline:
-            _kill_tree(proc.pid)
+            kill_ok = _kill_tree(proc.pid)
             status = "timeout"
             detail = (f"per-call timeout exceeded ({call_timeout_s}s; "
                       "tree-killed; no ack)")
@@ -1176,12 +1227,12 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     if run_log_path is not None:
         _write_run_log(run_log_path, uid, status, detail, out_tail, err_tail)
     if status == "stall":
-        return ("stall", None, detail, proc.pid, True)
+        return ("stall", None, detail, proc.pid, True, kill_ok)
     if status == "timeout":
-        return ("timeout", None, detail, proc.pid, False)
+        return ("timeout", None, detail, proc.pid, False, kill_ok)
     if status == "crash":
-        return ("crash", None, detail, proc.pid, False)
-    return ("spawn-ok", ack, detail, proc.pid, False)
+        return ("crash", None, detail, proc.pid, False, True)
+    return ("spawn-ok", ack, detail, proc.pid, False, True)
 
 
 def _list_pending(tier: dict, args) -> dict:
@@ -1456,35 +1507,83 @@ def _pid_cmdline(pid: int) -> str | None:
         return ""
 
 
+# POSIX kill-escalation ladder constants (signal ids ride getattr fallbacks so
+# the ladder is importable/patchable on Windows too), plus the grace window
+# SIGTERM gets before escalating and the poll slice inside it.
+_SIGTERM = getattr(signal, "SIGTERM", 15)
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+_KILL_TREE_GRACE_S = 1.5
+_KILL_TREE_POLL_S = 0.05
+
+
 def _kill_tree(pid: int) -> bool:
-    """Kill a whole process tree. Windows: `taskkill /pid <pid> /T /F` (/T is
-    the only reliable whole-tree kill — the host CLIs are npm `.cmd` shim
-    chains). POSIX: kill the process group — the dispatch spawns run with
-    `start_new_session`, so each unit child leads its OWN session/process
-    group and `killpg` scopes to that unit's tree alone, NEVER the caller's.
-    Callers (the stall/timeout path and the exit-path cleanup) therefore
-    survive the kill they issue."""
+    """Kill a whole process tree. Returns True = the tree is confirmed gone
+    (or the SIGKILL escalation was delivered); False = it survived every
+    attempt — callers treat that as KILL-FAILED (the survivor owns the unit:
+    no re-dispatch, pid kept in liveness, stderr fail-loud + stdout
+    kill_failed[]).
+
+    Windows: `taskkill /pid <pid> /T /F` (/T is the only reliable whole-tree
+    kill — the host CLIs are npm `.cmd` shim chains), retried ONCE on a
+    nonzero exit (a freshly spawned shim chain can outrun the first pass).
+    POSIX: SIGTERM to the unit's own process group (spawns run with
+    `start_new_session`, so killpg scopes to that unit's tree, NEVER the
+    caller's), then a short grace window re-checks group liveness (signal-0
+    killpg poll) and ESCALATES to SIGKILL while the group still survives —
+    SIGTERM alone is advisory to wedge-shaped descendants, and a kill that
+    silently failed used to re-queue the unit for a concurrent double-run.
+    Callers (the stall/timeout path and the exit-path cleanup) survive the
+    kill they issue."""
     if os.name == "nt":
-        try:
-            r = subprocess.run(["taskkill", "/pid", str(pid), "/T", "/F"],
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=60)
-            return r.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        for _ in range(2):
+            try:
+                r = subprocess.run(["taskkill", "/pid", str(pid), "/T", "/F"],
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=60)
+                if r.returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return False
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-        return True
-    except (OSError, ProcessLookupError):
-        # Fallback kept: a unit is a session leader (start_new_session) so
-        # getpgid normally cannot fail, but a PID that is already reaped or
-        # never became a group leader still deserves the direct-child attempt
-        # rather than a silent no-op.
+        pgid = os.getpgid(pid)
+    except OSError:
+        pgid = None
+    if pgid is None:
+        # A unit is a session leader (start_new_session) so getpgid normally
+        # cannot fail, but a PID that is already reaped or never became a
+        # group leader still deserves the direct-child attempt rather than a
+        # silent no-op.
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.kill(pid, _SIGTERM)
             return True
         except OSError:
             return False
+    try:
+        os.killpg(pgid, _SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass  # group already gone
+    deadline = time.monotonic() + _KILL_TREE_GRACE_S
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True              # group confirmed gone inside the grace
+        except OSError:
+            break                    # undecidable (e.g. permission) → escalate
+        time.sleep(_KILL_TREE_POLL_S)
+    delivered = False
+    try:
+        os.killpg(pgid, _SIGKILL)
+        delivered = True
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        os.kill(pid, _SIGKILL)       # direct-child fallback for non-leaders
+        delivered = True
+    except (OSError, ProcessLookupError):
+        pass
+    return delivered
 
 
 def _stale_liveness_files(init_dirs) -> list:
@@ -1542,12 +1641,37 @@ def _inspect_liveness(pid_file: Path) -> dict | None:
             "probe_unavailable": probe_unavailable}
 
 
+def _cmdline_exe_token(cl: str) -> str:
+    """Executable token of a raw cmdline string: a leading quoted span (Windows
+    quotes executable paths containing spaces) else the first whitespace-
+    separated token → unified separators → basename → lowercased →
+    .exe/.cmd/.bat stripped. The host-CLI identity match anchors HERE: a host
+    name anywhere else in the command line (an editor holding
+    `claude-meeting.txt`, a script path containing `dsh`) is never an identity
+    match — the old whole-cmdline substring disjunct tree-killed unrelated
+    processes."""
+    cl = (cl or "").strip()
+    if not cl:
+        return ""
+    if cl[0] in "\"'":
+        end = cl.find(cl[0], 1)
+        tok = cl[1:end] if end != -1 else cl[1:]
+    else:
+        tok = cl.split(None, 1)[0]
+    base = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for ext in (".exe", ".cmd", ".bat"):
+        if base.endswith(ext):
+            return base[:-len(ext)]
+    return base
+
+
 def _classify_targets(inspected: list) -> list:
     """PID-reuse double guard: return only {pid, tier, kind} entries that may
     be killed — kind=runner iff the runner PID is alive AND its cmdline names
     fanout_runner.py; kind=child iff the runner is dead/mismatched AND the
-    child PID is alive AND its cmdline is the host CLI. Everything else = a
-    stale record: the liveness file is removed, nothing is killed."""
+    child PID is alive AND its cmdline's EXECUTABLE TOKEN is the host CLI
+    (never a substring match over the whole command line). Everything else =
+    a stale record: the liveness file is removed, nothing is killed."""
     targets = []
     for ins in inspected:
         tier = ins["body"].get("tier") or "unknown"
@@ -1558,10 +1682,7 @@ def _classify_targets(inspected: list) -> list:
         if ins["runner_alive"] and not ins["runner_matches"]:
             continue  # PID reused by an unrelated process — never kill
         for ch in ins["live_children"]:
-            cl = (ch.get("cl") or "").replace("\\", "/").lower()
-            base = cl.rsplit("/", 1)[-1].split(".exe")[0] if cl else ""
-            if any(base == h or base.startswith(h + " ") or cl.find(h) >= 0
-                   for h in _HOST_CLIS):
+            if _cmdline_exe_token(ch.get("cl") or "") in _HOST_CLIS:
                 targets.append({"pid": ch["pid"], "tier": ch["tier"] or tier,
                                 "kind": "child"})
     return targets
@@ -1906,7 +2027,11 @@ def main() -> int:
     ap.add_argument("--kill-stale", action="store_true",
                     help="orphan-tree cleanup: inspect <init-dir>/fanout_runner.<tier>.pid "
                          "liveness files and kill what they record (runner tree; or, when "
-                         "the runner is dead, recorded host-CLI child trees). Needed after "
+                         "the runner is dead, recorded host-CLI child trees — matched by "
+                         "the EXECUTABLE TOKEN (argv[0] basename, .exe/.cmd/.bat stripped, "
+                         "never a whole-cmdline substring match, so an unrelated process "
+                         "merely mentioning a host name in its arguments is never killed)). "
+                         "Needed after "
                          "a HARD kill only: units lead their own session, so an "
                          "interactive Ctrl-C no longer reaches in-flight units through "
                          "the tty, and the dispatcher's exit path tree-kills whatever is "
@@ -2177,6 +2302,7 @@ def main() -> int:
     waves_run = 0            # cumulative units dispatched this run (slot backfill)
     failed_written: list[str] = []
     stall_killed: list[str] = []
+    kill_failed: list[str] = []    # units whose tree-kill FAILED (survivor owns)
     overflow_units: list[str] = []  # crashes whose stderr matched an overflow signature
     unit_durations: list[float] = []
     # Cost visibility (design D4): durations split by OUTCOME, so the runtime
@@ -2222,6 +2348,11 @@ def main() -> int:
     window_left = args.stall_waves
     last_terminal_count = None
     last_window_snap: dict = {}
+    # kill-failed units are disk-pending but NEVER queueable again this run;
+    # the breaker's trip condition must see them (they are the "units still to
+    # dispatch" the stalled disclosure reports) and the exit summary must not
+    # drop them from pending
+    last_stuck_pending: list = []
 
     def _rate_limited() -> bool:
         with storm_lock:
@@ -2489,8 +2620,8 @@ def main() -> int:
         # Anchor-tree interception BEFORE spawn (path-drift never spawns).
         reason = _anchor_check(tier, unit, repo)
         if reason:
-            _write_failed_marker(tier, unit, reason)
-            failed_written.append(uid)
+            if _write_failed_marker(tier, unit, reason, repo):
+                failed_written.append(uid)
             _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
             _eprint(f"[fanout_runner] unit {uid}: FAILED pre-spawn ({reason})")
             # pre-spawn failed terminal = disk terminal advance → clears the
@@ -2534,7 +2665,7 @@ def main() -> int:
         spawn_t0 = time.monotonic()
         run_log = (Path(args.checkpoints) / args.tier /
                    f"{_safe_name(uid)}.run.log").resolve()
-        status, ack, detail, child_pid, was_stalled = _run_unit(
+        status, ack, detail, child_pid, was_stalled, kill_ok = _run_unit(
             host, cmd, task, repo, args.call_timeout_s,
             window, run_log, uid, _register_child(uid))
         # Defensive clear (a faked/direct _run_unit that never claims leaves
@@ -2550,8 +2681,8 @@ def main() -> int:
         if was_stalled:
             stall_killed.append(uid)
         if ack is not None and ack.startswith("failed:"):
-            _write_failed_marker(tier, unit, ack[len("failed:"):])
-            failed_written.append(uid)
+            if _write_failed_marker(tier, unit, ack[len("failed:"):], repo):
+                failed_written.append(uid)
             _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
             _eprint(f"[fanout_runner] unit {uid}: failed ack → .failed marker")
             # failed terminal = disk terminal advance → clears the storm window
@@ -2563,6 +2694,23 @@ def main() -> int:
                 "stall" if status == "stall" else
                 "timeout" if status == "timeout" else "crash",
                 _hb_count(), total)
+            if not kill_ok:
+                # KILL-FAILED: the tree survived every kill attempt — the
+                # survivor OWNS this unit. Re-dispatching would run the unit
+                # concurrently with the process we failed to kill and race
+                # its checkpoint; the pid STAYS in liveness children[] so
+                # --kill-stale can still find it (removing it here minted an
+                # untrackable orphan).
+                kill_failed.append(uid)
+                _eprint(f"[fanout_runner] unit {uid}: TREE-KILL FAILED after "
+                        f"{status} — the process survived every kill attempt "
+                        f"and OWNS this unit: NO re-dispatch this run (its "
+                        f"marker lands whenever the survivor finishes, else "
+                        f"a later --resume re-dispatches); pid kept in the "
+                        f"liveness children[]. Recipe: "
+                        f"`fanout_runner.py --kill-stale --dry-run` lists "
+                        f"the survivor")
+                return
             _eprint(f"[fanout_runner] unit {uid}: {status} ({detail[:200]}) → "
                     f"stays pending (re-dispatch); run.log: {run_log}")
             if status == "crash" and detail.startswith(_OVERFLOW_MARK):
@@ -2652,7 +2800,7 @@ def main() -> int:
         _eprint(f"[fanout_runner] soft time budget reached; stopping new "
                 f"dispatches ({len(queue)} pending stay resumable)")
 
-    def _breaker_observe(wsnap: dict) -> bool:
+    def _breaker_observe(wsnap: dict, stuck_pending: list = ()) -> bool:
         """One zero-progress breaker observation (design D7, both points):
         advance the zero-growth window from a fresh disk re-derivation; True =
         tripped (stalled) with units still to dispatch. Growth, or the first
@@ -2660,12 +2808,17 @@ def main() -> int:
         pre-breaker backoff (design D3) when it has not been used and the
         time budget still allows a cooldown; only a still-zero-growth backoff
         re-derivation (resolved at the top of the dispatch loop) finally sets
-        stalled."""
+        stalled. `stuck_pending` = disk-pending units the dispatcher will
+        NEVER re-queue this run (kill-failed) — they are still "to dispatch"
+        from the disk's point of view, so they satisfy the trip condition and
+        ride the stalled disclosure, but only the zero-growth window bounds
+        how long the run keeps giving the survivor a chance."""
         nonlocal dispatched_since_window, last_window_snap
         nonlocal last_terminal_count, window_left, stalled
-        nonlocal backoff_used, backoff_pending
+        nonlocal backoff_used, backoff_pending, last_stuck_pending
         dispatched_since_window = 0
         last_window_snap = wsnap
+        last_stuck_pending = list(stuck_pending)
         terminal_count = (int(wsnap.get("done", 0))
                           + int(wsnap.get("failed", 0))
                           + len(set(failed_written)))
@@ -2677,7 +2830,7 @@ def main() -> int:
         last_terminal_count = terminal_count
         _write_sidecar(plan_path.parent, args.tier,
                        _sidecar_payload("running", wsnap, list(queue)))
-        if window_left <= 0 and (queue or inflight):
+        if window_left <= 0 and (queue or inflight or stuck_pending):
             if (not backoff_used and args.cooldown_s > 0
                     and _cooldown_budget_cap() > 0):
                 backoff_used = True
@@ -2736,11 +2889,14 @@ def main() -> int:
                     break
             # Cooldown gate: with nothing in flight, idle-wait the cooldown
             # out (1s chunks) — an intentional pause must not burn breaker
-            # observations or re-list subprocesses. With in-flight units the
-            # harvest loop below keeps running (cooldown only pauses NEW
-            # dispatch, via _fill).
-            if (time.monotonic() < cooldown_until and (queue or inflight)
-                    and not inflight):
+            # observations or re-list subprocesses. The DRAINED state (queue
+            # empty too — the pre-breaker backoff arms exactly at a drain
+            # point) MUST sleep as well: requiring a non-empty queue here
+            # used to spin the loop with ZERO sleep for the whole cooldown
+            # (default 300s of one core). With in-flight units the harvest
+            # loop below keeps running (cooldown only pauses NEW dispatch,
+            # via _fill).
+            if time.monotonic() < cooldown_until and not inflight:
                 time.sleep(min(1.0, max(0.001,
                                         cooldown_until - time.monotonic())))
                 continue
@@ -2806,9 +2962,14 @@ def main() -> int:
             if not pending_now:
                 break  # clean drain: nothing left to dispatch
             queued_ids = {u.get(id_field) for u in queue}
+            # kill-failed units are disk-pending but their survivor owns them
+            # — NEVER re-queued; they ride the breaker as stuck pending so the
+            # run stays bounded and the disclosure names them
+            stuck = [u for u in pending_now if u.get(id_field) in kill_failed]
             queue.extend(u for u in pending_now
-                         if u.get(id_field) not in queued_ids)
-            if _breaker_observe(wsnap):
+                         if u.get(id_field) not in queued_ids
+                         and u.get(id_field) not in kill_failed)
+            if _breaker_observe(wsnap, stuck):
                 _stall_diag("queue drained but the disk re-list still shows "
                             "pending units")
                 break
@@ -2819,7 +2980,8 @@ def main() -> int:
 
         if stalled:
             snap = last_window_snap or snap
-            pending_units = list(queue)
+            # queue + kill-failed stuck units (disk-pending, never queueable)
+            pending_units = list(queue) + list(last_stuck_pending)
         else:
             snap = _snapshot()
             pending_units = snap.get("pending") or []
@@ -2886,6 +3048,12 @@ def main() -> int:
             # De-duplicated in dispatch order: a re-dispatched unit crashes
             # once per attempt, but the summary names the UNIT once.
             result["context_overflow"] = list(dict.fromkeys(overflow_units))
+        if kill_failed:
+            # kill-failure disclosure (additive; absent when every tree-kill
+            # succeeded — same optional-key shape as runtime_p50_s): the
+            # survivor owns each named unit until a later --resume or
+            # --kill-stale closes it out
+            result["kill_failed"] = list(dict.fromkeys(kill_failed))
         if args.dry_run:
             result["dry_run"] = True
         # Fast-fail storm resilience disclosures (additive keys; existing

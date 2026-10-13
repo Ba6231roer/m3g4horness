@@ -16,6 +16,42 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — 扇出派发器 6 缺陷卫生收口:冷却忙等自旋 / 树杀失败无升级无处置 / 越树 marker 反被物化 / kill-stale 子串误杀 / spawn 未剥 PWD / 审计文件名编码漂移 (0.1.70)
+
+- **冷却忙等自旋**:熔断前退避恰在 drain 点武装(队列空、在飞零),旧冷却 gate 要求队列非空
+  才 sleep → 零 sleep 自旋烧满一个核最长 300s。gate 改 `cooldown 未到期 ∧ 无在飞` 即休眠
+  (≤1s 分片),队列空不空都等。
+- **树杀失败检测与升级**:`_kill_tree` POSIX 侧 SIGTERM 后短宽限内复查进程组存活性,仍存活
+  升级 SIGKILL(组杀 + 直接 kill 兜底);Windows 侧 `taskkill` 失败重试一次。返回 False(杀
+  失败)时:单元本 run 不再重派(幸存进程拥有该单元,防并发双跑竞写检查点)、pid 保留在
+  liveness `children[]` 供 `--kill-stale` 检出(不再摘除成不可追踪孤儿)、stderr fail-loud +
+  stdout 摘要新增可选键 `kill_failed:[unit…]`(无杀失败时省略)。stall/timeout 两调用点检查
+  返回值,杀成功路径语义逐字不变。
+- **越树 marker 永不物化**:path-drift 拦截检出越树路径后的响应曾是向该路径 mkdir + 写
+  `.failed` marker——「检测到投毒后反而执行投毒路径」。`_write_failed_marker` 写盘前按 repo
+  锚 resolve 校验(显式 failed ack 与 path-drift 两入口同判):树内照旧、树外 NEVER
+  mkdir/写盘 + stderr recipe,单元留磁盘 pending,不虚增 `failed` 计数,有界性由既有零推进
+  熔断承担(`stalled_pending[]` 披露含 stuck 单元)。
+- **kill-stale 身份匹配锚定可执行 token**:子进程判定从「全命令行小写子串包含」改为
+  「argv[0] 路径基名(引号闭合 span 优先,统一分隔符、小写、剥 `.exe`/`.cmd`/`.bat`)∈
+  {opencode, claude, dsh}」——`notepad C:\notes\claude-meeting.txt` 这类宿主名仅在参数里的
+  无关进程不再被整树强杀;漏杀方向退回既有 PID 复用防护路径(宁漏勿错)。runner 侧匹配不动。
+- **spawn 剥离 PWD**:全部 host 的子进程 env 统一 `os.environ` 去除 `PWD`(dsh 形继续附加
+  `MGH_TASK_TEXT`)——opencode 按 `PWD ?? cwd` 解析项目归属,宿主外手动拉起 runner 时继承的
+  `PWD` 会压制显式 `cwd=repo` 使子会话认错项目;claude/dsh 不读 `PWD`,剥离无副作用。
+- **审计文件名编码归一**:`_safe_name` 改为 `init_tier.safe_unit_filename` 的别名(镜像
+  list_scout_batches 形态),超长单元 id 获得 200 stem 截断(保判别尾),`.task.md`/`.run.log`
+  永不超 NTFS 255 上限写失败(旧私有拷贝只做 `/ \ :` 替换、无截断);短 id 输出逐字节不变,
+  audit/run.log 文件名与枚举器 marker 路径同名一致。
+- 测试:先红后绿新增 8 组(`TestCooldownWaitCoversDrainedBackoff`/
+  `TestKillFailureDisposition`/`TestKillTreeEscalation`/`TestWriteFailedMarkerAnchor`/
+  path-drift 越树 CLI 级/`TestSpawnEnvStripsPwd`/`TestSafeNameEncoding` ×3/
+  kill-stale 锚定 ×2)+ 既有 `_run_unit` 返回面 17 处 unpack 随 6 元组返回(新增 `kill_ok`
+  元素)同步;`test_fanout_runner` 173/174 绿 + `test_fanout_stale` 31/31 绿 +
+  zero-deps/no-compile 绿。唯一失败 `TestRateLimitStorm.test_all_rate_limit_storm_truncates_fast`
+  (waves_run 3≠2)经 HEAD worktree 对照为**存量失败**(HEAD 同断言同值失败),与本批无关。
+  sdr tier 用例(`TestDshHost` 等)零回归。
+
 ### Fixed — 守卫域 13 缺陷收口:redirect 越树四域放行 / stdin 未强制 UTF-8(GBK 中文 Windows 守卫整域休眠)/ 写目的地三入口翻转等(H2+H3+H13+M×7+L×3,2026-10-13 评审批次 2) (0.1.69)
 
 - **H2(高危,实测复现)redirect 越树拦截对四域不可达**:`_redirect_in_sanctioned` 是「init/ut-init

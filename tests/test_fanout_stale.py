@@ -197,7 +197,7 @@ print(json.dumps({{'repo': {str(self.env.repo)!r}, 'total': len(UNITS),
                 # ...and (wave=1) the PREVIOUS unit's entry is already gone
                 # (removed at its terminal event).
                 snapshots.append([dict(c) for c in children])
-            return ("spawn-ok", "ok", "ok", pid, False)
+            return ("spawn-ok", "ok", "ok", pid, False, True)
 
         saved = FR._run_unit
         FR._run_unit = fake_run
@@ -303,13 +303,15 @@ class TestKillStale(unittest.TestCase):
         self.assertFalse(self.env.liveness_path().exists(), "liveness removed after kill")
 
     def test_form2_runner_dead_children_alive_killed(self):
-        # runner PID dead; children[] records two PIDs, one is the host CLI
+        # runner PID dead; children[] records two PIDs, one is the host CLI.
+        # The opencode cmdline uses the QUOTED-absolute-path form (what a real
+        # Windows cmdline looks like when the executable path contains spaces)
         self.env.liveness(pid=999, children=[
             {"pid": 5001, "unit": "scout-001", "tier": "scout"},
             {"pid": 5002, "unit": "scout-002", "tier": "scout"}])
         killed = _patch_probe(
             self, {999: False, 5001: True, 5002: True},
-            {5001: r"C:\Program Files\nodejs\opencode.cmd run --agent x",
+            {5001: r'"C:\Program Files\nodejs\opencode.cmd" run --agent x',
              5002: "notepad.exe"}, [])
         code, out, _ = self._run_kill_stale("--dry-run")
         self.assertEqual(code, 0)
@@ -349,6 +351,49 @@ class TestKillStale(unittest.TestCase):
         self._run_kill_stale()
         self.assertEqual(killed, [], "cmdline-mismatch PIDs are NEVER killed")
         self.assertFalse(self.env.liveness_path().exists())
+
+    def test_host_name_in_args_only_never_a_target(self):
+        # the host-CLI match anchors on the EXECUTABLE token (argv[0] path
+        # basename): a reused PID whose cmdline merely MENTIONS a host name in
+        # its arguments is never a kill target — the old whole-cmdline
+        # substring disjunct (`cl.find(h) >= 0`) tree-killed unrelated
+        # processes like an editor holding claude-meeting.txt
+        self.env.liveness(pid=999, children=[
+            {"pid": 5007, "unit": "scout-007", "tier": "scout"}])
+        killed = _patch_probe(
+            self, {999: False, 5007: True},
+            {5007: r"notepad C:\notes\claude-meeting.txt"}, [])
+        code, out, _ = self._run_kill_stale("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["kill_stale"]["killed"], [],
+                         "host name in the arguments is not an identity match")
+        self._run_kill_stale()
+        self.assertEqual(killed, [], "host-name-in-args is NEVER killed")
+        self.assertFalse(self.env.liveness_path().exists(),
+                         "stale record still cleaned (PID-reuse guard path)")
+
+    def test_absolute_cmd_path_form_still_classified(self):
+        # the positive side of the anchored match: bare name, space-free
+        # absolute .cmd path, and case differences all classify as host CLI —
+        # the anchor is argv[0]'s basename with .exe/.cmd/.bat stripped,
+        # case-insensitively compared
+        self.env.liveness(pid=999, children=[
+            {"pid": 5008, "unit": "scout-008", "tier": "scout"},
+            {"pid": 5009, "unit": "scout-009", "tier": "scout"},
+            {"pid": 5010, "unit": "scout-010", "tier": "scout"}])
+        killed = _patch_probe(
+            self, {999: False, 5008: True, 5009: True, 5010: True},
+            {5008: r"C:\npm\opencode.cmd run --agent x",
+             5009: "CLAUDE -p --agents {}",
+             5010: "opencode run --agent init-scout-fanout"}, [])
+        code, out, _ = self._run_kill_stale("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(k["pid"] for k in json.loads(out)["kill_stale"]["killed"]),
+            [5008, 5009, 5010],
+            "argv[0]-basename anchor must still catch every host-CLI form")
+        self._run_kill_stale()
+        self.assertEqual(sorted(killed), [5008, 5009, 5010])
 
     def test_dry_run_guard_bare_real_kill_with_targets_exit_2(self):
         self.env.liveness(pid=4242)
@@ -485,7 +530,7 @@ class TestCmdlineProbeFallback(unittest.TestCase):
         self.env.liveness(tier="t1", pid=999, children=[
             {"pid": 5001, "unit": "cl-1", "tier": "t1"}])
         answers = {4242: "py fanout_runner.py --tier scout\n",
-                   5001: "C:\\Program Files\\nodejs\\opencode.cmd run\n"}
+                   5001: '"C:\\Program Files\\nodejs\\opencode.cmd" run\n'}
 
         def fake_alive(pid):
             return pid in (4242, 5001)

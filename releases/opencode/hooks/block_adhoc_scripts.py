@@ -160,23 +160,6 @@ Blocks the real-world failure shapes —
       indirection (`$p='D:\\out'; cp x $p`) extracts no bare path; an unknown write verb INTO a
       declared read root passes the net (the root is in the read allow-set) — declared roots
       are user-approved read-only trees.
-      (harden-mgh-bash-path-allowlist): with a pinned target, EVERY path-like token in the
-      command (Windows drive-letter absolute / UNC / POSIX absolute / `..`-leading resolved
-      against the guard cwd / `~/`-leading expanduser-resolved; bare `~` is NOT a token; bare
-      `..` without a separator is NOT a token; quoted forms are stripped; tokens containing
-      `://` are URL fragments and excluded) MUST resolve inside the unified read allow-set —
-      MGH_TARGET ∪ sentinel read_roots[] ∪ project config read_roots[] — REGARDLESS of which
-      verb leads the command. Closes the "verb not in any enumeration table" escape class
-      (robocopy, curl -o, .NET static write methods, Get-Content of an out-of-tree file,
-      Expand-Archive, …). Runs LAST in the Bash chain (after the mutation / introspection /
-      temp / aggregate / file-assoc / search / listing / interpreter / redirect rules) so
-      mutation-shaped hits keep surfacing their specific write/delete recipes; the verb tables
-      REMAIN IN FORCE as refinements (write/delete wording, cwd-drift coverage, init/ut-init
-      P1 root pollution). Target unpinned => degrade to pass (mirror of every other path
-      rule). Residual boundaries (regex-over-string, NOT a shell parser): alias/variable
-      indirection (`$p='D:\\out'; cp x $p`) extracts no bare path; an unknown write verb INTO a
-      declared read root passes the net (the root is in the read allow-set) — declared roots
-      are user-approved read-only trees.
   (n) dsh-dialect bypass surfaces (add-mgh-dsh-host-foundation; names are the shim-normalized
       guard names, NEVER dsh field names): `RunCode` = the host's bundled in-process code
       runner, the direct analogue of the blocked `py -c` inline-interpreter shape — denied
@@ -220,8 +203,9 @@ _DOMAINS = (
 _WALK_MAX_LEVELS = 16
 
 # A `py -c` / `python -c` / `python3 -c` invocation (preceded by start or a shell
-# delimiter, so it does not match a substring of another token).
-_PYC_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9]*\s+-c\b')
+# delimiter, so it does not match a substring of another token). The version segment
+# includes dotted forms (`python3.11`) — a dotted interpreter is the same interpreter.
+_PYC_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9.]*\s+-c\b')
 # Introspection / re-derivation signals (FD1 real failure shape).
 _INTRO_TOKENS = ("import json", "open(", "load(", ".json")
 # Write/delete shapes inside a `py -c` body that are NOT introspection (the prior _INTRO_TOKENS
@@ -241,7 +225,7 @@ _PYC_WRITE_TOKENS = ("makedirs", "mkdir", "write(", "write_text", "write_bytes",
 # `-` WITHOUT `<<` (e.g. `git log -`, other stdin piping) is deliberately NOT in this rule
 # face — minimal interception surface, new observed shapes net in later (same stance as the
 # Bash verb tables).
-_PY_INLINE_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9]*\s+(?:-c\b|- <<<|- <<)')
+_PY_INLINE_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9.]*\s+(?:-c\b|- <<<|- <<)')
 
 # Script extensions blocked at runtime (leaf scripts read-only; .ts covers the opencode plugin
 # glue -- its install-time write happens while the guard is inactive). .json/.md are NOT here
@@ -313,11 +297,18 @@ _LISTING_VERB_RX = re.compile(
 # prefix exempted the file-association rule and no other rule judged the script's LOCATION.
 # `-c`/`-m` forms are excluded (the introspection / write-relabel rules own those bodies).
 _INTERPRETERS = ("py", "py3", "python", "python3", "python2")
-# A leading interpreter invocation (start/delimiter-bound). The negative lookaheads skip the
-# `-c` and `-m` forms right after the interpreter name.
+# A leading interpreter invocation (start/delimiter-bound). The `-c`/`-m` exclusion is NOT a
+# regex lookahead here (the prior `(?!-(?:c|m)\b)` lookahead only ever matched the glued
+# `py-c` form — a spaced `py -m pytest <x.py>` sailed through and its trailing `.py` was
+# misjudged as the executed script): the token walk in _out_of_tree_interpreter_exec
+# excludes BOTH forms uniformly.
 _INTERPRETER_RX = re.compile(
-    r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_INTERPRETERS) + r')\b(?!-(?:c|m)\b)',
+    r'(?:^|[;|&])\s*(?:&&|\|\|)?\s*(' + "|".join(_INTERPRETERS) + r')\b',
     re.IGNORECASE)
+# Inline/module-body interpreter forms the walk treats as "not an executed script": the
+# spaced flags (`-c`/`-m`) and the glued interpreter-flag forms (`py-c`/`python3-m`, …).
+_INTERPRETER_INLINE_FORMS = frozenset(
+    f"{name}-{flag}" for name in _INTERPRETERS for flag in ("c", "m"))
 # A token that starts with a path anchor making its location judgeable without a cwd: Windows
 # drive-letter (`D:\…`/`D:/…`), UNC (`\\…`), POSIX absolute (`/…`), or a leading `~` (shell
 # expansion to a home dir OUTSIDE the project — the `python3 ~/tools/scan.py` observed shape).
@@ -329,15 +320,18 @@ _ANCHORED_TOKEN_RX = re.compile(r'(?:[A-Za-z]:[\\/]|\\\\|/|~)[^\s;"\'&|]*')
 # (`C:\…`/`C:/…`), UNC (`\\…`), POSIX absolute (`/…`), a `..`-leading relative token (the
 # caller resolves it against the guard cwd), or a `~/`-leading token (expanduser-resolved;
 # bare `~` is NOT a token, `..` without a separator is NOT a token). The left boundary
-# (start / whitespace / shell delimiter / quote / paren / `=`) anchors the token to a TOKEN
-# position, so mid-word slashes (`foo/bar`, `a=b/c`) and URL bodies (`https://…`) never
-# match; `--flag=<abs path>` values DO match at the `=`. Quote-wrapped forms are consumed
+# (start / whitespace / shell delimiter / quote / paren / redirect char / `=`) anchors the
+# token to a TOKEN position, so mid-word slashes (`foo/bar`, `a=b/c`) and URL bodies
+# (`https://…`) never match; the redirect characters `<`/`>` are boundary chars so the
+# no-space redirect form (`echo x >D:/out/f`) yields its token (mid-word arrow infixes
+# like `->b` never match — the body must start with a path anchor);
+# `--flag=<abs path>` values DO match at the `=`. Quote-wrapped forms are consumed
 # (quotes stripped off group 1). The body stops at shell delimiters, mirroring
 # _ABS_PATH_TOKEN_RX. Regex-over-observed-shape: alias/env-var indirection is not guaranteed
 # (same stance as every other Bash rule). The `://` post-filter in _bash_path_tokens is the
 # belt-and-suspenders URL exclusion on top of the boundary.
 _PATH_TOKEN_RX = re.compile(
-    r'(?:^|[\s;&|("\'=])"?\'?'
+    r"(?:^|[\s;&|(\"'<>=])\"?\'?"
     r'((?:[A-Za-z]:[\\/]|\\\\|/|\.\.[/\\]|~[/\\])[^\s;"\'&|]*)'
     r'"?\'?')
 
@@ -580,8 +574,11 @@ def _is_leaf_script_read(tool_input) -> bool:
         parts = Path(fp).resolve().parts
     except (OSError, ValueError):
         return False
+    # case-insensitive segment comparison (Windows filesystems): a `.CLAUDE/Mgh-Core/
+    # Scripts` casing variant is the same installed layout — aligned with rule l's
+    # IGNORECASE regex.
     for i in range(len(parts) - 1):
-        if parts[i] == "mgh-core" and parts[i + 1] == "scripts":
+        if parts[i].lower() == "mgh-core" and parts[i + 1].lower() == "scripts":
             return True
     return False
 
@@ -664,9 +661,12 @@ def _out_of_tree_interpreter_exec(command, target, cwd):
     token following a `--flag` token is that flag's VALUE (a data path, never the executed
     script) and is skipped; the first remaining script-extension token is the script. Only
     anchored tokens (drive-letter / UNC / POSIX-absolute / `~`) are judged — relative script
-    paths are not (observed-shape stance). `py -c` / `-m` forms are excluded by
-    _INTERPRETER_RX (the introspection / write-relabel rules own those). Returns False
-    (pass/degrade) when target is None, no interpreter leads a simple command, or the first
+    paths are not (observed-shape stance). A `-c`/`-m` token (spaced `py -c "…"` / `py -m
+    pytest <x.py>`) or a glued interpreter-flag form (`py-c`/`python3-m`) means the command
+    is an inline/module invocation — NOT an executed script: this rule exits False (the
+    trailing `.py` is the inline body's argument; the introspection / write-relabel rules
+    and the rule-m net own those bodies). Returns False (pass/degrade) when target is None,
+    no interpreter leads a simple command, the inline/module form is detected, or the first
     script token is not anchored or will not resolve."""
     if target is None or not _INTERPRETER_RX.search(command):
         return False
@@ -676,6 +676,8 @@ def _out_of_tree_interpreter_exec(command, target, cwd):
         if skip_next:
             skip_next = False
             continue
+        if tok in ("-c", "-m") or tok.lower() in _INTERPRETER_INLINE_FORMS:
+            return False          # inline/module body: not an executed-script shape
         if tok.startswith("--"):
             skip_next = True          # `--flag <path>`: the next token is a data value
             continue
@@ -696,27 +698,41 @@ def _mgh_core_missing_install(command, target, cwd):
     shape). A relative reference resolves cwd-relative first (the sanctioned
     `py .claude/mgh-core/scripts/x.py` form), falling back to target-root-relative; an
     in-tree existing reference passes. `py -c` bodies are excluded (rules (a)/(h) own them).
-    Returns False (pass/degrade) when target is None, no mgh-core script reference exists,
-    or no reference resolves. Fires on the FIRST offending reference: a missing install is
-    terminal for the run — there is no sanctioned continuation."""
+    Command is judged per SIMPLE command (split on `;`/`|`/`&`): in a segment led by a
+    FILE-SEARCH verb (rg/grep/findstr/find/…), the FIRST non-flag operand is the search
+    PATTERN — a string literal, not a disk reference — and is exempt (the stop-all, the
+    heaviest block, must never be triggered by a quoted literal); every later token is
+    judged as before. READ verbs (cat/type/Get-Content) are NOT exempt — their operands are
+    disk paths. Returns False (pass/degrade) when target is None, no mgh-core script
+    reference exists, or no reference resolves. Fires on the FIRST offending reference: a
+    missing install is terminal for the run — there is no sanctioned continuation."""
     if target is None or _PYC_RX.search(command):
         return False
-    toks = command.replace(";", " ").replace("|", " ").replace("&", " ").split()
-    for tok in toks:
-        tok = tok.strip('"\'')
-        if not tok.lower().endswith(_SCRIPT_EXTS) or not _MGH_CORE_SEG_RX.search(tok):
-            continue
-        p = Path(tok)
-        bases = (cwd, target) if not p.is_absolute() else (None,)
-        for base in bases:
-            try:
-                cand = p.resolve() if base is None else (base / p).resolve()
-            except (OSError, ValueError):
+    for seg in re.split(r'[;|&]', command):
+        toks = seg.split()
+        lead = toks[0].strip('"\'').lower() if toks else ""
+        skip_pattern = lead in _FILE_SEARCH_VERBS
+        pattern_skipped = False
+        for tok in toks[1:]:     # toks[0] is the lead verb, never a pattern/operand
+            tok = tok.strip('"\'')
+            if skip_pattern and not pattern_skipped:
+                if tok.startswith("-"):
+                    continue          # flags preceding the pattern
+                pattern_skipped = True  # the first non-flag operand IS the pattern
                 continue
-            if not cand.exists():
-                continue   # try the next base; an unresolved reference at BOTH bases => absent
-            return not cand.is_relative_to(target)
-        return True           # absent at every base => missing install
+            if not tok.lower().endswith(_SCRIPT_EXTS) or not _MGH_CORE_SEG_RX.search(tok):
+                continue
+            p = Path(tok)
+            bases = (cwd, target) if not p.is_absolute() else (None,)
+            for base in bases:
+                try:
+                    cand = p.resolve() if base is None else (base / p).resolve()
+                except (OSError, ValueError):
+                    continue
+                if not cand.exists():
+                    continue   # try the next base; an unresolved reference at BOTH bases => absent
+                return not cand.is_relative_to(target)
+            return True           # absent at every base => missing install
     return False
 
 
@@ -739,17 +755,19 @@ def _bash_path_tokens(command: str):
     return toks
 
 
-def _path_outside_allowset(command, target, cwd, read_roots):
+def _path_outside_allowset(command, target, cwd, read_roots, write_roots=()):
     """Rule m judge: return the FIRST path-like token whose resolution falls OUTSIDE the
     unified read allow-set — the resolved MGH_TARGET tree ∪ the passed-in read_roots (sentinel
-    read_roots[] ∪ project config read_roots[], already merged by the caller) — or None when
-    every token is inside (pass). Verb-independent: which verb (if any) leads the command is
-    irrelevant — the earlier enumeration rules own mutation-shaped hits; this is the
-    fail-closed net under all of them. `..`-leading tokens resolve against the guard's cwd
-    (the context that issued the call); `~`-leading tokens expanduser first; absolute tokens
-    resolve directly. A token that fails to resolve is skipped (never a crash); NO path token
-    at all => None (pass — all other rules still apply); target is None => None (degrade,
-    mirror of every other path rule)."""
+    read_roots[] ∪ project config read_roots[], already merged by the caller) ∪ write_roots
+    (init/ut-init only: sentinel out_roots[], sanctioned destinations the write predicate
+    already passed — never re-blocked under the read-side recipe) — or None when every token
+    is inside (pass). Verb-independent: which verb (if any) leads the command is irrelevant —
+    the earlier enumeration rules own mutation-shaped hits; this is the fail-closed net under
+    all of them. `..`-leading tokens resolve against the judgment cwd (the context that
+    issued the call); `~`-leading tokens expanduser first; absolute tokens resolve directly.
+    A token that fails to resolve is skipped (never a crash); NO path token at all => None
+    (pass — all other rules still apply); target is None => None (degrade, mirror of every
+    other path rule)."""
     if target is None:
         return None
     for tok in _bash_path_tokens(command):
@@ -762,7 +780,8 @@ def _path_outside_allowset(command, target, cwd, read_roots):
                 r = Path(_glob_free_prefix(tok)).resolve()
         except (OSError, ValueError):
             continue
-        if r.is_relative_to(target) or _in_read_root(r, read_roots):
+        if (r.is_relative_to(target) or _in_read_root(r, read_roots)
+                or _in_write_root(r, write_roots)):
             continue
         return tok
     return None
@@ -1126,25 +1145,58 @@ def _is_temp_redirect_target(target: str) -> bool:
     return bool(_TEMP_WRITE_RX.search(">" + target))
 
 
-def _redirect_in_sanctioned(target: str, domain, project_target, out_roots) -> bool:
-    """For init/ut-init: True iff the redirect/mutation target lands inside a sanctioned
-    subtree (P1/D5), reusing the same allowlist the Write/Edit tool layer uses. Returns True
-    (pass / in-sanctioned) when the domain has no allowlist (sast/sra/srr — they only get the
-    out-of-tree check), when project_target is None, the path is empty, or either side will not
-    resolve. NOTE: returns True for in-sanctioned AND for degradable/no-allowlist cases; the
-    caller already applied the out-of-tree check, so True here means 'OK to proceed'."""
-    subtrees = _ALLOWLIST_SUBTREES.get(domain)
-    if subtrees is None:
-        return True
-    return not _allowlist_write_blocked(target, project_target, out_roots, subtrees)
+def _bash_write_dest_blocked(dest: str, domain, target, out_roots) -> bool:
+    """Single write-DESTINATION predicate shared by the three Bash write entries: the
+    write/delete-verb branch, the redirect loop, and the `py -c` write-shape relabel (the
+    relabel result flows through the same mutation branch). Domain-mirrors each domain's
+    Write/Edit tool face so every write entry reaches the SAME verdict for the same
+    destination:
+      - init/ut-init (allowlist domains): _allowlist_write_blocked — an in-tree destination
+        must land in a sanctioned subtree / AGENTS.md (P1); an out-of-tree destination passes
+        only inside a sentinel out_roots[] root (the SAME query the tool face makes);
+      - sast/sra/srr/sdr: out-of-tree => block, in-tree => pass (their tool face consults no
+        allowlist — mirrored verbatim).
+    read_roots NEVER appear here: a declared read-only root is not writable on any face.
+    Four-domain out_roots lockstep note: sast/sra/srr/sdr Write/Edit tool faces do NOT
+    consult sentinel out_roots[] — neither does this predicate. If a four-domain run ever
+    needs an out-of-tree write destination, extend out_roots consultation on BOTH the tool
+    face and here in the SAME change (lockstep), never on one side alone.
+    Returns False (pass) when target is None (degrade — mirrors the tool face) or dest empty."""
+    if target is None or not dest:
+        return False
+    if domain in _ALLOWLIST_SUBTREES:
+        return _allowlist_write_blocked(dest, target, out_roots,
+                                        _ALLOWLIST_SUBTREES[domain])
+    return _is_out_of_tree(dest, target)
 
 
-def _emit_bash_write_block(domain, cmd, kind, dest, target, out_roots):
+def _in_write_root(resolved, write_roots) -> bool:
+    """True iff an already-resolved path falls inside ANY sentinel out_roots[] root — the
+    WRITE-allowlist roots (init/ut-init custom --out/--rules-dir destinations). Existence is
+    NOT required (mirror of _allowlist_write_blocked's out_root loop: a customized output
+    root may not exist yet at first write). Consulted ONLY by the Bash path-token net for
+    allowlist domains, so a destination the write predicate already sanctioned is not
+    re-blocked by the read net under its read-side recipe; read_roots stay the read-side
+    set and the tool-face/search/listing read rules keep judging MGH_TARGET ∪ read_roots."""
+    for root in (write_roots or ()):
+        if not isinstance(root, str) or not root.strip():
+            continue
+        r = _safe_resolve(root.strip())
+        if r is None:
+            continue
+        try:
+            if resolved.is_relative_to(r):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _emit_bash_write_block(domain, cmd, kind, dest, target):
     r"""Emit the stderr block for a Bash write/delete-verb (or `py -c` write shape) out-of-tree
-    hit. kind = "write" | "delete". Handles the in-tree-but-not-sanctioned (P1/D5) case for
-    init/ut-init too: a mutation verb destination inside the target root but outside a sanctioned
-    subtree (root pollution: `Set-Content <target>\evil.txt`) fails loud, mirroring the
-    Write/Edit tool layer. dest="<cwd>" => the cwd-drift leak (D4), reported as such."""
+    hit. kind = "write" | "delete". dest="<cwd>" => the cwd-drift leak (D4), reported as such.
+    (The in-tree-but-not-sanctioned P1/D5 case for init/ut-init emits its own block at the
+    call site — the root-pollution wording differs.)"""
     location = dest if dest and dest != "<cwd>" else "<cwd> (outside the target tree)"
     sys.stderr.write(
         f"blocked: out-of-tree {kind} in {domain} run-domain: `{cmd}`\n"
@@ -1196,8 +1248,16 @@ def main():
     # tool cwd) is the BEST activation anchor — it is the context that issued the tool
     # call (a subagent's cwd may be a target subdirectory while the hook process cwd is
     # not). Fall back to the guard process cwd (opencode plugin process) when absent.
+    # Decode as FORCED UTF-8 from the raw byte stream: the three hosts all send UTF-8, but
+    # `json.load(sys.stdin)` decodes with the CONSOLE code page (cp936 on Chinese Windows),
+    # which mojibakes (or UnicodeDecodeErrors) the payload -> broken anchor -> sentinel
+    # not found -> domain None -> every rule silently passes for the whole run. A
+    # StringIO stdin (in-process test harnesses) has no `.buffer` — fall back to read().
     try:
-        payload = json.load(sys.stdin)
+        if hasattr(sys.stdin, "buffer"):
+            payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
+        else:
+            payload = json.loads(sys.stdin.read())
     except (OSError, ValueError):
         return 0  # cannot inspect -> never block
     cwd = Path.cwd()
@@ -1207,6 +1267,12 @@ def main():
         r = _safe_resolve(pcwd.strip())
         if r is not None:
             anchor = r
+    # Single cwd source for BOTH sentinel discovery and judgment (relative `..` token
+    # resolution, cwd-default listing/mutation anchors, Glob/Grep no-`path` anchor): the
+    # payload `cwd` when resolvable, else the guard process cwd. The judgment never uses
+    # Path.cwd() while discovery uses the payload — two sources can disagree about the
+    # root and systematically mis-judge relative paths (the mismatch root shape).
+    judge_cwd = anchor
     domain, sentinel = _resolve_domain(anchor)
     if domain is None:
         return 0  # outside any run-domain: pass silently (zero day-to-day noise)
@@ -1236,7 +1302,7 @@ def main():
         # rule l (terminal state, FIRST): a command referencing an mgh-core script that is
         # absent on disk or installed outside the tree is the root-project-only-install shape;
         # every later recipe is meaningless — stop-all wins before any other judgment.
-        if _mgh_core_missing_install(cmd, target, cwd):
+        if _mgh_core_missing_install(cmd, target, judge_cwd):
             _emit_missing_install_block(domain, cmd, target)
             return 2
         # rule-a relabel (L1/D8): a `py -c` WRITE/DELETE shape with an out-of-tree path is
@@ -1246,20 +1312,22 @@ def main():
         # write-side recipe. Order matters: this gate precedes _is_introspect_py_c so the write
         # shape wins when both a write token and an introspection token are present. Target
         # absent => _out_of_tree_mutation returns pass (degrade, same as every side).
-        mut_kind, mut_dest, mut_oot = _out_of_tree_mutation(cmd, target, cwd)
+        mut_kind, mut_dest, mut_oot = _out_of_tree_mutation(cmd, target, judge_cwd)
         if mut_kind in ("write", "delete"):
-            # out-of-tree (W1/W3/D4): always block. in-tree (P1/D5): block only for init/ut-init
-            # when the destination is NOT inside a sanctioned subtree (root pollution). sast/sra/
-            # srr have no allowlist, so an in-tree mutation destination passes (mirror of the
-            # Write/Edit tool layer). dest="<cwd>" + in-tree => cwd is the run root, a sanctioned
-            # location only when cwd itself is under a sanctioned subtree; treat "<cwd>" as
-            # root-level for the P1 check (root pollution is the threat model).
-            if mut_oot:
-                _emit_bash_write_block(domain, cmd, mut_kind, mut_dest, target, out_roots)
-                return 2
-            if domain in _ALLOWLIST_SUBTREES:
-                p1_dest = cwd if mut_dest == "<cwd>" else mut_dest
-                if not _redirect_in_sanctioned(p1_dest, domain, target, out_roots):
+            # Single destination judgment for all three Bash write entries (verb face /
+            # redirect / `py -c` write shape): domain-mirroring the Write/Edit tool face —
+            # init/ut-init consult the sanctioned subtrees + sentinel out_roots (the SAME
+            # query the tool face makes); sast/sra/srr/sdr block out-of-tree and pass
+            # in-tree (their tool face consults no allowlist). read_roots NEVER exempt a
+            # write. Message split: an out-of-tree hit keeps the out-of-tree wording; an
+            # in-tree hit is the init/ut-init root-pollution (P1) wording. dest="<cwd>" is
+            # probed as the judgment cwd (root-level for the P1 check — root pollution is
+            # the threat model).
+            dest_probe = str(judge_cwd) if mut_dest == "<cwd>" else mut_dest
+            if _bash_write_dest_blocked(dest_probe, domain, target, out_roots):
+                if mut_oot:
+                    _emit_bash_write_block(domain, cmd, mut_kind, mut_dest, target)
+                else:
                     sys.stderr.write(
                         f"blocked: in-tree {mut_kind} outside the sanctioned "
                         f"{_SUBTREE_LABELS.get(domain, domain)} subtrees in {domain} "
@@ -1267,7 +1335,7 @@ def main():
                         f"  The Write/Edit tool's positive allowlist is bypassed by invoking a "
                         f"write/delete verb directly in Bash (root pollution).\n"
                         f"{_write_recipe(domain, target, mut_kind)}\n")
-                    return 2
+                return 2
         if _is_introspect_py_c(cmd):
             sys.stderr.write(
                 f"blocked: ad-hoc `py -c` introspection in {domain} run-domain.\n  {_recipe(domain)}\n")
@@ -1315,7 +1383,7 @@ def main():
         # confinement. Block when its search scope (any explicit absolute-path argument OR the
         # implicit cwd anchor) is outside the MGH_TARGET tree. Operand-vs-arg: a command with
         # no file-search verb as a leading token (e.g. `py … --in x.java`) does NOT enter here.
-        if _out_of_tree_file_search(cmd, target, cwd, read_roots):
+        if _out_of_tree_file_search(cmd, target, judge_cwd, read_roots):
             sys.stderr.write(
                 f"blocked: out-of-tree file search in {domain} run-domain: `{cmd}`\n"
                 f"  The native Grep/grep tool's `path` confinement is bypassed by invoking a "
@@ -1325,7 +1393,7 @@ def main():
         # read-side confinement, directory-listing escape route (rule j): ls/dir/Get-ChildItem/
         # gci are the enumeration peer of the search verbs above — the observed real-machine
         # shape is `ls /home` / `ls /adhome` hunting for prompts/scripts after a 404.
-        if _out_of_tree_listing(cmd, target, cwd, read_roots):
+        if _out_of_tree_listing(cmd, target, judge_cwd, read_roots):
             sys.stderr.write(
                 f"blocked: out-of-tree directory listing in {domain} run-domain: `{cmd}`\n"
                 f"  Listing verbs (ls/dir/Get-ChildItem/…) directly in Bash bypass the native "
@@ -1334,7 +1402,7 @@ def main():
         # execution confinement (rule k): an interpreter running a script that resolves
         # OUTSIDE the target tree — the explicit launcher prefix exempts the file-association
         # rule, so the executed script's LOCATION is judged here instead.
-        if _out_of_tree_interpreter_exec(cmd, target, cwd):
+        if _out_of_tree_interpreter_exec(cmd, target, judge_cwd):
             sys.stderr.write(
                 f"blocked: interpreter executing an out-of-tree script in {domain} "
                 f"run-domain: `{cmd}`\n"
@@ -1348,31 +1416,33 @@ def main():
         # OUTSIDE the MGH_TARGET tree (generalizes _TEMP_WRITE_RX, which matched only temp-dir
         # prefixes). The retained temp-I/O rule above is an independent defense (temp write +
         # read-back); this catches the non-temp out-of-tree redirect `echo x > D:\out\f.json`.
-        # temp targets are still caught first by _detect_temp_io; here any remaining out-of-tree
-        # redirect target fails loud. target absent => degrade (the resolve skips).
+        # temp targets are still caught first by _detect_temp_io; here any remaining
+        # redirect destination goes through the SAME write-destination predicate as the verb
+        # face (domain-mirrored: out_roots exempt init/ut-init out-of-tree destinations,
+        # four domains block out-of-tree outright; init/ut-init in-tree destinations
+        # additionally need a sanctioned subtree — root pollution fails loud). target
+        # absent => degrade (the loop is skipped).
         if target is not None:
             for rm in _REDIRECT_RX.finditer(cmd):
                 rdest = rm.group(1).strip('"\'')
                 if not rdest or _is_temp_redirect_target(rdest):
                     continue
-                if _is_out_of_tree(_glob_free_prefix(rdest), target):
-                    if _redirect_in_sanctioned(rdest, domain, target, out_roots):
-                        continue
-                    sys.stderr.write(
-                        f"blocked: out-of-tree redirect in {domain} run-domain: `{cmd}`\n"
-                        f"  The Write/Edit tool's confinement is bypassed by a `>`/`>>` redirect "
-                        f"to a path outside the target tree.\n"
-                        f"{_write_recipe(domain, target, 'write')}\n")
-                    return 2
-                # in-tree redirect: init/ut-init ALSO require the target inside a sanctioned
-                # subtree (P1/D5) — root pollution (`echo x > <target>\evil.txt`) fails loud.
-                if domain in _ALLOWLIST_SUBTREES and not _redirect_in_sanctioned(
-                        rdest, domain, target, out_roots):
-                    sys.stderr.write(
-                        f"blocked: in-tree redirect outside the sanctioned "
-                        f"{_SUBTREE_LABELS.get(domain, domain)} subtrees in {domain} "
-                        f"run-domain: `{cmd}`\n"
-                        f"{_write_recipe(domain, target, 'write')}\n")
+                probe = _glob_free_prefix(rdest)
+                if _bash_write_dest_blocked(probe, domain, target, out_roots):
+                    if _is_out_of_tree(probe, target):
+                        sys.stderr.write(
+                            f"blocked: out-of-tree redirect in {domain} run-domain: `{cmd}`\n"
+                            f"  The Write/Edit tool's confinement is bypassed by a `>`/`>>` "
+                            f"redirect to a path outside the target tree.\n"
+                            f"{_write_recipe(domain, target, 'write')}\n")
+                    else:
+                        # in-tree redirect outside a sanctioned subtree (init/ut-init only —
+                        # four domains pass in-tree destinations, mirroring their tool face).
+                        sys.stderr.write(
+                            f"blocked: in-tree redirect outside the sanctioned "
+                            f"{_SUBTREE_LABELS.get(domain, domain)} subtrees in {domain} "
+                            f"run-domain: `{cmd}`\n"
+                            f"{_write_recipe(domain, target, 'write')}\n")
                     return 2
         # rule m — the fail-closed net (LAST; runs after every rule above): judge EVERY
         # path-like token in the command against the unified read allow-set
@@ -1383,9 +1453,14 @@ def main():
         # which verb leads. All the enumeration rules above REMAIN IN FORCE as refinements —
         # they surface the specific write/delete/introspection recipes and own
         # mutation-shaped + cwd-drift + P1 judgments first (D2), so a mutation hit into a
-        # declared read root surfaces the WRITE recipe, never a read-net pass. No path token
-        # => pass; target unpinned => degrade to pass (mirror of every other path rule).
-        offender = _path_outside_allowset(cmd, target, cwd, read_roots)
+        # declared read root surfaces the WRITE recipe, never a read-net pass. For
+        # init/ut-init the sentinel out_roots[] (sanctioned WRITE destinations) also pass
+        # the net — a destination the write predicate already sanctioned must not be
+        # re-blocked here under the read-side recipe (four domains: out_roots not
+        # consulted, mirror of their tool face). No path token => pass; target unpinned
+        # => degrade to pass (mirror of every other path rule).
+        net_write_roots = out_roots if domain in _ALLOWLIST_SUBTREES else ()
+        offender = _path_outside_allowset(cmd, target, judge_cwd, read_roots, net_write_roots)
         if offender is not None:
             _emit_bash_allowset_block(domain, cmd, offender, target,
                                       sentinel_read_roots, config_read_roots)
@@ -1415,7 +1490,7 @@ def main():
         # inside declared external roots on the tool face AND the Bash face alike
         # (fail-closed: root must exist + be a dir); the write layers and the leaf-source /
         # `py -c` / temp-I/O / file-assoc blocks keep judging against MGH_TARGET alone.
-        if _read_out_of_tree(ti, target, cwd, read_roots):
+        if _read_out_of_tree(ti, target, judge_cwd, read_roots):
             sys.stderr.write(
                 f"blocked: read outside the MGH_TARGET tree in {domain} run-domain.\n"
                 f"  {_read_recipe(domain, target, read_roots)}\n")

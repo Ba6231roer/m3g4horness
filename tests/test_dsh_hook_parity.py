@@ -187,6 +187,16 @@ class TestShimIsGlueOnly(unittest.TestCase):
         self.assertIn("Buffer.from(", text)                 # one-shot buffer write
         self.assertIn("block_adhoc_scripts.py", text)      # spawns the shared guard
 
+    def test_shim_fails_soft_on_missing_guard_file(self):
+        """python exits 2 (`can't open file ...`) for a MISSING guard script — the same exit
+        code as a deny. The shim MUST pre-check the guard file (node:fs existsSync) before
+        spawning and treat a can't-open-file exit 2 as fail-soft pass + one diagnostic,
+        NEVER as a deny (a skewed/missing install used to deny every handled call)."""
+        text = DSH_SHIM.read_text(encoding="utf-8")
+        self.assertIn("existsSync", text)         # spawn-time existence pre-check
+        self.assertIn("node:fs", text)            # stdlib import (Bun-compatible)
+        self.assertIn("can't open file", text)    # exit-2 signature fallback (fail-soft)
+
     def test_deny_shape_matches_host_contract(self):
         text = DSH_SHIM.read_text(encoding="utf-8")
         self.assertIn('kind: "deny"', text)

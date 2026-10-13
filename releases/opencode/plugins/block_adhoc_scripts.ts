@@ -21,6 +21,7 @@
 // error), we log and PASS — never break the user's session. The shell bright-lines + per-stage
 // `--check` boundary validation remain the real backstop either way.
 
+import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
 // opencode tool ids are lowercase; these mirror Claude's Bash|Write|Edit|Read|Glob|Grep
@@ -116,6 +117,13 @@ function guardPath(): string {
 
 async function runGuard(payload: unknown): Promise<{ code: number; stderr: string }> {
   const guard = guardPath()
+  // Fail-soft pre-check: python exits 2 (`can't open file ... .py`) for a MISSING guard
+  // script — the SAME exit code as a guard denial. A missing/skewed install must degrade
+  // to a pass + one diagnostic, NEVER a deny (the fail-soft contract is "guard absent ->
+  // PASS").
+  if (!existsSync(guard)) {
+    return { code: 0, stderr: `[block_adhoc_scripts] guard file missing (${guard}); passing (fail-soft)` }
+  }
   const stdin = JSON.stringify(payload)
   // `py` (Windows launcher / some Linux), else `python3`, else `python`. Glue only.
   for (const py of ["py", "python3", "python"]) {
@@ -135,6 +143,11 @@ async function runGuard(payload: unknown): Promise<{ code: number; stderr: strin
       })
       const code = await proc.exited
       const stderr = proc.stderr ? await new Response(proc.stderr).text() : ""
+      // can't-open-file exit 2 (guard moved/deleted after the pre-check — TOCTOU or an
+      // unusual missing shape) is python's own error, NOT a guard denial: fail-soft pass.
+      if (code === 2 && /can't open file/i.test(stderr)) {
+        return { code: 0, stderr: `[block_adhoc_scripts] guard file missing at spawn time (${guard}); passing (fail-soft)` }
+      }
       return { code, stderr }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

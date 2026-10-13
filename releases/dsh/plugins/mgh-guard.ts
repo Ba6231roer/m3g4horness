@@ -31,6 +31,7 @@
 // python later is post-install environment drift.
 
 import { spawn } from "node:child_process"
+import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
 // dsh tool ids -> guard dispatch names. The wiring invariant (wiring-coverage regression
@@ -141,12 +142,26 @@ function feedGuard(py: string, payload: unknown): Promise<GuardResult> {
 }
 
 async function runGuard(payload: unknown): Promise<GuardResult> {
+  const guard = guardPath()
+  // Fail-soft pre-check: python exits 2 (`can't open file ... .py`) for a MISSING guard
+  // script — the SAME exit code as a guard denial. A missing/skewed install (incomplete
+  // mirror, moved file) must degrade to a pass + one diagnostic, NEVER a deny (the
+  // fail-soft contract is "guard absent -> PASS").
+  if (!existsSync(guard)) {
+    return { code: 0, stderr: `[mgh-guard] guard file missing (${guard}); passing (fail-soft)` }
+  }
   // `py` (Windows launcher / some Linux), else `python3`, else `python` — same fallback
   // chain as the opencode face (spike-verified on dsh/windows: `py` present, python/
   // python3 absent => the chain order matters). Glue only.
   for (const py of ["py", "python3", "python"]) {
     try {
-      return await feedGuard(py, payload)
+      const res = await feedGuard(py, payload)
+      // can't-open-file exit 2 (guard moved/deleted after the pre-check — TOCTOU or an
+      // unusual missing shape) is python's own error, NOT a guard denial: fail-soft pass.
+      if (res.code === 2 && /can't open file/i.test(res.stderr)) {
+        return { code: 0, stderr: `[mgh-guard] guard file missing at spawn time (${guard}); passing (fail-soft)` }
+      }
+      return res
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       // ENOENT = this interpreter isn't on PATH; try the next one.

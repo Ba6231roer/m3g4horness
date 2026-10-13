@@ -36,6 +36,7 @@ imported by resume_state/list_steps/resume_sdr_state/list_sdr_steps (R5.3a
 self-locate retained for uniform install copies; zero runtime deps, R2).
 """
 from __future__ import annotations
+import copy
 import sys
 from pathlib import Path
 
@@ -390,9 +391,11 @@ def get_discipline(step: str, domain: str = "init") -> dict:
     callers are unchanged by this parameter's arrival). Unknown domain, unknown
     step, and no-discipline steps (`done`, `not-started`) all → EMPTY structure
     (all three keys present, empty lists) so the stdout field shape is stable
-    everywhere.
+    everywhere. The return value is a DEFENSIVE DEEP COPY: a consumer mutating the
+    returned subset (e.g. appending to `gates`) can never pollute the module-level
+    shared table — every later call, in any domain, keeps its pristine value.
     """
     table = _DOMAINS.get(domain)
     if table is None:
-        return dict(_EMPTY)
-    return table.get(step, dict(_EMPTY))
+        return copy.deepcopy(_EMPTY)
+    return copy.deepcopy(table.get(step, _EMPTY))

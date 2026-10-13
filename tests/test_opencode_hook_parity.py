@@ -494,6 +494,16 @@ class TestGuardByteParity(unittest.TestCase):
             "shim must feed stdin as new Blob([stdin]); a bare string stdin throws in opencode's "
             "bundled Bun and silently disables the guard (the D7 root cause)")
 
+    def test_shim_fails_soft_on_missing_guard_file(self):
+        """python exits 2 (`can't open file ...`) for a MISSING guard script — the same exit
+        code as a deny. The shim MUST pre-check the guard file (node:fs existsSync) before
+        spawning and treat a can't-open-file exit 2 as fail-soft pass + one diagnostic,
+        NEVER as a deny (a skewed/missing install used to deny every handled call)."""
+        text = SHIM.read_text(encoding="utf-8")
+        self.assertIn("existsSync", text)         # spawn-time existence pre-check
+        self.assertIn("node:fs", text)            # Bun-compatible stdlib import
+        self.assertIn("can't open file", text)    # exit-2 signature fallback (fail-soft)
+
     def test_shim_handles_apply_patch_and_path_fallback(self):
         """Source-form assertion that the shim feeds apply_patch (HANDLED + normalize marker
         extraction) and uses the `path`/`include` arg-name fallback chains (D9 defense-in-depth).

@@ -199,6 +199,34 @@ class TestListSteps(unittest.TestCase):
             self.assertEqual(got, rs.get_discipline(step_id),
                              f"step {step_id}: discipline differs from resume_state")
 
+    def test_get_discipline_returns_defensive_deep_copy(self):
+        """get_discipline returns a defensive DEEP copy: a consumer mutating the returned
+        subset (append to gates/path_recipes/nevers) must NOT pollute the module-level
+        shared table — before the fix one append permanently changed every later call's
+        output (known steps returned the table entry itself; unknown steps returned
+        dict(_EMPTY), whose nested lists are shared references too)."""
+        d = _load("discipline_core")
+        steps = ("t1", "t2", "scout", "t3", "done")
+        pristine = {s: d.get_discipline(s) for s in steps}
+        sdr_pristine = d.get_discipline("t1", domain="sdr")
+        polluted = d.get_discipline("t1")
+        polluted["gates"].append("POLLUTED")
+        polluted["path_recipes"].append("POLLUTED")
+        polluted["nevers"].append("POLLUTED")
+        for s, want in pristine.items():
+            self.assertEqual(d.get_discipline(s), want,
+                             f"shared discipline table polluted at step {s}")
+        self.assertEqual(d.get_discipline("t1", domain="sdr"), sdr_pristine)
+        # the unknown-step / unknown-domain dict(_EMPTY) shallow-copy form is closed too
+        empty = d.get_discipline("done")
+        empty["nevers"].append("POLLUTED")
+        self.assertEqual(d.get_discipline("done")["nevers"], [])
+        self.assertEqual(d.get_discipline("no-such-step")["nevers"], [])
+        self.assertEqual(d.get_discipline("t1", domain="no-such-domain")["nevers"], [])
+        # the module-level table constants are untouched
+        self.assertNotIn("POLLUTED", d._DISCIPLINE["t1"]["gates"])
+        self.assertNotIn("POLLUTED", d._DISCIPLINE["done"]["nevers"])
+
     # ---- 4.6 零依赖 AST 扫描 ----
 
     def test_zero_stdlib_imports_only(self):

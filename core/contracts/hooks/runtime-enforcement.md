@@ -144,8 +144,14 @@ guard NEVER sees a dsh-native id, and fields are renamed to the snake_case tool_
   source convention: fresh run → `write_runconfig` side-effect; resume → `resume_state`
   re-arm; both derive from `run_config`, never from an orchestrator `printf`.
 - **completion / clean-stop (orchestrator, Bash)**: `rm <sentinel>` so a stale sentinel does
-  not arm the guard during subsequent day-to-day dev. Residual (crash without cleanup) only
-  blocks script writes, never JSON/`.md`/reads; user may `rm` manually.
+  not arm the guard during subsequent day-to-day dev. A residual (crash without cleanup) arms
+  the guard's FULL face for its domain — NOT scripts-only: for init/ut-init every write
+  outside the sanctioned subtrees is blocked (ANY extension — `.json`/`.md` included) plus
+  out-of-tree reads blocked, i.e. a full write lock on day-to-day dev (an init completion-state
+  residual is detected as a violation by `resume_state --check`); for sast/sra/srr/sdr script
+  writes + out-of-tree writes + out-of-tree reads are blocked (in-tree non-script writes pass).
+  Disposition: `rm` the residual promptly, or let a `--resume` re-arm overwrite it — never
+  leave it armed during ordinary development.
 - **sdr sentinel lifecycle (fully scripted — no `printf` recipe exists in any sdr shell)**:
   pre-arm → co-write → second-gate refresh → re-arm → existence check → completion removal.
   ① **pre-arm** (shell step 0, BEFORE step 1 wakes the guard — closes the "step-1 args are

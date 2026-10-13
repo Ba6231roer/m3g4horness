@@ -16,6 +16,54 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — 守卫域 13 缺陷收口:redirect 越树四域放行 / stdin 未强制 UTF-8(GBK 中文 Windows 守卫整域休眠)/ 写目的地三入口翻转等(H2+H3+H13+M×7+L×3,2026-10-13 评审批次 2) (0.1.69)
+
+- **H2(高危,实测复现)redirect 越树拦截对四域不可达**:`_redirect_in_sanctioned` 是「init/ut-init
+  受信子树白名单」查询函数却被复用在语义相反的调用点(树外拦截豁免),对无 allowlist 的
+  sast/sra/srr/sdr 直接放行——`echo x > <声明的只读根>/f` 全链路 exit 0,「声明只读根永不可写」
+  被击穿。新增单一谓词 `_bash_write_dest_blocked` 统一三个 Bash 写入口(Bash 写动词 / `>`/`>>`
+  redirect / `py -c` 写形态重标记),按域逐字镜像各自 Write/Edit 工具面:init/ut-init 走
+  `_allowlist_write_blocked`(受信子树 + AGENTS.md + 哨兵 `out_roots`),四域树外即拦、树内放行;
+  `read_roots` 在任何写面永不豁免。净网(rule m)对 allowlist 域同样放行 `out_roots` 令牌
+  (写谓词已判合法的目的地不再被读侧 recipe 二次拦);`_redirect_in_sanctioned` 删除,
+  `_emit_bash_write_block` 死参 `out_roots` 移除。
+- **H3(高危,实机 A/B)stdin 未强制 UTF-8**:`json.load(sys.stdin)` 解码随控制台代码页走,
+  中文 Windows(GBK 管道)下 UTF-8 payload 被按 cp936 错解 → `cwd` 锚点损坏 → 哨兵发现失败 →
+  域判 None → **六域全部规则对整场 run 静默放行**。改 `sys.stdin.buffer.read()` +
+  `decode("utf-8", "replace")`(StringIO 替身 getattr 回退;不可解析 payload 维持 exit 0 fail-soft)。
+  实机抽查:PYTHONIOENCODING=gbk + chcp 936 子进程喂 UTF-8 payload → 拦截生效。
+- **out_roots 三入口翻转(连坐修复)**:同一授权写根,Write/Edit 工具面放行、Bash 写动词却拦
+  (`_emit_bash_write_block` 的 `out_roots` 形参从未被读)——三入口现同判。
+- **H13(文档失实)两处按域改述残留哨兵语义**:`orchestrator-discipline.md` 与
+  `runtime-enforcement.md` 原宣称「残留哨兵只挡脚本写、不挡 JSON/`.md`/读」,与实现矛盾
+  (实测 init/ut-init 域哨兵激活 = 受信子树外**一切写**全拦 + 树外读拦 ≈ 日常开发全面写锁;
+  四域 = 脚本写 + 越树写 + 树外读拦)。两处均补处置路径(rm / resume 重写;init 完成态残留已被
+  `resume_state --check` 检出);回归测把该语义钉死(init 哨兵下受信子树外 `.md`/`.json` 写拦)。
+- **判定/哨兵双 cwd 源合一**:路径判定(`..` 相对 token、cwd 缺省锚)此前用 `Path.cwd()` 而哨兵
+  发现用 payload `cwd`,错根时系统性误判;现统一 `judge_cwd`(payload `cwd` 优先、回退进程 cwd)。
+- **解释器规则误拦/绕过收口**:`py -m pytest <树外.py>` / `py -c "…" <树外.py>` 的尾随参数不再被
+  误当执行脚本(token 走查遇 `-c`/`-m`(含 `py-c` 粘连形)即退出,负向前瞻死代码删除);
+  `python3.11 -c` / `python3.12 - <<EOF` 带点版本绕过全部内省与 heredoc 检测(版本段
+  `[0-9]*` → `[0-9.]*`)。
+- **规则 l 搜索模式误触 stop-all**:`grep -n "mgh-core/scripts/run.py" notes.md` 的引号内模式被当
+  磁盘引用触发最重阻断;改按简单命令分段,搜索动词(rg/grep/findstr/find/…)段的首个非旗标操作数
+  (模式)豁免,读动词(cat/type/Get-Content)不豁免(stop-all 面不缩)。
+- **双 shim fail-soft 修真(opencode + dsh)**:python 对缺失守卫文件以退出码 2 退出
+  (`can't open file`),与阻断退出码同值——守卫缺失/错位会被误判为 deny。spawn 前补
+  `existsSync`(node:fs)存在性预检(缺失 → 放行 + 诊断),退出码 2 且 stderr 含
+  「can't open file」签名亦按 fail-soft 放行(TOCTOU 兜底);parity 测加源形态断言防回退。
+- **其余 medium/low**:`get_discipline` 改 `copy.deepcopy` 返回(消费方一次 append 曾永久污染
+  跨域共享纪律表,`dict(_EMPTY)` 浅拷贝形态一并消灭);净网路径 token 左边界类补 `<`/`>`
+  (`echo x >D:/out/f` 无空格重定向形态此前提取不到 token);f2 叶源码拦截路径段比较改大小写
+  不敏感(`.CLAUDE/Mgh-Core/Scripts` 变体不再绕过);模块 docstring 规则 (m) 重复段删除。
+- **测试**:17 条先红后绿(`test_block_adhoc_scripts` 7 组 25 测:写目的地统一/stdin 编码/解释器
+  规则/规则 l 豁免/单一 cwd 源/净网边界+f2 大小写/H13 语义锚;双 parity 各 1;纪律表污染 1;
+  另 6 条语义锚修复前后均绿),`test_block_adhoc_scripts` 全文件 300 测零回归;定向面
+  (parity ×2 / install_hook / install_opencode_plugin / install_dsh / resume_state / list_steps /
+  zero_deps / no_compile_warnings)全绿;purity 324 文件零违例;contracts / budget lint 零变化
+  (plain_language exit 2 为存量,HEAD 同态,本批两 md 零警告)。守卫三份镜像字节一致。
+
+
 ### Fixed — /mgh-init resume 状态机 CR-1 分片簇死锁 + 口径合一/done 可达/哨兵闭环/契约同步(CR-1+H12+t3 裸 glob 等 11 项,2026-10-13 评审批次 1) (0.1.68)
 
 - **CR-1(唯一 Critical)分片簇死锁**:`resume_state.py` 的 t1 id 集从「空候选集 + 零预算退化

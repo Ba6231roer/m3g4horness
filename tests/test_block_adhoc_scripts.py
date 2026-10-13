@@ -2616,5 +2616,424 @@ class TestWriteConfinementHarness:
         return code, err.getvalue()
 
 
+class _EnvBashMixin:
+    """Env-activated Bash runner with independent payload-cwd / process-cwd control (the
+    claude-face shape: the hook payload carries `cwd`, the guard process chdirs elsewhere).
+    Returns (code, stderr)."""
+
+    def _bash_env(self, mod, cmd, domain="init", target=None, payload_cwd=None,
+                  process_cwd=None):
+        key = _DOMAIN_ENV[domain]
+        sibs = [v for d, v in _DOMAIN_ENV.items() if d != domain]
+        old_sib = {s: os.environ.pop(s, None) for s in sibs}
+        old_active = os.environ.get(key)
+        old_target = os.environ.get("MGH_TARGET")
+        os.environ[key] = "1"
+        if target is None:
+            os.environ.pop("MGH_TARGET", None)
+        else:
+            os.environ["MGH_TARGET"] = str(target)
+        payload = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        if payload_cwd is not None:
+            payload["cwd"] = str(payload_cwd)
+        proc_cwd = process_cwd or tempfile.mkdtemp(prefix="mgh_envcwd_")
+        old_cwd, old_stdin = os.getcwd(), sys.stdin
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            os.chdir(proc_cwd)
+            sys.stdin = io.StringIO(json.dumps(payload))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = mod.main()
+        finally:
+            sys.stdin = old_stdin
+            os.chdir(old_cwd)
+            if old_active is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_active
+            if old_target is None:
+                os.environ.pop("MGH_TARGET", None)
+            else:
+                os.environ["MGH_TARGET"] = old_target
+            for s, v in old_sib.items():
+                if v is not None:
+                    os.environ[s] = v
+        return code, err.getvalue()
+
+
+class TestUnifiedWriteDestination(unittest.TestCase, _EnvBashMixin):
+    """fix batch 1.1 — the three Bash write entries (write/delete verbs, `>`/`>>` redirect,
+    `py -c` write shape) judge their destination through ONE domain-mirroring predicate:
+      (a) sdr + declared read root: a redirect INTO the read root is blocked with the
+          write-side recipe (before the fix the redirect exemption passed no-allowlist
+          domains outright and the read net allowed the in-allow-set token => the whole
+          chain exited 0 — 'declared roots are never writable' was breached);
+      (b) no-allowlist domains: an out-of-tree redirect is blocked by the REDIRECT rule
+          with the write-side recipe (before the fix the redirect branch passed and only
+          the read net caught it — with the wrong, read-side recipe);
+      (c) init: a Bash write verb into a sentinel out_root passes — mirror of the Write/Edit
+          tool face (before the fix the verb face blocked what the tool face allowed);
+      (d) init: a Bash write verb into a declared READ root stays blocked (read_roots never
+          enter the write predicate — regression anchor, green before and after)."""
+
+    def _sent(self, domain, target, out_roots=(), read_roots=()):
+        return {"domain": domain, "target": str(target),
+                "out_roots": [str(r) for r in out_roots],
+                "read_roots": [str(r) for r in read_roots], "v": 1}
+
+    def _cleanup(self, *dirs):
+        import shutil
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_sdr_redirect_into_read_root_blocked_write_recipe(self):
+        self.m = _load()
+        target = Path(tempfile.mkdtemp(prefix="mgh_uwd_tgt_"))
+        front = Path(tempfile.mkdtemp(prefix="mgh_uwd_front_"))
+        try:
+            code, err = _run_with_sentinel(self.m,
+                {"tool_name": "Bash", "tool_input": {"command": f"echo x > {front}\\f.js"}},
+                "sdr", self._sent("mgh-sdr", target, read_roots=[front]))
+            self.assertEqual(code, 2, err)
+            self.assertIn("out-of-tree redirect", err)
+        finally:
+            self._cleanup(target, front)
+
+    def test_sast_out_of_tree_redirect_write_recipe(self):
+        self.m = _load()
+        code, err = self._bash_env(self.m, r"echo x > D:\out\f.json", domain="sast",
+                                   target=r"D:\parent\sonA")
+        self.assertEqual(code, 2, err)
+        self.assertIn("out-of-tree redirect", err)
+        self.assertNotIn("read allow-set", err)   # NOT the read net's recipe
+
+    def test_init_copy_item_into_out_root_passes_tool_face_mirror(self):
+        self.m = _load()
+        target = Path(tempfile.mkdtemp(prefix="mgh_uwd_init_"))
+        outroot = Path(tempfile.mkdtemp(prefix="mgh_uwd_out_"))
+        try:
+            sent = self._sent("mgh-init", target, out_roots=[outroot])
+            code, err = _run_with_sentinel(self.m,
+                {"tool_name": "Bash",
+                 "tool_input": {"command": f"Copy-Item x.json {outroot}\\x.json"}},
+                "init", sent)
+            self.assertEqual(code, 0, err)
+            # mirror witness: the SAME destination via the Write tool face passes too
+            code, err = _run_with_sentinel(self.m,
+                {"tool_name": "Write", "tool_input": {"file_path": f"{outroot}\\x.json"}},
+                "init", sent)
+            self.assertEqual(code, 0, err)
+        finally:
+            self._cleanup(target, outroot)
+
+    def test_init_write_verb_into_read_root_blocked(self):
+        self.m = _load()
+        target = Path(tempfile.mkdtemp(prefix="mgh_uwd_init2_"))
+        front = Path(tempfile.mkdtemp(prefix="mgh_uwd_front2_"))
+        try:
+            code, err = _run_with_sentinel(self.m,
+                {"tool_name": "Bash",
+                 "tool_input": {"command": f"Copy-Item x.js {front}\\x.js"}},
+                "init", self._sent("mgh-init", target, read_roots=[front]))
+            self.assertEqual(code, 2, err)
+            self.assertIn("out-of-tree write", err)
+        finally:
+            self._cleanup(target, front)
+
+
+class TestGuardStdinDecoding(unittest.TestCase):
+    """fix batch 1.2 — the guard decodes its stdin payload as FORCED UTF-8
+    (sys.stdin.buffer.read().decode('utf-8','replace')), never via the console code page.
+    Fixture: a GBK TextIOWrapper carrying UTF-8 payload bytes (the Chinese-Windows console
+    shape: chcp 936 pipe, the host sends UTF-8). Before the fix the payload was mis-decoded
+    (mojibake anchor / UnicodeDecodeError) => sentinel not found => domain None => the WHOLE
+    guard silently passed a blockable out-of-tree Write."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def _run_stdin(self, raw: bytes, encoding: str = "gbk"):
+        old_active = {k: os.environ.pop(k, None) for k in _DOMAIN_KEYS}
+        old_target = os.environ.pop("MGH_TARGET", None)
+        neutral = tempfile.mkdtemp(prefix="mgh_gbk_neutral_")
+        old_cwd, old_stdin = os.getcwd(), sys.stdin
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        try:
+            os.chdir(neutral)
+            sys.stdin = io.TextIOWrapper(io.BytesIO(raw), encoding=encoding)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.stdin = old_stdin
+            os.chdir(old_cwd)
+            for k, v in old_active.items():
+                if v is not None:
+                    os.environ[k] = v
+            if old_target is not None:
+                os.environ["MGH_TARGET"] = old_target
+        return code, err.getvalue()
+
+    def _gbk_fixture(self):
+        """Chinese-named target + on-disk sentinel + payload cwd under it (UTF-8 bytes)."""
+        target = Path(tempfile.mkdtemp(prefix="mgh_gbk_目标_"))
+        sub = target / "子目录"
+        sub.mkdir()
+        (target / ".mgh-sdr").mkdir()
+        (target / ".mgh-sdr" / ".active").write_text(json.dumps(
+            {"domain": "mgh-sdr", "target": str(target), "out_roots": [], "v": 1}),
+            encoding="utf-8")
+        payload = {"tool_name": "Write",
+                   "tool_input": {"file_path": r"D:\definitely_out\f.txt"},
+                   "cwd": str(sub)}
+        return target, json.dumps(payload).encode("utf-8")
+
+    def test_gbk_pipe_utf8_payload_still_blocks(self):
+        target, raw = self._gbk_fixture()
+        try:
+            code, err = self._run_stdin(raw, encoding="gbk")
+            self.assertEqual(code, 2, err)
+            self.assertIn("outside the MGH_TARGET tree", err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_utf8_control_still_blocks(self):
+        # control: the same fixture through a UTF-8 wrapper (proves the fixture is
+        # blockable — isolates the GBK wrapper as the variable under test).
+        target, raw = self._gbk_fixture()
+        try:
+            code, err = self._run_stdin(raw, encoding="utf-8")
+            self.assertEqual(code, 2, err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_unparseable_payload_still_fail_soft(self):
+        # empty / non-JSON pipe keeps the never-block fail-soft posture (unchanged).
+        code, _ = self._run_stdin(b"")
+        self.assertEqual(code, 0)
+        code, _ = self._run_stdin(b"not json at all")
+        self.assertEqual(code, 0)
+
+
+class TestInterpreterRuleExclusions(unittest.TestCase, _RealTreeBashMixin):
+    """fix batch 1.3 — (D3) a spaced `-c`/`-m` excludes the command from the interpreter-
+    exec rule: the trailing `.py` belongs to the module / inline body (a pytest arg, a data
+    file) and is judged — if at all — by the introspection rules / the rule-m net, NEVER by
+    the 'executing an out-of-tree script' recipe; the glued `py-c` form is excluded by the
+    same walk. (D4) dotted version tokens (python3.11 / python3.12) are the same
+    interpreter: `-c` and heredoc forms must not bypass."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    def test_spaced_m_trailing_py_not_interpreter_recipe(self):
+        outpy = self.sonb / "test_something.py"
+        code, err = self._bash(f"py -m pytest {outpy}", target=self.sona)
+        self.assertEqual(code, 2)                      # still confined: the net owns the token
+        self.assertNotIn("out-of-tree script", err)    # NEVER the interpreter-exec recipe
+        self.assertIn("read allow-set", err)
+
+    def test_spaced_c_trailing_py_not_interpreter_recipe(self):
+        helper = self.sonb / "helper.py"
+        code, err = self._bash(f'py -c "import x" {helper}', target=self.sona)
+        self.assertEqual(code, 2)
+        self.assertNotIn("out-of-tree script", err)
+        self.assertIn("read allow-set", err)
+
+    def test_glued_c_form_trailing_py_not_interpreter_recipe(self):
+        helper = self.sonb / "helper.py"
+        code, err = self._bash(f'py-c "import x" {helper}', target=self.sona)
+        self.assertNotIn("out-of-tree script", err)
+
+    def test_dotted_version_py_c_introspection_blocked(self):
+        code, err = self._bash('python3.11 -c "import json; json.load(open(\'x.json\'))"',
+                               target=self.sona)
+        self.assertEqual(code, 2, err)
+        self.assertIn("introspection", err)
+
+    def test_dotted_version_heredoc_blocked(self):
+        code, err = self._bash("python3.12 - <<'EOF'\nimport sys\nEOF", target=self.sona)
+        self.assertEqual(code, 2, err)
+        self.assertIn("inline interpreter", err)
+
+
+class TestMghCorePatternExemption(unittest.TestCase, _RealTreeBashMixin):
+    """fix batch 1.4 — a FILE-SEARCH verb's first non-flag operand is the PATTERN, not a
+    disk reference: `grep -n "mgh-core/scripts/run.py" notes.md` must never fire the
+    stop-all rule (the heaviest block must not be triggered by a string literal; quoted or
+    bare pattern both exempt, per simple-command segment). READ verbs (cat/type/
+    Get-Content) are NOT exempt: their operands are disk paths and still stop-all."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    def test_grep_quoted_pattern_not_stop_all(self):
+        (self.sona / "notes.md").write_text("x", encoding="utf-8")
+        code, err = self._bash('grep -n "mgh-core/scripts/run.py" notes.md',
+                               target=self.sona, cwd=self.sona)
+        self.assertNotIn("STOP ALL", err, err)
+        self.assertNotIn("mgh-core is not installed", err)
+
+    def test_grep_bare_pattern_not_stop_all(self):
+        (self.sona / "notes.md").write_text("x", encoding="utf-8")
+        code, err = self._bash("grep -n mgh-core/scripts/run.py notes.md",
+                               target=self.sona, cwd=self.sona)
+        self.assertNotIn("STOP ALL", err, err)
+        self.assertNotIn("mgh-core is not installed", err)
+
+    def test_cat_missing_mgh_core_script_still_stop_all(self):
+        # read verbs are NOT exempt: `cat <missing mgh-core script>` keeps the stop-all.
+        code, err = self._bash("cat .claude/mgh-core/scripts/not_installed.py",
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("STOP ALL", err)
+
+    def test_missing_ref_after_delimiter_still_stop_all(self):
+        # the pattern exemption is per simple-command segment: a REAL missing mgh-core
+        # reference in a later segment still stop-alls.
+        (self.sona / "notes.md").write_text("x", encoding="utf-8")
+        code, err = self._bash(
+            'grep -n "mgh-core/scripts/run.py" notes.md; cat .claude/mgh-core/scripts/gone.py',
+            target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("STOP ALL", err)
+
+
+class TestJudgeCwdSingleSource(unittest.TestCase, _EnvBashMixin):
+    """fix batch 1.5 — the judgment cwd (`..`-token resolution, cwd-default anchors) and the
+    sentinel discovery anchor are ONE source: payload `cwd` first, guard-process cwd
+    fallback. Before the fix the judgment used Path.cwd() while discovery used the payload
+    cwd — two sources that can disagree about the root."""
+
+    def test_payload_cwd_drives_relative_token_judgment(self):
+        self.m = _load()
+        target = Path(tempfile.mkdtemp(prefix="mgh_jcwd_tgt_"))
+        deep = target / "a" / "b"
+        deep.mkdir(parents=True)
+        sub = target / "sub"
+        sub.mkdir()
+        try:
+            # process cwd deep INSIDE the target (Path.cwd() judging would mis-pass);
+            # payload cwd = a shallow subdir => ..\.. climbs out => block.
+            code, err = self._bash_env(self.m, "type ..\\..\\secret.txt", domain="init",
+                                       target=target, payload_cwd=sub, process_cwd=deep)
+            self.assertEqual(code, 2, err)
+            self.assertIn("read allow-set", err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_no_payload_cwd_falls_back_to_process_cwd(self):
+        self.m = _load()
+        target = Path(tempfile.mkdtemp(prefix="mgh_jcwd_tgt2_"))
+        deep = target / "a" / "b"
+        deep.mkdir(parents=True)
+        try:
+            # no payload cwd: judgment anchors at the guard process cwd (existing
+            # behavior): the deep-inside process cwd resolves in-tree => pass.
+            code, err = self._bash_env(self.m, "type ..\\..\\secret.txt", domain="init",
+                                       target=target, payload_cwd=None, process_cwd=deep)
+            self.assertEqual(code, 0, err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+
+class TestNetBoundaryAndLeafCase(unittest.TestCase):
+    """fix batch 1.6 — (rule m) the path-token left-boundary class includes the redirect
+    characters `<`/`>` so the no-space redirect form (`echo x >D:/out/f`) yields its token;
+    (f2) the mgh-core/scripts segment comparison is case-insensitive (Windows filesystems):
+    `.CLAUDE/Mgh-Core/Scripts` variants cannot bypass the leaf-source read block."""
+
+    def setUp(self):
+        self.m = _load()
+
+    def test_net_extracts_no_space_redirect_token(self):
+        toks = self.m._bash_path_tokens("echo x >D:/out/f")
+        self.assertIn("D:/out/f", toks)
+
+    def test_net_extracts_input_redirect_token(self):
+        toks = self.m._bash_path_tokens("sort <D:/out/in.txt")
+        self.assertIn("D:/out/in.txt", toks)
+
+    def test_sdr_no_space_redirect_blocked_end_to_end(self):
+        # combined shape (boundary gap x redirect exemption): a no-allowlist domain + a
+        # no-space redirect — before the fix the redirect branch passed no-allowlist
+        # domains AND the net could not extract the token => whole chain exit 0.
+        target = Path(tempfile.mkdtemp(prefix="mgh_nb_tgt_"))
+        try:
+            code, err = _run_with_sentinel(self.m,
+                {"tool_name": "Bash", "tool_input": {"command": "echo x >D:/out/f.txt"}},
+                "sdr", {"domain": "mgh-sdr", "target": str(target), "out_roots": [], "v": 1})
+            self.assertEqual(code, 2, err)
+            self.assertIn("out-of-tree redirect", err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_leaf_read_case_variant_blocked(self):
+        code, err = _run_hook(self.m, {"tool_name": "Read", "tool_input":
+            {"file_path": r"D:\parent\sonA\.CLAUDE\Mgh-Core\Scripts\list_clusters.py"}},
+            domain="init")
+        self.assertEqual(code, 2, err)
+        self.assertIn("leaf script source", err)
+
+    def test_leaf_read_exact_case_still_blocked(self):
+        # anchor: the canonical casing keeps blocking (no relaxation).
+        code, err = _run_hook(self.m, {"tool_name": "Read", "tool_input":
+            {"file_path": r"D:\parent\sonA\.claude\mgh-core\scripts\list_clusters.py"}},
+            domain="init")
+        self.assertEqual(code, 2, err)
+
+
+class TestResidualSentinelFullLock(unittest.TestCase):
+    """fix batch 1.7 — semantic anchor for the residual-sentinel documentation (H13): a
+    residual init sentinel arms the guard's FULL face — writes of ANY extension outside the
+    sanctioned subtrees (`.md`/`.json` artifacts included) are blocked. This pins the true
+    semantics the two docs must state: a stale init sentinel is a full write lock on
+    day-to-day dev, not a scripts-only speed bump. (Green before and after the code change —
+    it pins documented reality against doc drift.)"""
+
+    def setUp(self):
+        self.m = _load()
+
+    def test_residual_sentinel_blocks_md_and_json_writes_at_target_root(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_h13_tgt_"))
+        sent = {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1}
+        try:
+            for name in ("notes.md", "data.json"):
+                code, err = _run_with_sentinel(self.m,
+                    {"tool_name": "Write", "tool_input": {"file_path": str(target / name)}},
+                    "init", sent)
+                self.assertEqual(code, 2, f"{name}: {err}")
+                self.assertIn("sanctioned init subtrees", err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_residual_sentinel_sanctioned_subtree_md_write_passes(self):
+        # pins that the lock is SUBTREE-scoped, not extension-scoped.
+        target = Path(tempfile.mkdtemp(prefix="mgh_h13_tgt2_"))
+        sent = {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1}
+        try:
+            code, err = _run_with_sentinel(self.m,
+                {"tool_name": "Write",
+                 "tool_input": {"file_path": str(target / ".mgh-init" / "report" / "out.md")}},
+                "init", sent)
+            self.assertEqual(code, 0, err)
+        finally:
+            import shutil
+            shutil.rmtree(target, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

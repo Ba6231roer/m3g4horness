@@ -36,10 +36,12 @@ reports are neither migrated nor rewritten.
 
 Injection safety (finding text and slice text come from an LLM and quote target-repo
 source — a real injection surface): the HTML skeleton is a static template with NO
-per-run interpolation; all dynamic text reaches the DOM through the page's single
-escaping entry (`textContent` / `setAttribute`, never string-concatenated into
-innerHTML), and the embedded JSON block has every `</` escaped to `<\/` (a legal JSON
-string escape, parse-identical) so a `</script>` literal can never terminate the block.
+per-run interpolation; all dynamic text reaches the DOM through textContent /
+setAttribute (never string-concatenated into innerHTML), and the embedded JSON block
+escapes `</` to `<\/` and `<!--` to `<\u0021--` (both legal JSON string escapes,
+parse-identical) so finding text can neither terminate the block (`</script>`) nor
+flip the HTML parser into the script-data-double-escaped state (which would swallow
+the page's own render JS).
 
 Source links: the 入口/调用链/位置 points render as links to repo-relative source files
 (`<a href="rel/path#Lline">`, anchor omitted when no line); a path that cannot be
@@ -153,6 +155,7 @@ def _merge_findings(drafts: list) -> dict:
     """Dedup-merge by {dimension, route, file}; line_hint union; first-writer-wins for
     the text fields. Returns {dimension: [finding...]} severity-sorted."""
     merged: dict[tuple, dict] = {}
+    warned_sev = False
     for d in drafts:
         for f in d["findings"]:
             if not isinstance(f, dict):
@@ -165,9 +168,16 @@ def _merge_findings(drafts: list) -> dict:
                 if hint and hint not in prev["line_hint"]:
                     prev["line_hint"] = ", ".join(x for x in (prev["line_hint"], hint) if x)
                 continue
+            sev = f.get("severity")
+            if not (isinstance(sev, str) and sev in _SEVERITY_ORDER):
+                if not isinstance(sev, str) and not warned_sev:
+                    _eprint(f"[render_sdr_report] warning: non-string severity "
+                            f"({type(sev).__name__}) in a finding degraded to 'medium'")
+                    warned_sev = True
+                sev = "medium"
             merged[key] = {
                 "dimension": key[0], "route": key[1], "file": key[2],
-                "severity": f.get("severity") if f.get("severity") in _SEVERITY_ORDER else "medium",
+                "severity": sev,
                 "line_hint": hint,
                 # anchor line (int, optional; old drafts lack it — degrade to file only)
                 "line": f.get("line") if isinstance(f.get("line"), int)
@@ -230,8 +240,13 @@ def _href_of(file, line, repo: Path) -> str | None:
     (NEVER stats the filesystem — the diff branch's files may not be checked out):
     an absolute path is rebased onto `repo` and only linked when inside its subtree;
     a relative path is taken as repo-root-relative; empty/missing, subtree-outside,
-    leading `..`, and paths with spaces or parentheses degrade to plain text — the
-    error direction is "fewer links", never a broken one."""
+    leading `..`, paths with spaces or parentheses, and first-segment colons degrade
+    to plain text — the error direction is "fewer links", never a broken one. A
+    colon in the first segment (a scheme payload like `javascript:…` or a
+    drive-relative form like `C:foo`) has no legitimate repo-relative meaning, and
+    the check runs BOTH on the raw input and on the final normalized rel — normpath
+    folds `//` to `/` and WHATWG URL parsing tolerates a single slash for special
+    schemes, so normalization must not revive a scheme payload."""
     if not isinstance(file, str) or not file.strip():
         return None
     f = file.strip()
@@ -247,8 +262,12 @@ def _href_of(file, line, repo: Path) -> str | None:
                 return None
         rel = rel.replace("\\", "/")
     else:
+        if ":" in f.split("/")[0]:
+            return None
         rel = os.path.normpath(f.replace("\\", "/")).replace("\\", "/")
     if not rel or rel == "." or rel.startswith(".."):
+        return None
+    if ":" in rel.split("/")[0]:
         return None
     if " " in rel or "(" in rel or ")" in rel:
         return None
@@ -381,11 +400,22 @@ def _sorted_units(units: list) -> list:
     return sorted(units, key=key)
 
 
+def _is_failed(u: dict) -> bool:
+    """The ONE 'skip failed units' predicate for the 简报表: a failed unit never
+    becomes a row and never enters the frontend-column join. One named predicate,
+    both consumers — rows built skipping failed units, then zipped against the
+    FULL unit list, is exactly how the frontend columns ever misaligned."""
+    return u.get("status") == "failed"
+
+
 def _frontend_pair(route: str, exts: list) -> tuple[str, str]:
     """(是否前端接口, 前端使用) three-state by route join over route_hits[]:
     declared ∧ count>0 = 是/N 处; declared ∧ 0 = 否/—; route not in any route_hits[]
-    (or no declared repo) = 未知/—. Multi-route units join on the MAIN route only
-    (first ';'-segment, per spec; the entry column shows the others as `(+N)`)."""
+    (or no declared repo) = 未知/—. The join is EXACT string equality — route_hits
+    are counted per exact route, so nested prefix routes (`/api/user` vs
+    `/api/user/list`) must never cross-count. Multi-route units join on the MAIN
+    route only (first ';'-segment, per spec; the entry column shows the others as
+    `(+N)`)."""
     main = str(route).split(";")[0]
     if not main or not exts:
         return "未知", "—"
@@ -396,7 +426,7 @@ def _frontend_pair(route: str, exts: list) -> tuple[str, str]:
             if not isinstance(rh, dict):
                 continue
             rt = rh.get("route", "")
-            if rt and rt in main:
+            if rt and rt == main:
                 found = True
                 best = max(best, rh.get("count", 0) or 0)
     if not found:
@@ -437,7 +467,7 @@ def _build_rows(g_units: list, by_dim: dict, unit_refs: dict,
     (same data, same walk — never a second truth)."""
     rows, links = [], []
     for u in _sorted_units(g_units):
-        if u.get("status") == "failed":
+        if _is_failed(u):
             continue
         routes = [r for r in str(u.get("route", "")).split(";") if r]
         chain = u.get("chain") or []
@@ -473,10 +503,11 @@ def _build_rows(g_units: list, by_dim: dict, unit_refs: dict,
             "all_refs": refs,
         })
         links.append({"unit_id": uid, "entry": entry_rec, "chain": segs})
-    # frontend two columns need the row route: fill after rows exist
-    for r, u in zip(rows, _sorted_units(g_units)):
-        if u.get("status") == "failed":
-            continue
+    # frontend two columns need the row route: fill after rows exist, pairing each
+    # row with its OWN unit — the same failed filter the row walk used (_is_failed;
+    # zipping against the full unit list shifts every row after a failed unit and
+    # writes one unit's frontend values into another unit's row)
+    for r, u in zip(rows, [u for u in _sorted_units(g_units) if not _is_failed(u)]):
         fis, fcnt = _frontend_pair(str(u.get("route", "")), external)
         r["frontend_is"], r["frontend_count"] = fis, fcnt
     manifest_rows = [{
@@ -552,8 +583,13 @@ def _load_grouping(run_dir: Path) -> dict:
 def _json_embed(data: dict) -> str:
     r"""The data dict serialized for the HTML embed: every `</` becomes `<\/` — a legal
     JSON string escape that parses identically — so a `</script>` literal carried in
-    LLM/切片 text can never terminate the host `<script>` block."""
-    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    LLM/切片 text can never terminate the host `<script>` block, and every `<!--`
+    becomes `<\u0021--` so the literal sequence can never flip the HTML parser into
+    the script-data-double-escaped state (there the real `</script>` is ignored and
+    the page's own render JS is swallowed as data)."""
+    return (json.dumps(data, ensure_ascii=False)
+            .replace("</", "<\\/")
+            .replace("<!--", "<\\u0021--"))
 
 
 # ============================================================================
@@ -669,7 +705,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <ul id="boundaries"></ul>
   </section>
 </main>
-<!-- section: data (the ONLY per-run content; `</` escaped to `<\/` by the renderer) -->
+<!-- section: data (the ONLY per-run content; `</` -> `<\/` and `<!--` -> `<\u0021--` by the renderer) -->
 <script type="application/json" id="mgh-data">__MGH_DATA_JSON__</script>
 <!-- section: page js (vanilla; renders everything above from the embedded data) -->
 <script>
@@ -677,15 +713,9 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   "use strict";
   var DATA = JSON.parse(document.getElementById("mgh-data").textContent);
 
-  // The single string-escaping entry. Every dynamic value reaches the DOM through
-  // textContent or setAttribute (both auto-isolate), and string-concatenated
-  // innerHTML is never used for data — escapeHtml covers any string-level HTML
-  // need so there is exactly ONE sanctioned escape path, never two.
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
+  // No string-level HTML assembly exists on this page: every dynamic value reaches
+  // the DOM through textContent or setAttribute (both auto-isolate text from
+  // markup), so finding text can never inject elements or attributes.
 
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -1330,10 +1360,32 @@ def _check(run_dir: Path) -> int:
             if m.get("rows") != (data.get("rows") if isinstance(data, dict) else None):
                 violations.append("manifest rows[] != data file rows[] (projection "
                                   "drift)")
-    # the renderer NEVER writes beyond the report + run dir: the report must live at the
-    # repo root and the manifest in the run dir
-    if "sdr_manifest.json" not in str(mp):
-        violations.append(f"manifest not in run dir: {mp}")
+    # the renderer writes the report at the repo root (--repo) and the manifest in
+    # the run dir; a manifest pointing the report anywhere else is tampering or
+    # misuse. The repo root comes from grouping.json when present, else from the
+    # standard run-dir shape <repo>/.mgh-sdr/runs/<ts>; when neither yields one,
+    # this check is skipped (no repo to compare against — never a false positive).
+    repo_root = None
+    gp = run_dir / "grouping.json"
+    if gp.is_file():
+        try:
+            g = json.loads(gp.read_text(encoding="utf-8"))
+            if isinstance(g.get("repo"), str) and g["repo"].strip():
+                repo_root = Path(g["repo"])
+        except (OSError, ValueError):
+            pass
+    if repo_root is None and run_dir.parent.name == "runs" \
+            and run_dir.parent.parent.name == ".mgh-sdr":
+        repo_root = run_dir.parent.parent.parent
+    if repo_root is not None:
+        rep = os.path.normcase(os.path.normpath(str(Path(report).resolve())))
+        root = os.path.normcase(os.path.normpath(str(repo_root)))
+        try:
+            outside = os.path.relpath(rep, root).startswith("..")
+        except ValueError:      # different drive (Windows) = outside
+            outside = True
+        if outside:
+            violations.append(f"report not inside repo root: {report}")
     if violations:
         _eprint(f"error: render_sdr_report --check: {len(violations)} violation(s):")
         for v in violations:

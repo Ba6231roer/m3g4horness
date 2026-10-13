@@ -16,6 +16,36 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — /mgh-sdr 报告渲染器缺陷收口(C3/H1/H2/H3/M11/L7/L8,2026-10-13 评审) (0.1.64)
+
+- `core/scripts/render_sdr_report.py` 单文件收口,全部先红后绿:**C3** `_href_of`
+  相对路径补「首段含冒号即放弃链接化」双判定点(入口原始值 + 归一后最终 rel)——
+  `javascript:` 载荷(无空格无圆括号)曾原样进入 `<a href>`(normpath 把 `//` 折叠
+  为 `/` 而 WHATWG 对特殊 scheme 容忍单斜杠,载荷存活)、`C:foo` 盘符相对路径曾成
+  坏链接;canonical 数据字段原样保留(只不做链接,不删数据)。**H1** `_merge_findings`
+  severity 取值单点守卫(`isinstance(sev, str) ∧ 闭集内`否则落 `medium`,stderr 一次
+  性提示)——severity 为 list/dict 曾致渲染与 `--check` 双路径裸 traceback(退出码 1,
+  违约 0/1/2 契约)。**H3** `_json_embed` 转义链追加 `<!--` → `<\u0021--`(parse
+  等价)——草稿引述含 `<!--<script>` 时 HTML 解析器曾进入 script-data-double-escaped
+  状态,真 `</script>` 被忽略、页面渲染 JS 全被吞成空白壳,且 `--check` 的 regex 取块
+  恰停在浏览器忽略的同一终止符上(exit 0 校验盲)。**H2** 「跳过 failed 单元」谓词
+  提取为单一具名判定 `_is_failed`,前端两列的行侧改「过滤后 zip」与建 rows 同源——
+  曾对全量单元 zip,从首个 failed 单元起整体错一位(一列残留占位「—」、其后每行
+  继承**前一单元**的前端值,错误数据写进 manifest/data/HTML 三载体、`--check` 同错
+  检不出)。**M11** `_frontend_pair` 子串包含改精确等值——REST 嵌套路由
+  (`/api/user` 与 `/api/user/list`)曾把短路由的命中算到长路由头上(「无前端使用」
+  标成「有」,方向性误导)。**L7** 删页面 `escapeHtml` 死函数,失实注释改为如实陈述
+  (全程 textContent/setAttribute,无字符串级拼装)。**L8** `--check` 恒假守卫
+  (构造方式决定永假的「manifest 须在 run 目录」)改为真实校验 `manifest['report']`
+  落在 repo 根内(repo 根取 grouping.json,缺则按 `<repo>/.mgh-sdr/runs/<ts>` 形态
+  推导;均缺则跳过不误伤)。
+- 测试:`tests/test_render_sdr_report.py` 新增 9 条回归 + 1 条断言翻转(scheme/
+  盘符相对 href 载荷、scheme finding 端到端降级且数据保真、severity 错型单元级 +
+  端到端双路径、敌意 `<!--<script>` 引述端到端、failed 单元前端两列对齐三载体一致、
+  嵌套前缀路由双向精确 join、report 指向仓外 exit 2、escapeHtml 缺席)。修复前
+  10 条全红、其余 40 条既有用例全绿不受扰。
+- 版本:VERSION 0.1.64。
+
 ### Fixed — /mgh-sdr diff 解析层缺陷收口(C1/C2/H4/M7/L6 + sast 侧 M14,2026-10-13 评审) (0.1.63)
 
 - `core/scripts/diff_group.py`:**C1** `_git` 封装单点注入 `-c core.quotePath=false`

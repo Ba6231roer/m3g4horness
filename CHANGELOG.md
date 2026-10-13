@@ -16,6 +16,21 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — /mgh-sdr 全流程深度代码评审报告落盘(根概览 + docs 明细;3 critical + 6 high,均实机验证) (0.1.62)
+
+- 新增根 `mgh-sdr-review.md`(概览:严重度统计、流水线缺陷落点 mermaid、修复顺序建议
+  与分组选项对比、修复后定向测试映射)与 `docs/review-mgh-sdr-pipeline-2026-10-13.md`
+  (24 文件逐条明细:位置/影响/修复建议/复现验证/健康面确认清单)。按
+  open-code-review-delegate 流程执行(ocr 规则分组 + 6 批 subagent 逐文件全读 + 4 组
+  独立二次验证 subagent,覆盖率 24/24 零 skipped)。发现:3 critical(quotePath 引号
+  路径中文文件整文件静默丢失 / 超预算贪心拆分丢「开启 part 成员」的 hunk / 报告
+  `<a href>` 的 javascript: scheme 注入)+ 6 high(render severity 错型双路径崩 /
+  failed 单元前端两列 zip 错位 / `<!--`+`<script` 双转义吞页 JS 且 --check 盲 /
+  NTFS 非法字符致 Windows 写盘崩 / wmic 于 Win11 24H2+ 移除致 --kill-stale 全盲且
+  销毁证据 / 同名 basename 外部仓结论互相覆盖)+ 20 medium + 12 low;9 条
+  critical/high 与限流截断竞态(本机回归测试确定性红)全部独立复现确认,零整体误报。
+  仅文档零代码改动;作为后续修复 change 的工作清单。
+
 ### Added — /mgh-init 全流程深度代码评审报告落盘 docs/(1 critical + 14 high,均实机验证) (0.1.61)
 
 - 新增 `docs/review-mgh-init-full-pipeline-2026-10-13.md`:对 /mgh-init 全流程(壳三面 /

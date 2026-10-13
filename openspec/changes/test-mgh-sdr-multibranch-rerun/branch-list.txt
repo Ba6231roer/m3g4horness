@@ -1,0 +1,6 @@
+# multi-branch sweep rerun (2026-10-13), mirrors archive/2026-10-12 test
+sdr-dryrun
+# line 3 = deliberate failure probe (branch does not exist)
+sdr-mb-nonexistent
+sdr-mb-authz
+sdr-mb-sql-sensitive

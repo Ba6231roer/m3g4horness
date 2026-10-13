@@ -1,0 +1,12 @@
+编排完成。
+
+**报告绝对路径**:`C:\DEV\springBootTemplate\mgh-sdr-sdr-dryrun-20261013_175612.html`
+**数据文件**:`C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_175037-sdr-dryrun\sdr_report_data.json`
+**manifest**:`C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_175037-sdr-dryrun\sdr_manifest.json`
+
+**counts**:units=8(6 interface + 2 standalone)/ findings=22(high 7 / medium 11 / low 4 / info 0)/ failed_units=0 / excluded_files=0 / boundaries=6
+
+**流水线**:step 2 分组 16 文件→8 单元 + `--check` ok;step 3 fan-out 8/8 done、0 failed、partial=false、exit 0;step 4 渲染 + `--check` ok;step 5 哨兵 `.mgh-sdr/.active` 已移除。
+
+**发现是 LLM 候选,非已确认漏洞,需人工复核**;存量控制断言「存在」不断言「有效」;覆盖受基线投影与注解启发式分组上界约束。
+{"launcher": "mgh_sdr_launch", "host": "opencode", "branches": ["sdr-dryrun"], "reports": ["C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-dryrun-20261013_175612.html"], "dry_run": false, "pending_approval": []}

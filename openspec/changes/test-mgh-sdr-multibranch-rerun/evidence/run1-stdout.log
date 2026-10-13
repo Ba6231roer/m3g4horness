@@ -1,0 +1,46 @@
+Step 2 materialized 8 units (empty:false). Running the check:
+Step 3: 8/8 done, partial=false. Running step 4:
+编排完成。
+
+**报告路径**
+`C:\DEV\springBootTemplate\mgh-sdr-sdr-dryrun-20261013_173400.html`
+
+**counts**
+- units 8 (interface 6 / standalone 2)、failed_units 0
+- findings 24 → high 7 / medium 13 / low 4 / info 0
+- boundaries 6
+
+**流程核对**:step2 `empty:false` + `--check ok`;step3 `8/8 done, 0 failed, partial=false`;step4 渲染 + `--check ok`;step5 已 `rm` `.mgh-sdr\.active`。
+
+**发现是 LLM 候选,需人工复核。**
+
+（说明:本次为 detach 编排,step 3 调用了 fanout 子代理,其产出的 drafts 已按脚本 stdout 的绝对路径逐字透传,未读任何叶子 .py 源码或外部仓原文。）
+I'll start by locating the mgh-core scripts and verifying the run directory setup.
+Step 2 done: 5 units (`empty:false`). Running the step 2 check.
+Step 2 check passed. Now step 3: the fanout runner (budget 720000ms; running with an extended call timeout).
+Step 3 complete: 5/5 done, `partial:false`. Now step 4: render the report.
+编排完成（单分支 `sdr-mb-authz`）。
+
+**报告**: `C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-authz-20261013_173831.html`
+**数据**: `C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_173412-sdr-mb-authz\sdr_report_data.json`
+
+**Counts**
+- units: 5 (interface 3 / standalone 2)
+- findings: 26 — high 10 / medium 9 / low 7 / info 0
+- failed_units: 0, excluded_files: 0, boundaries: 6
+
+**流程**: step2 diff_group (empty:false, 5 units, `--check ok`) → step3 fanout_runner (5/5 done, 0 failed, partial:false) → step4 render (`--check ok`) → step5 已删除 `.active`。
+
+⚠️ 上述发现均为 **LLM 候选**，需人工复核后方可确认。
+编排完成(sdr-mb-sql-sensitive)。
+
+报告: `C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-sql-sensitive-20261013_174309.html`
+
+counts: units=4, findings=17 (high=9, medium=8, low=0, info=0), failed_units=0, boundaries=6
+
+- step2 diff_group: 8 files → 4 units, `--check` ok
+- step3 fanout_runner --tier sdr: 4/4 done, 0 failed, partial=false
+- step4 render_sdr_report: `--check` ok
+- step5: `.active` 已删除
+
+发现均为 LLM 候选,需人工复核。

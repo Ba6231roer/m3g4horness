@@ -1,0 +1,25 @@
+[launch] === branch sdr-dryrun ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_172626-sdr-dryrun\orchestrator_prompt.md
+[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; NOT spawning the host CLI (sentinel kept for the next real run)
+[launch] branch sdr-dryrun: ok -> C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_172626-sdr-dryrun\orchestrator_prompt.md
+[launch] === branch sdr-mb-nonexistent ===
+[launch] branch sdr-mb-nonexistent: FAILED pre-check (ref does not resolve) — zero spawn, zero artifacts; sweep continues
+[launch] branch sdr-mb-nonexistent: FAILED (branch not found: sdr-mb-nonexistent)
+[launch] === branch sdr-mb-authz ===
+[launch] residual sentinel found for this target — reusing (resume semantics; run dir state on disk is the truth)
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_172626-sdr-mb-authz\orchestrator_prompt.md
+[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; NOT spawning the host CLI (sentinel kept for the next real run)
+[launch] branch sdr-mb-authz: ok -> C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_172626-sdr-mb-authz\orchestrator_prompt.md
+[launch] === branch sdr-mb-sql-sensitive ===
+[launch] residual sentinel found for this target — reusing (resume semantics; run dir state on disk is the truth)
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_172627-sdr-mb-sql-sensitive\orchestrator_prompt.md
+[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; NOT spawning the host CLI (sentinel kept for the next real run)
+[launch] branch sdr-mb-sql-sensitive: ok -> C:\DEV\springBootTemplate\.mgh-sdr\runs\20261013_172627-sdr-mb-sql-sensitive\orchestrator_prompt.md
+[launch] FAILED BRANCHES (1):
+  - sdr-mb-nonexistent: branch not found: sdr-mb-nonexistent

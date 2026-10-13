@@ -37,4 +37,5 @@
 ## 7. 回归与验收
 
 - [x] 7.1 定向回归:验证:`py tests/test_mgh_sdr_launch.py`、`py tests/test_block_adhoc_scripts.py`、`py tests/test_zero_deps.py`、`py tests/test_no_compile_warnings.py` 全绿;`py tools/check_contracts.py` 退出 0
-- [ ] 7.2 真仓回归(维护者执行,验收证据):测试床 `C:/DEV/springBootTemplate` 同清单(含 `sdr-mb-nonexistent` 探针)重跑 launcher——断言:探针 FAILED(branch-not-found)且零 LLM 轮次、后续分支报告照常、退出码 1 + stderr 汇总完整、`reports[]` 无跨分支认领;另从开发仓 cwd 启动一轮,opencode 会话 `directory` = 测试床、`ls "<床>"/*.html` 形态命令在运行域内放行
+- [x] 7.2 真仓回归(维护者执行,验收证据):测试床 `C:/DEV/springBootTemplate` 同清单(含 `sdr-mb-nonexistent` 探针)重跑 launcher——断言:探针 FAILED(branch-not-found)且零 LLM 轮次、后续分支报告照常、退出码 1 + stderr 汇总完整、`reports[]` 无跨分支认领;另从开发仓 cwd 启动一轮,opencode 会话 `directory` = 测试床、`ls "<床>"/*.html` 形态命令在运行域内放行
+  - 2026-10-13 执行通过,证据与逐项断言结论:`openspec/changes/test-mgh-sdr-multibranch-rerun/findings.md`(测试床 cwd 轮:探针 `FAILED pre-check` 零 spawn、3 分支报告各归其名、exit 1 + FAILED BRANCHES(1);开发仓 cwd 轮:单分支完整收敛 exit 0,会话全程落测试床)。注:`ls "<床>"/*.html` 形态本轮无自然样本(P2 修复后宿主不再需要仓根 glob 找报告),以「全程零误拦 + 一次真阳性树外拦截」与单测覆盖代偿。遗留新问题 F1(`--print-logs --log-level ERROR` 对子会话 provider 错误无效)记录于同一 findings §4。

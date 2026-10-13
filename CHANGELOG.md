@@ -16,6 +16,16 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — /mgh-init 全流程深度代码评审报告落盘 docs/(1 critical + 14 high,均实机验证) (0.1.61)
+
+- 新增 `docs/review-mgh-init-full-pipeline-2026-10-13.md`:对 /mgh-init 全流程(壳三面 /
+  agent 16 / 脚本 20 / 契约 18 / 提示词 40,共 97 文件)的全量文件评审(非 diff)明细,
+  按 open-code-review-delegate 流程执行(ocr 规则分组 + 12 批 subagent 逐文件全读 +
+  7 个二次验证 subagent,critical/high 全部含实机复现或代码级复核)。含按优先级排序的
+  修复工作清单、1 critical(resume 状态机对分片簇死锁)+ 14 high(守卫 redirect 四域
+  放行 / stdin GBK 休眠 / kill-stale wmic 失效 / 分发死链等)+ 68 medium + 19 low、
+  二次验证校准记录与经核验无问题面。仅文档,零代码改动;作为后续修复战役的输入。
+
 ### Changed — 顶级文档重写(命令/宿主优先级、用户画像、过时信息清理)+ install 默认宿主改 opencode (0.1.60)
 
 - **顶级文档重写**:根 `README.md` 与根 `AGENTS.md` 按当前产品形态重写——命令优先级

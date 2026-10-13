@@ -191,7 +191,11 @@ class TestPlanAggregateT2(unittest.TestCase):
         self.assertEqual(out.strip(), "")
         self.assertIn("unit-000.json", err)
         self.assertIn("atomic-oversize", err)
-        expected_b = PA._byte_len([{**rec, "__source_file": "unit-000.json"}])
+        # disclosed size = MATERIALIZED caliber (the file the subagent would read),
+        # not the compact serialization
+        expected_b = PA._materialized_bytes(PA._t2_body(
+            "t2-authorization-part00", "authorization",
+            [{**rec, "__source_file": "unit-000.json"}], 0, 1))
         self.assertIn(f"({expected_b}B > 8192B)", err)
 
     def test_marker_aware_part_shards(self):
@@ -216,7 +220,10 @@ class TestPlanAggregateT2(unittest.TestCase):
         self.assertEqual(d2["total"], 2)
         self.assertEqual([i["shard_id"] for i in d2["pending"]],
                          ["t2-authorization-part01"])
-        self.assertEqual(len(d2["rollup"]["summary_paths"]), 2)
+        # full shard-summary set rides the manifest (stdout carries only its path)
+        manifest = json.loads(Path(d2["rollup"]["summary_paths_manifest"])
+                              .read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest["summary_paths"]), 2)
 
     def test_small_repo_stdout_byte_identical(self):
         # ⑦ needs_reduce=false path is BYTE-identical to the pre-part-split
@@ -335,9 +342,13 @@ class TestPlanAggregateT2(unittest.TestCase):
         self.assertEqual(d2["done"], 2)
         self.assertEqual(d2["failed"], 1)
         self.assertEqual(d2["pending"], [])   # marker-aware: nothing left to dispatch
-        # summary_paths still carries the full shard set (rollup eats all)
-        self.assertEqual(len(d2["rollup"]["summary_paths"]), 3)
-        self.assertEqual(len(d["rollup"]["summary_paths"]), 3)
+        # manifest still carries the full shard set (rollup eats all)
+        manifest = json.loads(Path(d2["rollup"]["summary_paths_manifest"])
+                              .read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest["summary_paths"]), 3)
+        manifest1 = json.loads(Path(d["rollup"]["summary_paths_manifest"])
+                               .read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest1["summary_paths"]), 3)
 
     def test_scout_merge_marker_aware_terminal_exclusion(self):
         """scout-merge is dispatcher-consumed: a shard whose .done marker exists
@@ -366,7 +377,9 @@ class TestPlanAggregateT2(unittest.TestCase):
         self.assertEqual(d2["total"], d["shards"])
         self.assertEqual([i["shard_id"] for i in d2["pending"]],
                          [i["shard_id"] for i in d["pending"][1:]])
-        self.assertEqual(len(d2["rollup"]["summary_paths"]), d["shards"])
+        manifest = json.loads(Path(d2["rollup"]["summary_paths_manifest"])
+                              .read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest["summary_paths"]), d["shards"])
 
     def test_paging_and_shrink(self):
         # each category's 2 small records stay within the 500B budget (no part
@@ -387,6 +400,119 @@ class TestPlanAggregateT2(unittest.TestCase):
         code, out, _ = self.a.run("--node", "t2", "--budget", "1000")
         self.assertEqual(code, 0)
         self.assertFalse(json.loads(out)["needs_reduce"])
+
+
+class TestT2MaterializedCaliber(unittest.TestCase):
+    """H8: the t2 shard budget is measured on the MATERIALIZED caliber — the same
+    envelope + indent + CRLF serialization that `_write_shard_input` puts on disk —
+    so every dispatched shard's FILE is ≤ budget. Pre-fix the t2 packer measured
+    compact `json.dumps` bytes (scout-merge already used the materialized family):
+    a 96KB-class budget materialized ~1.23× over, and `pending[].bytes` under-
+    reported (compact) instead of equaling the file's `st_size`. `total_bytes`
+    (the needs_reduce disclosure of raw input scale) stays compact — it is not
+    the dispatch bound."""
+
+    def setUp(self):
+        self.a = _Agg()
+
+    def _records(self, n=10):
+        # many short fields → materialized ≈ 1.47× compact (real checkpoint records
+        # have the same many-small-fields shape)
+        recs = [{"category": "authorization", "name": f"n{i}", "kind": "auth",
+                 **{f"f{j}": "v" * 12 for j in range(12)}} for i in range(n)]
+        return recs
+
+    def test_dispatched_shard_file_within_budget_and_bytes_eq_st_size(self):
+        self.a.write_t1(self._records())
+        shards_dir = self.a.init / "shards"
+        code, out, _ = self.a.run("--node", "t2", "--budget", "2000",
+                                  "--materialize", str(shards_dir))
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertTrue(d["needs_reduce"])
+        self.assertTrue(d["pending"])
+        for item in d["pending"]:
+            fsize = Path(item["input_path"]).stat().st_size
+            self.assertLessEqual(fsize, 2000,
+                                 f"{item['shard_id']}: materialized {fsize}B > budget 2000B")
+            self.assertEqual(item["bytes"], fsize)       # bytes backfilled = st_size
+            self.assertFalse(item["oversize"])
+        # the whole category's record set is still covered exactly once
+        seen = sum(len(json.loads(Path(i["input_path"]).read_text(encoding="utf-8"))["records"])
+                   for i in d["pending"])
+        self.assertEqual(seen, 10)
+
+
+class TestRollupManifest(unittest.TestCase):
+    """M5: needs_reduce stdout NEVER carries the full `summary_paths` array (1000
+    shards ≈ 100KB punches through the 64KB orchestrator single-reply budget);
+    the rollup section carries the manifest ABSOLUTE path instead, and the
+    manifest FILE carries the full path set (atomic, idempotent overwrite) for
+    the rollup subagent to Read. needs_reduce:false stays byte-identical (no
+    manifest, no rollup key)."""
+
+    def setUp(self):
+        self.a = _Agg()
+
+    def _many_categories(self, n=50):
+        # one small record per category → one ≤-budget shard per category
+        return [{"category": f"crypto-{i:02d}", "name": f"n{i}", "kind": "other",
+                 "pad": "p" * 200} for i in range(n)]
+
+    def _run(self, *extra):
+        return self.a.run("--node", "t2", *extra)
+
+    def test_stdout_carries_manifest_not_array(self):
+        self.a.write_t1(self._many_categories())
+        code, out, _ = self._run("--budget", "4000", "--orch-budget-bytes", "4000",
+                                 "--materialize", str(self.a.init / "shards"))
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertTrue(d["needs_reduce"])
+        self.assertEqual(d["shards"], 50)
+        self.assertEqual(set(d["rollup"].keys()),
+                         {"summary_paths_manifest", "output", "done_marker"})
+        self.assertNotIn("summary_paths", d["rollup"])
+        self.assertTrue(Path(d["rollup"]["summary_paths_manifest"]).is_absolute())
+        # single-reply budget: the stdout stays within the page budget + a small
+        # FIXED envelope (repo/total_bytes/note/manifest-path — constant, does not
+        # scale with shard count; pre-fix the 50-path array alone added ~6KB here)
+        self.assertLessEqual(len(out), 4000 + 1024,
+                             "stdout exceeded --orch-budget-bytes + fixed envelope")
+
+    def test_manifest_carries_full_path_set_idempotently(self):
+        self.a.write_t1(self._many_categories())
+        _, out1, _ = self._run("--budget", "4000", "--materialize",
+                               str(self.a.init / "shards"))
+        mpath = Path(json.loads(out1)["rollup"]["summary_paths_manifest"])
+        self.assertEqual(mpath, (self.a.init / "checkpoints" / "t2" / "shards"
+                                 / "rollup_manifest.json"))
+        body1 = mpath.read_text(encoding="utf-8")
+        manifest = json.loads(body1)
+        self.assertEqual(len(manifest["summary_paths"]), 50)
+        self.assertTrue(all(Path(p).is_absolute() for p in manifest["summary_paths"]))
+        self.assertTrue(manifest["output"].endswith("controls_inventory.json"))
+        self.assertTrue(manifest["done_marker"].endswith("synthesis.json.done"))
+        # idempotent: a re-run (markers advanced) rewrites the SAME content
+        d2_item = json.loads(out1)["pending"][0]
+        Path(d2_item["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(d2_item["done_marker"]).write_text("{}", encoding="utf-8")
+        _, out2, _ = self._run("--budget", "4000", "--materialize",
+                               str(self.a.init / "shards"))
+        d2 = json.loads(out2)
+        self.assertEqual(d2["done"], 1)          # marker-aware counts still work
+        self.assertEqual(Path(d2["rollup"]["summary_paths_manifest"]).read_text(
+            encoding="utf-8"), body1)            # FULL set, unchanged
+
+    def test_under_budget_no_manifest_byte_identical(self):
+        self.a.write_t1(SMALL)
+        code, out, _ = self._run("--budget", "100000")
+        self.assertEqual(code, 0)
+        d = json.loads(out)
+        self.assertFalse(d["needs_reduce"])
+        self.assertNotIn("rollup", d)
+        self.assertFalse((self.a.init / "checkpoints" / "t2" / "shards"
+                          / "rollup_manifest.json").exists())
 
 
 class TestPlanAggregateScoutMerge(unittest.TestCase):

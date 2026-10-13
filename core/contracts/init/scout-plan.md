@@ -77,7 +77,8 @@ Consumer: orchestrator merges with regex candidates → `form_clusters`.
 
 Producer: `init-scout-merge-partial`(经 `fanout_runner --tier scout-merge` 波次派发,
 仅当 `plan_aggregate.py --node scout-merge` 判 `needs_reduce=true`)。
-Consumer: `init-scout-merge-rollup`(仅吞 `rollup.summary_paths`,写终态
+Consumer: `init-scout-merge-rollup`(先 Read `rollup_manifest.json` 取
+`summary_paths[]` 全集,仅吞这些摘要,写终态
 `scout_candidates.json` + touch `checkpoints/scout/merge.json.done`)。
 
 ```json

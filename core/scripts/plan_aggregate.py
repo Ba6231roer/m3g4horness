@@ -26,10 +26,15 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"node":"t2|scout-merge","repo":"<abs target>","total_bytes":N,"budget":B,
    "needs_reduce":bool,"shards":K,
    "pending":[<Shard>,...],"truncated":false,"offset":0,"limit":K,"effective_limit":k,"shrunk":false,
-   "rollup":{"summary_paths":["<abs>",...],"output":"<abs>","done_marker":"<abs>"}}
+   "rollup":{"summary_paths_manifest":"<abs rollup_manifest.json>","output":"<abs>","done_marker":"<abs>"}}
   - needs_reduce=false → pending=[] + rollup omitted; orchestrator uses single-context init-synthesis
     / init-scout-merge directly (existing path). This path is BYTE-IDENTICAL to the pre-map-reduce
     release (no repo / failed_marker added) — single-context callers read the same fields.
+  - needs_reduce=true → the FULL shard-summary path set rides the materialized
+    `rollup_manifest.json` (atomic, idempotent; the rollup subagent Reads it) — stdout carries only
+    the manifest ABSOLUTE PATH, never the array (1000 shards ≈ 100KB would punch through the
+    `--orch-budget-bytes` single-reply promise; the orchestrator passes the manifest path verbatim
+    and NEVER reads it — R5.2).
   - Shard item: {shard_id, node, categories (t2) | batches (scout-merge: deduped list of
     batch_ids the shard covers), input_path, bytes, oversize, checkpoint_path, done_marker,
     failed_marker}  (all ABSOLUTE; passed verbatim by the
@@ -60,6 +65,7 @@ Idempotent (overwrite), no TTY.
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -106,6 +112,15 @@ def _shrink_page(page: list, orch_budget: int):
     return page[:eff], eff, eff < len(page)
 
 
+def _atomic_write_text(path: Path, text: str):
+    """Same-directory tmp + os.replace — atomic on POSIX and Windows; a crash
+    mid-write leaves the previous file intact, never a truncated manifest."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _read_records(records_dir: Path, exclude_names=()) -> list:
     """Read every `<id>.json` (NOT `.done`) under records_dir; skip names in exclude_names."""
     out = []
@@ -125,34 +140,42 @@ def _read_records(records_dir: Path, exclude_names=()) -> list:
     return out
 
 
-def _greedy_pack(records: list, budget: int):
-    """Greedy whole-record packing in the given (glob) order: flush the current
-    part before any record that would push it over budget. Deterministic.
-    Returns [(records, bytes), ...]. A part that still exceeds budget holds
-    exactly one record (atomic oversize — the caller slim-projects or fails
-    loud; a multi-record part is ≤ budget by construction)."""
-    parts = []
-    cur, cur_b = [], 0
-    for r in records:
-        rb = _byte_len([r])
-        if cur and cur_b + rb > budget:
-            parts.append((cur, cur_b))
-            cur, cur_b = [], 0
-        cur.append(r)
-        cur_b += rb
-    if cur:
-        parts.append((cur, cur_b))
-    return parts
+def _t2_body(sid: str, cat: str, recs: list, part_index: int, part_count: int) -> dict:
+    """The EXACT envelope `_write_shard_input` serializes for one t2 shard (same
+    key order: node, shard_id, records, part_index, part_count, categories), so
+    budget decisions measure the same bytes that land on disk. `sid` is passed
+    by the caller (the split branch ALWAYS uses the `t2-<cat>-part<N>` form,
+    even for a single part) — deriving it from part_count here would measure a
+    different id than the file carries."""
+    return {"node": "t2", "shard_id": sid, "records": recs,
+            "part_index": part_index, "part_count": part_count, "categories": [cat]}
+
+
+def _t2_part_seal_bytes(cat: str, part_recs: list, n_records: int) -> int:
+    """Materialized-caliber size of a SPLIT part's on-disk body, with the shard
+    id / part_count digit widths pinned to the worst case this category can
+    produce (conservative by a couple of bytes) so the greedy seal decision can
+    never under-measure the final file. The budget caliber is MATERIALIZED
+    (H8): the pre-fix compact measure let a ≤-budget-compact part materialize
+    ~1.23× over budget (indent + envelope + CRLF), so every dispatched shard
+    file broke the hard bound."""
+    digits = max(2, len(str(max(0, n_records - 1))))
+    sid = f"t2-{_safe_name(cat)}-part{'0' * digits}"
+    return _materialized_bytes({"node": "t2", "shard_id": sid, "records": part_recs,
+                                "part_index": 0, "part_count": n_records,
+                                "categories": [cat]})
 
 
 def _shard_by_category(records: list, budget: int):
-    """T2 sharding: one shard per category; a category whose own serialized
+    """T2 sharding: one shard per category; a category whose own MATERIALIZED
     size exceeds budget is further split whole-record (greedy, existing glob
-    order — deterministic) into ≤-budget parts (`t2-<category>-part<N>`, N
-    zero-padded from 0). Returns [(shard_id, categories, records, bytes,
-    oversize, part_index, part_count)]; `oversize` is always False — every
-    dispatched shard is ≤ budget by construction (atomic-oversize records are
-    slim-projected / fail-loud in main(), design D3)."""
+    order — deterministic, sealed on the materialized caliber) into ≤-budget
+    parts (`t2-<category>-part<N>`, N zero-padded from 0). Returns
+    [(shard_id, categories, records, bytes, oversize, part_index, part_count)];
+    `bytes` is the MATERIALIZED body size (what the file will weigh — compact
+    serialization under-reported ~1.23×, H8) and `oversize` is always False —
+    every dispatched shard is ≤ budget by construction (atomic-oversize records
+    are slim-projected / fail-loud in main(), design D3)."""
     by_cat = {}
     for r in records:
         cat = r.get("category") or "_uncategorized"
@@ -160,14 +183,25 @@ def _shard_by_category(records: list, budget: int):
     shards = []
     for cat in sorted(by_cat):
         recs = by_cat[cat]
-        nbytes = _byte_len(recs)
-        if nbytes <= budget:
-            shards.append((f"t2-{_safe_name(cat)}", [cat], recs, nbytes, False, 0, 1))
+        whole_sid = f"t2-{_safe_name(cat)}"
+        whole = _materialized_bytes(_t2_body(whole_sid, cat, recs, 0, 1))
+        if whole <= budget:
+            shards.append((whole_sid, [cat], recs, whole, False, 0, 1))
             continue
-        parts = _greedy_pack(recs, budget)
+        parts, cur = [], []
+        for r in recs:
+            if cur and _t2_part_seal_bytes(cat, cur + [r], len(recs)) > budget:
+                parts.append(cur)
+                cur = []
+            cur.append(r)
+        if cur:
+            parts.append(cur)
         n = len(parts)
-        for i, (prec, pb) in enumerate(parts):
-            shards.append((f"t2-{_safe_name(cat)}-part{i:02d}", [cat], prec, pb, False, i, n))
+        for i, prec in enumerate(parts):
+            sid = f"t2-{_safe_name(cat)}-part{i:02d}"
+            shards.append((sid, [cat], prec,
+                           _materialized_bytes(_t2_body(sid, cat, prec, i, n)),
+                           False, i, n))
     return shards
 
 
@@ -467,6 +501,12 @@ def main():
     if args.offset < 0:
         print("error: --offset must be >= 0", file=sys.stderr)
         return 2
+    if args.limit is not None and args.limit < 1:
+        # an empty page with effective_limit=0 would report SUCCESS and spin an
+        # offset-advancing orchestrator forever (validation symmetric with --offset)
+        print(f"error: --limit must be >= 1 (got {args.limit}). recipe: omit --limit "
+              f"for the full shard list, or pass >= 1", file=sys.stderr)
+        return 2
     for label, raw in (("--budget", args.budget), ("--orch-budget-bytes", args.orch_budget_bytes)):
         if _parse_bytes(label, raw) < 0:
             return 2
@@ -538,7 +578,11 @@ def main():
                         r["_slimmed"] = touched
                         src = str(r.get("__source_file") or r.get("name") or "record")
                         slim[src] = {"original_bytes": orig_b, "truncated": touched}
-                post = _byte_len(recs)
+                # post-slim size on the SAME materialized caliber the shard
+                # decision used (compact `_byte_len` under-reported the file);
+                # sid rides the tuple — split parts keep their partNN id
+                cat = _cats[0] if _cats else sid
+                post = _materialized_bytes(_t2_body(sid, cat, recs, _pi, _pc))
                 if post > args.budget:
                     src = recs[0].get("__source_file") if recs else None
                     rpath = str(init_dir / "checkpoints" / "t1" / src) if src else sid
@@ -553,16 +597,15 @@ def main():
                   f"no units dispatched", file=sys.stderr)
         return 2
 
-    shards_dir = Path(args.materialize).resolve() if args.materialize else None
-
     # D2a (marker-aware enumeration for the t2 dispatcher only): `--node t2` is consumed by
     # fanout_runner --tier t2, whose wave loop converges by re-listing (pending shrinks) and whose
     # zero-progress circuit breaker needs marker-derived counts. So for both aggregate
     # nodes (t2 and the now dispatcher-consumed scout-merge): exclude terminal
-    # (`.done`/`.failed`) shards from pending[] and emit total/done/failed. `summary_paths`/`shards`
-    # stay FULL — rollup eats every shard summary and boundaries disclose the whole reduction. A
-    # `.failed` shard is terminal and NOT retried; the orchestrator surfaces it (map not all-done →
-    # report, do not rollup).
+    # (`.done`/`.failed`) shards from pending[] and emit total/done/failed. The rollup
+    # manifest keeps the FULL shard set (rollup eats every shard summary and boundaries
+    # disclose the whole reduction). A `.failed` shard is terminal and NOT retried; the
+    # orchestrator surfaces it (map not all-done → report, do not rollup).
+    shards_dir = Path(args.materialize).resolve() if args.materialize else None
     marker_aware = args.node in ("t2", "scout-merge")
     is_t2 = args.node == "t2"
     done_count = failed_count = 0
@@ -607,27 +650,43 @@ def main():
             item["batches"] = groups
         if not terminal:
             if shards_dir:
-                ipath, _ = _write_shard_input(
+                ipath, fbytes = _write_shard_input(
                     shards_dir, sid, args.node, groups if is_t2 else None, recs,
                     part_index if is_t2 else None,
                     part_count if is_t2 else None)
                 item["input_path"] = ipath
+                # `bytes` = the MATERIALIZED file's actual size (H8): the compact
+                # measure under-reported what the dispatched subagent will read.
+                item["bytes"] = fbytes
                 # Every dispatched shard is ≤ budget by construction at BOTH
-                # nodes (t2: split+slim+exit-2; scout-merge: candidate packing
-                # +slim+exit-2, measured on the materialized file) — the
-                # warn+dispatch-anyway disclosure path is retired.
+                # nodes (t2: split+slim+exit-2 on the materialized caliber;
+                # scout-merge: candidate packing +slim+exit-2, measured on the
+                # materialized file) — the warn+dispatch-anyway disclosure path
+                # is retired.
             pending.append(item)
         summary_paths.append(cp_abs)
 
     req_limit = args.limit if args.limit is not None else len(pending)
     page = pending[args.offset: args.offset + max(0, req_limit)]
     page, eff, shrunk = _shrink_page(page, args.orch_budget_bytes)
+    # rollup manifest (M5): the FULL summary-path set rides a materialized file,
+    # never stdout — 1000 shards ≈ 100KB of paths would punch through the
+    # `--orch-budget-bytes` single-reply promise. The rollup SUBAGENT reads the
+    # manifest (an in-tree Read, tree-confinement-legal); the orchestrator only
+    # passes its absolute path verbatim and NEVER opens it (R5.2 introspection
+    # ban). Atomic + idempotent: same full set every run (summary_paths is
+    # marker-independent), so a re-dispatch overwrites identical content.
+    manifest_path = shard_cp_dir / "rollup_manifest.json"
+    _atomic_write_text(manifest_path, json.dumps(
+        {"summary_paths": summary_paths,
+         "output": str(output), "done_marker": str(done_marker)},
+        ensure_ascii=False, indent=2))
     result = {
         "node": args.node, "repo": str(repo), "total_bytes": total_bytes, "budget": args.budget,
         "needs_reduce": True, "shards": len(raw_shards), "pending": page,
         "truncated": False, "offset": args.offset, "limit": req_limit,
         "effective_limit": eff, "shrunk": shrunk,
-        "rollup": {"summary_paths": summary_paths,
+        "rollup": {"summary_paths_manifest": str(manifest_path),
                    "output": str(output), "done_marker": str(done_marker)},
         "note": (f"aggregate input {total_bytes}B > budget {args.budget}B — {len(raw_shards)} "
                  f"shard(s); per-shard partial then single rollup over summaries"),

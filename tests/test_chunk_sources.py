@@ -99,5 +99,134 @@ class TestChunkSources(unittest.TestCase):
         self.assertTrue(out_file.exists())
 
 
+CTRL_JAVA = """\
+package com.bank.ctrl;
+public class Ctrl {
+  public String mask(String s) {
+    while (s.length() > 8) {
+      s = s.substring(8);
+    }
+    for (String part : s.split(",")) {
+      if (part.isEmpty()) {
+        continue;
+      }
+    }
+    try {
+      switch (s) {
+        case "a":
+          break;
+        default:
+          break;
+      }
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+    synchronized (this) {
+      s = s.trim();
+    }
+    do {
+      s = s + "x";
+    } while (false);
+    return s;
+  }
+  public synchronized void guard(String raw) {
+    String cleaned = raw.trim();
+  }
+}
+"""
+
+
+class TestJavaControlFlowExclusion(unittest.TestCase):
+    """M3 ①: JAVA_DEF matches control-flow heads (`while (…) {`, `catch (…) {`,
+    `synchronized (…) {`, …) because they are "name + paren + brace" shaped —
+    each such block became a phantom function node, splitting big files by loop
+    body instead of method body and truncating the enclosing method's
+    `line_end` at the first inner block. The exclusion is a deterministic
+    post-filter on the captured name (never a regex rewrite), and a
+    `synchronized`-MODIFIED real method (whose captured name is the method
+    name) stays recognized."""
+
+    def setUp(self):
+        self.cs = _load("chunk_sources")
+        self.repo = Path(tempfile.mkdtemp(prefix="mgh_ctrl_"))
+        self.f = self.repo / "Ctrl.java"
+        self.f.write_text(CTRL_JAVA, encoding="utf-8")
+
+    def _functions(self):
+        return [n for n in self.cs.parse_skeleton(self.f, "java")
+                if n["kind"] == "function"]
+
+    def test_control_flow_blocks_produce_no_function_nodes(self):
+        names = {n["name"] for n in self._functions()}
+        self.assertEqual(names, {"mask", "guard"})   # no while/for/if/try/switch/catch/synchronized/do
+        for banned in ("while", "for", "if", "switch", "catch", "try", "do", "guard",
+                       "substring", "split", "trim", "RuntimeException"):
+            if banned == "guard":
+                continue
+            self.assertNotIn(banned, names)
+
+    def test_real_method_line_end_not_truncated_by_inner_blocks(self):
+        fns = {n["name"]: n for n in self._functions()}
+        mask = fns["mask"]
+        lines = CTRL_JAVA.splitlines()
+        mask_start = next(i + 1 for i, ln in enumerate(lines) if "String mask(" in ln)
+        guard_start = next(i + 1 for i, ln in enumerate(lines) if "void guard(" in ln)
+        self.assertEqual(mask["line_start"], mask_start)
+        # pre-fix: line_end = while-line - 1 (the first inner control-flow node);
+        # post-fix: extends to just before the next real method
+        self.assertEqual(mask["line_end"], guard_start - 1)
+        self.assertGreater(mask["line_end"], mask_start + 5)
+
+    def test_synchronized_modified_real_method_still_recognized(self):
+        fns = {n["name"]: n for n in self._functions()}
+        self.assertIn("guard", fns)               # `synchronized void guard(…)` is a method
+        self.assertEqual(fns["guard"]["line_start"],
+                         CTRL_JAVA.splitlines().index("  public synchronized void guard(String raw) {") + 1)
+
+
+class TestChunkInputValidation(unittest.TestCase):
+    """M3 ②③: `--in` pointing at a missing file is exit 2 fail-loud (the old
+    behavior reported success + an empty skeleton — a subagent path typo looked
+    like a clean run); `--line 0` is rejected (truthiness used to route 0 into
+    skeleton mode silently; 0 lines is not a legal request; skeleton mode =
+    omit --line)."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="mgh_chunk_in_"))
+        self.src = self.repo / "A.java"
+        self.src.write_text("public class A { void m(){} }\n", encoding="utf-8")
+
+    def _run(self, *extra):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "chunk_sources.py"), *extra],
+            capture_output=True, text=True)
+
+    def test_missing_in_file_exit_2(self):
+        r = self._run("--in", str(self.repo / "nope.java"),
+                      "--out", str(self.repo / "o.json"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("nope.java", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertFalse((self.repo / "o.json").exists())   # no empty-skeleton artifact
+
+    def test_line_zero_exit_2(self):
+        r = self._run("--in", str(self.src), "--line", "0",
+                      "--out", str(self.repo / "o.json"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--line", r.stderr)
+
+    def test_line_negative_exit_2(self):
+        r = self._run("--in", str(self.src), "--line", "-3",
+                      "--out", str(self.repo / "o.json"))
+        self.assertEqual(r.returncode, 2)
+
+    def test_line_one_still_slices(self):
+        r = self._run("--in", str(self.src), "--line", "1",
+                      "--out", str(self.repo / "o.json"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.repo / "o.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

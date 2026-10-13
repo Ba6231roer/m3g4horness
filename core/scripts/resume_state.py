@@ -198,6 +198,22 @@ def _load_json(path: Path):
         return None, f"malformed JSON: {e}"
 
 
+def _runconfig_unit_budget(cfg) -> int | None:
+    """`budgets.max_unit_bytes` from the run_config dict when recorded as a
+    positive integer, else None (the collector falls back to the shared default —
+    the exact budget the enumerators use when the dispatcher forwards no flag).
+    The dispatcher forwards THIS SAME value to the enumerators (COUPLING LOCKSTEP,
+    both sides switched in the same change): a custom-budget run's shard markers
+    are recomputed at the caliber they were materialized at — anchoring the
+    shared default instead re-deadlocked such runs at step t1 (the CR-1 shape)."""
+    if not isinstance(cfg, dict):
+        return None
+    b = (cfg.get("budgets") or {}).get("max_unit_bytes")
+    if isinstance(b, bool) or not isinstance(b, int) or b <= 0:
+        return None
+    return b
+
+
 def _atomic_write_json(path: Path, obj):
     """Write `<path>.tmp` then `os.replace` (atomic; mirrors write_runconfig)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -546,14 +562,12 @@ def resolve(init_dir: Path):
 
     # t1 done/failed = forward marker-path computation over the SHARED canonical
     # unit-id set, recomputed via list_clusters's producer-side composite (real
-    # candidates + the shared default unit budget → EXACTLY the materializable
+    # candidates + the run's recorded unit budget → EXACTLY the materializable
     # unit set: whole-cluster ids for fitting clusters, `::shard-<n>` ids ONLY
-    # for oversize clusters). The prior degraded call (empty candidates, zero
-    # budget → whole ids only) never counted shard markers, so a sharded run
-    # parked at step=t1 forever while list_clusters reported pending=0 — the
-    # review's only Critical. tiers.t1.total is the UNIT count (shards included);
+    # for oversize clusters). tiers.t1.total is the UNIT count (shards included);
     # a run with no shards keeps its previous totals (whole ids unchanged).
-    t1_ids: list = canonical_unit_ids_for_run(clusters_p) if clusters_p.is_file() else []
+    t1_ids: list = canonical_unit_ids_for_run(
+        clusters_p, _runconfig_unit_budget(cfg)) if clusters_p.is_file() else []
     t1_total = len(t1_ids)
     t1_done_count = len(forward_done_ids(t1_cp, t1_ids))
     t1_failed_count = len(forward_failed_ids(t1_cp, t1_ids))
@@ -829,7 +843,7 @@ def check(init_dir: Path) -> dict:
                          if isinstance(b, dict) and b.get("batch_id")]
     t1_ids: list = []
     if clusters_p.is_file():
-        t1_ids = canonical_unit_ids_for_run(clusters_p)
+        t1_ids = canonical_unit_ids_for_run(clusters_p, _runconfig_unit_budget(cfg))
     t3_ids: list = []
     if inventory.is_file():
         inv, inv_err = _load_json(inventory)

@@ -256,17 +256,37 @@ class TestFoldInNormalize(unittest.TestCase):
         cl = json.loads((self.d / "cl.json").read_text(encoding="utf-8"))
         self.assertTrue(any(c["category"] == "authorization" for c in cl["clusters"]))
 
-    def test_unmapped_category_skipped_warned(self):
-        # "runtime-guard" is not canonical and not aliased → skip + warn, NOT folded
+    def test_unmapped_category_folds_in_fail_loud_exit_2(self):
+        # "runtime-guard" is not canonical and not aliased → the fold-in MAIN path
+        # refuses with exit 2 (mirror of --check): an unmapped category name is a
+        # deterministic drift that must be intercepted at the fold-in boundary,
+        # never silently dropped (skip+warn) and never passed to T2.
         code, out, err = self._fold([
             {"file": "a.java", "line": 3, "source": "scout",
              "category": "runtime-guard", "evidence_snippet": "ok",
              "anchor": {"class": "Guard"}}])
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertIn("not in the 8 canonical categories", err)
-        data = json.loads(out)
-        self.assertEqual(data["scout_candidates_added"], 0)
-        self.assertEqual(data["skipped"], 1)
+        # fail-loud BEFORE any write: both files untouched, no partial state
+        cc = json.loads((self.d / "cc.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cc["candidates"]), 1)          # regex candidate only
+        self.assertNotIn("provenance", cc)
+        cl = json.loads((self.d / "cl.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cl["clusters"]), 1)
+
+    def test_unmapped_category_in_audit_path_also_fail_loud(self):
+        # audit path同判 (it does not pass through --check; a silent skip there
+        # would be an ungated drift)
+        _w(self.d / "sc.json", {"repo": "r", "candidates": []})
+        _w(self.d / "au.json", {"audited": 1, "audit_found": [
+            {"file": "b.java", "line": 9, "source": "scout",
+             "category": "runtime-guard", "evidence_snippet": "x"}]})
+        code, out, err = _run(["--candidates", str(self.d / "cc.json"),
+                               "--scout", str(self.d / "sc.json"),
+                               "--audit", str(self.d / "au.json"),
+                               "--clusters", str(self.d / "cl.json")])
+        self.assertEqual(code, 2)
+        self.assertIn("runtime-guard", err)
 
     def test_check_rejects_noncanonical_exit2(self):
         sc = _w(self.d / "sc.json", {"repo": "r", "candidates": [
@@ -352,6 +372,120 @@ class TestFoldInCascade(unittest.TestCase):
         self.assertEqual(data["invalidated_tiers"], [])
         for m in markers:
             self.assertTrue(m.exists(), f"{m} must survive when added == 0")
+
+
+# ---- M4: fold-in shape errors + atomic two-write with credential-last order ----
+
+class TestFoldInShapeErrors(unittest.TestCase):
+    """Legal JSON with a WRONG SHAPE never crashes the fold-in with a bare
+    traceback: wrapper not a dict / `candidates` not a list / candidate element
+    not a dict / audit `audit_found` not a list or holding non-dict elements →
+    structured stdout error (file + shape diagnosis) + exit 1 (same family as
+    the malformed-JSON path; the audit path is judged the same — it has no
+    --check gate)."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_msc_shape_"))
+        _w(self.d / "cc.json", {"repo": "r", "candidates": []})
+        _w(self.d / "cl.json", {"repo": "r", "clusters": [], "truncated": False})
+
+    def _fold(self, **kw):
+        argv = ["--candidates", str(self.d / "cc.json"),
+                "--scout", str(self.d / "sc.json"),
+                "--clusters", str(self.d / "cl.json")]
+        if "audit" in kw:
+            argv[2:2] = ["--audit", str(kw["audit"])]
+        return _run(argv)
+
+    def test_scout_wrapper_not_a_dict(self):
+        (self.d / "sc.json").write_text(json.dumps(["not", "a", "wrapper"]),
+                                        encoding="utf-8")
+        code, out, err = self._fold()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+        data = json.loads(out)
+        self.assertEqual(data["status"], "error")
+        self.assertIn("shape", data)
+
+    def test_candidates_not_a_list(self):
+        _w(self.d / "sc.json", {"repo": "r", "candidates": {"a": 1}})
+        code, out, err = self._fold()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(out)["status"], "error")
+
+    def test_candidate_element_not_a_dict(self):
+        _w(self.d / "sc.json", {"repo": "r", "candidates": ["not-a-dict"]})
+        code, out, err = self._fold()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(out)["status"], "error")
+
+    def test_audit_found_element_not_a_dict(self):
+        _w(self.d / "sc.json", {"repo": "r", "candidates": []})
+        _w(self.d / "au.json", {"audited": 1, "audit_found": [42]})
+        code, out, err = self._fold(audit=self.d / "au.json")
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+        self.assertTrue(json.loads(out).get("file", "").endswith("au.json"))
+
+    def test_audit_found_not_a_list(self):
+        _w(self.d / "sc.json", {"repo": "r", "candidates": []})
+        _w(self.d / "au.json", {"audited": 1, "audit_found": {"file": "x.java"}})
+        code, out, err = self._fold(audit=self.d / "au.json")
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+
+
+class TestFoldInCrashWindowConvergence(unittest.TestCase):
+    """M4 atomic two-write + credential-last order: clusters FIRST, candidates
+    (carrying the `provenance.scout_merged` credential) LAST. A crash between
+    the two writes leaves the credential absent → the re-run folds again and
+    CONVERGES (cluster-id dedup keeps the re-append idempotent — no duplicate
+    scout clusters) instead of appending a second copy of every scout cluster
+    (the pre-fix behavior under the new crash window). Credential present ⟺
+    both files consistent; the old 'candidates merged but clusters missing
+    scout clusters' window is structurally gone."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_msc_crash_"))
+        _w(self.d / "cc.json", {"repo": "r", "candidates": [
+            {"id": "R-1", "file": "x.java", "line": 1, "source": "regex",
+             "category": "crypto", "pattern": "@Enc", "anchor": {"class": "X"}}]})
+        _w(self.d / "cl.json", {"repo": "r", "clusters": [
+            {"cluster_id": "crypto::X::regex1", "category": "crypto",
+             "usage_sites": ["x.java"], "evidence_files": ["x.java"],
+             "candidate_ids": ["R-1"]}], "truncated": False})
+        _w(self.d / "sc.json", {"repo": "r", "candidates": [
+            {"file": "a.java", "line": 3, "source": "scout",
+             "category": "authorization", "evidence_snippet": "ok",
+             "anchor": {"class": "Authz"}}]})
+
+    def _fold(self):
+        return _run(["--candidates", str(self.d / "cc.json"),
+                     "--scout", str(self.d / "sc.json"),
+                     "--clusters", str(self.d / "cl.json")])
+
+    def test_crash_between_writes_refold_converges_without_duplicates(self):
+        code, _, _ = self._fold()
+        self.assertEqual(code, 0)
+        cl_full = json.loads((self.d / "cl.json").read_text(encoding="utf-8"))
+        n_clusters_after_first_fold = len(cl_full["clusters"])
+        # simulate the crash window: clusters.json already rewritten (scout
+        # clusters in), candidates.json rolled back to its pre-fold state
+        # (regex only, no credential)
+        _w(self.d / "cc.json", {"repo": "r", "candidates": [
+            {"id": "R-1", "file": "x.java", "line": 1, "source": "regex",
+             "category": "crypto", "pattern": "@Enc", "anchor": {"class": "X"}}]})
+        code, out, _ = self._fold()
+        self.assertEqual(code, 0)
+        cc = json.loads((self.d / "cc.json").read_text(encoding="utf-8"))
+        cl = json.loads((self.d / "cl.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cc["candidates"]), 2)          # regex + scout restored
+        self.assertEqual(cc["provenance"]["scout_merged"], 1)  # credential re-written
+        self.assertEqual(len(cl["clusters"]), n_clusters_after_first_fold)  # NO duplicates
+        ids = [c["cluster_id"] for c in cl["clusters"]]
+        self.assertEqual(len(ids), len(set(ids)))
 
 
 if __name__ == "__main__":

@@ -37,6 +37,20 @@ JAVA_DEF = re.compile(
     r"(?:[A-Za-z_]\w*(?:\s*<[^>]*>)?(?:\s*\[\s*\])*\s+)*"
     r"([A-Za-z_]\w*)\s*\([^;{]*\)\s*(?:throws[^{]*)?\{")
 
+# Control-flow keyword heads JAVA_DEF cannot distinguish from method definitions
+# ("while (rs.next()) {", "catch (Exception e) {", "synchronized (lock) {", … are
+# all "name + paren + brace" shaped). A captured name in this set means the match
+# is a control-flow BLOCK head, not a method: each such phantom node used to split
+# big files by loop body instead of method body and truncate the enclosing
+# method's `line_end` at the first inner block. The exclusion is a deterministic
+# post-filter on the captured name (lower-case compare) — never a regex rewrite
+# (negative look-ahead mis-fires on modifier/generic combinations). A
+# `synchronized`-MODIFIED real method is unaffected: its captured name is the
+# METHOD name, not the keyword.
+_JAVA_CONTROL_FLOW = frozenset((
+    "while", "for", "do", "if", "else", "switch", "case", "try", "catch",
+    "finally", "synchronized", "return", "new", "throw"))
+
 
 def _def_rx(lang: str):
     return JAVA_DEF if lang == "java" else DEF_CALL.get(lang, DEF_CALL["c"])[0]
@@ -98,6 +112,8 @@ def parse_skeleton(path: Path, lang: str | None = None):
         name = m.group(1)
         if not name or len(name) <= 2:
             continue
+        if lang == "java" and name.lower() in _JAVA_CONTROL_FLOW:
+            continue    # control-flow block head, not a method (deterministic post-filter)
         ln = text.count("\n", 0, m.start()) + 1
         nodes.append({"name": name, "kind": "function",
                       "line_start": ln, "line_end": 0})
@@ -159,8 +175,7 @@ def main():
     # R5.9 self-check: --out MUST be a file path, NOT an existing directory. The observed
     # misuse was a subagent passing the bare slice DIR (e.g. ".../scout-003") instead of
     # "<slice_dir>/<safe-stem>.slice.json" -- silently writing into a mis-shaped path. Fail
-    # loud at the leaf rather than emitting a broken artifact. Does NOT re-validate --in
-    # (argparse required=True already does) or --line (absence = legit skeleton-mode req).
+    # loud at the leaf rather than emitting a broken artifact.
     out_path = Path(args.out)
     if out_path.is_dir():
         sys.stderr.write(
@@ -169,9 +184,26 @@ def main():
             f"(<safe-stem> = the source file's stem). NEVER pass --out a directory.\n")
         return 2
     p = Path(args.inp)
+    if not p.is_file():
+        # A missing input used to yield "success + empty skeleton" (exit 0) — a
+        # subagent path typo looked like a clean run. Fail loud instead.
+        sys.stderr.write(
+            f"error: --in file not found: {args.inp}\n"
+            f"  recipe: re-check the path (typo form); this leaf NEVER reports a\n"
+            f"  clean run for an input that does not exist.\n")
+        return 2
+    if args.line is not None and args.line < 1:
+        # `--line 0` used to fall through to skeleton mode via a truthiness check —
+        # a legal-looking request silently got the wrong artifact. 0 lines does not
+        # exist; skeleton mode = omit --line entirely.
+        sys.stderr.write(
+            f"error: --line must be >= 1 (got {args.line})\n"
+            f"  recipe: pass the candidate's 1-based line; for a whole-file skeleton\n"
+            f"  omit --line entirely.\n")
+        return 2
     lang = file_lang(p)
     big = is_big(p, args.big_file_bytes)
-    if args.line:
+    if args.line is not None:
         result = {"file": str(p), "lang": lang, "big_file": big,
                   "slice": slice_for_line(p, args.line, args.window, lang)}
     else:

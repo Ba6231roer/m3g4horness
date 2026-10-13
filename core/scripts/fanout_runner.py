@@ -567,6 +567,10 @@ TIERS = {
                                 "--checkpoints", a.checkpoints,
                                 "--materialize", a.inputs_dir]
             + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
+        # unit-budget tier: run_config.budgets.max_unit_bytes is forwarded as
+        # --max-unit-bytes (see _unit_budget_flag); aggregate tiers (t2 /
+        # scout-merge) are a different budget family (--max-aggregate-bytes).
+        "unit_budget": True,
         "required_args": ("scout_plan", "checkpoints", "inputs_dir"),
         # artifact whose dir = init-dir (sidecar home + run_config neighbor)
         "plan_arg": "scout_plan",
@@ -588,6 +592,7 @@ TIERS = {
                                 "--checkpoints", a.checkpoints,
                                 "--materialize", a.inputs_dir]
             + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
+        "unit_budget": True,
         "required_args": ("clusters", "candidates", "checkpoints", "inputs_dir"),
         "plan_arg": "clusters",
         "template_rel": Path("prompts") / "fragments" / "fanout" / "t1-task.md",
@@ -673,6 +678,7 @@ TIERS = {
                                 "--checkpoints", a.checkpoints,
                                 "--materialize", a.inputs_dir]
             + (["--include-failed"] if getattr(a, "retry_failed", False) else []),
+        "unit_budget": True,
         "required_args": ("inventory", "fmt", "rules_dir", "target",
                           "checkpoints", "inputs_dir"),
         "plan_arg": "inventory",
@@ -1235,6 +1241,43 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     return ("spawn-ok", ack, detail, proc.pid, False, True)
 
 
+def _unit_budget_flag(tier: dict, args) -> list:
+    """`["--max-unit-bytes", <v>]` built from the run's OWN record, for unit-budget
+    tiers (scout/t1/t3, marked `unit_budget` in TIERS). Source = `<init-dir>/
+    run_config.json::budgets.max_unit_bytes` — the value step 0 recorded, which
+    the enumerators previously never saw (the budget was recorded and silently
+    ignored; sharding stayed on the 192KB default). The resume-side t1
+    recomputation reads the SAME file (COUPLING LOCKSTEP — both sides switched
+    in the same change, never a second CLI flag, or the two budget sources can
+    diverge and re-deadlock custom-budget sharded runs). Missing run_config
+    (manual direct run outside a host session — legitimate), missing field, or
+    a non-positive/non-integer value → no flag: the enumerator default applies,
+    byte-identical to legacy runs. A present-but-unreadable run_config gets a
+    one-line stderr note instead of an exit (too harsh = the rejected design)."""
+    if not tier.get("unit_budget"):
+        return []
+    plan_attr = tier.get("plan_arg")
+    raw = getattr(args, plan_attr, None) if plan_attr else None
+    if not raw:
+        return []
+    plan_path = Path(raw)
+    init_dir = plan_path if plan_attr == "init_dir" else plan_path.parent
+    rc_path = init_dir / "run_config.json"
+    if not rc_path.is_file():
+        _eprint(f"note: {rc_path} absent — enumerator default unit budget applies "
+                f"(manual direct run outside a host session)")
+        return []
+    try:
+        cfg = json.loads(rc_path.read_text(encoding="utf-8"))
+        v = (cfg.get("budgets") or {}).get("max_unit_bytes")
+    except (OSError, ValueError, AttributeError):
+        _eprint(f"note: {rc_path} unreadable — enumerator default unit budget applies")
+        return []
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        return []
+    return ["--max-unit-bytes", str(v)]
+
+
 def _list_pending(tier: dict, args) -> dict:
     """Invoke the tier's sibling enumeration script in --materialize mode and
     return its stdout JSON (the single pending source; NEVER re-dig tier
@@ -1247,7 +1290,8 @@ def _list_pending(tier: dict, args) -> dict:
     crash/re-dispatch loop. Exit 1 (bad inputs) stays exit 1."""
     cmd = [sys.executable,
            str(Path(__file__).resolve().parent / tier["list_script"])] \
-        + tier["list_args"](args)
+        + tier["list_args"](args) \
+        + _unit_budget_flag(tier, args)
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                        errors="replace")
     if r.returncode == 2:

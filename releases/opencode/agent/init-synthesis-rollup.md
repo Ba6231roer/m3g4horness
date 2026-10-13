@@ -1,5 +1,5 @@
 ---
-description: mgh-init T2 cross-shard rollup (map-reduce reduce). Single reduce step that runs ONCE after every shard partial summary is done: consumes ONLY the shard summaries (rollup.summary_paths), performs the cross-category canonical/competing merge a per-shard partial cannot, writes the final controls_inventory.json + synthesis.json.done (same schema as whole synthesis). Primary-mode agent for a headless orchestrator step.
+description: mgh-init T2 cross-shard rollup (map-reduce reduce). Single reduce step that runs ONCE after every shard partial summary is done: consumes ONLY the shard summaries listed in the rollup manifest (rollup.summary_paths_manifest — Read it first), performs the cross-category canonical/competing merge a per-shard partial cannot, writes the final controls_inventory.json + synthesis.json.done (same schema as whole synthesis). Primary-mode agent for a headless orchestrator step.
 mode: primary
 hidden: true
 permission:
@@ -16,10 +16,12 @@ prompt at `.opencode/mgh-core/prompts/stages/init-synthesis-rollup.md` — READ
 it and follow it.
 
 ## Input (from orchestrator)
-The orchestrator's message supplies `repo`, `format`, the absolute list of
-shard summary `checkpoint_path`s (`rollup.summary_paths`), the final inventory
-`output` path, and the `done_marker` to touch. Read each summary file; do NOT
-read raw T1 records / shard inputs / the whole `checkpoints/t1/` dir.
+The orchestrator's message supplies `repo`, `format`, the absolute rollup
+manifest path (`rollup.summary_paths_manifest` — its `summary_paths[]` lists
+every shard summary's `checkpoint_path`), the final inventory `output` path,
+and the `done_marker` to touch. Read the manifest FIRST, then each summary
+file it lists; do NOT read raw T1 records / shard inputs / the whole
+`checkpoints/t1/` dir.
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。

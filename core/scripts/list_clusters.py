@@ -130,7 +130,6 @@ from init_tier import (scout_complete, safe_unit_filename, forward_marker_paths,
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — aligns with --big-file-bytes 200KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB — orchestrator single-request page cap
-MAX_UNIT_FILENAME_STEM = 200           # alias of init_tier.MAX_UNIT_FILENAME_STEM (single source)
 DEFAULT_PACK_BYTES = 0                 # packing off (opt-in; off path stays byte-identical)
 DEFAULT_PACK_MAX = 8                   # per-pack member cap when packing is on
 
@@ -304,19 +303,21 @@ def collect_canonical_ids(clusters, cands, max_unit_bytes: int, repo_root):
     return ids
 
 
-def canonical_unit_ids_for_run(clusters_path):
+def canonical_unit_ids_for_run(clusters_path, max_unit_bytes=None):
     """Producer-side recomposition of the canonical T1 unit-id set from a run
     dir (the single source resume_state's t1 caliber recomputes from): reads
     clusters.json ONCE + controls_candidates.json from the same dir
     (`_load_candidates`), then `collect_canonical_ids` over the REAL candidates
-    at the SHARED DEFAULT unit budget. The budget anchors `DEFAULT_MAX_UNIT_BYTES`
-    — deliberately NOT run_config.budgets.max_unit_bytes — because the dispatch
-    path materializes with the default today (fanout_runner does not forward
-    --max-unit-bytes), so recomputing with a custom run_config value would
-    misalign with the sharded plan already on disk and re-deadlock exactly the
-    "custom budget + oversize cluster" runs. COUPLING LOCKSTEP: when the runner
-    gains --max-unit-bytes forwarding, materialization AND this recomputation
-    MUST switch to the run_config value in the SAME change.
+    at the run's unit budget — the `max_unit_bytes` argument, which callers feed
+    from `run_config.json::budgets.max_unit_bytes` so recomputation matches the
+    dispatch-side materialization byte-for-byte; None (or a non-positive value)
+    anchors the SHARED DEFAULT, the exact budget the enumerators use when the
+    runner forwards no flag. COUPLING LOCKSTEP: the dispatcher (fanout_runner)
+    forwards the run_config budget to the enumerators and resume_state feeds the
+    SAME value HERE — the two budget sources MUST keep switching together in the
+    SAME change (a dispatch-side switch without this side — or the reverse —
+    re-deadlocks custom-budget sharded runs: the recomputation would count a
+    different unit set than the markers on disk, the exact CR-1 shape).
     Returns the unit-id list ([] when clusters.json is missing / malformed /
     not a wrapper — the caller's counts degrade to zero, never a traceback)."""
     p = Path(clusters_path)
@@ -334,8 +335,10 @@ def canonical_unit_ids_for_run(clusters_path):
             if isinstance(wrapper.get("repo"), str) and wrapper["repo"] else None
     except (OSError, ValueError):
         repo_root = None
-    return collect_canonical_ids(wrapper["clusters"], cands,
-                                 DEFAULT_MAX_UNIT_BYTES, repo_root)
+    budget = max_unit_bytes if isinstance(max_unit_bytes, int) \
+        and not isinstance(max_unit_bytes, bool) and max_unit_bytes > 0 \
+        else DEFAULT_MAX_UNIT_BYTES
+    return collect_canonical_ids(wrapper["clusters"], cands, budget, repo_root)
 
 
 def _shard_plan(cid: str, cluster: dict, hits: list, max_unit_bytes: int,
@@ -564,8 +567,8 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
     pack_max = args.pack_max if args.pack_max is not None else DEFAULT_PACK_MAX
     packable = {}          # category -> [{bytes, cid, cluster, hits}]
     independent = []       # (cluster, hits) — oversize, existing shard path
-    clusters_failed = 0
     whole_ids = []
+    units_map = {}         # cid -> [unit ids] (SAME `_shard_plan` shard decision)
     for cluster in clusters:
         if not isinstance(cluster, dict):
             continue
@@ -573,18 +576,19 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
         if not cid:
             continue
         whole_ids.append(cid)
-        if cid in failed:  # terminal → excluded from any pack, counted failed
-            clusters_failed += 1
-            if not args.include_failed:
-                continue
+        hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
+        plan = _shard_plan(cid, cluster, hits, args.max_unit_bytes, repo_root)
+        units_map[cid] = [u for u, _ in plan] if plan else [cid]
+        if cid in failed and not args.include_failed:
+            # terminal → excluded from any pack (its cluster-level failure is
+            # counted once by the three-way pass below, never duplicated here)
+            continue
+        if cid in failed:
             # --include-failed: the failed cluster re-enters on the independent
             # (unpacked) path — same canonical identity the unpacked path would
             # derive; pack identity must stay independent of failure markers.
-            independent.append((cluster,
-                                [cands[i] for i in cluster.get("candidate_ids", [])
-                                 if i in cands]))
+            independent.append((cluster, hits))
             continue
-        hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
         nbytes = _byte_len(_absolutize_paths(
             dict(_cluster_header(cluster), candidates=hits), repo_root))
         if hits and nbytes > args.max_unit_bytes:
@@ -653,8 +657,13 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
                 merged_path.stat().st_size, checkpoints_dir, members_meta))
 
     # independent oversize clusters: the existing per-cluster shard path, verbatim
-    # (same `_resolve_units` + OSError isolation semantics as the unpacked path).
+    # (same `_resolve_units` + OSError isolation semantics as the unpacked path),
+    # with the SAME cluster-level three-way counting: all units `.done` → done;
+    # all terminal with ≥1 `.failed` → cluster failure (NOT `independent_done` —
+    # the old `if not emitted` residual rolled the all-shards-failed cluster into
+    # done); otherwise the non-terminal units are emitted as pending.
     independent_all = independent_done = 0
+    osee_failed = 0
     for cluster, hits in independent:
         cid = cluster["cluster_id"]
         independent_all += 1
@@ -675,9 +684,16 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
                 print(f"error: cannot write failed marker for {cid} — systemic "
                       f"run-dir failure", file=sys.stderr)
                 return 2
-            clusters_failed += 1
+            osee_failed += 1
             continue
-        emitted = False
+        uids = [u for u, _, _ in units]
+        d_ct = sum(1 for u in uids if u in done)
+        f_ct = sum(1 for u in uids if u in failed)
+        if d_ct == len(uids):
+            independent_done += 1
+            continue
+        if d_ct + f_ct == len(uids) and not args.include_failed:
+            continue            # cluster failed (counted at cluster level below)
         for uid, ipath, nbytes in units:
             if uid in done or (uid in failed and not args.include_failed):
                 continue
@@ -685,14 +701,26 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
             all_units.append(_slim_materialized(
                 cluster, uid, len(hits) if not shard else _shard_hit_count(inputs_dir, uid),
                 ipath, nbytes, shard, checkpoints_dir))
-            emitted = True
-        if not emitted:
-            independent_done += 1
 
     total = packs_all + independent_all
     done_count = packs_done + independent_done
-    failed_count = packs_failed + clusters_failed
-    cluster_done = sum(1 for cid in whole_ids if cid in done)
+    # Cluster-level three-way over every cluster's unit set (units_map = the SAME
+    # `_shard_plan` shard decision the collector/materializer share): cluster_done
+    # counts ONLY clusters whose every unit is `.done`; all-terminal-with-failure
+    # clusters add to the failed count (sharded failures are cluster failures too,
+    # not just whole-marker ones). OSError-isolated clusters' fresh `.failed`
+    # markers postdate the `failed` set → counted via osee_failed.
+    cluster_failed = osee_failed
+    cluster_done = 0
+    for cid in whole_ids:
+        uids = units_map.get(cid, [cid])
+        d_ct = sum(1 for u in uids if u in done)
+        f_ct = sum(1 for u in uids if u in failed)
+        if d_ct == len(uids):
+            cluster_done += 1
+        elif d_ct + f_ct == len(uids):
+            cluster_failed += 1
+    failed_count = packs_failed + cluster_failed
     avg = (pack_member_total / packs_all) if packs_all else 0.0
     print(f"packing: {packs_all} pack(s) over {pack_member_total} packable cluster(s), "
           f"avg {avg:.1f} member(s)/pack; {independent_all} independent oversize/shard "
@@ -782,6 +810,12 @@ def main():
 
     if args.offset < 0:
         print("error: --offset must be >= 0", file=sys.stderr)
+        return 2
+    if args.limit is not None and args.limit < 1:
+        # an empty page with effective_limit=0 would report SUCCESS and spin an
+        # offset-advancing orchestrator forever (validation symmetric with --offset)
+        print(f"error: --limit must be >= 1 (got {args.limit}). recipe: omit --limit "
+              f"for the full pending list, or pass >= 1", file=sys.stderr)
         return 2
     for label, raw in (("--max-unit-bytes", args.max_unit_bytes),
                        ("--orch-budget-bytes", args.orch_budget_bytes),
@@ -894,19 +928,36 @@ def main():
         if not isinstance(cluster, dict):
             continue
         cid = cluster.get("cluster_id")
-        if cid in done:  # whole-cluster complete (terminal)
-            continue
-        if cid in failed:  # whole-cluster confirmed-failed (terminal; NOT retried)
+        # Per-cluster unit set = exactly what materialization writes (the SAME
+        # `_shard_plan` the collector/materializer share): whole-cluster id when
+        # the cluster fits, its `::shard-<n>` ids when oversize. Cluster-level
+        # three-way over the units' terminal markers: all `.done` → done; all
+        # terminal with ≥1 `.failed` → failed (visible to --retry-failed);
+        # otherwise pending. The old residual formula (done = total - pending -
+        # failed) rolled the all-shards-failed cluster into `done` — the failure
+        # vanished from stdout and from the retry path (实测 1 簇 2 片全 `.failed`
+        # → `{done:1, failed:0}`).
+        if materialize:
+            hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
+            plan = _shard_plan(cid, cluster, hits, args.max_unit_bytes, repo_root)
+            unit_ids = [u for u, _ in plan] if plan else [cid]
+        else:
+            hits = []
+            unit_ids = [cid]
+        d_ct = sum(1 for u in unit_ids if u in done)
+        f_ct = sum(1 for u in unit_ids if u in failed)
+        if d_ct == len(unit_ids):
+            continue                                    # cluster done (terminal)
+        if d_ct + f_ct == len(unit_ids):                # all terminal, ≥1 failed
             clusters_failed += 1
             if not args.include_failed:
                 continue
-            # --include-failed: the failed cluster falls through to the normal
-            # materialize + emit below (canonical cluster id / shard ids; the
-            # forward-derived failed_marker path rides the emitted unit)
+            # --include-failed: the failed cluster's non-done units re-enter
+            # pending below under their canonical ids; the residual back-add
+            # keeps `done` the marker-truth count
             clusters_reincluded += 1
         emitted = False
         if materialize:
-            hits = [cands[i] for i in cluster.get("candidate_ids", []) if i in cands]
             try:
                 units = list(_resolve_units(cid, cluster, hits,
                                             args.max_unit_bytes, inputs_dir, repo_root))

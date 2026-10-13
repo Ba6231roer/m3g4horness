@@ -47,8 +47,8 @@ core/contracts/ut-init/validate.md:3
 core/prompts/fragments/init-stage/resolve.md:19
 core/prompts/fragments/security-dimensions.md:34
 core/prompts/stages/init-synthesis-partial.md:103
-core/prompts/stages/init-synthesis-rollup.md:31
-core/prompts/stages/init-synthesis-rollup.md:84
+core/prompts/stages/init-synthesis-rollup.md:33
+core/prompts/stages/init-synthesis-rollup.md:86
 core/prompts/stages/init-synthesis.md:61
 releases/claude-code/agents/init-synthesis.md:26
 releases/claude-code/commands/mgh-sast.md:122
@@ -155,7 +155,7 @@ releases/dsh/skills/mgh-srr/SKILL.md:110
 releases/dsh/skills/mgh-srr/SKILL.md:111
 releases/dsh/skills/mgh-srr/SKILL.md:112
 releases/dsh/skills/mgh-srr/SKILL.md:26
-releases/opencode/agent/init-synthesis-rollup.md:36
+releases/opencode/agent/init-synthesis-rollup.md:38
 releases/opencode/agent/init-synthesis.md:31
 releases/opencode/command/mgh-sast.md:15
 releases/opencode/command/mgh-sast.md:165

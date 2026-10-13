@@ -18,6 +18,7 @@ CLI:
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,8 +37,9 @@ def _normalize(c, i):
     Category is deterministically normalized to the canonical 8-category form via
     init_tier.normalize_category AT THE FOLD-IN BOUNDARY so T2 / validate_inventory only
     see canonical names (a drifted scout name like access-control/auth maps to its
-    canonical member; the caller skips + warns a candidate whose normalized category is
-    NOT one of the 8)."""
+    canonical member; the caller FAILS LOUD (exit 2, mirror of --check) on a candidate
+    whose normalized category is NOT one of the 8 — only MISSING-FIELD candidates are
+    skip+warned)."""
     if not c.get("category") or not c.get("file"):
         return None
     a = c.get("anchor") or {}
@@ -101,6 +103,23 @@ def _emit_load_error(detail):
              f"near: {detail.get('nearby')!r}" if "lineno" in detail else detail.get("msg", ""))
     print(f"error: cannot load {detail.get('file')}: {where}", file=sys.stderr)
     print(json.dumps({"status": "error", **detail}, ensure_ascii=False))
+
+
+def _emit_shape_error(file, shape):
+    """Legal JSON with a WRONG SHAPE: structured stdout error + stderr, exit 1 —
+    NEVER a bare AttributeError traceback (the audit path is judged the same: it
+    has no --check gate, a crash there = an ungated boundary)."""
+    print(f"error: {file}: {shape}", file=sys.stderr)
+    print(json.dumps({"status": "error", "error": "wrong shape", "file": str(file),
+                      "shape": shape}, ensure_ascii=False))
+
+
+def _atomic_write_text(path: Path, text: str):
+    """Same-directory tmp + os.replace — atomic on POSIX and Windows; a crash
+    mid-write leaves the previous file intact, never a truncated JSON."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _run_check(scout_path: Path):
@@ -179,19 +198,46 @@ def main():
     if err:
         _emit_load_error(err)
         return 1
+    if not isinstance(cd, dict) or not isinstance(cd.get("candidates"), list):
+        _emit_shape_error(args.candidates,
+                          "controls_candidates.json must be a wrapper {repo, candidates[]} "
+                          "with candidates[] a list"
+                          + ("" if isinstance(cd, dict) else " (top level is not an object)"))
+        return 1
     regex_cands = cd.get("candidates", [])
+    if any(not isinstance(c, dict) for c in regex_cands):
+        _emit_shape_error(args.candidates, "every candidates[] element must be an object")
+        return 1
 
     sc, err = _load_json(args.scout)
     if err:
         _emit_load_error(err)
         return 1
+    if not isinstance(sc, dict) or not isinstance(sc.get("candidates"), list):
+        _emit_shape_error(args.scout,
+                          "scout_candidates.json must be a wrapper {repo, candidates[]} "
+                          "with candidates[] a list"
+                          + ("" if isinstance(sc, dict) else " (top level is not an object)"))
+        return 1
     scout_cands = list(sc.get("candidates", []))
     if args.audit and Path(args.audit).is_file():
         try:
             au = json.loads(Path(args.audit).read_text(encoding="utf-8"))
-            scout_cands += au.get("audit_found", [])
         except (OSError, ValueError):
-            pass  # audit is optional/best-effort
+            au = None  # unreadable/malformed audit stays best-effort (optional input)
+        if au is not None:
+            found = au.get("audit_found") if isinstance(au, dict) else None
+            if not isinstance(found, list):
+                _emit_shape_error(args.audit, "audit_found must be a list")
+                return 1
+            if any(not isinstance(c, dict) for c in found):
+                _emit_shape_error(args.audit,
+                                  "every audit_found[] element must be an object")
+                return 1
+            scout_cands += found
+    if any(not isinstance(c, dict) for c in scout_cands):
+        _emit_shape_error(args.scout, "every candidates[] element must be an object")
+        return 1
 
     # de-dup scout vs regex (and within scout) by (file, anchor.class/method, category)
     seen = {_key(c) for c in regex_cands}
@@ -202,12 +248,15 @@ def main():
             continue
         seen.add(k)
         fresh_raw.append(c)
-    # normalize; skip + warn on any candidate missing a required field (category/file)
-    # OR whose category does not normalize into the canonical 8 (D3 — a drifted name is
-    # never passed downstream; belt-and-suspenders for the audit path, which does not
-    # pass through --check)
+    # normalize; skip + warn on any candidate missing a required field (category/file);
+    # an UNMAPPED non-canonical category (not one of the 8, not aliased) is a
+    # deterministic drift → collected and refused with exit 2 BEFORE any write
+    # (mirror of --check; the audit path is judged identically — skip+warn is
+    # reserved for MISSING-FIELD candidates, LLM output-quality noise disclosed
+    # via the `skipped` count). Zero side effects on the violation path.
     fresh = []
     skipped = 0
+    unmapped = []
     for i, c in enumerate(fresh_raw):
         n = _normalize(c, i)
         if n is None:
@@ -219,21 +268,23 @@ def main():
             skipped += 1
             continue
         if n["category"] not in INIT_CATEGORIES:
-            print(f"[merge_scout] warn: scout candidate #{i} "
-                  f"({c.get('file', '?')}:{c.get('line', '?')}) "
-                  f"category {n['category']!r} not in the 8 canonical categories - skipped",
-                  file=sys.stderr)
-            skipped += 1
+            unmapped.append((i, f"{c.get('file', '?')}:{c.get('line', '?')}",
+                             n["category"]))
             continue
         fresh.append(n)
+    if unmapped:
+        for i, where, cat in unmapped:
+            print(f"[merge_scout] error: scout candidate #{i} ({where}) category "
+                  f"{cat!r} not in the 8 canonical categories and not aliased — "
+                  f"fold-in refuses (mirror of --check; a drifted name must never "
+                  f"reach T2)", file=sys.stderr)
+        print(json.dumps({"status": "error", "error": "unmapped category",
+                          "violations": [{"index": i, "file": w, "category": c}
+                                         for i, w, c in unmapped]}, ensure_ascii=False))
+        return 2
 
     # reuse discover's grouping logic (empty reverse -> no graph-derived usage_sites)
     scout_clusters = form_clusters(list(fresh), {}, set(), None, args.sample)
-
-    cd["candidates"] = regex_cands + fresh
-    cd.setdefault("provenance", {})["scout_merged"] = len(fresh)
-    Path(args.candidates).write_text(
-        json.dumps(cd, indent=2, ensure_ascii=False), encoding="utf-8")
 
     cl, err = _load_json(args.clusters)
     if err:
@@ -241,9 +292,25 @@ def main():
         return 1
     if not isinstance(cl.get("clusters"), list):
         cl["clusters"] = []
-    cl["clusters"] = cl["clusters"] + scout_clusters
-    Path(args.clusters).write_text(
-        json.dumps(cl, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Atomic two-write with the CREDENTIAL LAST: clusters.json first (scout
+    # clusters appended, id-deduped so a re-fold after a crash between the two
+    # writes converges instead of duplicating), then controls_candidates.json
+    # (carrying the `provenance.scout_merged` completion credential). Crash
+    # between the writes → credential absent → the next fold-in re-runs →
+    # both files converge consistent. Credential present ⟺ both files
+    # consistent — the old "candidates merged but clusters.json missing the
+    # scout clusters" disease window (credential first, cluster write lost)
+    # is structurally gone.
+    existing_ids = {c.get("cluster_id") for c in cl["clusters"] if isinstance(c, dict)}
+    new_clusters = [c for c in scout_clusters if c.get("cluster_id") not in existing_ids]
+    cl["clusters"] = cl["clusters"] + new_clusters
+    _atomic_write_text(Path(args.clusters),
+                       json.dumps(cl, indent=2, ensure_ascii=False))
+
+    cd["candidates"] = regex_cands + fresh
+    cd.setdefault("provenance", {})["scout_merged"] = len(fresh)
+    _atomic_write_text(Path(args.candidates),
+                       json.dumps(cd, indent=2, ensure_ascii=False))
 
     # --- cascade invalidation: fold-in actually ADDED candidates → downstream aggregate
     # .done markers are stale credentials (produced from regex-only input) → delete them
@@ -263,13 +330,13 @@ def main():
                 pass  # marker already gone / unwritable — non-fatal, idempotent
         invalidated_tiers.sort()
 
-    print(f"[merge_scout] +{len(fresh)} scout candidates, +{len(scout_clusters)} scout clusters"
+    print(f"[merge_scout] +{len(fresh)} scout candidates, +{len(new_clusters)} scout clusters"
           + (f", {skipped} skipped" if skipped else "")
           + (f", cascade-invalidated downstream aggregate markers {invalidated_tiers}"
              if invalidated_tiers else ""),
           file=sys.stderr)
     print(json.dumps({"scout_candidates_added": len(fresh),
-                      "scout_clusters_added": len(scout_clusters),
+                      "scout_clusters_added": len(new_clusters),
                       "skipped": skipped,
                       "invalidated_tiers": invalidated_tiers}))
     return 0

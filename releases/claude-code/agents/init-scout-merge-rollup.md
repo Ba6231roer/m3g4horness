@@ -1,6 +1,6 @@
 ---
 name: init-scout-merge-rollup
-description: mgh-init S4 cross-shard scout-merge rollup (map-reduce reduce). Single reduce step that runs ONCE after every shard partial summary is done: consumes ONLY the shard summaries (rollup.summary_paths), performs the cross-shard anchor-tuple dedup / normalization a per-shard partial cannot, writes the final scout_candidates.json wrapper + checkpoints/scout/merge.json.done (same shape as the single-context S4 stage, passes merge_scout.py --check unchanged).
+description: mgh-init S4 cross-shard scout-merge rollup (map-reduce reduce). Single reduce step that runs ONCE after every shard partial summary is done: consumes ONLY the shard summaries listed in the rollup manifest (rollup.summary_paths_manifest — Read it first), performs the cross-shard anchor-tuple dedup / normalization a per-shard partial cannot, writes the final scout_candidates.json wrapper + checkpoints/scout/merge.json.done (same shape as the single-context S4 stage, passes merge_scout.py --check unchanged).
 tools: Read, Glob, Grep, Write
 model: inherit
 ---
@@ -11,12 +11,13 @@ the prompt at
 follow it.
 
 ## Input (from orchestrator)
-The orchestrator's message supplies `repo`, the absolute list of shard summary
-`checkpoint_path`s (`rollup.summary_paths`), the final candidate-set `output`
-path (`<abs target>/.mgh-init/scout_candidates.json`), and the `done_marker` to
-touch (`<abs target>/.mgh-init/checkpoints/scout/merge.json.done`). Read each
-summary file; do NOT read raw scout batch records / shard inputs / the whole
-`checkpoints/scout/` dir.
+The orchestrator's message supplies `repo`, the absolute rollup manifest path
+(`rollup.summary_paths_manifest` — its `summary_paths[]` lists every shard
+summary's `checkpoint_path`), the final candidate-set `output` path
+(`<abs target>/.mgh-init/scout_candidates.json`), and the `done_marker` to
+touch (`<abs target>/.mgh-init/checkpoints/scout/merge.json.done`). Read the
+manifest FIRST, then each summary file it lists; do NOT read raw scout batch
+records / shard inputs / the whole `checkpoints/scout/` dir.
 
 ## Hard constraints
 - **NEVER `Write .py` / `py -c` / `python -c`**——subagent 脚本纪律(见 stage prompt 的 Sanctioned tools 段);确定性脚本由编排器调用,subagent 不写脚本。

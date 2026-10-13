@@ -49,10 +49,12 @@ import json
 import sys
 from pathlib import Path
 
-# Self-locate this script's dir so any future sibling import resolves under any cwd /
-# host-agent invocation (direct `py`/`python`). list_rule_jobs currently has no sibling
-# import, but the guard keeps it in the self-contained family (R5.3a).
+# Self-locate this script's dir so the sibling `init_tier` import resolves under any
+# cwd / host-agent invocation (direct `py`/`python`) — R5.3a.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from init_tier import (safe_unit_filename, forward_marker_paths,
+                       orphan_markers)  # noqa: E402
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB
@@ -85,8 +87,11 @@ def rule_unit_ids(categories, fmt):
 
 
 def _safe_name(unit_id: str) -> str:
-    """Filesystem-safe input filename (category names are slugs, but guard anyway)."""
-    return unit_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    """Filesystem-safe input filename. Alias of `init_tier.safe_unit_filename`
+    (single encoding source shared with the forward done/failed judgment —
+    NEVER a private copy: a local reimplementation would silently drift from
+    the judgment encoding, e.g. missing the stem cap for overlong ids)."""
+    return safe_unit_filename(unit_id)
 
 
 def _rule_path(target: str, rules_dir_abs: str, category: str, fmt: str) -> str:
@@ -99,48 +104,37 @@ def _rule_path(target: str, rules_dir_abs: str, category: str, fmt: str) -> str:
     return f"{rules_dir_abs.rstrip('/')}/{category}.md"
 
 
-def _done_categories(checkpoints_dir: Path, fmt: str):
-    """Completed categories by scanning `<category>.<format>.json.done` markers."""
-    done = set()
-    if not checkpoints_dir.is_dir():
-        return done
-    suffix = f".{fmt}.json.done"
-    for marker in sorted(checkpoints_dir.glob(f"*.{fmt}.json.done")):
-        name = marker.name
-        if not name.endswith(suffix):
-            continue
-        cat = name[: -len(suffix)]  # strip ".<fmt>.json.done" -> <category>
-        done.add(cat)
-    return done
-
-
-def _failed_categories(checkpoints_dir: Path, fmt: str):
-    """TERMINAL-FAILED categories (confirmed failure; excluded from `pending`, NOT retried
-    on `--resume`). Marker = `<category>.<fmt>.json.failed` (sibling of `.done`); the
-    orchestrator writes its body `{unit,reason,tier}` on a `failed` ack — `unit` is the
-    category, read in-body (covers the no-record-body failure case); falls back to the
-    filename stem (categories are clean slugs, so stem derivation is reliable). A crash
-    with no `failed` ack leaves no marker → category stays pending and IS retried
-    (crash ≠ confirmed terminal failure)."""
-    failed = set()
-    if not checkpoints_dir.is_dir():
-        return failed
-    suffix = f".{fmt}.json.failed"
-    for marker in sorted(checkpoints_dir.glob(f"*.{fmt}.json.failed")):
-        name = marker.name
-        if not name.endswith(suffix):
-            continue
-        cat = None
-        try:
-            body = json.loads(marker.read_text(encoding="utf-8"))
-            if isinstance(body, dict):
-                cat = body.get("unit") or None
-        except (OSError, ValueError):
-            cat = None
-        if not cat:
-            cat = name[: -len(suffix)]  # strip ".<fmt>.json.failed" -> <category>
-        failed.add(cat)
-    return failed
+def _judge_categories(checkpoints_dir: Path, categories, fmt: str):
+    """done/failed = FORWARD marker-path computation over the canonical unit set —
+    the SAME judgment primitive T1 (`list_clusters`) and scout
+    (`list_scout_batches`) use: for each canonical unit id `<category>.<fmt>`
+    (single-source `rule_unit_ids` formula) encode the exact
+    `<safe(uid)>.json.done|.failed` path with the SHARED
+    `init_tier.safe_unit_filename` encoding and `is_file()` = terminal. NEVER a
+    glob + record-body-field / filename-stem reverse lookup (identity-immune:
+    a stem is a truncated form of long ids, and record bodies may drift or be
+    absent). Returns (done_cats, failed_cats, orphan_names); the failed marker
+    body's `unit` field is read only as a DIAGNOSTIC CONTRAST (a mismatch is
+    stderr-warned, never load-bearing)."""
+    done, failed = set(), set()
+    uids = rule_unit_ids(categories, fmt)
+    for cat, uid in zip(categories, uids):
+        _cp, dm, fm = forward_marker_paths(checkpoints_dir, uid)
+        if Path(dm).is_file():
+            done.add(cat)
+        elif Path(fm).is_file():
+            failed.add(cat)
+            try:
+                body = json.loads(Path(fm).read_text(encoding="utf-8"))
+                body_unit = body.get("unit") if isinstance(body, dict) else None
+            except (OSError, ValueError):
+                body_unit = None
+            if body_unit and body_unit != uid:
+                print(f"note: failed marker body unit {body_unit!r} != canonical "
+                      f"unit id {uid!r} (diagnostic only; judgment is marker-path "
+                      f"based)", file=sys.stderr)
+    orphans = orphan_markers(checkpoints_dir, uids)
+    return done, failed, orphans
 
 
 def _write_category_input(inputs_dir: Path, category: str, controls: list):
@@ -200,6 +194,12 @@ def main():
     if args.offset < 0:
         print("error: --offset must be >= 0", file=sys.stderr)
         return 2
+    if args.limit is not None and args.limit < 1:
+        # an empty page with effective_limit=0 would report SUCCESS and spin an
+        # offset-advancing orchestrator forever (validation symmetric with --offset)
+        print(f"error: --limit must be >= 1 (got {args.limit}). recipe: omit --limit "
+              f"for the full pending list, or pass >= 1", file=sys.stderr)
+        return 2
     for label, raw in (("--max-unit-bytes", args.max_unit_bytes),
                        ("--orch-budget-bytes", args.orch_budget_bytes)):
         if _parse_bytes(label, raw) < 0:
@@ -229,8 +229,13 @@ def main():
 
     checkpoints_dir = (Path(args.checkpoints).resolve() if args.checkpoints
                        else (inv_path.parent / "checkpoints" / "t3").resolve())
-    done = _done_categories(checkpoints_dir, args.format)
-    failed = _failed_categories(checkpoints_dir, args.format)
+    done, failed, orphans = _judge_categories(checkpoints_dir, categories, args.format)
+    # orphan audit (fail-soft, same shape as the other two enumerators): markers
+    # whose encoded filename matches no canonical unit id warn on stderr and
+    # NEVER enter done/failed/pending.
+    for name in orphans:
+        print(f"warn: orphan marker (no canonical unit id matches; audit only, "
+              f"not counted): {name}", file=sys.stderr)
     # controls grouped by category (one pass) for materialization
     by_cat = {}
     if args.materialize:
@@ -264,12 +269,15 @@ def main():
             # forward-derived marker path; the dispatcher's --retry-failed
             # deletes it at claim)
             reincluded += 1
+        # advertised marker paths = the SAME forward encoding the judgment used
+        # (single source; advertisement and judgment cannot diverge)
+        _cp, dm, fm = forward_marker_paths(checkpoints_dir, uid)
         item = {
             "category": cat,
             "format": args.format,
             "rule_path": _rule_path(target_abs, rules_dir_abs, cat, args.format),
-            "done_marker": str(checkpoints_dir / f"{uid}.json.done"),
-            "failed_marker": str(checkpoints_dir / f"{uid}.json.failed"),
+            "done_marker": dm,
+            "failed_marker": fm,
         }
         if args.materialize:
             ipath, nbytes = _write_category_input(inputs_dir, cat, by_cat.get(cat, []))

@@ -340,14 +340,43 @@ T1 的**结构化记录**(无原始码,仍**每簇一份**、粒度与打包无�
 SHALL 回退到带重叠的行窗口。对大文件 shard 的归纳结果,系统 MAY 再跑一道 verify
 pass 交叉核验,不一致时降 `confidence`。
 
+**骨架函数节点判定的控制流排除(Java)**:`chunk_sources.py` 的 Java 函数节点判定
+(JAVA_DEF 形态)SHALL 排除控制流关键字头——`while`/`for`/`do`/`if`/`switch`/`catch`/
+`finally`/`synchronized`/`try`/`return`/`new` 作为「名字 + 参数列表 + `{`」形态命中时 SHALL
+NOT 产出函数节点(这些块的行区间不是方法体;Java 是本工具族首要目标语言,把循环/分支块当
+方法节点会让大文件按循环体而非方法体切分、外层方法 `line_end` 被截断)。排除 SHALL 是
+匹配后按捕获名字的确定性过滤(小写比较),NEVER 改动对真方法(含 `synchronized` 修饰的
+方法)的识别。**输入校验**:`--in` 指向不存在的文件 SHALL 退出码 2 fail-loud(subagent
+路径 typo 得到「成功 + 空骨架」是错误信号);`--line` 取值 `< 1`(含 0)SHALL 退出码 2 +
+recipe(`--line 0` 曾因真值判断静默落入骨架模式,合法请求 0 行不存在)。
+
 #### Scenario: Big file is sharded, not fed whole
+
 - **WHEN** 一个 250KB 的 `LegacyAuthFilter.java` 含控制候选
 - **THEN** induct 收到的是候选函数切片(含上下文窗口),而非整文件;切片来自 AST 骨架定位
 
 #### Scenario: Shard disagreement lowers confidence
+
 - **WHEN** 大文件某 shard 的归纳与 verify pass 核验不一致
 - **THEN** 该控制 `confidence` 被下调,并在 report 标注
 
+#### Scenario: Java 控制流块不产生函数节点
+
+- **WHEN** 某 Java 文件含 `while (rs.next()) {…}`、`switch (mode) {…}`、`catch (Exception e) {…}`
+  块与真方法 `public String mask(String s) {…}`
+- **THEN** 骨架的函数节点含 `mask`(含其真实行区间,不被内层控制流块截断 `line_end`),
+  不含 while/switch/catch 块节点;`synchronized` **修饰的真方法**(`synchronized void x() {…}`)
+  仍被识别,`synchronized (lock) {…}` 块不产生节点
+
+#### Scenario: 不存在的输入文件 fail-loud
+
+- **WHEN** `chunk_sources.py --in <path>` 且该路径不存在
+- **THEN** 退出码 2 + stderr 指认路径;NEVER 以「成功 + 空骨架」退出 0
+
+#### Scenario: `--line 0` 被拒识而非落骨架模式
+
+- **WHEN** 调用 `chunk_sources.py --in <file> --line 0 --out <slice.json>`
+- **THEN** 退出码 2 + recipe(合法行号 ≥ 1;骨架模式 = 不传 `--line`);NEVER 静默产出整文件骨架
 ### Requirement: Cluster competing controls and designate canonical
 
 当同 `category`(如 authorization、data-masking)存在 2+ 候选时,i2 归纳 SHALL 将其
@@ -532,7 +561,7 @@ MUST NOT 手搓 `py -c "import json…"` 式内省、MUST NOT 对 `clusters.json
 (那是包装字典的 key 数,非簇数)、MUST NOT **整份读** `clusters.json` 进编排器上下文(完整记录经
 `--materialize` 下沉到 per-unit input 文件,见 `request-context-budget`)。`list_clusters.py` SHALL 读
 `<target>/.mgh-init/clusters.json` 并扫 `<target>/.mgh-init/checkpoints/t1/*.done`,stdout 输出结构化
-JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`,`pending[]` 每项为
+JSON `{repo,total,done,failed,pending[],truncated,offset,limit,effective_limit,shrunk}`,`pending[]` 每项为
 **slim 壳**`{cluster_id,category,kind,shape,candidate_count,input_path,checkpoint_path,done_marker,bytes,oversize}`
 (**不含** `evidence_files[]`/`usage_sites[]`/候选命中——已下沉进 `input_path` 文件);stderr 仅走诊断/进度;
 退出码 `0/1/2`。脚本 SHALL 支持 `--materialize <dir>`(把每簇完整输入写到
@@ -541,6 +570,13 @@ JSON `{repo,total,done,pending[],truncated,offset,limit,effective_limit,shrunk}`
 子单元或标 `oversize`)。当某页序列化字节 > `--orch-budget-bytes` 时 SHALL 自动收紧 `--limit`、报
 `effective_limit`+`shrunk:true`。脚本的 `--help` 即其 CLI 契约(承 R5.1)。簇数权威真相源 =
 `discover_controls.py` stdout `clusters` 字段 或 `list_clusters.py` stdout `total`。
+
+**簇级计数三分(切片簇失败不吞失)**:簇级 `done`/`failed` 计数 SHALL 按三分判定——某簇的
+全部单元(整簇单元,或被切分时的全部分片单元)`.done` → 该簇计 done;≥1 单元 `.failed` 且
+无 pending 单元 → 该簇计 **failed**(该簇因此对 `--retry-failed` 链路可见);否则计 pending。
+打包路径的独立(oversize/分片)簇 SHALL 同判。理由〔修复前「全片终态但含失败」的簇落入
+done 残差公式——实测 1 簇 2 片全 `.failed` → stdout `{done:1, failed:0}`,分片失败对
+`--retry-failed` 不可见、报告披露失真〕。单元级(marker)口径不变,仍是唯一真相源。
 
 **canonical id 收集器的整装守卫(分片派生仅对真超预算簇)**:整簇 id + `::shard-<n>` 分片 id 的
 canonical id 收集器(枚举器自身的 done/failed 判定与 `resume_state.py` 的复算**共享导入**,单一
@@ -584,7 +620,20 @@ deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出
 #### Scenario: list_clusters reports total vs done for resume
 
 - **WHEN** 部分簇已 done(`checkpoints/t1/<cluster_id>.json.done` 存在)后再次运行
-- **THEN** `list_clusters.py` stdout 的 `done` 反映已完成数,`pending[]` 仅含未完成簇,`total = done + len(pending)`
+- **THEN** `list_clusters.py` stdout 的 `done` 反映已完成数,`pending[]` 仅含未完成簇,`total = done + failed + len(pending)`
+
+#### Scenario: 分片全失败的簇计 failed(对 retry-failed 可见)
+
+- **WHEN** 某 1 簇被物化为 2 个 shard 单元、两个 `.failed` marker 全部在盘(无任何 `.done`),
+  再次运行 `list_clusters.py`
+- **THEN** stdout 报 `done:0, failed:1, pending:0`(簇计 failed);该簇在 `--include-failed`
+  重列下以 canonical shard id 重新进入 `pending[]`,`--retry-failed` 链路可见——修复前同一磁盘
+  状态实测报 `{done:1, failed:0}`(失败被吞)
+
+#### Scenario: 打包路径独立簇同判三分
+
+- **WHEN** `--pack-bytes > 0` 模式下某独立(oversize)簇的全部 shard 单元 `.failed`
+- **THEN** 该簇计 failed(NEVER 计入 `independent_done`);`cluster_done` 只数全 `.done` 簇
 
 #### Scenario: list_clusters is self-contained and offline
 
@@ -606,7 +655,7 @@ deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出
 
 - **WHEN** 某 cluster 物化输入 `bytes` > `--max-unit-bytes`
 - **THEN** `list_clusters.py` 按候选命中组切分为 `<cluster_id>::shard-<n>` 子单元,
-  每子单元 `bytes` ≤ `--max-unit-bytes` 且有独立 `input_path`/`checkpoint_path`;`pending[]` 不出现超阈值整簇
+      每子单元 `bytes` ≤ `--max-unit-bytes` 且有独立 `input_path`/`checkpoint_path`;`pending[]` 不出现超阈值整簇
 
 #### Scenario: Fitting cluster derives no shard id(整装守卫)
 
@@ -620,19 +669,19 @@ deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出
 
 - **WHEN** 一页 `pending[]` 序列化字节 > `--orch-budget-bytes`
 - **THEN** `list_clusters.py` 自动收紧 `--limit`,stdout 报 `effective_limit` + `shrunk:true`(stderr 告警),
-  编排器据 `offset`/`effective_limit` 翻页
+      编排器据 `offset`/`effective_limit` 翻页
 
 #### Scenario: input filename stem is length-capped for overlong cluster_id
 
 - **WHEN** 一条 legacy `cluster_id` 超过文件名 stem 上限(如 267 字符,旧版 discover 产出、未经上游长度约束)
 - **THEN** `--materialize` 写出 `<inputs>/<safe(id)>.input.json`,其文件名 stem 被截到 ≤ 上限(保留尾部判别段),
-  文件成功创建;envelope `cluster_id` 字段仍为完整 canonical id
+      文件成功创建;envelope `cluster_id` 字段仍为完整 canonical id
 
 #### Scenario: one unmaterializable cluster does not abort the batch
 
 - **WHEN** `clusters.json` 含一条物化写失败(`OSError`)的簇,`--materialize` 枚举它
 - **THEN** 该簇被写 `.failed` 终态 marker(文件名可写)、stderr 报原因、stdout `failed` 计数 +1,
-  **其余簇照常物化**,退出码 `0`;若 `.failed` 亦写不进 → 退出码 `2` fail-loud,不静默丢簇
+      **其余簇照常物化**,退出码 `0`;若 `.failed` 亦写不进 → 退出码 `2` fail-loud,不静默丢簇
 
 #### Scenario: Packing partitions deterministically within one category
 
@@ -782,40 +831,65 @@ provisional `source` 标记 → `scout_candidates.json`。编排器 SHALL 以 `m
 SHALL 由 `ceil(Σtarget_bytes / batch_bytes)` **涌现而出**,而非固定常量。每批 SHALL 落
 `checkpoints/scout/<batch_id>.json.done`;`--resume` MUST 跳过已 done 批次。
 
+**计划自描述与 `--check` 退出码**:`plan_scout.py` 生成时 SHALL 把生成所用
+`batch_bytes`/`batch_cap` 记入 `scout_plan.json` 顶层(自描述);`--check` 校验批预算 SHALL
+优先使用 plan 记录值(plan 未记录时回退 CLI `--batch-bytes`,兼容存量 plan)。`--check` 对
+损坏 plan(JSON 不可解析 / wrapper 形状错)SHALL 退出码 **2**(fail-loud 边界校验统一语义,
+闸门 recipe 只认 2),NEVER 退出码 1。理由〔自定义批字数生成的合法 plan 在缺省 `--check`
+下按默认值误报违例 → 回退循环;损坏 plan 报 1 会被编排器当作可重试通用错而非闸门违例〕。
+
 编排器取得「待跑批清单」MUST 经确定性叶脚本 `list_scout_batches.py`(见「Deterministic
 scout-batch enumeration for fan-out」),MUST NOT 手挖 `scout_plan.json`、MUST NOT `py -c`
 内省。`merge_scout.py` 折叠后,`scout_candidates.json` 与改写后的 `controls_candidates.json`
 为**终态**,编排器 MUST NOT 对其二次聚合或重切批。
 
 #### Scenario: Batches sized by bytes, co-located by package
+
 - **WHEN** scout 目标含同一 `com/acme/security/` 包下的多个相关文件
 - **THEN** `scout_plan.json` 的某批同时包含这些文件,且该批累计 bytes ≤ `--scout-batch-bytes`
 
 #### Scenario: Oversize single file is sliced, not fed whole
+
 - **WHEN** scout 目标含一个 250KB 的 `LegacyGuard.java`,而 `--scout-batch-bytes` 为 96KB
 - **THEN** 该文件经 `chunk_sources.py` 切成函数切片入批,而非整文件塞入一个 scout-reader
 
+#### Scenario: 自定义批字数的 plan 在缺省 --check 下零违例
+
+- **WHEN** 以 `--batch-bytes 204800` 生成 plan(顶层记录该值),随后不传 `--batch-bytes`
+  运行 `plan_scout.py --check <plan>`
+- **THEN** 校验按 plan 记录的 204800 判预算,合法 plan 退出码 0(修复前按缺省 98304 误报违例);
+  存量无记录 plan 回退 CLI 值,行为不变
+
+#### Scenario: 损坏 plan 的 --check 退出码 2
+
+- **WHEN** `scout_plan.json` 内容不是合法 JSON(或顶层不是 wrapper dict)
+- **THEN** `plan_scout.py --check` 退出码 **2** + stderr 诊断(NEVER 退出码 1)
+
 #### Scenario: Batch count emerges from data, parallel waves bounded
+
 - **WHEN** scout 目标共 ~9.6MB、`--scout-batch-bytes` 96KB、`max_concurrent` 8
 - **THEN** `scout_plan.json` 产出约 100 批,编排器以每波 8 并行跑完所有批
 
 #### Scenario: Merge operates on structured records only
+
 - **WHEN** scout-merge 运行
 - **THEN** 其输入为各 batch 的结构化候选 JSON(无原始源码),上下文规模远小于任一
   scout-reader;跨批重复报告的同一控制被去重归一
 
 #### Scenario: Resume skips completed batches
+
 - **WHEN** scout fan-out 中途断开,随后 `mgh-init --resume`
 - **THEN** 已 done 的批次被跳过,仅继续 pending 批次,`scout_candidates.json` 最终完整
 
 #### Scenario: Pending work-list obtained via leaf script, not hand-mining
+
 - **WHEN** 编排器进入 scout fan-out
 - **THEN** 它先调用 `list_scout_batches.py` 取 `pending[]` 再逐批扇出;不出现 `py -c` 挖 `scout_plan.json` 或 `Write _prep_scout_batches.py`
 
 #### Scenario: Merged artifacts are terminal
+
 - **WHEN** `merge_scout.py` 完成,`scout_candidates.json` 落盘
 - **THEN** 编排器不再对其二次聚合或重切批(不出现 `_aggregate_scout.py` 之类重实现)
-
 ### Requirement: Self-audit scout rejections to bound false negatives
 
 scout 批次完成后,系统 SHALL 随机抽取 `--scout-audit-pct`(默认 15%)个被 scout 判定
@@ -1169,6 +1243,9 @@ LLM subagent 产出的 scout 候选 JSON SHALL 是合法 JSON,每条 candidate S
 `merge_scout.py` 折入(`main()`)SHALL **NOT** 在畸形输入上抛未捕获异常(原始 traceback):
 - 破损 JSON(`--scout`/`--candidates`/`--clusters` 任一 `json.loads` 失败)→ stderr 出 `lineno/colno/msg`
   诊断、stdout 出结构化错误 JSON(含 `error`/`file`/`lineno`/`colno`/`nearby`)、退出码 `1`;
+- **合法 JSON 但形状错**(wrapper 非 dict、`candidates` 非 list、candidate 非 dict、cluster 记录
+  非 dict 等)→ 同形结构化错误(含 `error`/`file`/`shape` 诊断)+ 退出码 `1`,NEVER 裸崩
+  (audit 路径同判——该路径不经 `--check`,裸崩 = 无闸门);
 - 缺 `category` 的 candidate(含 `audit_found[]` 路径,该路径不经 `--check`)→ `_normalize` **跳过**该
   candidate、stderr warn、退出码 `0`,stdout 成功摘要 SHALL 含 `skipped` 计数显式披露丢弃数。
 
@@ -1176,25 +1253,36 @@ LLM subagent 产出的 scout 候选 JSON SHALL 是合法 JSON,每条 candidate S
 `discover_controls.form_clusters`(共享逻辑;`_normalize` 跳过即阻断缺 category 候选进入)。
 
 #### Scenario: merge_scout fold-in does not crash on malformed JSON
+
 - **WHEN** `merge_scout.py --candidates … --scout <malformed.json> --clusters …` 被调用,且 `<malformed.json>` 不是合法 JSON
 - **THEN** 进程退出码 `1`、**不**抛未捕获 traceback;stdout 为含 `error`/`file`/`lineno`/`colno` 的结构化 JSON,stderr 出可操作诊断
 
+#### Scenario: merge_scout fold-in does not crash on wrong-shape legal JSON
+
+- **WHEN** `--candidates` 指向的文件是合法 JSON 但顶层是 list(非 wrapper dict),或
+  `candidates` 键是 dict(非 list),或 audit 路径 `audit_found[]` 含非 dict 元素
+- **THEN** 进程退出码 `1`、不抛未捕获 traceback;stdout 结构化错误指认文件与形状问题(audit
+  路径同判),NEVER 在 `form_clusters` 深处裸崩
+
 #### Scenario: merge_scout fold-in skips missing-category audit candidates
+
 - **WHEN** `audit.json::audit_found[]` 含一条缺 `category` 的 candidate(该路径不经 `--check`)
 - **THEN** `merge_scout.py` 折入跳过该 candidate、stderr warn 指明丢弃、退出码 `0`,stdout 摘要的 `skipped` 计数 ≥1,合法 candidate 仍正常折入
 
 #### Scenario: merge_scout fold-in reports skipped count on success
+
 - **WHEN** 折入完成且有 candidate 因缺 `category` 被跳过
 - **THEN** stdout 成功摘要 JSON 含 `skipped` 字段(非 0),`scout_candidates_added` 仅计合法折入数
 
 #### Scenario: Scout prompts require category and a JSON-safe snippet
+
 - **WHEN** 审阅 `core/prompts/stages/init-scout.md` / `init-scout-merge.md` / `init-scout-audit.md`
 - **THEN** 每份显式声明:每条 candidate `category` 必带(S4 合并 NEVER 丢弃)、`evidence_snippet` 为单行且以 `'` 代 `"`、去 `\` 的安全子串
 
 #### Scenario: form_clusters untouched by the robustness fix
+
 - **WHEN** 审阅 `discover_controls.py::form_clusters`
 - **THEN** 其 `category` 取值方式与变更前一致(未改为 `.get`);缺 `category` 的 scout 候选在 `merge_scout._normalize` 即被跳过,不进入 `form_clusters`
-
 ### Requirement: Detect optional codegraph index and gate enrichment (fail-soft)
 
 `/mgh-init` 编排器 SHALL 在起步段(步骤 0)以 Bash 检测目标项目是否具备 codegraph:`test -d
@@ -1990,7 +2078,17 @@ See capability `t1-record-schema-gate` for the validator contract.
 归一 SHALL 发生在 fold-in 写入前(T2 之前),使 T2 `init-synthesis` 与 `validate_inventory.py`
 只见到规范类名。`merge_scout.py --check` SHALL 对每条 scout candidate 断言其 `category` 归一后 ∈
 规范 8 类;未映射的非规范类 SHALL 作为违例 fail-loud 退出码 2(而非静默丢弃或放行),使类名漂移在
-**fold-in 边界**被拦截、而非等到 T2 边界(`validate_inventory.py`)或静默丢进综合。
+**fold-in 边界**被拦截、而非等到 T2 边界(`validate_inventory.py`)或静默丢进综合。**fold-in 主
+路径同判**:折入(非 `--check`)遇到未映射非规范类 SHALL 同样退出码 2 fail-loud(audit 路径
+同判,NEVER「audit 无闸门」)——skip+warn 仅适用于**缺字段**候选(承「Scout candidate JSON
+robustness at the merge boundary」),未映射类名是可拦截的确定性漂移,静默丢弃即吞候选。
+
+**fold-in 双文件写的原子性与凭证写序**:折入对 `controls_candidates.json` 与 `clusters.json`
+两文件的重写 SHALL 各自原子(tmp + `os.replace`);写序 SHALL 为 **clusters 先、candidates 后**
+(完成凭证 `provenance.scout_merged` 随 candidates 最后落盘)——凭证存在 ⟺ 两文件一致。崩溃
+于两写之间 → 凭证缺失 → 重折幂等收敛(已折候选在去重集内被跳过、`fresh` 为空不再追加簇),
+NEVER 出现「candidates 已并、clusters 缺 scout 簇」的带病进 T1 窗口(凭证在而簇缺失的旧窗口
+形态被写序结构性消灭)。
 
 #### Scenario: Non-canonical scout category is normalized at fold-in
 
@@ -2005,6 +2103,20 @@ See capability `t1-record-schema-gate` for the validator contract.
 - **THEN** 退出码 2,violations 报告该 candidate 的 index 与「category 非规范 8 类」issue;
   编排器据此回退重跑 scout-merge,而非带着漂移类名进入 T2
 
+#### Scenario: fold-in 主路径对未映射类别同样 fail-loud
+
+- **WHEN** `audit.json::audit_found[]` 或 `scout_candidates.json` 含 `category: "runtime-guard"`
+  的候选,fold-in(非 `--check`)运行
+- **THEN** 退出码 2 + 指认候选来源与类别;NEVER skip+warn 静默丢弃(缺 `category`/`file` 字段的
+  候选仍走既有 skip+warn + `skipped` 计数语义)
+
+#### Scenario: fold-in 两写之间崩溃后重折幂等收敛
+
+- **WHEN** fold-in 写完 `clusters.json` 后、写 `controls_candidates.json` 前进程被杀,随后重跑
+  fold-in
+- **THEN** 凭证(provenance)缺失 → 重折执行;已折候选在去重集内被识别为重复(`fresh` 为空),
+  clusters 不被重复追加,最终两文件一致且凭证落盘;NEVER 出现凭证在而 scout 簇缺失的带病态
+
 #### Scenario: Canonical categories pass the fold-in check unchanged
 
 - **WHEN** scout candidate 携带规范类名(如 `authorization`),运行 `merge_scout.py --check` 与 fold-in
@@ -2014,7 +2126,6 @@ See capability `t1-record-schema-gate` for the validator contract.
 
 - **WHEN** 审阅 `merge_scout.py` / `validate_inventory.py` 的类别常量来源
 - **THEN** 两脚本引用同一规范 8 类 + 别名表(单一真相源),不允许各自硬编码一份
-
 ### Requirement: Run directory is git-isolated by deterministic co-write
 
 `write_runconfig.py`(step 0 原子写 run 配置)SHALL 以**确定性副作用** co-write

@@ -527,5 +527,67 @@ class TestListRuleJobsMaterialize(unittest.TestCase):
         self.assertEqual(len(data["pending"]), 1)
 
 
+
+# ---- B2: pending[] advertised marker paths share the forward encoding (M5-caliber
+# fix-mgh-init-enumeration-caliber) ----
+
+class TestPendingAdvertisedPathsForwardEncoded(unittest.TestCase):
+    """pending[] advertises checkpoint_path/done_marker/failed_marker produced by the
+    SAME forward encoding the done/failed judgment uses (init_tier.forward_marker_paths).
+    Pre-fix the advertisement was a bare `checkpoints_dir / f"{bid}.json"` concat while
+    the judgment encoded — a batch_id carrying `::` (or one so long its stem truncates)
+    advertised paths the dispatcher could write to that the judgment would never see:
+    the batch stayed pending forever (infinite re-dispatch). The dead
+    `forward_marker_paths` import in the module is exactly the encoding the
+    advertisement should have been using."""
+
+    def setUp(self):
+        self.m = _load("list_scout_batches")
+        self.it = _load("init_tier")
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_lsb_fwd_"))
+        self.cp = self.d / "checkpoints" / "scout"
+
+    def _run(self, batches, *extra):
+        p = self.d / "scout_plan.json"
+        p.write_text(json.dumps({"repo": str(self.d), "targets_total": len(batches),
+                                 "truncated": False, "batches": batches},
+                                ensure_ascii=False), encoding="utf-8")
+        argv = ["list_scout_batches.py", "--scout-plan", str(p),
+                "--checkpoints", str(self.cp)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.argv = old
+        return code, json.loads(out.getvalue()), err.getvalue()
+
+    def test_weird_bid_advertised_paths_are_forward_encoded(self):
+        bid = "pkg::weird::" + "9" * 40          # `::` + overlong → encoding is NOT identity
+        code, data, _ = self._run([{"batch_id": bid, "targets": [{"file": "w.java"}],
+                                    "bytes": 10, "needs_slice": []}])
+        self.assertEqual(code, 0)
+        (item,) = data["pending"]
+        for key in ("checkpoint_path", "done_marker", "failed_marker"):
+            self.assertEqual(item[key],
+                             getattr(self.it, "forward_marker_paths")(self.cp, bid)[
+                                 {"checkpoint_path": 0, "done_marker": 1,
+                                  "failed_marker": 2}[key]])
+            self.assertNotIn(":", Path(item[key]).name)   # NTFS ADS separator encoded out
+
+    def test_marker_written_at_advertised_path_makes_batch_terminal(self):
+        bid = "pkg::gone::" + "7" * 40
+        _, data, _ = self._run([{"batch_id": bid, "targets": [], "bytes": 0,
+                                 "needs_slice": []}])
+        (item,) = data["pending"]
+        Path(item["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(item["done_marker"]).write_text("", encoding="utf-8")
+        _, data2, _ = self._run([{"batch_id": bid, "targets": [], "bytes": 0,
+                                  "needs_slice": []}])
+        self.assertEqual(data2["done"], 1)               # the dispatcher's write is visible
+        self.assertEqual(data2["pending"], [])           # NO infinite re-dispatch
+
+
 if __name__ == "__main__":
     unittest.main()

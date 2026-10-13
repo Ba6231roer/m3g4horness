@@ -221,6 +221,12 @@ def main():
     if args.offset < 0:
         print("error: --offset must be >= 0", file=sys.stderr)
         return 2
+    if args.limit is not None and args.limit < 1:
+        # an empty page with effective_limit=0 would report SUCCESS and spin an
+        # offset-advancing orchestrator forever (validation symmetric with --offset)
+        print(f"error: --limit must be >= 1 (got {args.limit}). recipe: omit --limit "
+              f"for the full pending list, or pass >= 1", file=sys.stderr)
+        return 2
     for label, raw in (("--max-unit-bytes", args.max_unit_bytes),
                        ("--orch-budget-bytes", args.orch_budget_bytes)):
         if _parse_bytes(label, raw) < 0:
@@ -278,10 +284,15 @@ def main():
             # canonical batch_id (fm path below is the same forward-derived
             # marker path; the dispatcher's --retry-failed deletes it at claim)
             reincluded += 1
-        base = checkpoints_dir / f"{bid}.json"
-        cp = str(base)
-        dm = str(base.with_name(base.name + ".done"))
-        fm = str(base.with_name(base.name + ".failed"))
+        # Advertised paths share the FORWARD encoding the done/failed judgment uses
+        # (init_tier.forward_marker_paths — the import the judgment already consumed):
+        # a bare `checkpoints_dir / f"{bid}.json"` concat diverges from the encoded
+        # judgment path for any id that is not a clean slug (`::` separators, stem
+        # truncation) — the dispatcher writes the marker at the advertised path, the
+        # judgment never sees it → the batch stays pending forever (infinite
+        # re-dispatch). Judgment and advertisement are now byte-identical by
+        # construction.
+        cp, dm, fm = forward_marker_paths(checkpoints_dir, bid)
         slice_dir = str((init_dir / "slices" / "scout" / _safe_name(bid)).resolve())
         if materialize:
             ipath, _ = _write_batch_input(inputs_dir, bid, batch, wrapper.get("repo"))

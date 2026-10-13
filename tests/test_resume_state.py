@@ -1313,5 +1313,87 @@ class TestInvalidateStaleGuard(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
+class TestRunConfigUnitBudgetLockstep(unittest.TestCase):
+    """B1 lockstep side B: resume_state's t1 recomputation feeds the run_config
+    `budgets.max_unit_bytes` into the shared collector so a custom-budget run's
+    shard markers are visible. Pre-fix the recomputation anchored the shared
+    192KB default while the dispatcher materialized at the recorded 64KB: the
+    recomputation saw only the whole-cluster id, the two shard markers were
+    invisible -> step stuck at t1 forever (the CR-1 deadlock shape revived for
+    custom budgets). Missing run_config/field -> shared default (compat anchor)."""
+
+    CID = "auth::BUDGET::bb"
+
+    def _custom_run(self):
+        # 2 candidates x ~40KB: whole cluster ~80KB — shards at the recorded
+        # 65536 budget, stays whole under the 192KB shared default
+        s = _State(no_scout=True, max_unit_bytes=65536)
+        payload = "x" * 40_000
+        cands = [{"id": f"C-{i}", "file": f"src/F{i}.java", "snippet": payload}
+                 for i in range(2)]
+        s.write_json("controls_candidates.json",
+                     {"repo": str(s.target), "candidates": cands,
+                      "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": self.CID, "category": "authorization", "kind": "auth",
+             "shape": "centralized", "evidence_files": ["src/F0.java"],
+             "usage_sites": ["src/F0.java"],
+             "candidate_ids": [c["id"] for c in cands]}], "truncated": False})
+        clusters = json.loads((s.init / "clusters.json").read_text(encoding="utf-8"))["clusters"]
+        cands_by_id = {c["id"]: c for c in cands}
+        shard_ids = sorted(set(
+            LC.collect_canonical_ids(clusters, cands_by_id, 65536, s.target)) - {self.CID})
+        self.assertEqual(len(shard_ids), 2, "fixture must shard at 65536")
+        for uid in shard_ids:
+            s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
+        return s, shard_ids
+
+    def test_custom_budget_run_step_passes_t1(self):
+        s, shard_ids = self._custom_run()
+        st = s.state()
+        self.assertEqual(st["step"], "t2")
+        self.assertEqual(st["tiers"]["t1"], {"done": 2, "failed": 0, "total": 2})
+
+    def test_collector_budget_param_is_the_switch(self):
+        # the collector itself: default parameter -> shared default (whole id);
+        # explicit recorded value -> the sharded plan the dispatcher materialized
+        s, shard_ids = self._custom_run()
+        clusters = json.loads((s.init / "clusters.json").read_text(encoding="utf-8"))["clusters"]
+        cands = json.loads(
+            (s.init / "controls_candidates.json").read_text(encoding="utf-8"))["candidates"]
+        cands_by_id = {c["id"]: c for c in cands}
+        self.assertEqual(LC.canonical_unit_ids_for_run(s.init / "clusters.json"),
+                         [self.CID])                      # default anchor unchanged
+        ids = LC.canonical_unit_ids_for_run(s.init / "clusters.json", 65536)
+        self.assertEqual(sorted(ids), shard_ids)          # run_config-caliber plan
+
+    def test_default_budget_run_unchanged(self):
+        # compat anchor: a run recording the DEFAULT budget recomputes exactly as
+        # before (the value equals the shared default -> same id set, same step)
+        s = _State(no_scout=True)
+        payload = "x" * 110_000
+        cands = [{"id": f"C-{i}", "file": f"src/F{i}.java", "snippet": payload}
+                 for i in range(3)]
+        s.write_json("controls_candidates.json",
+                     {"repo": str(s.target), "candidates": cands, "truncated": False})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [
+            {"cluster_id": self.CID, "category": "authorization", "kind": "auth",
+             "shape": "centralized", "evidence_files": ["src/F0.java"],
+             "usage_sites": ["src/F0.java"],
+             "candidate_ids": [c["id"] for c in cands]}], "truncated": False})
+        clusters = json.loads((s.init / "clusters.json").read_text(encoding="utf-8"))["clusters"]
+        cands_by_id = {c["id"]: c for c in cands}
+        shard_ids = sorted(set(
+            LC.collect_canonical_ids(clusters, cands_by_id,
+                                     LC.DEFAULT_MAX_UNIT_BYTES, s.target)) - {self.CID})
+        self.assertEqual(len(shard_ids), 3)
+        for uid in shard_ids:
+            s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
+        st = s.state()
+        self.assertEqual(st["step"], "t2")
+        self.assertEqual(st["tiers"]["t1"], {"done": 3, "failed": 0, "total": 3})
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,16 +71,26 @@ def _run_check(plan_path: Path, batch_bytes: int):
     """R5.9 boundary check: validate an existing scout_plan.json. Asserts batches[] is
     non-empty when there are targets, every batch is within byte budget (an over-budget
     batch MUST be a sliced single-file batch), and needs_slice lists only oversize files.
-    Returns exit 0 ok / 2 violation."""
+    The budget judged is the plan's RECORDED generation-time `batch_bytes` (the plan is
+    self-describing) — falling back to the CLI value only for legacy plans without the
+    record; a custom-budget plan re-checked with default flags is therefore
+    zero-violation instead of mis-flagged against 98304. Unreadable / malformed-JSON /
+    wrong-wrapper-shape plans exit 2 (boundary-check fail-loud; the orchestrator gate
+    recipe only recognizes 2 — exit 1 would read as a retryable generic error).
+    Returns exit 0 ok / 2 violation or corrupt input."""
     violations = []
     try:
         wrapper = json.loads(plan_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        print(f"error: malformed scout_plan.json: {e}", file=sys.stderr)
-        return 1
+        print(f"error: unreadable or malformed scout_plan.json ({plan_path}): {e}",
+              file=sys.stderr)
+        return 2
     if not isinstance(wrapper, dict) or not isinstance(wrapper.get("batches"), list):
         print("error: scout_plan.json must be a wrapper {repo, batches[], ...}", file=sys.stderr)
-        return 1
+        return 2
+    recorded = wrapper.get("batch_bytes")
+    if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded > 0:
+        batch_bytes = recorded
     batches = wrapper["batches"]
     targets_total = wrapper.get("targets_total", 0)
     if targets_total and not batches:
@@ -183,6 +193,12 @@ def main():
     payload = {
         "repo": sk.get("repo"),
         "generated_by": "plan_scout.py",
+        # self-describing: the generation-time budgets ride the plan so a later
+        # `--check` (possibly with default flags) judges by THESE values, not the
+        # CLI defaults (M2 — a custom-budget plan is zero-violation under a
+        # default re-check)
+        "batch_bytes": args.batch_bytes,
+        "batch_cap": args.batch_cap,
         "targets_total": len(targets),
         "regex_known_count": regex_known_count,
         "truncated": truncated,

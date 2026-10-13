@@ -26,6 +26,15 @@ sidecar `waves_run` SHALL 为累计派发单元数(字段名不变,语义重定�
 **枚举 stdout `repo` 锚**:枚举脚本 stdout SHALL 均携带 `repo`(目标仓绝对根)锚字段,
 dispatcher 以之为锚树校验与子进程 cwd 的依据。
 
+**单元预算透传(run_config 消费闭环)**:scout/t1/t3 三个单元枚举 tier,dispatcher 在内部
+调用枚举 CLI 前 SHALL 读取 init 目录(既有 plan-artifact 锚定)的 `run_config.json`,其
+`budgets.max_unit_bytes` 存在且为正整数时 SHALL 以 `--max-unit-bytes <值>` 透传给枚举器;
+缺 run_config 或字段缺失时 SHALL 不附加该 flag(枚举器用自身默认,行为与既有 run 一致)。
+理由〔用户在 step 0 传入的自定义单元预算此前只被记录、无消费方——切分仍按枚举器默认 192KB,
+预算静默失效;透传使「记录的预算」与「物化切分用的预算」恒同值,且与 resume 侧 t1 复算的
+同 change 锁步(见 `resume-step-discipline` 能力「T1 终态闸门」requirement)——漏任一侧会
+造成派发物化与状态机复算口径分叉,复活分片簇卡死形态〕。
+
 **T1 scout 闸门透传**:`list_clusters.py` 因 scout 层未完成而退出码 2
 (`scout-incomplete-gate`)时,dispatcher SHALL 以退出码 2 fail-loud 并透传其 stderr recipe
 (先完成 scout 层),NEVER 将闸门拒识当作单元 crash 进入重派循环。sdr 枚举 gate 形退出码 2
@@ -67,6 +76,20 @@ SHALL 保证在宿主硬超时之前软时限触发(停发新补位、等在飞�
 - **WHEN** 补位取到的下一单元其 `.done`(或 `.failed`)marker 已在磁盘
 - **THEN** dispatcher 不 spawn 该单元,直接取后续单元;磁盘 marker 仍是唯一真相源,已终态
   单元 NEVER 再次 spawn
+
+#### Scenario: run_config 单元预算被透传给枚举器
+
+- **WHEN** 某 run 的 `run_config.json` 记录 `budgets.max_unit_bytes: 65536`,dispatcher 以
+  `--tier scout`/`--tier t1`/`--tier t3` 内部调用枚举 CLI
+- **THEN** 枚举命令携带 `--max-unit-bytes 65536`,超 64KB 的簇按该值切分/标 oversize(NEVER
+  按枚举器默认 192KB);同 run 的 resume 侧 t1 复算使用同一 run_config 值,两侧口径恒一致
+
+#### Scenario: 缺 run_config 时枚举命令形态不变
+
+- **WHEN** init 目录无 `run_config.json`(或 `budgets.max_unit_bytes` 缺失/非正整数),
+  dispatcher 调用枚举 CLI
+- **THEN** 枚举命令不附加 `--max-unit-bytes`,枚举器按自身默认切分——与既有 run 行为一致
+  (透传是增量,不改变无 run_config 场景)
 
 #### Scenario: 时间预算耗尽干净早退
 
@@ -116,7 +139,6 @@ SHALL 保证在宿主硬超时之前软时限触发(停发新补位、等在飞�
   (`p99(完成单元运行时)× 2`,向下取整到分钟,不低于 900);文案 SHALL 注明四级超时不变式与
   「宁慢勿杀」依据(被杀单批无 marker 留 pending,重派浪费一整跑)、该判据的**失效面**
   (字节静默不区分「等网关排队」与「真卡死」)、关闭取值(`0`)与标定口径
-
 ### Requirement: 任务消息由固定模板与逐字字段填充构造
 
 fan-out 任务消息 SHALL 由固定模板 + 逐字字段填充构造:`fanout_runner.py` 内嵌 tier

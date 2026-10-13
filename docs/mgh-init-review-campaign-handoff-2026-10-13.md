@@ -15,12 +15,11 @@
 | 1 | `fix-mgh-init-resume-state-machine` | ✅ 已 apply(2ae05fb)+ 归档(15f72b2),VERSION 0.1.68 |
 | 2 | `fix-mgh-guard-enforcement-integrity` | ✅ 已 apply(37a9b9b)+ 归档(4b35700),VERSION 0.1.69 |
 | 3 | `fix-mgh-fanout-dispatcher-hygiene` | ✅ 已 apply + 归档(1557e4d,archive/2026-10-13-fix-mgh-fanout-dispatcher-hygiene),VERSION 0.1.70;specs 5 MODIFIED 已回写主规格 fanout-dispatch 并随该提交推送 |
-| 4 | `fix-mgh-init-distribution-links` | ✅ 已 apply(VERSION 0.1.71),归档见本行更新时的会话;拍板项 A/B 状态见三.14 |
-| 5-7 | 见第四节 | 未 propose |
+| 4 | `fix-mgh-init-distribution-links` | ✅ 已 apply + 归档(8b7e7a8,archive/2026-10-13-fix-mgh-init-distribution-links),VERSION 0.1.71;specs 5 能力 8 条已回写;拍板项 A/B 状态见三.14 |
+| 5 | `fix-mgh-init-enumeration-caliber` | ✅ 已 apply + 归档(archive/2026-10-14-fix-mgh-init-enumeration-caliber),VERSION 0.1.72;specs 11 MODIFIED 已回写主规格(control-discovery 5 / request-context-budget 3 / fanout-dispatch、resume-step-discipline、rules-emission 各 1);apply 期新发现见三.15 |
+| 6-7 | 见第四节 | 未 propose |
 
-**下一步**:指挥部会话处理批次 4 的两个拍板项回执(三.14:A 需维护者参与一次 opencode live
-验证;B 是第 10 类基线 186 行的全家族扫尾范围二选一),然后 propose 批次 5(`fix-mgh-init-
-enumeration-caliber`,规划见四;动笔前重新核实 HEAD,见三.4;runner 新形态基线见三.13)。
+**下一步**:指挥部会话说「propose 批次 6」;批次 4 拍板项 A/B(三.14)回执仍开放。
 
 ## 二、批次 2 摘要(apply 前必读)
 
@@ -114,6 +113,14 @@ enumeration-caliber`,规划见四;动笔前重新核实 HEAD,见三.4;runner 新
     安装布局路径、stage/fragment 引用改兄弟相对表述;各命令壳三面镜像须同步核对;零行为
     风险);(b2) 并入批次 7 顺带扫(批次 7 体量已大,209→186 行机械改写会稀释其评审密度)。
     两案均须同步把 `tools/purity_allowlist.txt` 对应条目删净(基线只减不增)。
+
+15. **批次 5 apply 期新发现(批次 4 遗留,未在本批修)**:`test_fanout_runner::
+    TestAgentCloneParity::test_clone_hard_constraints_and_output_match_base` 在 HEAD 8b7e7a8
+    即红(stash 对照确认):批次 4 删了三面 **fanout 克隆** agent(init-scout/induct/rulewriter-fanout)
+    的 `oversize` ack 枚举,但 **base** agent(init-scout/induct/rulewriter,opencode+claude 两面)
+    的回传 ack 行仍保留 `oversize <绝对路径>` → 克隆 parity 断言(Hard constraints/Output 段逐字同)
+    失败。修法 = base 面同步删该枚举(与批次 4 同判:stage Return 段未定义 oversize ack),双面镜像
+    同步;归批次 6/7 的分发面对账面顺带修,或独立一行小批。
 
 ## 四、剩余批次自包含规划(propose 时直接取用)
 

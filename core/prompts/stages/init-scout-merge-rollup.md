@@ -21,13 +21,15 @@ final merged scout candidate set.
 ## Input
 The orchestrator's message supplies:
 - `repo` (anchor root, absolute);
-- each shard summary's absolute `checkpoint_path` (`rollup.summary_paths`);
+- the absolute `rollup_manifest.json` path (`rollup.summary_paths_manifest`) —
+  its `summary_paths[]` lists every shard summary's absolute `checkpoint_path`;
 - the absolute final candidate-set `output` path
   (`<abs target>/.mgh-init/scout_candidates.json`);
 - the absolute `done_marker` to touch
   (`<abs target>/.mgh-init/checkpoints/scout/merge.json.done`).
 
-Read each summary file in `rollup.summary_paths`. Each is a JSON
+First `Read` the manifest at `summary_paths_manifest`, then read each summary
+file its `summary_paths[]` lists. Each is a JSON
 `{"node":"scout-merge-partial","shard_id","batches","repo","candidates":[...],"unresolved":[...],"notes":...}`
 whose `candidates[]` already use the final candidate shape (per the S4
 whole-merge output contract). A summary that is missing/unreadable = a shard
@@ -52,9 +54,9 @@ scout aggregate) — every model request stays ≤ budget. Do NOT read or re-der
 the raw batch records.
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅 `rollup.summary_paths` 列出的 summary 文件)/ `Glob` / `Grep` ——`path` SHALL 锚
-  repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/
-  `findstr`/`find`/… 同禁越界。
+- 读侧:`Read`(仅 rollup manifest 本身 + 其 `summary_paths[]` 列出的 summary 文件)/ `Glob` / `Grep`
+  ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里
+  直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。
 - 脚本侧:无(本层只处理结构化摘要);确定性脚本由**编排器**调用。
 - `Write`/`Edit`:仅限 orchestrator 给定的最终候选集 `output` 路径。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**NEVER** 写任何

@@ -493,6 +493,131 @@ class TestListClustersPacking(unittest.TestCase):
         self.assertTrue(data["shrunk"])  # pack items carry members[] -> heavy items
         self.assertEqual(data["effective_limit"], 1)
 
+# ---- cluster-level three-way counting (fix-mgh-init-enumeration-caliber, H4/D1) ----
+
+class TestClusterThreeWayCounting(unittest.TestCase):
+    """A cluster whose units are ALL terminal with >=1 `.failed` is counted FAILED —
+    never rolled into `done` by the residual formula. Pre-fix shape: 1 cluster
+    materialized as 2 shards, both `.failed` -> stdout `{done:1, failed:0}` (the
+    shard failures were invisible to --retry-failed and the report undercounted).
+    Three-way: all units `.done` -> done; all terminal with >=1 `.failed` -> failed;
+    otherwise pending. Both enumeration paths (unpacked + packed-mode independent
+    cluster) and the packed `cluster_done` disclosure follow the same judgment."""
+
+    def setUp(self):
+        self.lc = _load_lc()
+        self.d = Path(tempfile.mkdtemp(prefix="mgh_3way_"))
+        self.inputs = self.d / "inputs" / "t1"
+        self.cp = self.d / "checkpoints" / "t1"
+
+    def _write(self, clusters, cands):
+        p = self.d / "clusters.json"
+        p.write_text(json.dumps({"repo": str(self.d), "clusters": clusters,
+                                 "truncated": False}, ensure_ascii=False), encoding="utf-8")
+        (self.d / "controls_candidates.json").write_text(
+            json.dumps({"candidates": cands}, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def _run(self, clusters_path, *extra):
+        argv = ["list_clusters.py", "--clusters", str(clusters_path),
+                "--checkpoints", str(self.cp),
+                "--candidates", str(self.d / "controls_candidates.json"),
+                "--materialize", str(self.inputs)] + list(extra)
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.lc.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def _sharded(self, cid, n=2):
+        """One cluster whose absolutized body shards into n units under --max-unit-bytes 4000."""
+        cluster = {"cluster_id": cid, "category": "crypto", "kind": "other",
+                   "shape": "centralized", "evidence_files": ["s.java"],
+                   "usage_sites": ["s.java"],
+                   "candidate_ids": [f"S-{cid}-C-{i}" for i in range(n)]}
+        cands = [{"id": f"S-{cid}-C-{i}", "file": f"s{i}.java", "line": i,
+                  "category": "crypto", "kind": "other", "snippet": "B" * 3000}
+                 for i in range(n)]
+        return cluster, cands
+
+    def _touch(self, item, kind):
+        Path(item[f"{kind}_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(item[f"{kind}_marker"]).write_text(
+            json.dumps({"unit": item["cluster_id"], "reason": "r", "tier": "t1"}),
+            encoding="utf-8")
+
+    def test_all_shards_failed_cluster_counts_failed_not_done(self):
+        # ① the red shape: 1 cluster x 2 shards, both .failed -> {done:0, failed:1,
+        # pending:0} (pre-fix {done:1, failed:0} — failure swallowed)
+        cluster, cands = self._sharded("crypto::F::01")
+        p = self._write([cluster], cands)
+        _, out, _ = self._run(p, "--max-unit-bytes", "4000")
+        units = json.loads(out)["pending"]
+        self.assertEqual(len(units), 2)
+        for it in units:
+            self._touch(it, "failed")
+        _, out2, _ = self._run(p, "--max-unit-bytes", "4000")
+        d2 = json.loads(out2)
+        self.assertEqual((d2["done"], d2["failed"], len(d2["pending"])), (0, 1, 0))
+        # --include-failed: the failed cluster's shards re-enter under canonical ids
+        _, out3, _ = self._run(p, "--max-unit-bytes", "4000", "--include-failed")
+        d3 = json.loads(out3)
+        self.assertEqual(d3["failed"], 1)
+        self.assertEqual(sorted(it["cluster_id"] for it in d3["pending"]),
+                         sorted(u["cluster_id"] for u in units))  # both failed shards
+
+    def test_mixed_clusters_each_lands_in_its_own_bucket(self):
+        # 3 clusters: A whole unit .done -> done; B 2 shards (1 done + 1 failed,
+        # all terminal) -> failed; C 2 shards (1 done + 1 pending) -> pending
+        a, a_cands = self._sharded("crypto::A::aa", n=1)
+        b, b_cands = self._sharded("crypto::B::bb")
+        c, c_cands = self._sharded("crypto::C::cc")
+        p = self._write([a, b, c], a_cands + b_cands + c_cands)
+        _, out, _ = self._run(p, "--max-unit-bytes", "4000")
+        units = {it["cluster_id"]: it for it in json.loads(out)["pending"]}
+        self._touch(units["crypto::A::aa"], "done")
+        self._touch(units["crypto::B::bb::shard-0"], "done")
+        self._touch(units["crypto::B::bb::shard-1"], "failed")
+        self._touch(units["crypto::C::cc::shard-0"], "done")
+        _, out2, _ = self._run(p, "--max-unit-bytes", "4000")
+        d2 = json.loads(out2)
+        self.assertEqual(d2["done"], 1)                       # A only
+        self.assertEqual(d2["failed"], 1)                     # B (all terminal, >=1 failed)
+        self.assertEqual([it["cluster_id"] for it in d2["pending"]],
+                         ["crypto::C::cc::shard-1"])          # C stays pending
+
+    def test_packed_independent_all_failed_shards_count_failed(self):
+        # ② packed mode: 2 packable clusters (all member markers .done -> the pack
+        # counts done) + 1 oversize cluster whose shards ALL .failed -> counted
+        # failed, NEVER rolled into independent_done (pre-fix done=2/failed=0)
+        small, small_cands = _pack_clusters(n_per_cat=2, cats=("crypto",))
+        big, big_cands = self._sharded("crypto::BIGPACK::zz")
+        p = self._write(small + [big], small_cands + big_cands)
+        _, out, _ = self._run(p, "--pack-bytes", "100000", "--max-unit-bytes", "4000")
+        d1 = json.loads(out)
+        pack_items = [it for it in d1["pending"] if it["cluster_id"].startswith("pack::")]
+        self.assertEqual(len(pack_items), 1)
+        for m in pack_items[0]["members"]:
+            Path(m["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(m["done_marker"]).write_text("", encoding="utf-8")
+        shard_items = [it for it in d1["pending"]
+                       if not it["cluster_id"].startswith("pack::")]
+        self.assertTrue(shard_items and all(
+            it["cluster_id"].startswith("crypto::BIGPACK::zz::shard-")
+            for it in shard_items))
+        for it in shard_items:
+            self._touch(it, "failed")
+        _, out2, _ = self._run(p, "--pack-bytes", "100000", "--max-unit-bytes", "4000")
+        d2 = json.loads(out2)
+        self.assertEqual((d2["done"], d2["failed"]), (1, 1))  # pack done; BIGPACK failed
+        self.assertEqual(d2["pending"], [])
+        self.assertEqual(d2["cluster_total"], 3)
+        self.assertEqual(d2["cluster_done"], 2)               # only all-.done clusters
+
+
 # ---- canonical-id collector whole-fits guard (fix-mgh-init-resume-state-machine) ----
 
 class TestCanonicalIdCollector(unittest.TestCase):
@@ -547,6 +672,25 @@ class TestCanonicalIdCollector(unittest.TestCase):
         self.assertEqual(sorted(ids), sorted(u[0] for u in units))
         self.assertNotIn(cid, ids)
         self.assertGreaterEqual(len(ids), 2)
+
+
+# ---- L1: no local MAX_UNIT_FILENAME_STEM redefinition (single source = init_tier) ----
+
+class TestStemCapSingleSource(unittest.TestCase):
+    """The module-level `MAX_UNIT_FILENAME_STEM = 200` local redefinition was a
+    shadowing copy of the init_tier import (self-described alias, actually an
+    independent literal) — an upstream value change would silently drift. The
+    module keeps ONLY the import."""
+
+    def test_no_local_literal_redefinition(self):
+        src = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("MAX_UNIT_FILENAME_STEM = 200", src)
+
+    def test_module_attribute_is_the_imported_single_source(self):
+        m = _load_lc()
+        import init_tier
+        self.assertEqual(m.MAX_UNIT_FILENAME_STEM, init_tier.MAX_UNIT_FILENAME_STEM)
+
 
 
 if __name__ == "__main__":

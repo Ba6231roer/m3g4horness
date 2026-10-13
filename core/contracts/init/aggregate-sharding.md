@@ -55,7 +55,8 @@ py plan_aggregate.py --node t2|scout-merge --init-dir <dir>
      "done_marker":"<abs ...>.done"}
   ],
   "truncated": false, "offset": 0, "limit": 4, "effective_limit": 4, "shrunk": false,
-  "rollup": {"summary_paths":["<abs shard checkpoint>...", "output":"<abs controls_inventory.json>",
+  "rollup": {"summary_paths_manifest":"<abs checkpoints/t2/shards/rollup_manifest.json>",
+              "output":"<abs controls_inventory.json>",
               "done_marker":"<abs checkpoints/t2/synthesis.json.done>"},
   "note": "aggregate input 400000B > budget 98304B — 4 shard(s); per-shard partial then single rollup"
 }
@@ -90,7 +91,12 @@ py plan_aggregate.py --node t2|scout-merge --init-dir <dir>
   投影记录带 `_slimmed` 标记(被截字段 + 原始字节数),痕迹记入该 shard 的 `slimmed` 披露;
   `checkpoints/t1` / `checkpoints/scout` 原件 **NEVER** 改写。瘦身后仍 > 预算(结构字段本身超限 = 病态记录)→ **退出码 2**
   fail-loud(stderr 报记录文件与字节数),零派发、零物化。
-- `rollup.summary_paths` = 各 shard 的 `checkpoint_path`(rollup subagent 仅吞这些**摘要**,非原始记录全集);
+- `rollup.summary_paths_manifest` = `checkpoints/<t2|scout>/shards/rollup_manifest.json` 的绝对路径
+  (原子写、幂等;body = `{summary_paths[]: 各 shard checkpoint 绝对路径全集, output, done_marker}`)。
+  stdout **NEVER** 携带 `summary_paths` 数组(1000 shard ≈ 100KB 会击穿 `--orch-budget-bytes` 的
+  单次回复承诺)——rollup subagent 先 `Read` manifest 取全量路径再逐份吞摘要(仅吞这些**摘要**,
+  非原始记录全集);编排器逐字透传 manifest 路径、**NEVER** 自读其内容(编排器黑盒纪律:叶脚本
+  stdout 即工作清单,聚合产物整份读 = 内省);
   `rollup.output`/`done_marker` = 终态产物(`controls_inventory.json` / `scout_candidates.json` + 其 `.done`)。
 - **scout-merge 与 t2 同构接入 dispatcher**:枚举同样 marker-aware(`.done`/`.failed` 终态 shard 移出
   `pending[]`,stdout 附 `total`/`done`/`failed`);`shard_id = scout-merge-<K>`;shard 项 `batches` 为该
@@ -102,8 +108,8 @@ py plan_aggregate.py --node t2|scout-merge --init-dir <dir>
 ```
 plan_aggregate --node t2 --materialize <shards>     # 决策 + 物化有界 shard 输入
   → per shard: spawn init-synthesis(partial, 读 shard input_path, ack 回传, 写 checkpoint_path)
-  → rollup: 单一 init-synthesis subagent 仅吞 rollup.summary_paths(各 shard 摘要)
-            → 写 controls_inventory.json + checkpoints/t2/synthesis.json.done
+  → rollup: 单一 init-synthesis subagent 先 Read rollup_manifest.json 取 summary_paths 全集,
+            仅吞各 shard 摘要 → 写 controls_inventory.json + checkpoints/t2/synthesis.json.done
 ```
 
 rollup 输入 = 各 shard 的**结构化摘要**(非原始 T1/scout 全集),上下文 ≪ 任一 shard;跨 shard 的

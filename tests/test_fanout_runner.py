@@ -3415,5 +3415,88 @@ class TestActiveSinkWiring(unittest.TestCase):
         self.assertEqual(self.fr._UNIT_SINKS, {})
 
 
+# ---- B1 lockstep side A: run_config unit budget forwarded to the enumerators
+# (fix-mgh-init-enumeration-caliber) ----
+
+class TestRunConfigUnitBudgetForward(unittest.TestCase):
+    """The dispatcher reads <init-dir>/run_config.json's budgets.max_unit_bytes and
+    forwards it as `--max-unit-bytes <v>` to the scout/t1/t3 enumerator CLI — the
+    step-0-recorded budget previously had NO consumer (recorded, then silently
+    ignored; sharding stayed on the enumerator default 192KB). Source stays the
+    run_config file alone (never a second CLI flag); missing/malformed run_config
+    or field -> no flag (enumerator default, legacy runs unchanged; t2/scout-merge
+    aggregate tiers are a different budget family and are NOT in scope)."""
+
+    def setUp(self):
+        self.fr = _load()
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_rcbudget_"))
+        self.init = self.tmp / "repo" / ".mgh-init"
+        self.init.mkdir(parents=True, exist_ok=True)
+
+    def _args(self):
+        # plan artifacts all anchored inside <init-dir> (the runner's real layout)
+        return type("A", (), {
+            "scout_plan": str(self.init / "scout_plan.json"),
+            "clusters": str(self.init / "clusters.json"),
+            "candidates": str(self.init / "controls_candidates.json"),
+            "inventory": str(self.init / "controls_inventory.json"),
+            "fmt": "opencode", "rules_dir": "r", "target": str(self.tmp / "repo"),
+            "checkpoints": str(self.init / "checkpoints"),
+            "inputs_dir": str(self.init / "inputs"),
+            "retry_failed": False, "budget": None,
+            "init_dir": str(self.init)})()
+
+    def _capture_cmd(self, tier_name):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return type("R", (), {"returncode": 0,
+                                  "stdout": json.dumps({"repo": str(self.tmp / "repo"),
+                                                        "total": 0, "done": 0,
+                                                        "failed": 0, "pending": []}),
+                                  "stderr": ""})()
+
+        cfg = dict(self.fr.TIERS[tier_name])
+        with mock.patch.object(self.fr.subprocess, "run", fake_run):
+            self.fr._list_pending(cfg, self._args())
+        return captured["cmd"]
+
+    def _write_run_config(self, budget):
+        (self.init / "run_config.json").write_text(json.dumps(
+            {"target": str(self.tmp / "repo"), "budgets": {"max_unit_bytes": budget}}),
+            encoding="utf-8")
+
+    def test_recorded_budget_forwarded_to_unit_enumerators(self):
+        self._write_run_config(65536)
+        for tier in ("scout", "t1", "t3"):
+            cmd = self._capture_cmd(tier)
+            self.assertIn("--max-unit-bytes", cmd, tier)
+            self.assertEqual(cmd[cmd.index("--max-unit-bytes") + 1], "65536", tier)
+
+    def test_aggregate_tiers_never_receive_the_flag(self):
+        self._write_run_config(65536)
+        for tier in ("t2", "scout-merge"):
+            cmd = self._capture_cmd(tier)
+            self.assertNotIn("--max-unit-bytes", cmd, tier)
+
+    def test_missing_run_config_no_flag(self):
+        for tier in ("scout", "t1", "t3"):
+            cmd = self._capture_cmd(tier)
+            self.assertNotIn("--max-unit-bytes", cmd, tier)
+
+    def test_field_absent_or_non_positive_no_flag(self):
+        (self.init / "run_config.json").write_text(json.dumps(
+            {"target": "t", "budgets": {}}), encoding="utf-8")
+        self.assertNotIn("--max-unit-bytes", self._capture_cmd("t1"))
+        (self.init / "run_config.json").write_text(json.dumps(
+            {"target": "t", "budgets": {"max_unit_bytes": 0}}), encoding="utf-8")
+        self.assertNotIn("--max-unit-bytes", self._capture_cmd("t1"))
+        (self.init / "run_config.json").write_text(json.dumps(
+            {"target": "t", "budgets": {"max_unit_bytes": "big"}}), encoding="utf-8")
+        self.assertNotIn("--max-unit-bytes", self._capture_cmd("t1"))
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

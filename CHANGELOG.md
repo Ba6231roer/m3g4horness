@@ -16,6 +16,55 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — mgh-init 枚举/聚合层口径分裂收口:簇级计数吞失败 / t2 预算口径 / 单元预算无消费 / scout 广告路径分叉 / T3 判定反推 / rollup 全量路径进 stdout 等 11 项 (0.1.72)
+
+- **簇级计数三分(H4)**:`list_clusters.py` 两条计数路径(无打包 / 打包)的簇级计数由残差公式改
+  逐簇三分(全部单元 `.done` → done;全终态含失败 → **failed**,对 `--retry-failed` 可见;否则
+  pending)——修复前「1 簇 2 片全 `.failed`」被计为 `{done:1, failed:0}`,分片失败被吞;打包模式
+  `cluster_done` 同改只数全 `.done` 簇。
+- **t2 聚合物化口径(H8)**:`plan_aggregate.py` t2 分桶/瘦身判定由紧凑序列化字节统一为物化口径
+  (信封 + 缩进 + CRLF,镜像 scout-merge 既有形态)——修复前 96KB 预算物化出 ~1.23× 超预算文件;
+  `pending[].bytes` 回填落盘文件 `st_size`;`total_bytes`(输入规模披露)保持紧凑口径。
+- **单元预算消费闭环(B1,批次 1 锁步兑现)**:`fanout_runner.py` 派发前读 `<init-dir>/run_config.json`
+  的 `budgets.max_unit_bytes`,为正整数即向 scout/t1/t3 枚举器透传 `--max-unit-bytes`(此前该值
+  只被记录、无任何消费方);`canonical_unit_ids_for_run` 增可选预算参数,`resume_state.py` t1 复算
+  同 change 切到 run_config 值——派发物化与状态机复算恒同源,自定义预算 run 不再复活「复算只见
+  整簇 id → step 永卡 t1」死锁;缺 run_config 两侧同退共享默认。
+- **scout 广告路径编码同源(B2)**:`list_scout_batches.py` pending 广告的 checkpoint/done/failed
+  路径改经共享 forward 编码函数产出(死 import 转正)——修复前广告裸 bid 拼接、判定侧编码,
+  `::`/超长 id 的批「marker 写得到、判定看不见」→ 无限重派。
+- **T3 判定正向化(B3)**:`list_rule_jobs.py` done/failed 判定改 forward marker 路径计算(canonical
+  `<cat>.<fmt>` 单元集正向判,与 T1/scout 同构),glob 降级为孤儿审计(stderr 告警不进计数);
+  私有 `_safe_name` 改 `init_tier.safe_unit_filename` 别名(编码单源);failed marker body `unit`
+  字段仅作诊断对照。
+- **分页卫生(M1)**:list_clusters / list_scout_batches / list_rule_jobs / plan_aggregate 四枚举器
+  `--limit < 1` → 退出码 2 + recipe(与 `--offset` 校验对称;修复前空页 `effective_limit=0` 报成功,
+  按 offset 推进的编排器原地自旋)。
+- **scout 计划自描述(M2)**:`plan_scout.py` 生成时把 `batch_bytes`/`batch_cap` 记进 plan 顶层;
+  `--check` 优先按 plan 记录值判预算(缺记录的存量 plan 回退 CLI 值)——修复前自定义批字数的合法
+  plan 在缺省 `--check` 下按 98304 误报违例;损坏 plan(不可解析 / wrapper 形状错 / 缺失)退出码
+  统一 **2**(闸门 recipe 只认 2,修复前 1)。
+- **切片器三修(M3)**:`chunk_sources.py` JAVA_DEF 匹配后按捕获名确定性后过滤控制流关键字
+  (while/for/do/if/switch/catch/finally/synchronized/try/return/new/throw)——修复前循环/分支块
+  被当函数节点,大文件按循环体切分且外层方法 `line_end` 被截断;`--in` 不存在 → 退出码 2 fail-loud
+  (修复前「成功 + 空骨架」);`--line < 1` → 退出码 2(修复前 `--line 0` 真值判断静默落骨架模式)。
+- **fold-in 韧性(M4)**:`merge_scout.py` 双文件写改原子写 + 写序反转(clusters 先、携凭证的
+  candidates 后,凭证在 ⟺ 两文件一致)+ 追加簇按 id 去重(两写间崩溃后重折幂等收敛,修复前
+  重复追加);未映射非规范类别在 fold-in 主路径(含 audit 路径)fail-loud 退出码 2(镜像 `--check`;
+  缺字段候选保持 skip+warn 既有语义);合法 JSON 形状错(wrapper 非 dict / candidates 非 list /
+  candidate 非 dict / audit_found 形状错)→ 结构化错误 + 退出码 1,不裸崩。
+- **rollup manifest(M5)**:`plan_aggregate.py` needs_reduce 时原子物化
+  `<shard_cp_dir>/rollup_manifest.json`(全量 shard 摘要路径 + output + done_marker,幂等);
+  stdout `rollup` 段改携 `summary_paths_manifest` 绝对路径,`NEVER` 携带全量 `summary_paths` 数组
+  (1000 shard ≈ 100KB 会击穿 64KB 编排器单次回复承诺);`init-synthesis-rollup` / 
+  `init-scout-merge-rollup` stage 提示词 + 两面 rollup agent 定义 + 两契约(aggregate-sharding /
+  scout-plan)同步「先 Read manifest 取 summary_paths」消费形态;`needs_reduce:false` 路径逐字节不变。
+- **死常量清理(L1)**:删除 `list_clusters.py` 本地 `MAX_UNIT_FILENAME_STEM = 200` 重定义
+  (自称 alias 实为独立副本,上游改值即静默漂移;单源 = init_tier import)。
+- **lint 基线**:`tools/purity_allowlist.txt` 三条钉扎随 rollup 消费面行号漂移同步更新(条目数不变,
+  本批未新增任何分发面违例)。
+
+
 ### Fixed — 分发面死链与披露/契约失实收口:codegraph-hint 与 rules-format 死链、dsh 派发披露失实、壳 flag 表死旗、agent/stage 契约对形、run 目录 gitignore 兑现、install 卫生 (0.1.71)
 
 - **死链修复(第 10 类)**:六个 stage 提示词(init-{scout,induct,survey,resolve} + sra-{clarify,augment})的

@@ -92,12 +92,22 @@ def _parse_bytes(label: str, raw) -> int:
     return v
 
 
-def _atomic_write_json(path: Path, obj):
-    """Write `<path>.tmp` then `os.replace` (atomic on POSIX & same-volume Windows)."""
+def _atomic_write_text(path: Path, text: str):
+    """Write `<path>.tmp` then `os.replace` (atomic on POSIX & same-volume Windows),
+    with `flush` + `os.fsync` BEFORE the replace: os.replace's atomicity does NOT
+    flush file CONTENT — without fsync a power cut can land a zero-length
+    run_config (the crash-recovery anchor) after a "successful" replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def _atomic_write_json(path: Path, obj):
+    _atomic_write_text(path, json.dumps(obj, indent=2, ensure_ascii=False))
 
 
 def _derive_out_roots(args, target_abs: str) -> list:
@@ -232,6 +242,23 @@ def main():
                           "gitignore_present": gi_present}, ensure_ascii=False))
         return 0
 
+    # Sentinel domain/location consistency (M6): a sentinel written INTO a
+    # canonically-named run dir MUST carry that dir's domain — a mismatched
+    # explicit combo (e.g. --run-root .mgh-ut-init with --init-dir <t>/.mgh-init)
+    # activates the WRONG domain's trusted subtrees at that location. A
+    # custom-named --init-dir keeps the documented "--init-dir wins" override.
+    _CANON_RUN_DIRS = {".mgh-init": "mgh-init", ".mgh-ut-init": "mgh-ut-init"}
+    if args.init_dir and init_dir.name in _CANON_RUN_DIRS:
+        _domain_from_run_root = ("mgh-ut-init" if args.run_root == ".mgh-ut-init"
+                                 else "mgh-init")
+        if _CANON_RUN_DIRS[init_dir.name] != _domain_from_run_root:
+            print(f"error: --init-dir {init_dir} is a canonical run dir but "
+                  f"--run-root {args.run_root} derives the other domain's sentinel "
+                  f"there (would activate the wrong domain's trusted subtrees). "
+                  f"Pass --run-root {init_dir.name} to match, or use a "
+                  f"non-canonical --init-dir.", file=sys.stderr)
+            return 2
+
     run_config = {
         "target": target_abs,
         "format": args.format,
@@ -276,7 +303,7 @@ def main():
     # NEVER rewrite/append an existing file (user-tuned stays); the target project's
     # own root .gitignore is zero-touch — this lands INSIDE the run dir only.
     if not gitignore_path.exists():
-        gitignore_path.write_text("*\n", encoding="utf-8")
+        _atomic_write_text(gitignore_path, "*\n")
     ack = {
         "run_config": str(rc_path),
         "target": target_abs,

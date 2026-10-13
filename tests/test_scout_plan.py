@@ -186,5 +186,41 @@ class TestPlanSelfDescribingCheck(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestPlanAtomicWrite(unittest.TestCase):
+    """M5: scout_plan.json MUST land via `.tmp` + os.replace (atomic family).
+    A truncated half-written plan is the scout layer's corrupt-plan input's
+    main supply (design D8)."""
+
+    def test_plan_write_goes_through_atomic_replace(self):
+        import os
+        from unittest import mock
+        ps = _load("plan_scout")
+        tmp = Path(tempfile.mkdtemp(prefix="mgh_spa_"))
+        sk = tmp / "skeleton.json"
+        sk.write_text(json.dumps(_skeleton([("a/A.java", "a", 100, False)])),
+                      encoding="utf-8")
+        cand = tmp / "cands.json"
+        cand.write_text(json.dumps({"candidates": []}), encoding="utf-8")
+        out = tmp / "scout_plan.json"
+        argv = ["plan_scout.py", "--skeleton", str(sk), "--candidates", str(cand),
+                "--out", str(out)]
+        old, sys.argv = sys.argv, argv
+        replaced = []
+        real_replace = os.replace
+        try:
+            with mock.patch("os.replace",
+                            side_effect=lambda s, d: (replaced.append((str(s), str(d))),
+                                                      real_replace(s, d))[-1]):
+                rc = ps.main()
+        finally:
+            sys.argv = old
+        self.assertEqual(rc, 0)
+        self.assertTrue(
+            any(s == str(out) + ".tmp" and d == str(out) for s, d in replaced),
+            f"scout_plan write must go through .tmp+os.replace, got {replaced}")
+        self.assertFalse((tmp / "scout_plan.json.tmp").exists())
+        json.loads(out.read_text(encoding="utf-8"))  # complete plan on disk
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,9 +17,11 @@
 | 3 | `fix-mgh-fanout-dispatcher-hygiene` | ✅ 已 apply + 归档(1557e4d,archive/2026-10-13-fix-mgh-fanout-dispatcher-hygiene),VERSION 0.1.70;specs 5 MODIFIED 已回写主规格 fanout-dispatch 并随该提交推送 |
 | 4 | `fix-mgh-init-distribution-links` | ✅ 已 apply + 归档(8b7e7a8,archive/2026-10-13-fix-mgh-init-distribution-links),VERSION 0.1.71;specs 5 能力 8 条已回写;拍板项 A/B 状态见三.14 |
 | 5 | `fix-mgh-init-enumeration-caliber` | ✅ 已 apply + 归档(archive/2026-10-14-fix-mgh-init-enumeration-caliber),VERSION 0.1.72;specs 11 MODIFIED 已回写主规格(control-discovery 5 / request-context-budget 3 / fanout-dispatch、resume-step-discipline、rules-emission 各 1);apply 期新发现见三.15 |
-| 6-7 | 见第四节 | 未 propose |
+| 6 | `fix-mgh-init-discover-resilience` | ✅ 已 apply + 归档(archive/2026-10-14-fix-mgh-init-discover-resilience),VERSION 0.1.73;specs 10 MODIFIED 已回写主规格 control-discovery(validate --specs 26/26 过);apply 由 5 分钟定时任务会话自包含执行,红→绿 21 新测,apply 期两处规格自纠与情报见三.16 |
+| 7 | 见第四节 | 未 propose;含批次 4 拍板项 A/B(三.14)与批次 5 遗留三.15(base agent oversize 枚举双面删,归本批分发面对账面) |
 
-**下一步**:指挥部会话说「propose 批次 6」;批次 4 拍板项 A/B(三.14)回执仍开放。
+**下一步**:指挥部会话说「propose 批次 7」(收官批:stage 提示词与契约批量 + H11 `--merge`
+拍板项 + 三.15 base agent oversize 双面删;动笔前重新核实 HEAD,见三.4)。
 
 ## 二、批次 2 摘要(apply 前必读)
 
@@ -121,6 +123,22 @@
     的回传 ack 行仍保留 `oversize <绝对路径>` → 克隆 parity 断言(Hard constraints/Output 段逐字同)
     失败。修法 = base 面同步删该枚举(与批次 4 同判:stage Return 段未定义 oversize ack),双面镜像
     同步;归批次 6/7 的分发面对账面顺带修,或独立一行小批。
+
+16. **批次 6 apply 期自纠与新知(定时任务会话执行)**:①哨兵不变式收窄——既有测试
+    `test_init_dir_overrides_run_root` 钉死「custom 名 `--init-dir` 覆盖 `--run-root`」为合法
+    旗标语义,全域 `init_dir == target/run_root` 校验会破坏它;实现与规格(delta 归档前已同步
+    修订)收窄为「init_dir 基名为规范运行目录名(.mgh-init/.mgh-ut-init)且与域来源冲突才
+    exit 2」。②journal 完成态**保留**而非清理——删除会破坏「完成态 resume 幂等 no-op」的
+    候选重放(最终产物需要 journal 重放候选),规格同步改述;journal 仅在新扫描开始时截断。
+    ③测试文件指针勘误:tasks 所写「sast 共用面 test_focus_scope」实为 focus_scope.py(维度
+    注册表)的测试,与 expand_scope 无关;expand_scope 直接测试面在 test_init_discover(本批
+    红绿测落处),test_focus_scope 照跑全绿(23/23)。④既有测试两处随行为/schema 更新:
+    test_partial_exit_clean(M3 后 1ms/120 文件在 pass1 内截断,断言改「无 callgraph 缓存」+
+    新增 boundary-1 形态用例)、preserve-checkpoint 测试的 candidates 键改 candidate_count+
+    journal 断言。⑤工具事故记录(零最终影响):长补丁经 bash heredoc 被截断 + 补丁脚本
+    `open(p,"w")` 在 ValueError 前截空 test_discover_resilience.py——`git checkout --` 恢复后
+    以 Edit 工具重做;教训:长补丁一律 Write 落文件、写回禁用先 truncate 的 open("w") 形态。
+    ⑥validate --specs 现态 26/26 全过(前批注记的 6 失败已随批次 5 归档消隐,非本批功劳)。
 
 ## 四、剩余批次自包含规划(propose 时直接取用)
 

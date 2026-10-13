@@ -112,17 +112,30 @@ ANNOTATION_LANGS = {"java", "php"}
 
 def walk_sources(repo: Path, limit_files: int = 20000,
                  include_dotfiles: bool = False, dot_skipped: list | None = None,
-                 include_tests: bool = True, tests_skipped: list | None = None):
+                 include_tests: bool = True, tests_skipped: list | None = None,
+                 limit_hit: list | None = None):
+    """Yield (path, lang) for source files under repo.
+
+    The `limit_files` quota counts SOURCE files only (H6): non-source assets
+    (.txt/.xml/.sql/…) never consume it — a mixed repo's truncation point was
+    unpredictable, and discover's max_files+1 truncated sentinel (built on
+    source-only counting) never fired while source files were silently
+    dropped. Cap hit: stderr warning + `limit_hit` accumulator flag (the
+    family's generator→caller channel, mirroring dot_skipped/tests_skipped) —
+    NEVER a silent stop. Pruning (EXCLUDE_DIR / dot-prefix / test-tree) judges
+    repo-RELATIVE parts only (M8): ancestors outside the repo never prune."""
+    src_limit = limit_files
     for p in repo.rglob("*"):
         if not p.is_file():
             continue
-        if any(part in EXCLUDE_DIR for part in p.parts):
+        rel_parts = p.relative_to(repo).parts
+        if any(part in EXCLUDE_DIR for part in rel_parts):
             continue
         # Dot-prefixed path component = non-first-party code by Unix convention
         # (tooling/VCS/IDE/build/config/index: .opencode/.claude/.codegraph/.github/.env).
         # Skip so these tool scripts are not induced as business security controls.
         # EXCLUDE_DIR is kept (additive): it still owns the non-dot build/cache dirs.
-        if not include_dotfiles and any(part.startswith(".") for part in p.parts):
+        if not include_dotfiles and any(part.startswith(".") for part in rel_parts):
             if dot_skipped is not None and SOURCE_EXT.get(p.suffix.lower()):
                 dot_skipped[0] += 1
             continue
@@ -143,9 +156,14 @@ def walk_sources(repo: Path, limit_files: int = 20000,
         lang = SOURCE_EXT.get(p.suffix.lower())
         if lang:
             yield p, lang
-        limit_files -= 1
-        if limit_files <= 0:
-            return
+            limit_files -= 1
+            if limit_files <= 0:
+                print(f"warn: source-file limit ({src_limit}) reached under "
+                      f"{repo}; remaining files not walked — raise the limit or "
+                      f"scope the run", file=sys.stderr)
+                if limit_hit is not None:
+                    limit_hit[0] = True
+                return
 
 
 def build_call_graph(repo: Path, include_dotfiles: bool = False):
@@ -155,29 +173,42 @@ def build_call_graph(repo: Path, include_dotfiles: bool = False):
     reverse:  callee_file -> set(caller_file)
     name_to_files: bare_name -> set(files that DEFINE it)
     framework_files: files containing DI/routing markers (Spring/Feign/AOP)
-    """
-    forward = defaultdict(lambda: defaultdict(int))
-    name_to_files = defaultdict(set)
-    framework_files = set()
 
+    Two-pass, order-independent (mirrors discover_controls' internal
+    two-pass, which documents the same semantics): pass 1 builds the COMPLETE
+    definition index + framework markers over every file; pass 2 resolves call
+    sites against that complete index. The former single-pass build resolved
+    each file's calls against only the defs from files EARLIER in rglob order
+    — silently dropping ~half the cross-file edges (no unresolved disclosure).
+    One walk total: both passes share the cached texts (each file read once).
+    """
+    cached = []
     for path, lang in walk_sources(repo, include_dotfiles=include_dotfiles):
         rel = path.relative_to(repo).as_posix()
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        cached.append((rel, lang, text))
+
+    name_to_files = defaultdict(set)
+    framework_files = set()
+    # pass 1: definitions + framework markers
+    for rel, lang, text in cached:
         if lang in ANNOTATION_LANGS and FRAMEWORK_RX.search(text):
             framework_files.add(rel)
-        dp, cp = DEF_CALL.get(lang, DEF_CALL["c"])
-        # def sites
-        defs = set(m.group(1) for m in dp.finditer(text) if m.group(1))
-        for d in defs:
-            if len(d) > 2:  # skip noise like single letters
+        dp, _cp = DEF_CALL.get(lang, DEF_CALL["c"])
+        for m in dp.finditer(text):
+            d = m.group(1)
+            if d and len(d) > 2:  # skip noise like single letters
                 name_to_files[d].add(rel)
-        # call sites -> resolve to def files
+    # pass 2: resolve call sites against the COMPLETE def index
+    forward = defaultdict(lambda: defaultdict(int))
+    for rel, lang, text in cached:
+        _dp, cp = DEF_CALL.get(lang, DEF_CALL["c"])
         for m in cp.finditer(text):
             name = m.group(1)
-            if name in defs or len(name) <= 2:
+            if len(name) <= 2:
                 continue
             for tgt in name_to_files.get(name, ()):
                 if tgt != rel:
@@ -237,9 +268,12 @@ def collect_dir(repo: Path, dirpath: Path, include_dotfiles: bool = False,
     for p in dirpath.rglob("*"):
         if not (p.is_file() and SOURCE_EXT.get(p.suffix.lower())):
             continue
-        if any(part in EXCLUDE_DIR for part in p.parts):
+        # pruning judges repo-RELATIVE parts only (M8, same as walk_sources):
+        # an ancestor dir outside the repo (e.g. repo under D:\build\…) never prunes
+        rel_parts = p.relative_to(repo).parts
+        if any(part in EXCLUDE_DIR for part in rel_parts):
             continue
-        if not include_dotfiles and any(part.startswith(".") for part in p.parts):
+        if not include_dotfiles and any(part.startswith(".") for part in rel_parts):
             continue
         if not include_tests:
             rel_posix = p.relative_to(repo).as_posix()
@@ -271,11 +305,26 @@ def main():
         unresolved_note = f"seed from diff {data.get('ref','')}"
     elif args.path:
         d = repo / args.path
-        seeds = collect_dir(repo, d) if d.is_dir() else []
+        if not d.is_dir():
+            # ambiguous input, fail-loud (H7): a silent empty seed set is
+            # indistinguishable from "module has no controls" — the wrong
+            # safety conclusion (mgh-sast's scope resolver loses ALL findings
+            # the same way). "exists but no source files" stays exit 0 below.
+            print(f"error: --path {args.path!r} resolves to no directory under "
+                  f"{repo} (typo?); an empty scope would silently read as "
+                  f"'no controls here'", file=sys.stderr)
+            return 2
+        seeds = collect_dir(repo, d)
         unresolved_note = f"path scope {args.path}"
     elif args.package:
+        pkg_dirs = list(package_to_dirs(repo, args.package))
+        if not pkg_dirs:
+            print(f"error: --package {args.package!r} matches no directory under "
+                  f"{repo} (typo?); an empty scope would silently read as "
+                  f"'no controls here'", file=sys.stderr)
+            return 2
         seeds = []
-        for d in package_to_dirs(repo, args.package):
+        for d in pkg_dirs:
             seeds.extend(collect_dir(repo, d))
         unresolved_note = f"package scope {args.package}"
     else:

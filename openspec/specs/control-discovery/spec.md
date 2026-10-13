@@ -103,6 +103,12 @@ scout 层可见。「不命中规范 token」本身 MUST NOT 成为排除一个�
 scout 目标集(单一 chokepoint,承「Bounded single-pass scan」与「Extract lossless source skeleton」
 的单遍复用语义),使全部下游阶段一致地不见点前缀路径,而非仅 regex 一路。
 
+**剪枝判定按 repo 相对分量**:点前缀剪枝与 `EXCLUDE_DIR` 精确匹配的判定输入 SHALL 是
+`path.relative_to(repo).parts`(**repo 内分量**),NEVER 绝对路径的全部分量——repo 在磁盘上的
+**祖先目录**(如 repo 放在 `D:\build\work\`、`~\.cache\repos\`、`C:\out\` 等含排除名或点前缀
+分量的位置下)SHALL NOT 影响仓内文件的剪枝判定;修复前按绝对全分量判定,repo 布局撞上排除名
+祖先即**整仓静默扫空**。
+
 `discover_controls.py` SHALL 提供 `--include-dotfiles` flag(默认关);传该 flag 时 SHALL 回退到
 引入本要求前的行为(纳入点前缀路径)。理由:点前缀条目按 Unix 惯例为非一方业务代码(tooling /
 VCS / IDE / build / config / 索引);默认扫描它们会把工具自身脚本(如运行时纪律守卫
@@ -135,6 +141,12 @@ VCS / IDE / build / config / 索引);默认扫描它们会把工具自身脚本(
 - **WHEN** 在 Windows 上对 `C:\DEV\<repo>` 运行发现
 - **THEN** 盘符根分量(`C:\`)不以 `.` 开头,不触发点前缀跳过;repo 下正常源文件照常被发现
 
+#### Scenario: 排除名/点前缀祖先目录不吞整仓
+
+- **WHEN** 目标 repo 位于 `D:\build\work\<repo>`(祖先分量 `build` ∈ `EXCLUDE_DIR`)与
+  `D:\repos\.cache\<repo>`(祖先分量点前缀)下,各默认运行发现
+- **THEN** 两布局下 repo 内源文件照常被发现(剪枝只看 repo 相对分量);修复前按绝对全分量判定,
+  这两种布局整仓静默扫空(零候选、零 skeleton,退出码 0)
 ### Requirement: Skip test source directories during discovery
 
 确定性文件遍历(`expand_scope.walk_sources` / `collect_dir`)SHALL 在既有 `EXCLUDE_DIR` 精确匹配
@@ -238,6 +250,14 @@ datetime/json/math/pathlib/re/subprocess/sys` 同类)。MUST NOT `import` 任何
 候选 `entry_points`;无法文本解析的框架路由控制(AOP pointcut / 反射 / DI)写入
 `unresolved[]`。
 
+**调用图构建 SHALL 两遍、顺序无关**:`expand_scope.build_call_graph` SHALL 先完整遍历一次
+文件集建立**完整**定义索引(`name_to_files`)与框架标记,再遍历第二次解析调用边——调用解析
+MUST 面对**全部**定义,NEVER 只见到枚举顺序中先于本文件的定义。理由〔单遍边走边建索引时,
+文件 A 只能解析到 rglob 顺序中先于 A 的定义 → 约一半跨文件调用边**静默丢失**(不进
+`unresolved[]`,零披露),文件名一变结果就变;`discover_controls.py` 内部实现同为两遍并自证
+「Order-independent」,本条把该语义确立为共用引擎的规格〕。mgh-sast 侧对本脚本的 CLI 消费
+(scope resolver)同享该修复。
+
 #### Scenario: Control entry_points populated from reverse graph
 - **WHEN** 一个 sanitizer 工具方法被多个 controller 调用
 - **THEN** 该候选的 `entry_points` 包含这些调用方文件
@@ -246,6 +266,12 @@ datetime/json/math/pathlib/re/subprocess/sys` 同类)。MUST NOT `import` 任何
 - **WHEN** 某鉴权逻辑仅通过 AOP pointcut 织入,无文本调用边
 - **THEN** 该控制出现在 `unresolved[]` 而非 `entry_points`,并在 report 披露
 
+#### Scenario: 跨文件调用边与文件枚举顺序无关
+
+- **WHEN** 两个 Java 文件 A(定义 `mask()` 并调用 B 的 `check()`)与 B(定义 `check()` 并调用
+  A 的 `mask()`)以两种相反的文件名(交换后)分别构建调用图
+- **THEN** 两种枚举顺序产出的调用图逐边一致(A→B 与 B→A 双向边均在);修复前单向边随枚举
+  顺序漂移,约半数跨文件边静默缺失
 ### Requirement: Emit design_controls-compatible inventory
 
 `controls_inventory.json` SHALL 为每条归纳后的控制携带:`name`(slug)、`kind`(vvah
@@ -419,6 +445,12 @@ SHALL 区分:`defined`(默认,控制定义点在 scope 内)与 `applicable`(控�
 `mgh-init --merge <partials-dir>` SHALL 按 `evidence`(`file:class:method`)去重合并
 多次局部产物,并跨模块重算 cluster role。
 
+**scope 歧义输入 fail-loud**:`--scope path:<不存在路径>` 与 `--package:<无任何匹配目录>`
+SHALL 退出码 2 + stderr recipe(指认路径/包名),NEVER 以「空种子集 + 退出码 0」静默成功——
+拼错路径产出「该模块无存量控制」的**错误安全结论**(mgh-sast 侧丢全部 findings 同形态)。
+「scope 目录存在但确无源文件」是合法空集:保持退出码 0 + 空集 note(与「路径不存在」
+不可混淆的是二者 MUST 可区分)。
+
 #### Scenario: Scoped run bounds to a module
 - **WHEN** `mgh-init --scope path:src/payment --scope-mode defined`
 - **THEN** 仅分析定义点在 `src/payment` 内的控制;跨模块控制入 `out_of_scope[]`
@@ -427,6 +459,12 @@ SHALL 区分:`defined`(默认,控制定义点在 scope 内)与 `applicable`(控�
 - **WHEN** 对模块 A、B 各跑一次局部 init,再 `mgh-init --merge partials/`
 - **THEN** 合并后 inventory 按 `file:class:method` 去重,同一控制不重复,cluster role 跨模块重算
 
+#### Scenario: 拼错的 scope 路径 fail-loud 而非空集假成功
+
+- **WHEN** `expand_scope.py --path src/paymant`(目录不存在,typo)运行
+- **THEN** 退出码 2 + stderr 指认该路径;NEVER 输出 `{"in_scope": [], "count": 0}` + 退出码 0
+  (修复前与「目录存在但无源文件」不可区分,下游产出「该模块无存量控制」的错误结论);
+  `--package com.acme.nomatch`(零匹配目录)同判退出码 2;目录存在但无源文件保持 exit 0 + note
 ### Requirement: Standalone script invocation robustness
 
 `discover_controls.py` 与 `chunk_sources.py` SHALL 在 `from expand_scope import …` 之前,把
@@ -453,6 +491,13 @@ SHALL 区分:`defined`(默认,控制定义点在 scope 内)与 `applicable`(控�
 **stderr** 周期输出进度(每 N 个文件),stdout 仅在末尾输出既有 JSON 摘要(契约不变)。在 i0 阶段
 SHALL 以低成本统计源文件数,命中大仓阈值时**在开始全量扫描前**主动建议 `--scope` 分模块 + `--merge`。
 
+**文件配额只数源文件 + 截断显式上浮**:`walk_sources` 的 `limit_files` 配额 SHALL 仅对
+**源扩展名文件**计数(`SOURCE_EXT` 命中者),非源文件(.txt/.xml/.sql/资产等)MUST NOT 消耗
+配额;配额触顶时 SHALL stderr 告警并经可选 accumulator 形参(镜像 `dot_skipped`/`tests_skipped`
+家族形态)向调用方上浮截断信号,NEVER 静默 return。理由〔配额被非源文件消耗时,大仓的截断
+位置随枚举序不可预测;且 discover 侧的 `max_files+1` 截断哨兵(多 yield 一个源文件即判
+truncated)建立在「配额只数源文件」的假设上——配额混计时哨兵永不触发,截断静默〕。
+
 本要求**不再假设 discover 在单次宿主调用内必然完成**:当目标仓大到单次调用超过宿主 shell 超时
 (claude Bash / opencode shell 工具默认 120s,可被强杀于更早),discover SHALL 经 callgraph 缓存 +
 scan 续点 + 软时限干净早退(见「Discover call-graph cache survives re-runs」「Discover scan resumes
@@ -477,6 +522,18 @@ from a checkpoint」「Discover soft time-budget clean exit」「Discover writes
 - **WHEN** i0 阶段统计的源文件数超过阈值
 - **THEN** 系统在开始全量扫描前提示建议 `--scope` 分模块 + `--merge`,而非静默跑到超时
 
+#### Scenario: 非源文件不耗配额,触顶显式截断
+
+- **WHEN** 一个仓含 2 万个 `.txt`/`.xml` 资产与 2 个 `.java` 源文件,以默认 `limit_files=20000`
+  运行 `walk_sources`
+- **THEN** 两个 `.java` 均被 yield(非源文件不耗配额);对一个真超配额的源文件仓,触顶时 stderr
+  告警 + 调用方 accumulator 收到截断信号(修复前 `.txt` 先把配额吃完、`.java` 静默丢失且零信号)
+
+#### Scenario: discover 截断哨兵在混合仓下如实触发
+
+- **WHEN** 源文件数超过 `--max-files` 的仓运行 `discover_controls.py`
+- **THEN** stdout 摘要 `truncated:true`(哨兵 = 多 yield 一个源文件即判);混合扩展名仓下配额
+  语义同判(修复前配额被非源文件消耗,哨兵永不触发,截断静默)
 ### Requirement: Deterministic scripts are orchestrator black boxes
 
 `/mgh-init` 的编排器是宿主 agent 本身(按 `mgh-init.md` 用自身工具跑流水线,非写代码)。命令壳 SHALL 在正文最前列声明,且把编排纪律明线**扩展到一次性微脚本**(承
@@ -984,6 +1041,12 @@ schema:键 + 类型 + 数组元素 shape)、`--field a.b.c`(取嵌套字段)。s
 退出码 `0/1/2`;零依赖、自定位、utf-8、任意 cwd。编排器与 subagent MUST NOT 用 `py -c`/`python -c`
 或 `Read` 整份大 JSON 去内省产物结构,SHALL 改用本脚本。
 
+**`--field` 单独使用 SHALL 有界输出**:`--field` 不与 `--keys`/`--count`/`--sample`/`--shape`
+组合时,stdout SHALL 回显**截断后的值**(实现常量上限)并携带 `truncated` 标志;目标为容器
+(list/dict)时 SHALL 另报元素/键计数。理由〔无界回显整份值(如整份 `clusters[]`)正是本脚本
+要替代的反模式——「合法结构出口」自己击穿编排器上下文预算〕。与其它模式组合时行为不变
+(模式本身有界)。
+
 #### Scenario: Count mode warns on wrapper-dict miscount
 - **WHEN** 对 `clusters.json`(wrapper `{repo,clusters,truncated}`)运行 `describe_artifact.py --count`
 - **THEN** stdout 报 `clusters[]` 真实长度,并对顶层 3 键给出 warn(防把 3 当簇数)
@@ -996,6 +1059,12 @@ schema:键 + 类型 + 数组元素 shape)、`--field a.b.c`(取嵌套字段)。s
 - **WHEN** 从任意 cwd 以 `py <path>/describe_artifact.py --in <dir>/controls_candidates.json --keys` 执行
 - **THEN** 脚本成功,stdout 为合法 JSON 摘要
 
+#### Scenario: `--field` 单独使用输出有界
+
+- **WHEN** 运行 `describe_artifact.py --in clusters.json --field clusters`(目标为 5000 条的大数组)
+- **THEN** stdout 回显截断后的值(≤ 实现常量上限)+ `truncated:true` + 容器计数
+  (`{"type":"list","count":5000,…}` 形态);NEVER 整份 5000 条倾倒进 stdout;`--field a.b --count`
+  组合形态输出不变(计数模式天然有界)
 ### Requirement: Derived counts exposed as script output fields
 
 下游(编排器/subagent)可能需要 list keys / len / sample 才能得到的**派生量**,MUST 由该量的**产出者**
@@ -1116,6 +1185,11 @@ openspec validate-at-boundary,FD7)。覆盖:`discover_controls.py --check`(candi
 正确触发重跑 S4;诊断 SHALL 含 `lineno`/`colno`/`msg` 字段供定位。`category` 校验 SHALL 断言非空(不断言
 枚举归属,枚举归一交给 `validate_inventory.py`)。
 
+**`--check` 对「合法 JSON 但形状错」SHALL 结构化收口**:`discover_controls.py --check` 对
+「JSON 可解析但 wrapper/集合形状错」(wrapper 非 dict、`candidates`/`clusters` 非 list 等)SHALL
+记 violations 并以退出码 2 收口,NEVER 在任何输入形状上抛未捕获 traceback(裸崩的退出码 1
+不在编排器闸门语义内;形状错分支 MUST 把目标归一为空集后再走逐条校验循环)。
+
 #### Scenario: Check passes on a well-formed artifact
 - **WHEN** 编排器对刚产出的 `scout_plan.json` 运行 `plan_scout.py --check`
 - **THEN** 退出码 0,编排器进入下一步
@@ -1123,6 +1197,13 @@ openspec validate-at-boundary,FD7)。覆盖:`discover_controls.py --check`(candi
 #### Scenario: Check fails loud on a corrupted artifact
 - **WHEN** 某 batch 的 `bytes` 超过 `--scout-batch-bytes`(或 wrapper 损坏)
 - **THEN** `--check` 退出码 2,编排器回退重跑该步,不带着破损产物继续
+
+#### Scenario: discover --check 对形状错的合法 JSON 报 violations 而非裸崩
+
+- **WHEN** `controls_candidates.json` 内容为合法 JSON 但顶层是 list(非 wrapper dict),
+  运行 `discover_controls.py --check`
+- **THEN** 退出码 2 + violations 含「wrapper must be {repo,candidates[],…}」;NEVER 抛
+  `TypeError: 'NoneType' object is not iterable` 之类的未捕获 traceback(修复前实测裸崩)
 
 #### Scenario: merge_scout --check rejects a candidate missing category
 - **WHEN** `scout_candidates.json` 的某条 candidate 缺 `category` 字段(或为空)
@@ -1140,7 +1221,6 @@ openspec validate-at-boundary,FD7)。覆盖:`discover_controls.py --check`(candi
 - **WHEN** `clusters.json` 的某条 `cluster_id` 超 160 字符(producer 回归)
 - **THEN** `discover_controls.py --check` 退出码 2,violations 报该簇 index 与「cluster_id 超长」issue,
   编排器在 discover 后、T1 前被闸门拦下
-
 ### Requirement: Subagent sanctioned-tools allowlist
 
 每个 `core/prompts/stages/init-*.md`(及双壳 `agents/init-*.md`)SHALL 声明一个 **Sanctioned tools**
@@ -1437,6 +1517,19 @@ callgraph-cache 条款,关闭 `--rebuild-cache` 悬空契约)。`--rebuild-cache
 复用 callgraph 缓存并从 `scanned_index` 续扫、追加候选(不重扫已续点文件);续点合并 SHALL 确定性、
 幂等(同一续点重跑产等价候选集)。scan 完成后续点可保留(供再次 resume)或清理,均不破坏最终产物。
 
+**续点参数指纹(混合候选集防线)**:续点 SHALL 记录生成它的**生效扫描参数指纹**
+(`--scope` 种子集形态 + `--language`);`--resume` 时当前参数与指纹不符 → SHALL 弃续点从头扫 +
+stderr 披露(旧候选集按旧参数产物处置),NEVER 在旧续点上以新参数续扫(修复前换参续跑把
+新旧参数的候选静默混进同一集合)。指纹相符或参数缺省时续扫语义不变。
+
+**续点增量日志(消灭 O(n²) 写放大)**:累积候选 SHALL 经追加式
+`<out>/cache/scan_journal.jsonl` 落盘——每检查点窗口只**追加**该窗口新增候选(flush + fsync),
+`scan_progress.json` 仅携带小体积元数据(`scanned_index`/`candidate_count`/`cid`/参数指纹);
+`--resume` 读 journal 重放累积候选。scan 完成时 journal SHALL **保留**(完成态 `--resume` 幂等
+no-op 依赖它重放候选供最终产物);journal 仅在**新扫描开始**(无续点/续点失效)时截断;
+journal 行数与计数不符(撕裂/篡改)→ 弃续点重扫自愈;旧内联形续点(候选在 progress 文件内)
+加载兼容。修复前每检查点全量重写累积候选列表,大仓下总写放大 O(n²)(GB 级冗余写)。
+
 #### Scenario: Resume continues scan past a kill
 - **WHEN** discover 在 scan 中途被强杀,留下 `scan_progress.json`(scanned_index=K),随后
   `discover ... --resume`
@@ -1446,14 +1539,34 @@ callgraph-cache 条款,关闭 `--rebuild-cache` 悬空契约)。`--rebuild-cache
 - **WHEN** 对同一续点连续两次 `--resume`
 - **THEN** 两次产出的候选集等价(不重复、不丢失)
 
+#### Scenario: 换参 resume 弃旧续点而非混合候选集
+
+- **WHEN** 第一次以 `--scope path:src/a` 扫至中途留下续点,随后以 `--scope path:src/b --resume`
+  运行
+- **THEN** stderr 披露参数指纹不符、旧续点被弃,本次从头按 `src/b` 扫描;NEVER 在 `src/a` 的
+  已扫候选上继续追加 `src/b` 的候选(修复前产出两个 scope 的混合集合,零披露)
+
+#### Scenario: 检查点写放大有界(增量 journal)
+
+- **WHEN** 一个产出 5 万候选的仓以 `--progress-every 1000` 扫描,统计 `cache/` 下续点相关的
+  累计写入字节
+- **THEN** journal 追加总量与候选总量同阶(O(n)),`scan_progress.json` 恒为小体积元数据;
+  修复前每 1000 文件全量重写累积候选,总写放大 O(n²)
 ### Requirement: Discover soft time-budget clean exit
 
-`discover_controls.py` SHALL 提供 `--time-budget-ms <N>`(默认 0=关)。当置位且在安全边界(callgraph
-建成后、scan 每 `--progress-every` 文件)已超预算时,discover SHALL 落全部-so-far 产物(callgraph
-缓存 + scan 续点)并在 stdout 增 `partial: true` + `resume_hint`(可操作的重派提示)后**退出码 0**
-(干净早退,而非被宿主 SIGKILL 全损)。未置位或未超预算时 SHALL 一次性跑完,stdout `partial: false`。
-编排器 SHALL 据 stdout `partial: true` 经 Bash 重派 `--resume`(编排器循环,**NEVER** 写 wrapper `.py`;
-承 R5.2 黑盒纪律)直至 `partial: false`。
+`discover_controls.py` SHALL 提供 `--time-budget-ms <N>`(默认 0=关)。当置位且在安全边界已超预算时,
+discover SHALL 落全部-so-far 产物(callgraph 缓存 + scan 续点)并在 stdout 增 `partial: true` +
+`resume_hint`(可操作的重派提示)后**退出码 0**(干净早退,而非被宿主 SIGKILL 全损)。未置位或
+未超预算时 SHALL 一次性跑完,stdout `partial: false`。编排器 SHALL 据 stdout `partial: true`
+经 Bash 重派 `--resume`(编排器循环,**NEVER** 写 wrapper `.py`;承 R5.2 黑盒纪律)直至
+`partial: false`。
+
+**安全边界覆盖调用图两 pass(最贵阶段设防)**:安全边界 SHALL 扩展至 callgraph 两 pass 内部——
+每 pass 以 `--progress-every` 节奏检查 deadline;pass 1(定义索引)完成后其完整态 SHALL 落
+`cache/callgraph_defs.json`(原子写),`--resume` 时 manifest 新鲜则复用、跳过 pass 1;pass 2
+(调用解析)中途超限 → 当即干净 partial 早退(退出码 0 + `partial:true`),已落盘的
+defs 缓存 + scan 续点(如有)留存。理由〔修复前超时检查只在「callgraph 建成后」与 scan 边界,
+两 pass 本身不设防——大仓最贵阶段被宿主硬杀即零全损(scan 续点尚未产生、图缓存未落)〕。
 
 #### Scenario: Budget exceeded triggers clean partial exit
 - **WHEN** 运行 `discover_controls.py --repo . --out .mgh-init --time-budget-ms 30000`,且单次调用 30s
@@ -1468,12 +1581,24 @@ callgraph-cache 条款,关闭 `--rebuild-cache` 悬空契约)。`--rebuild-cache
 - **WHEN** discover stdout 为 `partial: true`
 - **THEN** 编排器经 Bash 重派 `discover ... --resume`;**不** `Write` wrapper `.py` 去循环
 
+#### Scenario: 调用图 pass 途中超限干净早退且 pass 1 可复用
+
+- **WHEN** 大仓运行带 `--time-budget-ms` 的 discover,预算在 callgraph pass 1 完成后、pass 2
+  中途耗尽
+- **THEN** 退出码 0 + stdout `partial:true`,`cache/callgraph_defs.json` 已落盘;重派 `--resume`
+  复用 defs 缓存跳过 pass 1、从 pass 2 续跑——NEVER 从零重建两遍;修复前 pass 2 中途被宿主
+  硬杀 = 零留存(scan 续点未产生、图缓存未写)
 ### Requirement: Discover writes are atomic
 
 `discover_controls.py` SHALL 原子写出所有产物 JSON(`controls_candidates.json`/`clusters.json`/`skeleton.json`/
 `cache/*`):先写 `<path>.tmp` 再 `os.replace` 落盘,使进程在任意时刻被 SIGKILL 都**不**留下
 截断/半写 JSON(`--check` 与下游 `json.loads` 不会读到破损文件)。原子写仅用 Python 标准库
 (`os.replace`/`pathlib`),承 R2 零运行时依赖。
+
+**原子写家族统一覆盖 scout 计划**:`plan_scout.py` 写 `scout_plan.json` SHALL 同用
+`.tmp` + `os.replace` 原子写(与 discover 产物、run_config 同族纪律)——半写的 plan 是
+scout 层「损坏 plan」输入的主要供给源(`scout_complete` 对截断 plan fail-open 形态的上游
+治理)。
 
 #### Scenario: Killed mid-write leaves no truncated artifact
 - **WHEN** discover 在写 `controls_candidates.json` 的过程中被强杀
@@ -1484,6 +1609,10 @@ callgraph-cache 条款,关闭 `--rebuild-cache` 悬空契约)。`--rebuild-cache
 - **WHEN** 对一次被强杀后留下完整产物的 out-dir 运行 `discover_controls.py --check`
 - **THEN** `--check` 读到合法 JSON,退出码 0(无破损文件误判为边界失败)
 
+#### Scenario: scout_plan.json 原子落盘
+
+- **WHEN** `plan_scout.py` 在写 `scout_plan.json` 途中被强杀
+- **THEN** 磁盘上要么是完整 plan、要么无 plan(NEVER 截断半写 JSON);`.tmp` 残留可被下次覆盖
 ### Requirement: Long-running deterministic Bash calls carry a per-call timeout
 
 每份 `mgh-*.md` 命令壳的编排器 SHALL 给**长跑确定性 Bash 调用**传一个慷慨的 per-call `timeout`
@@ -1590,6 +1719,18 @@ and SHALL NOT determine "current step" from conversation memory.
 `resume_state.py` SHALL fail-loud(退出码 2)+ stderr recipe(指向重跑 `/mgh-init --<flags>` 重建),MUST NOT 静默猜测
 步骤图。该文件随 `.mgh-init/` gitignore(承既有 unit-inputs gitignore 约定)。
 
+**崩溃恢复锚点的持久性(fsync)**:`write_runconfig.py` 的原子写 SHALL 在 `os.replace` 前对
+tmp 文件 `flush` + `os.fsync`(run_config 与哨兵、gitignore co-write 同治)——仅 `os.replace`
+的原子性不保证**内容**已落盘,掉电后可能出现「replace 完成、内容零长度」的 run_config,
+恰好毒化崩溃恢复的唯一锚点。
+
+**哨兵 domain 与位置单一来源**:`--init-dir` 显式传入且其基名为**规范运行目录名**
+(`.mgh-init`/`.mgh-ut-init`)时,该位置承载的哨兵 domain SHALL 与目录名一致——与
+`--run-root` 派生的域冲突的错组 → 退出码 2 + recipe(修复前显式错组如
+`--init-dir <t>/.mgh-init --run-root .mgh-ut-init` 会把 mgh-ut-init 域的受信子树写进
+mgh-init 的哨兵,激活错误域的写允许集);custom 名 `--init-dir` 保留既有「覆盖」旗标语义
+(`--init-dir wins`,既有测试钉死);默认组合(不显式传参)行为零变化。
+
 #### Scenario: Run config written atomically at start
 
 - **WHEN** `/mgh-init --target <t> --format opencode --no-scout` runs and reaches step 0
@@ -1607,6 +1748,18 @@ and SHALL NOT determine "current step" from conversation memory.
 - **THEN** it exits code `2` with a stderr recipe telling the user to re-run `/mgh-init --<flags>` to rebuild it, rather
   than silently guessing a step graph that could diverge from the original intent
 
+#### Scenario: 原子写内容经 fsync 持久
+
+- **WHEN** 审阅 `write_runconfig.py` 的原子写实现并对一次正常 step 0 后的文件做崩溃恢复演练
+- **THEN** tmp 写入后先 `flush` + `os.fsync` 再 `os.replace`(run_config/哨兵/gitignore 三处同治);
+  掉电场景下 replace 完成则内容完整,NEVER 出现零长度 run_config
+
+#### Scenario: 错组的 init-dir/run-root 被 fail-loud 拒识
+
+- **WHEN** 调用 `write_runconfig.py --target <t> --init-dir <t>/.mgh-init --run-root .mgh-ut-init`
+  (规范名目录与域来源冲突)
+- **THEN** 退出码 2 + stderr recipe 指认冲突;NEVER 写出 domain=mgh-ut-init 而落在 .mgh-init
+  的哨兵;custom 名 `--init-dir` 组合与默认组合行为不变
 ### Requirement: Subagent return-to-orchestrator is a bounded ack
 
 每份 `core/prompts/stages/init-*.md` SHALL 声明一个 **Return-to-orchestrator** 契约:subagent 的**最终回传消息**

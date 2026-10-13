@@ -342,32 +342,57 @@ def build_skeleton(files_data, reverse, cand_files):
     return out
 
 
-def build_call_graph(files_data, progress_every: int = 0):
+def build_call_graph(files_data, progress_every: int = 0, deadline=None,
+                     defs=None, budget_hit: list | None = None):
     """Two-pass textual graph over CACHED texts (FD3; no re-read). Order-independent.
 
-    Returns (forward, reverse, framework_files). forward is unused downstream but
-    kept to preserve scan()'s return contract.
-    """
+    Returns (forward, reverse, framework_files, defs). `forward` is unused downstream
+    but kept to preserve scan()'s return contract. `defs` is pass 1's complete state
+    ({"name_to_files": {name: [files]}, "framework_files": [...]}, JSON-ready) — None
+    when pass 1 did not complete (budget hit inside pass 1).
+
+    Soft deadline (M3): each pass checks `deadline` at every progress boundary. A hit
+    sets `budget_hit[0] = True` and returns early (partial graph work is discarded —
+    pass 2 restarts cheaply once defs are cached). `defs` (from cache/callgraph_defs.json)
+    PRELOADS pass 1's state: that pass is then skipped entirely, so a --resume after a
+    mid-pass-2 kill never re-walks the definition index."""
     name_to_files: dict[str, set[str]] = defaultdict(set)
     framework_files: set[str] = set()
     n = len(files_data)
-    # pass 1: definitions + framework markers
-    for i, fd in enumerate(files_data):
-        if progress_every and i and i % progress_every == 0:
-            print(f"[discover] callgraph pass1 {i}/{n} files", file=sys.stderr)
-        rel, lang, text = fd["rel"], fd["lang"], fd["text"]
-        if FRAMEWORK_RX.search(text):
-            framework_files.add(rel)
-        dp = _def_pattern(lang)
-        for m in dp.finditer(text):
-            name = m.group(1)
-            if name and len(name) > 2:
-                name_to_files[name].add(rel)
+    defs_out = None
+    if defs is None:
+        # pass 1: definitions + framework markers
+        for i, fd in enumerate(files_data):
+            if progress_every and i and i % progress_every == 0:
+                print(f"[discover] callgraph pass1 {i}/{n} files", file=sys.stderr)
+                if deadline is not None and time.monotonic() >= deadline:
+                    if budget_hit is not None:
+                        budget_hit[0] = True
+                    return {}, defaultdict(set), set(), None
+            rel, lang, text = fd["rel"], fd["lang"], fd["text"]
+            if FRAMEWORK_RX.search(text):
+                framework_files.add(rel)
+            dp = _def_pattern(lang)
+            for m in dp.finditer(text):
+                name = m.group(1)
+                if name and len(name) > 2:
+                    name_to_files[name].add(rel)
+        defs_out = {"name_to_files": {k: sorted(v) for k, v in name_to_files.items()},
+                    "framework_files": sorted(framework_files)}
+    else:
+        name_to_files = defaultdict(
+            set, {k: set(v) for k, v in defs.get("name_to_files", {}).items()})
+        framework_files = set(defs.get("framework_files", []))
+        defs_out = defs
     # pass 2: resolve calls against the COMPLETE def index (cached text)
     forward: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for i, fd in enumerate(files_data):
         if progress_every and i and i % progress_every == 0:
             print(f"[discover] callgraph pass2 {i}/{n} files", file=sys.stderr)
+            if deadline is not None and time.monotonic() >= deadline:
+                if budget_hit is not None:
+                    budget_hit[0] = True
+                return {}, defaultdict(set), set(), defs_out
         rel, lang, text = fd["rel"], fd["lang"], fd["text"]
         cp = _call_pattern(lang)
         seen: set[str] = set()
@@ -383,20 +408,23 @@ def build_call_graph(files_data, progress_every: int = 0):
     for caller, callees in forward.items():
         for callee in callees:
             reverse[callee].add(caller)
-    return dict(forward), reverse, framework_files
+    return dict(forward), reverse, framework_files, defs_out
 
 
 def scan_candidates(files_data, reverse, seed_files, language: str | None,
                     progress_every: int = 0, start_i: int = 0,
                     prior_candidates=None, start_cid: int = 0,
-                    deadline=None, outdir=None, manifest=None):
+                    deadline=None, outdir=None, manifest=None, scan_params=None):
     """Scan CACHED texts: one splitlines + one node index per file, O(log n) enclosing.
 
     Resilience: resumes from `start_i` appending to `prior_candidates` (candidate ids
-    continue from `start_cid`); at each `--progress-every` boundary writes a scan
-    checkpoint `<out>/cache/scan_progress.json`, and if `deadline` has passed stops
-    early (partial=True) at that safe boundary. Returns (candidates, partial)."""
+    continue from `start_cid`); at each `--progress-every` boundary APPENDS only the
+    window's NEW candidates to `cache/scan_journal.jsonl` (M4 — total write
+    amplification O(n), not the per-boundary full-list rewrite) and rewrites the
+    SMALL progress file (index/counts/params fingerprint); if `deadline` has passed
+    stops early (partial=True) at that safe boundary. Returns (candidates, partial)."""
     candidates = list(prior_candidates) if prior_candidates else []
+    journal_flushed = len(candidates)   # candidates already persisted in the journal
     cid = start_cid
     n = len(files_data)
     partial = False
@@ -405,7 +433,10 @@ def scan_candidates(files_data, reverse, seed_files, language: str | None,
             print(f"[discover] scanned {i}/{n} files, {len(candidates)} candidates",
                   file=sys.stderr)
             if outdir is not None and manifest is not None:
-                _write_scan_progress(outdir, i, candidates, manifest)
+                _append_scan_journal(outdir, candidates[journal_flushed:])
+                journal_flushed = len(candidates)
+                _write_scan_progress(outdir, i, len(candidates), cid,
+                                     scan_params, manifest)
             if deadline is not None and time.monotonic() >= deadline:
                 partial = True
                 break
@@ -446,7 +477,10 @@ def scan_candidates(files_data, reverse, seed_files, language: str | None,
                     })
     if outdir is not None and manifest is not None and not partial:
         # final checkpoint at completion -> a later --resume is an idempotent no-op
-        _write_scan_progress(outdir, n, candidates, manifest)
+        # (the journal is KEPT: a completed-run resume replays the candidates from
+        # it for the final products; it is truncated only when a fresh scan starts)
+        _append_scan_journal(outdir, candidates[journal_flushed:])
+        _write_scan_progress(outdir, n, len(candidates), cid, scan_params, manifest)
     return candidates, partial
 
 
@@ -514,11 +548,68 @@ def _write_callgraph_cache(outdir, forward, reverse, framework_files, manifest):
     _atomic_write_json(Path(outdir) / CACHE_DIRNAME / "manifest.json", manifest)
 
 
-def _try_load_scan_progress(outdir, manifest):
-    """Return {scanned_index, candidates} if a fresh scan checkpoint exists, else None.
+def _try_load_defs_cache(outdir, manifest):
+    """Return pass 1's defs state if a fresh `cache/callgraph_defs.json` exists
+    (manifest byte-equal), else None. The defs cache is the mid-kill salvage
+    artifact: a resume after a pass-2 budget hit skips pass 1 entirely (M3)."""
+    if outdir is None or manifest is None:
+        return None
+    p = Path(outdir) / CACHE_DIRNAME / "callgraph_defs.json"
+    if not p.is_file():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if d.get("manifest") != manifest:
+        return None
+    return {"name_to_files": d.get("name_to_files", {}),
+            "framework_files": d.get("framework_files", [])}
 
-    Fresh = the checkpoint's stored manifest is byte-equal to the current source
-    snapshot (so a checkpoint from a changed repo is ignored, not blindly trusted)."""
+
+def _write_defs_cache(outdir, defs, manifest):
+    if outdir is None or defs is None or manifest is None:
+        return
+    _atomic_write_json(Path(outdir) / CACHE_DIRNAME / "callgraph_defs.json",
+                       {**defs, "manifest": manifest})
+
+
+def _scan_journal_path(outdir) -> Path:
+    return Path(outdir) / CACHE_DIRNAME / "scan_journal.jsonl"
+
+
+def _append_scan_journal(outdir, new_items):
+    """Append one JSON candidate per line (flush + fsync: the journal IS the
+    candidate store a resume replays). Idempotent no-op for an empty window."""
+    if outdir is None or not new_items:
+        return
+    p = _scan_journal_path(outdir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        for c in new_items:
+            f.write(json.dumps(c, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _truncate_scan_journal(outdir):
+    """Reset the journal before a FRESH scan (stale params/snapshot/manifest)."""
+    if outdir is None:
+        return
+    p = _scan_journal_path(outdir)
+    if p.is_file():
+        p.unlink()
+
+
+def _try_load_scan_progress(outdir, manifest, scan_params=None):
+    """Return {scanned_index, candidates, cid} if a fresh scan checkpoint exists,
+    else None. Fresh = the checkpoint's stored manifest is byte-equal to the
+    current source snapshot AND its `scan_params` fingerprint matches (M2: a
+    checkpoint made under different --scope/--language is DISCARDED with an
+    stderr disclosure — never silently mixed into a different-scope resume).
+    Legacy checkpoints (inline `candidates`, pre-journal shape) still load.
+    The candidates replay from `scan_journal.jsonl`; a count mismatch (torn or
+    tampered journal) discards the checkpoint (fresh scan rebuilds it)."""
     if outdir is None or manifest is None:
         return None
     sp_path = Path(outdir) / CACHE_DIRNAME / "scan_progress.json"
@@ -530,14 +621,47 @@ def _try_load_scan_progress(outdir, manifest):
         return None
     if sp.get("manifest") != manifest:
         return None  # checkpoint belongs to a different source set -> ignore
-    return sp
+    stored_params = sp.get("scan_params")
+    if (scan_params is not None and stored_params is not None
+            and stored_params != scan_params):
+        print("[discover] scan checkpoint params mismatch (scope/language changed) "
+              "— discarding stale progress, fresh scan", file=sys.stderr)
+        return None
+    if "candidates" in sp:
+        # legacy inline shape (pre-journal) — honored as-is
+        cands = sp["candidates"]
+        return {"scanned_index": sp.get("scanned_index", 0), "candidates": cands,
+                "cid": sp.get("cid", len(cands))}
+    jpath = _scan_journal_path(outdir)
+    if not jpath.is_file():
+        return None
+    cands = []
+    try:
+        for ln in jpath.read_text(encoding="utf-8").splitlines():
+            if ln.strip():
+                cands.append(json.loads(ln))
+    except (OSError, ValueError):
+        return None
+    if len(cands) != sp.get("candidate_count", -1):
+        print("[discover] scan journal count mismatch — discarding stale progress, "
+              "fresh scan", file=sys.stderr)
+        return None
+    return {"scanned_index": sp.get("scanned_index", 0), "candidates": cands,
+            "cid": sp.get("cid", len(cands))}
 
 
-def _write_scan_progress(outdir, scanned_index, candidates, manifest):
+def _write_scan_progress(outdir, scanned_index, candidate_count, cid,
+                         scan_params, manifest):
+    """Small progress metadata (index/counts/params fingerprint). The candidate
+    LIST lives in scan_journal.jsonl — rewriting this file per boundary is O(1),
+    not O(accumulated) (M4)."""
     if outdir is None or manifest is None:
         return
     _atomic_write_json(Path(outdir) / CACHE_DIRNAME / "scan_progress.json",
-                       {"scanned_index": scanned_index, "candidates": candidates,
+                       {"scanned_index": scanned_index,
+                        "candidate_count": candidate_count,
+                        "cid": cid,
+                        "scan_params": scan_params,
                         "manifest": manifest})
 
 
@@ -572,48 +696,83 @@ def run_discover(repo: Path, seed_files, max_files: int, big_bytes: int,
 
     deadline = (time.monotonic() + time_budget_ms / 1000.0) if time_budget_ms else None
 
+    # scan params fingerprint (M2): scope shape + language. A --resume under
+    # DIFFERENT params must never continue an old checkpoint's candidate set.
+    if seed_files is None:
+        scope_sig = "all"
+    else:
+        scope_sig = "sha1:" + hashlib.sha1(
+            "\n".join(sorted(seed_files)).encode("utf-8")).hexdigest()
+    scan_params = {"scope": scope_sig, "language": language or None}
+
     # call graph: cache load or rebuild (cache hit skips the two regex passes)
     cache_hit = False
     loaded = None
     if write_cache and not rebuild_cache:
         loaded = _try_load_callgraph_cache(outdir, manifest)
+    graph_budget_hit = [False]
     if loaded is not None:
         forward, reverse, framework_files = loaded
         cache_hit = True
         print("[discover] callgraph cache hit; skipping two-pass rebuild", file=sys.stderr)
     else:
-        forward, reverse, framework_files = build_call_graph(files_data, progress_every)
-        if write_cache:
+        defs = None
+        if resume and write_cache and not rebuild_cache:
+            defs = _try_load_defs_cache(outdir, manifest)
+            if defs is not None:
+                print("[discover] callgraph defs cache hit; skipping pass 1",
+                      file=sys.stderr)
+        forward, reverse, framework_files, defs = build_call_graph(
+            files_data, progress_every, deadline=deadline, defs=defs,
+            budget_hit=graph_budget_hit)
+        if graph_budget_hit[0]:
+            # M3: budget tripped INSIDE a callgraph pass. Pass-1's complete state
+            # (when it completed) is the salvage artifact; pass 2 restarts cheaply.
+            if write_cache and defs is not None:
+                _write_defs_cache(outdir, defs, manifest)
+        elif write_cache:
             _write_callgraph_cache(outdir, forward, reverse, framework_files, manifest)
 
     partial = False
     resume_hint = ""
-    candidates = []  # set by scan_candidates unless the budget trips at the callgraph boundary
+    candidates = []  # set by scan_candidates unless the budget trips at/before scan
 
-    # safe boundary 1: call graph built (+ cached). Budget exceeded here → no scan yet.
-    if deadline is not None and time.monotonic() >= deadline:
+    # safe boundary 0 (M3): budget tripped inside a callgraph pass.
+    # safe boundary 1: call graph built (+ cached), budget exceeded here → no scan yet.
+    graph_or_boundary_partial = graph_budget_hit[0] or (
+        deadline is not None and time.monotonic() >= deadline)
+    if graph_or_boundary_partial:
         # Preserve any existing fresh checkpoint — do NOT clobber prior scan progress.
         # (On a huge repo, loading the callgraph cache can itself eat the budget on a
         # --resume call; wiping the checkpoint to (0, []) would lose all prior progress.)
-        if write_cache and _try_load_scan_progress(outdir, manifest) is None:
-            _write_scan_progress(outdir, 0, [], manifest)
+        if write_cache and _try_load_scan_progress(outdir, manifest, scan_params) is None:
+            _write_scan_progress(outdir, 0, 0, 0, scan_params, manifest)
         partial = True
-        resume_hint = ("callgraph built + cached; re-dispatch with --resume "
+        resume_hint = ("callgraph pass exceeded --time-budget-ms (pass-1 defs cached "
+                       "when complete); re-dispatch with --resume — a defs cache hit "
+                       "skips pass 1, a graph cache hit skips both passes"
+                       if graph_budget_hit[0] else
+                       "callgraph built + cached; re-dispatch with --resume "
                        "(or raise --time-budget-ms) to scan candidates")
     else:
         start_i, prior, start_cid = 0, None, 0
         if resume and write_cache and cache_hit:
-            sp = _try_load_scan_progress(outdir, manifest)
+            sp = _try_load_scan_progress(outdir, manifest, scan_params)
             if sp is not None:
                 start_i = sp["scanned_index"]
                 prior = sp["candidates"]
-                start_cid = len(prior)
+                start_cid = sp["cid"]
                 print(f"[discover] resuming scan from file {start_i}/{len(files_data)} "
                       f"({start_cid} prior candidates)", file=sys.stderr)
+        if write_cache and prior is None:
+            # fresh scan (no resume, or the checkpoint was stale/absent/mismatched):
+            # drop any stale journal so the new scan's appends start clean
+            _truncate_scan_journal(outdir)
         candidates, partial = scan_candidates(
             files_data, reverse, seed_files, language, progress_every,
             start_i=start_i, prior_candidates=prior, start_cid=start_cid,
-            deadline=deadline, outdir=outdir if write_cache else None, manifest=manifest)
+            deadline=deadline, outdir=outdir if write_cache else None, manifest=manifest,
+            scan_params=scan_params)
         if partial:
             resume_hint = ("scan incomplete within --time-budget-ms; re-dispatch with "
                            "--resume to continue from the checkpoint")
@@ -793,6 +952,11 @@ def _run_check(outdir: Path):
             if not isinstance(cands, list):
                 violations.append({"file": "controls_candidates.json",
                                    "issue": "wrapper must be {repo,candidates[],...}"})
+                # normalize to empty: a wrong-shape wrapper is a VIOLATION, never
+                # a bare crash — the per-candidate loop below must walk safely
+                # (enumerate(None) raised TypeError before; the gate recipe only
+                # recognizes exit 2)
+                cands = []
             elif not isinstance(cd.get("tests_skipped"), int) or \
                     isinstance(cd.get("tests_skipped"), bool) or \
                     cd.get("tests_skipped") < 0:
@@ -828,6 +992,7 @@ def _run_check(outdir: Path):
             if not isinstance(clusters, list):
                 violations.append({"file": "clusters.json",
                                    "issue": "wrapper must be {repo,clusters[],truncated}"})
+                clusters = []   # violation, never a crash (same as candidates side)
         except (OSError, ValueError) as e:
             violations.append({"file": "clusters.json", "issue": f"malformed: {e}"})
             clusters = []

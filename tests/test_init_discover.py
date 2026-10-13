@@ -416,6 +416,232 @@ class TestDiscover(unittest.TestCase):
         (outdir / "controls_candidates.json").write_text(json.dumps(cd), encoding="utf-8")
         self.assertEqual(self._run_main(self.d, ["discover_controls.py", "--check", str(outdir)]), 2)
 
+    def _check_capture(self, outdir):
+        """Run discover --check capturing stdout (violations JSON) + rc."""
+        import contextlib, importlib.util, io
+        spec = importlib.util.spec_from_file_location(
+            "dc_capture", SCRIPTS / "discover_controls.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        old = sys.argv
+        sys.argv = ["discover_controls.py", "--check", str(outdir)]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = mod.main()
+        finally:
+            sys.argv = old
+        return rc, buf.getvalue()
+
+    def test_check_wrong_shape_candidates_no_traceback(self):
+        # M1: legal JSON with a wrong-shape wrapper (top-level list where the
+        # wrapper dict is expected) reports violations + exit 2 — NEVER a bare
+        # TypeError traceback (the orchestrator gate recipe only recognizes 2).
+        import json
+        outdir = Path(tempfile.mkdtemp(prefix="mgh_init_out_"))
+        (outdir / "controls_candidates.json").write_text("[1, 2, 3]", encoding="utf-8")
+        (outdir / "clusters.json").write_text(
+            json.dumps({"repo": "r", "clusters": [], "truncated": False}),
+            encoding="utf-8")
+        rc, out = self._check_capture(outdir)
+        self.assertEqual(rc, 2)
+        self.assertIn("wrapper must be", out)
+
+    def test_check_wrong_shape_clusters_no_traceback(self):
+        import json
+        outdir = Path(tempfile.mkdtemp(prefix="mgh_init_out_"))
+        (outdir / "controls_candidates.json").write_text(
+            json.dumps({"repo": "r", "candidates": [], "tests_skipped": 0}),
+            encoding="utf-8")
+        (outdir / "clusters.json").write_text("[4, 5]", encoding="utf-8")
+        rc, out = self._check_capture(outdir)
+        self.assertEqual(rc, 2)
+        self.assertIn("wrapper must be", out)
+
+class TestCallGraphOrderIndependence(unittest.TestCase):
+    """H5: expand_scope.build_call_graph MUST be two-pass (complete def index
+    first, then resolve calls) — cross-file edges NEVER depend on rglob order.
+    Before the fix, a file only resolved defs from files EARLIER in the walk,
+    silently dropping ~half the cross-file edges."""
+
+    def _pair_repo(self, first_content_name, second_content_name):
+        repo = Path(tempfile.mkdtemp(prefix="mgh_cg_"))
+        src = repo / "src"
+        src.mkdir()
+        (src / first_content_name).write_text(
+            "public class A { public String mask(String s) { return s; } "
+            "public void callB() { B b = new B(); b.check(); } }",
+            encoding="utf-8")
+        (src / second_content_name).write_text(
+            "public class B { public void check() { } "
+            "public void callA() { A a = new A(); a.mask(\"x\"); } }",
+            encoding="utf-8")
+        return repo
+
+    def _edge_set(self, repo):
+        es = _load("expand_scope")
+        forward, _reverse, _n2f, _fw = es.build_call_graph(repo)
+        return {(a, b) for a, tgts in forward.items() for b in tgts}
+
+    def test_cross_file_edges_both_directions_under_filename_swap(self):
+        # rglob walks alphabetically: A.java first in both repos — but its
+        # CONTENT differs (class A in repo1, class B in repo2). A two-pass
+        # build yields BOTH directions in both layouts; the single-pass build
+        # lost whichever cross call sat in the first-walked file.
+        r1 = self._pair_repo("A.java", "B.java")
+        r2 = self._pair_repo("B.java", "A.java")   # contents swapped
+        e1 = self._edge_set(r1)
+        e2 = self._edge_set(r2)
+        # both repos carry the same two directed edges between the two files
+        expected1 = {("src/A.java", "src/B.java"), ("src/B.java", "src/A.java")}
+        expected2 = {("src/A.java", "src/B.java"), ("src/B.java", "src/A.java")}
+        self.assertEqual(e1, expected1)
+        self.assertEqual(e2, expected2)
+
+class TestWalkSourcesLimitQuota(unittest.TestCase):
+    """H6: the walk quota counts SOURCE files only; cap hit warns on stderr and
+    raises the limit_hit accumulator (never a silent stop). Non-source assets
+    (.txt/…) MUST NOT consume quota — discover's max_files+1 truncated sentinel
+    is built on source-only counting."""
+
+    def _repo(self, files):
+        repo = Path(tempfile.mkdtemp(prefix="mgh_lim_"))
+        for name, content in files:
+            p = repo / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        return repo
+
+    def test_non_source_files_do_not_consume_quota(self):
+        es = _load("expand_scope")
+        repo = self._repo([("a.txt", "x"), ("b.txt", "x"), ("c.txt", "x"),
+                           ("d.txt", "x"), ("e.java", "class E {}"),
+                           ("f.java", "class F {}")])
+        got = {p.name for p, _ in es.walk_sources(repo, limit_files=5)}
+        self.assertEqual(got, {"e.java", "f.java"})   # before: only e.java
+
+    def test_cap_hit_warns_and_flags(self):
+        import contextlib, io
+        es = _load("expand_scope")
+        repo = self._repo([("a.java", "class A {}"), ("b.java", "class B {}"),
+                           ("c.java", "class C {}")])
+        limit_hit = [False]
+        err = io.StringIO()
+        got = set()
+        with contextlib.redirect_stderr(err):
+            for p, _ in es.walk_sources(repo, limit_files=2, limit_hit=limit_hit):
+                got.add(p.name)
+        self.assertEqual(got, {"a.java", "b.java"})
+        self.assertTrue(limit_hit[0])
+        self.assertIn("limit", err.getvalue().lower())
+
+    def test_discover_truncated_sentinel_on_mixed_repo(self):
+        # mixed repo: 2 .txt + 3 .java with --max-files 2 — before the fix the
+        # quota was eaten by the .txt files, the sentinel never fired, and 2 of
+        # the 3 source files were silently dropped (truncated:false).
+        import contextlib, importlib.util, io, json
+        repo = self._repo([("a.txt", "x"), ("b.txt", "x"),
+                           ("c.java", 'class C { @PreAuthorize("x") void m() {} }'),
+                           ("d.java", 'class D { @PreAuthorize("x") void m() {} }'),
+                           ("e.java", 'class E { @PreAuthorize("x") void m() {} }')])
+        outdir = Path(tempfile.mkdtemp(prefix="mgh_tr_out_"))
+        spec = importlib.util.spec_from_file_location(
+            "dc_tr", SCRIPTS / "discover_controls.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        old = sys.argv
+        sys.argv = ["discover_controls.py", "--repo", str(repo), "--out", str(outdir),
+                    "--max-files", "2"]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                mod.main()
+        finally:
+            sys.argv = old
+        summary = json.loads(buf.getvalue().strip().splitlines()[-1])
+        self.assertTrue(summary.get("truncated"))
+
+class TestScopeAmbiguityFailLoud(unittest.TestCase):
+    """H7: --path to a nonexistent dir / --package with zero matching dirs exit
+    2 with a recipe — NEVER a silent empty-seed "success" (a typo'd scope
+    produced a wrong 'no controls here' conclusion). A dir that EXISTS but has
+    no source files stays exit 0 + empty note."""
+
+    def setUp(self):
+        import tempfile
+        self.repo = Path(tempfile.mkdtemp(prefix="mgh_h7_"))
+        (self.repo / "src" / "pay").mkdir(parents=True)
+        (self.repo / "src" / "pay" / "A.java").write_text(
+            "class A {}", encoding="utf-8")
+        self.tmp_out = Path(tempfile.mkdtemp(prefix="mgh_h7o_")) / "scope.json"
+
+    def _run_es(self, *args):
+        import contextlib, importlib.util, io
+        spec = importlib.util.spec_from_file_location(
+            "es_h7", SCRIPTS / "expand_scope.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        argv = ["expand_scope.py", "--repo", str(self.repo),
+                "--out", str(self.tmp_out), *args]
+        old, sys.argv = sys.argv, argv
+        buf, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                rc = mod.main()
+        finally:
+            sys.argv = old
+        return rc, buf.getvalue(), err.getvalue()
+
+    def test_nonexistent_path_exit_2(self):
+        rc, _, err = self._run_es("--path", "src/paymant")   # typo
+        self.assertEqual(rc, 2)
+        self.assertIn("src/paymant", err)
+
+    def test_no_match_package_exit_2(self):
+        rc, _, err = self._run_es("--package", "com.acme.nomatch")
+        self.assertEqual(rc, 2)
+        self.assertIn("com.acme.nomatch", err)
+
+    def test_existing_dir_without_sources_stays_empty_success(self):
+        (self.repo / "src" / "empty").mkdir(parents=True)
+        rc, out, _ = self._run_es("--path", "src/empty")
+        self.assertEqual(rc, 0)
+        self.assertIn("empty seed set", out)
+
+
+class TestPruningIgnoresAncestors(unittest.TestCase):
+    """M8: pruning (EXCLUDE_DIR + dot-prefix) judges repo-RELATIVE parts only —
+    a repo placed under a `build`/`.cache`-named ANCESTOR still scans. Before:
+    absolute-parts pruning emptied the whole repo silently (exit 0, zero
+    candidates). Covers walk_sources AND collect_dir (the shared chokepoints)."""
+
+    def test_walk_sources_under_excluded_named_ancestor(self):
+        import tempfile
+        outer = Path(tempfile.mkdtemp(prefix="mgh_m8a_"))
+        repo = outer / "build" / "repo"
+        repo.mkdir(parents=True)
+        (repo / "A.java").write_text("class A {}", encoding="utf-8")
+        es = _load("expand_scope")
+        self.assertEqual([p.name for p, _ in es.walk_sources(repo)], ["A.java"])
+
+    def test_walk_sources_under_dot_prefixed_ancestor(self):
+        import tempfile
+        outer = Path(tempfile.mkdtemp(prefix="mgh_m8b_"))
+        repo = outer / ".cache" / "repo"
+        repo.mkdir(parents=True)
+        (repo / "A.java").write_text("class A {}", encoding="utf-8")
+        es = _load("expand_scope")
+        self.assertEqual([p.name for p, _ in es.walk_sources(repo)], ["A.java"])
+
+    def test_collect_dir_under_excluded_named_ancestor(self):
+        import tempfile
+        outer = Path(tempfile.mkdtemp(prefix="mgh_m8c_"))
+        repo = outer / "build" / "repo"
+        repo.mkdir(parents=True)
+        (repo / "A.java").write_text("class A {}", encoding="utf-8")
+        es = _load("expand_scope")
+        self.assertEqual(es.collect_dir(repo, repo), ["A.java"])
+
 
 if __name__ == "__main__":
     unittest.main()

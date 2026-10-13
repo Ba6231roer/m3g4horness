@@ -156,20 +156,35 @@ class TestCallgraphCache(unittest.TestCase):
 
 class TestSoftBudget(unittest.TestCase):
     def test_partial_exit_clean(self):
-        # 120 files -> callgraph build is well over a 1ms budget, so the partial trips
-        # deterministically at the callgraph-built safe boundary.
+        # M3: with --progress-every 1 the deadline is checked INSIDE the callgraph
+        # passes too — a 1ms budget on 120 files trips mid-pass-1; the most
+        # expensive phase is no longer undefended. Pass 1 incomplete -> NO graph
+        # cache; clean partial exit (0 + partial:true + hint + zero-preserving
+        # scan checkpoint) + no truncated final product.
         repo = _repo(120, "part")
         out = Path(tempfile.mkdtemp(prefix="mgh_part_out_"))
         rc, s, err = _run(repo, out, "--time-budget-ms", "1")
         self.assertEqual(rc, 0, "partial must exit 0, not be killed")
         self.assertTrue(s["partial"], "budget exceeded -> partial:true")
         self.assertTrue(s["resume_hint"], "partial must carry a resume_hint")
-        self.assertTrue((out / "cache" / "callgraph.json").is_file(),
-                        "callgraph cache must land on partial")
+        self.assertFalse((out / "cache" / "callgraph.json").is_file(),
+                         "mid-pass-1 partial must not claim a built graph cache")
         self.assertTrue((out / "cache" / "scan_progress.json").is_file(),
-                        "scan checkpoint must land on partial")
+                        "zero-preserving scan checkpoint must land on partial")
         self.assertFalse((out / "controls_candidates.json").is_file(),
                          "partial must NOT write a truncated final product")
+
+    def test_graph_complete_partial_keeps_graph_cache(self):
+        # Boundary-1 shape still exists: warm cache + a budget smaller than the
+        # load overhead -> partial at the callgraph-built boundary, full graph
+        # cache intact on disk.
+        repo = _repo(60, "part2")
+        out = Path(tempfile.mkdtemp(prefix="mgh_part2_out_"))
+        _run(repo, out)                                   # full run populates cache
+        rc, s, err = _run(repo, out, "--time-budget-ms", "1", "--resume")
+        self.assertEqual(rc, 0)
+        self.assertTrue(s["partial"])
+        self.assertTrue((out / "cache" / "callgraph.json").is_file())
 
     def test_finishes_in_one_go_when_budget_off(self):
         repo = _repo(5, "off")
@@ -243,7 +258,12 @@ class TestScanResume(unittest.TestCase):
         self.assertTrue(s["partial"], "cold run must partial within 30ms on 40 dense files")
         cp1 = _progress()
         self.assertGreater(cp1["scanned_index"], 0, "cold partial must have scanned some files")
-        self.assertGreater(len(cp1["candidates"]), 0, "cold partial must have candidates")
+        self.assertGreater(cp1["candidate_count"], 0,
+                           "cold partial must have candidates (journal-backed count)")
+        jl = (out / "cache" / "scan_journal.jsonl")
+        self.assertEqual(len([ln for ln in jl.read_text(encoding="utf-8").splitlines()
+                              if ln.strip()]), cp1["candidate_count"],
+                         "journal lines must equal the checkpoint candidate count")
 
         # 2) resume with a budget smaller than the per-call read+load overhead ->
         #    trips at the callgraph-built boundary. The checkpoint MUST be preserved.
@@ -254,8 +274,10 @@ class TestScanResume(unittest.TestCase):
         cp2 = _progress()
         self.assertEqual(cp2["scanned_index"], cp1["scanned_index"],
                          "callgraph-boundary partial must not reset scanned_index")
-        self.assertEqual(len(cp2["candidates"]), len(cp1["candidates"]),
+        self.assertEqual(cp2["candidate_count"], cp1["candidate_count"],
                          "callgraph-boundary partial must not discard prior candidates")
+        self.assertTrue((out / "cache" / "scan_journal.jsonl").is_file(),
+                        "journal must survive the boundary partial")
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -285,6 +307,125 @@ class TestAtomicWrite(unittest.TestCase):
         self.assertEqual(r.returncode, 0, "--check must pass on atomic complete products")
         d = json.loads(r.stdout.decode("utf-8", "replace"))
         self.assertTrue(d["ok"])
+
+
+class TestScanParamsFingerprint(unittest.TestCase):
+    """M2: the scan checkpoint records a params fingerprint (scope shape +
+    language); --resume with DIFFERENT params discards the stale checkpoint
+    (stderr disclosure + fresh scan) instead of silently mixing candidate sets."""
+
+    def test_scope_changed_resume_discards_checkpoint(self):
+        repo = _repo(40, "pf")
+        out = Path(tempfile.mkdtemp(prefix="mgh_pf_out_"))
+        rc, s, _ = _run(repo, out, "--time-budget-ms", "30")
+        self.assertEqual(rc, 0)
+        self.assertTrue(s["partial"])
+        sp = json.loads((out / "cache" / "scan_progress.json")
+                        .read_text(encoding="utf-8"))
+        self.assertIn("scan_params", sp)
+        self.assertGreater(sp["scanned_index"], 0)
+        # baseline: full scoped run in a SEPARATE out dir
+        out2 = Path(tempfile.mkdtemp(prefix="mgh_pf_base_"))
+        rc2, s2, _ = _run(repo, out2, "--scope", "path:src/mod0")
+        self.assertEqual(rc2, 0)
+        self.assertFalse(s2["partial"])
+        # resume with a DIFFERENT scope -> fingerprint mismatch -> fresh scan,
+        # candidates == the scoped baseline (NEVER mixed with the prior set)
+        rc3, s3, err3 = _run(repo, out, "--resume", "--scope", "path:src/mod0")
+        self.assertEqual(rc3, 0)
+        self.assertFalse(s3["partial"])
+        self.assertIn("mismatch", err3)
+        self.assertEqual(_cand_set(out), _cand_set(out2),
+                         "param-changed resume must equal a fresh scoped run, "
+                         "never a mixed candidate set")
+
+
+class TestScanJournalShape(unittest.TestCase):
+    """M4: the checkpoint is a small progress file + an append-only journal —
+    total write amplification O(n), not the per-boundary full-list rewrite."""
+
+    def test_progress_small_and_journal_append_only(self):
+        repo = _repo(40, "jl")
+        out = Path(tempfile.mkdtemp(prefix="mgh_jl_out_"))
+        rc, s, _ = _run(repo, out, "--time-budget-ms", "30")
+        self.assertEqual(rc, 0)
+        self.assertTrue(s["partial"])
+        sp_text = (out / "cache" / "scan_progress.json").read_text(encoding="utf-8")
+        sp = json.loads(sp_text)
+        self.assertNotIn("candidates", sp, "progress must not carry the candidate list")
+        self.assertIn("candidate_count", sp)
+        self.assertLess(len(sp_text), 4096, "progress must stay small")
+        jl = out / "cache" / "scan_journal.jsonl"
+        self.assertTrue(jl.is_file())
+        lines = [ln for ln in jl.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        self.assertEqual(len(lines), sp["candidate_count"])
+
+    def test_complete_run_keeps_journal_and_resume_is_noop_equivalent(self):
+        repo = _repo(6, "jl2")
+        out = Path(tempfile.mkdtemp(prefix="mgh_jl2_out_"))
+        _run(repo, out)
+        base = _cand_set(out)
+        self.assertTrue((out / "cache" / "scan_journal.jsonl").is_file(),
+                        "completed run keeps the journal (idempotent resume replays it)")
+        rc, s, _ = _run(repo, out, "--resume")
+        self.assertEqual(rc, 0)
+        self.assertFalse(s["partial"])
+        self.assertEqual(_cand_set(out), base)
+
+
+class TestCallgraphDefsCache(unittest.TestCase):
+    """M3: pass 1's complete state caches to cache/callgraph_defs.json for
+    resume salvage; a defs hit skips pass 1 (never re-walks defs)."""
+
+    @staticmethod
+    def _files_data(repo):
+        files_data = []
+        for p in sorted(repo.rglob("*.java")):
+            t = p.read_text(encoding="utf-8")
+            files_data.append({"rel": p.relative_to(repo).as_posix(),
+                               "lang": "java", "text": t,
+                               "lines": t.splitlines(), "bytes": len(t),
+                               "mtime": p.stat().st_mtime, "big": False})
+        return files_data
+
+    def test_defs_roundtrip_and_preload_skips_pass1(self):
+        import contextlib, io
+        mod = _load("discover_controls")
+        repo = _repo(8, "dc")
+        files_data = self._files_data(repo)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            mod.build_call_graph(files_data, progress_every=2)
+        self.assertIn("callgraph pass1", err.getvalue())
+        fwd1, rev1, fw1, defs = mod.build_call_graph(files_data, progress_every=2)
+        self.assertIsNotNone(defs)
+        self.assertIn("name_to_files", defs)
+        err2 = io.StringIO()
+        with contextlib.redirect_stderr(err2):
+            fwd2, rev2, fw2, _ = mod.build_call_graph(files_data, progress_every=2,
+                                                      defs=defs)
+        self.assertNotIn("callgraph pass1", err2.getvalue(),
+                         "preloaded defs must skip pass 1")
+        self.assertEqual({k: dict(v) for k, v in fwd1.items()},
+                         {k: dict(v) for k, v in fwd2.items()})
+
+    def test_run_resume_uses_defs_cache_when_graph_cache_missing(self):
+        repo = _repo(10, "dc2")
+        out = Path(tempfile.mkdtemp(prefix="mgh_dc2_out_"))
+        _run(repo, out)                               # populate manifest + graph cache
+        (out / "cache" / "callgraph.json").unlink()   # simulate graph-cache loss
+        mod = _load("discover_controls")
+        files_data = self._files_data(repo)
+        manifest = json.loads((out / "cache" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        _f, _r, _fw, defs = mod.build_call_graph(files_data, progress_every=0)
+        (out / "cache" / "callgraph_defs.json").write_text(
+            json.dumps({**defs, "manifest": manifest}, ensure_ascii=False),
+            encoding="utf-8")
+        rc, s, err = _run(repo, out, "--resume")
+        self.assertEqual(rc, 0)
+        self.assertFalse(s["cache_hit"], "full graph cache is gone")
+        self.assertIn("defs cache hit", err, "resume must load the defs cache")
 
 
 if __name__ == "__main__":

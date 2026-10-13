@@ -25,6 +25,7 @@ Exit codes (R5.3b): 0 ok · 1 input missing/malformed · 2 misuse.
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -204,8 +205,13 @@ def main():
         "truncated": truncated,
         "batches": batches,
     }
-    Path(args.out).write_text(
+    # atomic landing (.tmp + os.replace, the family discipline): a SIGKILL
+    # mid-write leaves at most a stale .tmp, NEVER a truncated half-written
+    # plan — the upstream cure for the scout layer's corrupt-plan supply.
+    tmp = Path(str(args.out) + ".tmp")
+    tmp.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, args.out)
     print(f"[plan_scout] {len(targets)} targets -> {len(batches)} batches "
           f"(regex_known: {regex_known_count}, oversize->slice: {oversize}, "
           f"truncated: {truncated})", file=sys.stderr)

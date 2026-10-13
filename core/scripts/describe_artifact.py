@@ -97,6 +97,42 @@ def _element_shape(v):
     return _type_name(v)
 
 
+# Standalone `--field` echo bound (chars): keeps the sanctioned inspection
+# outlet itself bounded — an unbounded whole-container echo is exactly the
+# anti-pattern this script exists to replace.
+VALUE_ECHO_CAP = 4096
+_VALUE_SAMPLE_N = 4
+
+
+def _bounded_value(val):
+    """Bounded echo for standalone --field: scalars truncated at VALUE_ECHO_CAP,
+    containers carried as {type,count,sample} with each sampled element bounded
+    too. Returns (echo, truncated)."""
+    if isinstance(val, str):
+        if len(val) <= VALUE_ECHO_CAP:
+            return val, False
+        return val[:VALUE_ECHO_CAP], True
+    if isinstance(val, (int, float, bool)) or val is None:
+        return val, False
+    if isinstance(val, list):
+        sample, any_tr = [], False
+        for item in val[:_VALUE_SAMPLE_N]:
+            s, t = _bounded_value(item)
+            sample.append(s)
+            any_tr = any_tr or t
+        return ({"type": "list", "count": len(val), "sample": sample},
+                len(val) > _VALUE_SAMPLE_N or any_tr)
+    if isinstance(val, dict):
+        keys = list(val.keys())
+        sample, any_tr = {}, False
+        for k in keys[:_VALUE_SAMPLE_N]:
+            sample[k], t = _bounded_value(val[k])
+            any_tr = any_tr or t
+        return ({"type": "dict", "count": len(val), "sample": sample},
+                len(keys) > _VALUE_SAMPLE_N or any_tr)
+    return _type_name(val), False
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="describe an artifact's structure (sanctioned introspection outlet)")
@@ -142,7 +178,10 @@ def main():
         out["type"] = _type_name(val)
         target = val
         if not any([args.keys, args.count, args.sample is not None, args.shape]):
-            out["value"] = val
+            echo, truncated = _bounded_value(val)
+            out["value"] = echo
+            if truncated:
+                out["truncated"] = True
             print(json.dumps(out, ensure_ascii=False))
             return 0
     else:

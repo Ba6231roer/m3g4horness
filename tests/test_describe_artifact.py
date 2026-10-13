@@ -124,6 +124,47 @@ class TestDescribeArtifact(unittest.TestCase):
         code, _, _ = self._run(["--keys"])
         self.assertEqual(code, 1)
 
+    def test_field_standalone_bounded_echo(self):
+        # M7: standalone --field NEVER dumps a whole container — bounded echo
+        # (type+count+sample) + truncated flag (design D10).
+        big = [{"file": f"src/F{i}.java", "line": i} for i in range(500)]
+        self._wrap({"clusters": big})
+        code, out, _ = self._run(["--field", "clusters"])
+        self.assertEqual(code, 0)
+        got = json.loads(out)
+        self.assertTrue(got.get("truncated") is True)
+        v = got["value"]
+        self.assertEqual(v["type"], "list")
+        self.assertEqual(v["count"], 500)
+        self.assertLessEqual(len(json.dumps(v, ensure_ascii=False)),
+                             self.m.VALUE_ECHO_CAP)
+
+    def test_field_standalone_scalar_truncated(self):
+        self._wrap({"note": "x" * 10000})
+        code, out, _ = self._run(["--field", "note"])
+        self.assertEqual(code, 0)
+        got = json.loads(out)
+        self.assertTrue(got.get("truncated") is True)
+        self.assertEqual(len(got["value"]), self.m.VALUE_ECHO_CAP)
+
+    def test_field_with_count_combo_unchanged(self):
+        # combo forms stay byte-identical (count mode is naturally bounded)
+        self._wrap({"clusters": [1, 2]})
+        code, out, _ = self._run(["--field", "clusters", "--count"])
+        self.assertEqual(code, 0)
+        got = json.loads(out)
+        self.assertEqual(got["count"], 2)
+        self.assertNotIn("value", got)
+        self.assertNotIn("truncated", got)
+
+    def test_field_standalone_small_scalar_untruncated(self):
+        self._wrap({"note": "hello"})
+        code, out, _ = self._run(["--field", "note"])
+        self.assertEqual(code, 0)
+        got = json.loads(out)
+        self.assertEqual(got["value"], "hello")
+        self.assertNotIn("truncated", got)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -251,5 +251,63 @@ class TestWriteRunconfig(unittest.TestCase):
         self.assertFalse((target / ".mgh-init" / ".gitignore").exists())
 
 
+class TestFsyncDurability(unittest.TestCase):
+    """M6: the crash-recovery anchor's atomic write MUST fsync content before
+    os.replace — replace's atomicity alone does not flush CONTENT (a power cut
+    can land a zero-length run_config after a "successful" replace)."""
+
+    def test_all_three_writes_fsync_before_replace(self):
+        from unittest import mock
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_f_")).resolve()
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+        with mock.patch("os.fsync", side_effect=lambda fd: (events.append("fsync"),
+                                                            real_fsync(fd))[-1]),              mock.patch("os.replace", side_effect=lambda s, d: (events.append("replace"),
+                                                                real_replace(s, d))[-1]):
+            code, _, _ = _run("--target", str(target))
+        self.assertEqual(code, 0)
+        # run_config + sentinel + gitignore: every replace preceded by a fsync
+        self.assertGreaterEqual(events.count("fsync"), 3)
+        self.assertLess(events.index("fsync"), events.index("replace"))
+
+    def test_no_tmp_residue_after_success(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_t_")).resolve()
+        code, _, _ = _run("--target", str(target))
+        self.assertEqual(code, 0)
+        self.assertEqual(list((target / ".mgh-init").glob("*.tmp")), [])
+
+
+class TestSentinelDomainLocationInvariant(unittest.TestCase):
+    """M6: a sentinel written INTO a canonically-named run dir must carry that
+    dir's domain — a mismatched explicit combo activates the wrong domain's
+    trusted subtrees at that location. Custom-named --init-dir keeps the
+    documented "--init-dir wins" override semantics."""
+
+    def test_canonical_mismatch_exit_2(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_i_")).resolve()
+        code, _, err = _run("--target", str(target), "--init-dir",
+                            str(target / ".mgh-init"), "--run-root", ".mgh-ut-init")
+        self.assertEqual(code, 2)
+        self.assertIn("--run-root", err)
+        self.assertFalse((target / ".mgh-init" / ".active").exists())
+
+    def test_canonical_match_passes(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_m_")).resolve()
+        code, _, _ = _run("--target", str(target), "--init-dir",
+                          str(target / ".mgh-ut-init"), "--run-root", ".mgh-ut-init")
+        self.assertEqual(code, 0)
+        sent = json.loads((target / ".mgh-ut-init" / ".active")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(sent["domain"], "mgh-ut-init")
+
+    def test_default_combo_unchanged(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc_d_")).resolve()
+        code, _, _ = _run("--target", str(target))
+        self.assertEqual(code, 0)
+        sent = json.loads((target / ".mgh-init" / ".active")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(sent["domain"], "mgh-init")
+
+
 if __name__ == "__main__":
     unittest.main()

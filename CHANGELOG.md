@@ -16,6 +16,45 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — mgh-init 发现层扫描韧性:调用图单遍丢边 / 配额混计静默截断 / scope 拼错静默空集 / --check 形状错裸崩 / 续点混合候选集 / 调用图无软时限 / 检查点写放大 等 11 项 (0.1.73)
+
+- **调用图两遍化(H5)**:`expand_scope.build_call_graph` 由单遍(边走边建 def 索引,文件只能解析到枚举序
+  在前的定义 → 约半数跨文件边静默丢失、不进 `unresolved[]`)改两遍——pass 1 建完整定义索引、pass 2 对
+  完整索引解析调用,与文件枚举顺序无关(镜像 `discover_controls` 内部两遍实现);mgh-sast 的 scope
+  resolver CLI 消费面同享修复,输出 shape 零变化。
+- **文件配额只数源文件(H6)**:`walk_sources` 的 `limit_files` 仅对源扩展名文件计数(.txt/.xml/.sql 等资产
+  不再耗配额);触顶 stderr 告警 + 新 `limit_hit` accumulator 上浮截断信号(镜像 dot_skipped 家族)——
+  修复前混合仓的截断点随枚举序不可预测,且 discover 的 `max_files+1` 截断哨兵(建立在「配额只数源文件」
+  假设上)永不触发、源文件静默丢失。
+- **scope 歧义输入 fail-loud(H7)**:`expand_scope` 的 `--path` 指向不存在目录 / `--package` 零匹配 →
+  退出码 2 + recipe(修复前静默空集 + exit 0,拼错路径产出「该模块无存量控制」的错误安全结论,sast 侧
+  同病丢全部 findings);「目录存在但无源文件」保持 exit 0 + note(合法空集)。
+- **discover --check 形状错收口(M1)**:「合法 JSON 但 wrapper/集合形状错」在 not-list 分支归一 `[]` 后报
+  violations + 退出码 2——修复前 `enumerate(None)` 裸崩 TypeError(实机复现),退出码 1 不在编排器闸门
+  语义内。
+- **续点参数指纹(M2)**:`scan_progress.json` 记录生效扫描参数指纹(scope 形态 + language);`--resume`
+  参数与指纹不符 → 弃续点从头扫 + stderr 披露——修复前换参续跑把新旧参数的候选静默混进同一集合;存量
+  无指纹续点视作相符(兼容)。
+- **调用图软时限(M3)**:deadline 检查扩至两 pass 内部(`--progress-every` 节奏,修复前最贵阶段不设防、
+  超宿主超时零全损);pass 1 完成态落 `cache/callgraph_defs.json` 供 resume 复用(defs 命中跳过 pass 1);
+  pass 内超限 → 干净 partial 早退(exit 0 + `partial:true`),既有 scan 续点保留。
+- **续点增量日志(M4)**:累积候选改追加式 `cache/scan_journal.jsonl`(每检查点窗口只写新增,flush+fsync),
+  `scan_progress.json` 瘦身为小体积元数据(索引/计数/指纹)——总写放大由每边界全量重写累积列表的
+  O(n²) 降为 O(n);journal 与计数不符(撕裂/篡改)→ 弃续点重扫自愈;完成态保留 journal(幂等 resume
+  重放候选);旧内联形续点(无 journal)加载兼容。
+- **plan_scout 原子写(M5)**:`scout_plan.json` 改 `.tmp` + `os.replace`(原子写家族统一)——半写 plan 是
+  scout 层「损坏 plan」输入的主要供给源。
+- **step 0 持久性(M6)**:`write_runconfig.py` 原子写补 flush + `os.fsync` 再 replace(run_config / 哨兵 /
+  gitignore 三处 co-write 同治)——修复前掉电后 `os.replace` 可落零长度 run_config(崩溃恢复唯一锚点);
+  哨兵一致性:init_dir 基名为规范运行目录名(`.mgh-init`/`.mgh-ut-init`)而 `--run-root` 派生另一域 →
+  退出码 2(修复前错组把错误域的受信子树写进哨兵);custom 名 `--init-dir` 保留既有「覆盖」语义。
+- **describe --field 有界输出(M7)**:单独使用时值经 `VALUE_ECHO_CAP`(4096)截断 + `truncated` 标志 +
+  容器 `{type,count,sample≤4}`——修复前整份值无界倾倒 stdout(该脚本要替代的反模式);与 `--count` 等
+  模式组合行为不变。
+- **剪枝按 repo 相对分量(M8)**:`walk_sources`/`collect_dir` 的 EXCLUDE_DIR 与点前缀剪枝判定改
+  `p.relative_to(repo).parts`(修复前检查绝对路径全部分量,repo 放在 `build/`/`.cache/` 等排除名或点前缀
+  **祖先**目录下即整仓静默扫空,实测 0 产出)。
+
 ### Fixed — mgh-init 枚举/聚合层口径分裂收口:簇级计数吞失败 / t2 预算口径 / 单元预算无消费 / scout 广告路径分叉 / T3 判定反推 / rollup 全量路径进 stdout 等 11 项 (0.1.72)
 
 - **簇级计数三分(H4)**:`list_clusters.py` 两条计数路径(无打包 / 打包)的簇级计数由残差公式改

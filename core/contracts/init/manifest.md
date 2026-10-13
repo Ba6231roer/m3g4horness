@@ -50,12 +50,11 @@ Work-unit granularity = isolation unit = resume unit:
 | i1 discover | per file (big file per shard) | `i1/<sha(file)>.json` + `.done` |
 | scout reader | per batch | `scout/<batch_id>.json` + `.done` |
 | T1 induct | per cluster | `t1/<safe(cluster_id)>.json` + `.done` |
-| resolve (opt, codegraph-gated) | whole-repo (1) | `resolved.json` (top-level) + `checkpoints/resolve/.done` |
+| resolve (opt, codegraph-gated) | whole-repo (1) | `resolved.json` (top-level) + `checkpoints/resolve/.done` (subagent 写、optional/codegraph-gated——非确定性产出者,缺产 = stage 跳过 + 披露) |
 | T2 synthesis | whole-repo (1) | `t2/synthesis.json` + `.done` |
 | T3 rulewriter | per category | `t3/<category>.<format>.json` + `.done` |
 | T4 consistency | whole-repo (1) | `t4/consistency.json` + `.done` |
 
-A unit record: `{"unit": "<id>", "status": "done", "out": "<rel path>", "bytes": N}`.
 `--resume` skips any unit whose `.done` exists; `--rebuild-cache` ignores
 `cache/callgraph.json` (rebuilt from source mtimes otherwise).
 

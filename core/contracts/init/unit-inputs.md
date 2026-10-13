@@ -17,8 +17,9 @@ which **reads its own `input_path`**; the orchestrator only passes the path verb
 的 unit id —— 即 T1 `cluster_id` 与 `<cid>::shard-<n>` —— 其 input 文件名 + `checkpoint_path`/
 `done_marker` 文件名分量经 `_safe_name` 消毒(**字符消毒** `/`、`\`、`:` → `_` **+ stem 长度截断**
 ≤ 200、保尾 ~60 字符判别段,使任何超长/legacy id 派生的文件名亦可写、两 id 磁盘不碰撞);canonical
-unit id(含 `::`)原样保留为 envelope `cluster_id` 字段 + 物化记录 + 检查点记录 `unit` 字段(done
-检测读 `unit` 字段、不依赖文件名 → resume 不受影响)。`batch_id`(`scout-NNN`)/ `category` 为纯标识、
+unit id(含 `::`)原样保留为 envelope `cluster_id` 字段 + 物化记录 + 检查点记录 `unit` 字段(done/failed 判定为
+**forward marker 路径计算**(canonical id 经同一共享编码函数算出确切 marker 路径、
+`is_file()` 即终态;NEVER 读记录体字段、NEVER stem 反推——身份免疫)。。`batch_id`(`scout-NNN`)/ `category` 为纯标识、
 不含 `::`,消毒为 no-op。各命令的 `<命令输出目录>` + `<tier>`:
 
 | 命令 | 输出目录 | tier / unit | 物化者 |
@@ -52,8 +53,9 @@ SHALL 与 `checkpoint_path`/`input_path` 同纪律——**绝对、落受信子�
 
 ## Schema
 
-每个 `pending[]` 项携带该单元的 `input_path`(绝对)+ `bytes`(该 input 文件字节数)+ `oversize`(bool,
-是否超 `--max-unit-bytes`)。input 文件正文 = 该单元的**完整记录**(slim 待办壳剔除的可变长负载下沉于此):
+每个 `pending[]` 项携带该单元的 `input_path`(绝对)+ `bytes` + `oversize`(bool,是否超
+`--max-unit-bytes`)。`bytes` 按 tier 分列:**t1/t3 = 物化 input 文件字节数**(`st_size`,落盘后回填);
+**scout = 批声明字节**(skeleton 累计的规划值;materialize 的 input 文件另落盘)。input 文件正文 = 该单元的**完整记录**(slim 待办壳剔除的可变长负载下沉于此):
 
 | tier | `<unit>.input.json` 正文 |
 |---|---|

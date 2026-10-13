@@ -22,7 +22,7 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
 
 ```json
 {
-  "cluster_id": "authorization::SecurityConfig::<sha8>",
+  "cluster_id": "authorization::SecurityConfig::src/auth/SecurityConfig.java::<sha1_12>",
   "category": "authorization",
   "kind": "auth",
   "shape": "centralized",
@@ -34,7 +34,7 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
 
 | field | type | note |
 |---|---|---|
-| `cluster_id` | str | `{category}::{anchor\|pattern}::{sha8}`;**总长 ≤ 160**:超预算时截显示槽位(保目录头 + 文件名尾 + 槽位 hash)、保留 sha8 判别尾;`home==file`(路径被塞进类名槽位)时显示槽位去重;短 id 逐字不变 |
+| `cluster_id` | str | 集中式 = `{category}::{home(class 或 method,缺省落 file)}::{file}::{sha1(key) 前 12 hex}`(4 段,`key = category::home::file`);分布式 = `{category}::{pattern}::{sha1(key) 前 12 hex}`(3 段)。判别尾恒对**完整未截断 key** 计算(截断只裁显示槽位,判别身份逐字节不变;源码内该尾命名为 sha8,实际取 sha1 前 12 hex)。**总长 ≤ 160**:超预算时截显示槽位(保目录头 + 文件名尾 + 槽位 hash)、保留 sha8 判别尾;`home==file`(路径被塞进类名槽位)时显示槽位去重;短 id 逐字不变 |
 | `category` | enum | init 8(见 `inventory.md`) |
 | `kind` | enum | 6(`auth`\|`input-validation`\|`sandbox`\|`aslr`\|`cfi`\|`other`);`category→kind` 归一见 `inventory.md` |
 | `shape` | enum | `centralized`(util/filter/config/interceptor 定义,按 anchor 归簇)\| `distributed`(注解跨文件散落,按 `category::pattern` 归簇) |

@@ -109,7 +109,7 @@ For each entry in `unresolved[]`, attempt a real resolution via codegraph:
   终态**——NEVER 用代码变换/重派生;需瞄结构时向编排器请求 `describe_artifact.py` 输出。
 
 ## 输出语言
-面向人读的非代码内容用**简体中文**(`evidence_snippet` 描述);代码、文件路径、`file:class:method`
+面向人读的非代码内容用**简体中文**;`evidence_snippet` 是逐字源码行,NEVER 翻译;代码、文件路径、`file:class:method`
 锚点、标识符、`name`/枚举值保持原样。
 
 ## 输出纯净性(硬边界)

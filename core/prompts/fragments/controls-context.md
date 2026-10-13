@@ -46,7 +46,7 @@ STAGE USE (matches the reserved prompt wording):
    s2 threat-model  — a relevant in-scope control LOWERS a threat's likelihood; never to
                       zero. Record the control `name` in the threat's `controls` field.
    s3 decompose     — prefer chunks that touch an in-scope control's `entry_points` /
-                      `protects` paths first (controls are where中和 claims live).
+                      `protects` paths first (controls are where mitigation claims live).
    s4 deep-dive     — do NOT exclude a source/sink region merely because a control lists
                       it under `protects`; the control may be off-path or gapped. Exclude
                       only on Rule 2 data-flow grounds.

@@ -1,5 +1,5 @@
 ---
-description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/security-controls/; claude: path-scoped .claude/rules/*.md). Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format defaults opencode (pass claude for .claude/rules/*.md; structures differ, never mix). Supports --scope/--resume/--merge and large-file sharding. Findings are LLM-induced candidates needing human review.
+description: Discover existing reusable security controls in a project (input-validation / data-masking / authentication / authorization / crypto / rate-limiting / csrf / audit-logging) and emit agent-consumable rules (opencode: concise AGENTS.md lazy index + per-category detail files under docs/security-controls/; claude: path-scoped .claude/rules/*.md). Three-tier isolation-first pipeline (deterministic discover → T1 per-cluster induct → T2 synthesis → T3 per-category rules → T4 consistency). --format defaults opencode (pass claude for .claude/rules/*.md; structures differ, never mix). Supports --scope/--resume and large-file sharding (--merge is refused: no deterministic merger exists). Findings are LLM-induced candidates needing human review.
 ---
 
 # /mgh-init — discover existing security controls → agent rules
@@ -25,12 +25,12 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 - `--format opencode|claude` (default `opencode`; pass `claude` for `<target>/.claude/rules/security-*.md`)
 - `--rules-dir <path>` (opencode default `<target>/docs/security-controls`; 详述文件目录,透传给 `list_rule_jobs.py`/`assemble_rules.py`)
 - `--scope path:<dir>|package:<pkg>|file:<glob>` + `--scope-mode defined|applicable` (default `defined`)
-- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope`+`--merge`)
+- `--language <lang>`, `--max-files <N>`, `--big-file-bytes <N>` (default 200KB), `--sample <N>` (default 8), `--progress-every <N>` (默认 1000), `--large-repo-threshold <N>` (默认 15000;超阈值则前置建议 `--scope` 分模块,产物独立)
 - `--include-dotfiles` (默认关;扫描点前缀路径 `.opencode`/`.claude`/`.codegraph`/`.github`/`.env`。默认跳过——tooling/VCS/IDE/build/config/索引 非一方业务代码;控制定义点落在 `.xxx` 内时传此 flag 纳入)
 - `--include-tests` (默认关;扫描测试源码树 `src/test`/`src/tests`(Maven/Gradle/Kotlin)与 `tests`/`__tests__`/`__mocks__`/`spec`/`specs` 目录段。默认跳过——测试代码对「发现生产安全控制」是净噪声:mock/stub(`@MockBean SecurityConfig`、`mock(SecurityChecker)`)把安全组件物化成调用图里的伪控制、故意写脆弱的测试夹具(渗透训练 `VulnerableApp`、禁用 TLS / 放宽 CORS / 占位密钥 / dummy JWT issuer)命中成真实控制特征、且测试码不上线;控制定义点落在测试目录内时传此 flag 纳入)
-- `--resume` · `--rebuild-cache` · `--merge <partials-dir>` · `--skip-consistency`
+- `--resume` · `--rebuild-cache` · `--skip-consistency`
 - `--no-scout` (skip LLM scout discovery; legacy regex-only) · `--scout-budget <N>` (0=全量) · `--scout-batch-bytes <N>` (默认 96KB) · `--scout-batch-cap <N>` (默认 40) · `--scout-audit-pct <N>` (默认 15)
-- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize 簇切 `::shard-<n>`、scout 批/T3 category 标 `oversize`)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 96KB;T2/scout-merge 经 `plan_aggregate.py` **硬阈值**——> 预算自动 map-reduce;T4 仍软边界 + `--scope`/`--merge` 回退;触发 + shard 数进 `boundaries[]`/`report.md`)
+- **请求上下文预算**(`request-context-budget`,确定性边界强制每次大模型请求 ≤ 阈值;单位字节):`--max-unit-bytes <N>`(单 fan-out 单元物化输入上限,默认 192KB;oversize 簇切 `::shard-<n>`、scout 批/T3 category 标 `oversize`)· `--orch-budget-bytes <N>`(编排器单次请求可见的待办壳页上限,默认 64KB;超则自动分页收紧,stdout `shrunk:true`)· `--max-aggregate-bytes <N>`(聚合输入上限,默认 96KB;T2/scout-merge 经 `plan_aggregate.py` **硬阈值**——> 预算自动 map-reduce;T4 仍软边界 + `--scope` 分模块回退(多次局部运行产物独立);触发 + shard 数进 `boundaries[]`/`report.md`)
 - `--no-codegraph` (skip optional codegraph enrichment; legacy behavior). codegraph 检测默认 `auto`:仅当 `<target>/.codegraph/` 存在**且** PATH 有 `codegraph` 才启用;`--no-codegraph` 或不可用 → 富化 off(行为等价于引入 codegraph 前)
 
 **No actionable args / `--help`** → print the flag table and STOP (zero tokens).
@@ -45,7 +45,7 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 
 ## Orchestration flow
 
-> **完整 stage 流逐步细节见 per-step fragment 集 `init-stage/{<step>}.md`**(经上方 recipe 按当前步加载):`not-started`(bootstrap)→ `discover` → `survey`(opt)→ `scout` → `resolve`(opt)→ `t1` → T1→T2 闸门 → `t2` → `t3` → `assemble`(BUILD INDEX+LINT)→ `t4` → `merge`(--merge 模式)→ `done`。下方 Stage→组件表给全图概览。
+> **完整 stage 流逐步细节见 per-step fragment 集 `init-stage/{<step>}.md`**(经上方 recipe 按当前步加载):`not-started`(bootstrap)→ `discover` → `survey`(opt)→ `scout` → `resolve`(opt)→ `t1` → T1→T2 闸门 → `t2` → `t3` → `assemble`(BUILD INDEX+LINT)→ `t4` → `done`。下方 Stage→组件表给全图概览。
 
 ### Stage → component map
 
@@ -81,5 +81,5 @@ at `.opencode/mgh-core/` (mirrored from `core/`).
 - **Windows `.py` 文件关联风险**:win32 下 opencode 经 PowerShell 执行每条 Bash 命令;脚本侧 leaf(如切片)`MUST` 用显式 `py "<abs>.py"` launcher 调用,**NEVER** `& "<abs>.py"` 或裸 `"<abs>.py"` 命令体(会按 `.py` 文件关联解析为编辑器/弹窗 → 死锁整个 run)。
 - 面向人读的非代码内容(`report.md`、`init_manifest.json::boundaries[]` 文案、rules 正文)用**简体中文**;锚点/路径/frontmatter 保持原样。
 
-> 其余边界细节(dotfiles/tests 默认跳过、宿主 shell 超时、codegraph 富化辅助、请求上下文预算、大仓 `--scope`/`--merge`)由脚本写入 `init_manifest.json::boundaries[]` + `report.md`(运行时落盘),摘要**复述**命中项即可,NEVER 遗漏**实际触发**的边界触发计数。
+> 其余边界细节(dotfiles/tests 默认跳过、宿主 shell 超时、codegraph 富化辅助、请求上下文预算、大仓 `--scope` 分模块)由脚本写入 `init_manifest.json::boundaries[]` + `report.md`(运行时落盘),摘要**复述**命中项即可,NEVER 遗漏**实际触发**的边界触发计数。
 

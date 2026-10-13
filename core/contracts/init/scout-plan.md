@@ -38,13 +38,15 @@ A `Batch` (one S3 scout-reader isolation unit = resume unit):
 |---|---|---|
 | `batch_id` | str | `scout-NNN`;确定性,= checkpoint 单元(`checkpoints/scout/<batch_id>.json.done`) |
 | `targets[]` | [FileSkeleton] | 本批 skeleton 行(已按 `pkg` 排序 → **包内聚**) |
-| `bytes` | int | 本批累计 bytes;MUST ≤ `--scout-batch-bytes` |
-| `needs_slice[]` | [file] | 单文件 `bytes > --scout-batch-bytes` 者,scout-reader 须经 `chunk_sources.py` 切片,**不整文件喂 LLM** |
+| `bytes` | int | 本批累计 bytes;MUST ≤ `--batch-bytes` |
+| `needs_slice[]` | [file] | 单文件 `bytes > --batch-bytes` 者,scout-reader 须经 `chunk_sources.py` 切片,**不整文件喂 LLM** |
 
-- **批数涌现**:`num_batches = ceil(Σtarget_bytes / --scout-batch-bytes)`,非固定常量。
+- **批数涌现**:`num_batches = ceil(Σtarget_bytes / --batch-bytes)`,非固定常量。
 - **包内聚**:切批前按 `pkg` 排序,同目录相关文件落同批。
-- **每批文件数 ≤ `--scout-batch-cap`**(防 subagent 赶进度草率)。
+- **每批文件数 ≤ `--batch-cap`**(防 subagent 赶进度草率)。
 - `truncated`:`targets_total > --scout-budget` 时为真;编排器须建议 `--scope`+`--merge`(无静默)。
+- **计划自描述**:plan 顶层记录生成所用 `batch_bytes`/`batch_cap`;`plan_scout.py --check` 优先按 plan 记录值判预算(缺记录的存量 plan 回退 CLI 值)——自定义批字数的合法 plan 在缺省 `--check` 下零违例;损坏 plan(不可解析/wrapper 形状错)退出码 **2**。
+
 
 ## `scout_candidates.json`
 

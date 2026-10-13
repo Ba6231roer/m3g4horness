@@ -33,7 +33,7 @@ py list_steps.py [--target <dir>] [--step <id>]
 
 `--target` 接受但不使用(未来扩展锚点)。`--step <id>` 打单步(闭集,未知 id → exit 2)。
 `--step` **只接受命名枚举 id**(与 `resume_state.py` step 枚举一致:
-`not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done`);数字索引
+`not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|done`);数字索引
 (如 `--step 0`)→ exit 2(闭集拒歧义)+ stderr 附**可操作 hint**(id 是命名枚举、读
 `resume_state.py` stdout `step` 或 `list_steps.py` 不带 `--step` 列全表;numeric indices
 NOT accepted)。
@@ -62,7 +62,7 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 }
 ```
 
-- `step` ∈ `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done`
+- `step` ∈ `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|done`
   (与 `resume_state.py` step 枚举一致)
 - `kind` = `bash`(确定性叶脚本) 或 `subagent`(LLM stage,无 leaf script)
 - `script_abs` = **绝对路径**(Windows 原生盘符);`null` for subagent steps
@@ -89,7 +89,6 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 | `t3` | bash | `fanout_runner.py` | `controls_inventory.json` {controls[]} | `checkpoints/t3/*.<fmt>.json` [checkpoint per category] |
 | `assemble` | bash | `assemble_rules.py` | `checkpoints/t3/*.<fmt>.json` [T3 records] | `rules` (claude: `.claude/rules/security-*.md` / opencode: `docs/security-controls/*.md`) |
 | `t4` | subagent | — | `rules` (rule files) | `checkpoints/t4/consistency.json.done` (marker) |
-| `merge` | bash | `merge_inventories.py` | `<partials-dir>` [partial inventory JSONs] | `controls_inventory.json` {controls[],merged[]} |
 | `done` | bash | — | — | `init_manifest.json` {version,counts,boundaries[]} |
 
 > **dispatcher-first 扇出步**:scout/t1/t2/t3 四行的 script = `fanout_runner.py`(确定性派发器,

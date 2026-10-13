@@ -3,7 +3,7 @@
 """Unit tests for write_runconfig.py — atomic run_config.json start-state intent writer.
 
 Asserts: atomic write of <target>/.mgh-init/run_config.json; target recorded ABSOLUTE;
---no-scout / mode=merge / skip_consistency recorded; --target required (exit 2); --format
+--no-scout / skip_consistency recorded (--merge refused, no mode field); --target required (exit 2); --format
 defaults to opencode (omitted -> exit 0); stdout ack shape. Run from a non-script cwd
 (import robustness).
 """
@@ -50,16 +50,27 @@ class TestWriteRunconfig(unittest.TestCase):
         self.assertTrue(Path(cfg["target"]).is_absolute())
         self.assertEqual(cfg["format"], "opencode")
         self.assertTrue(cfg["no_scout"])
-        self.assertEqual(cfg["mode"], "normal")
         ack = json.loads(out)
         self.assertEqual(ack["run_config"], str(rc_path.resolve()))
 
-    def test_merge_sets_mode(self):
+    def test_merge_refused_exit2(self):
+        # H11(b): --merge has NO deterministic implementation — refused at step 0
+        # with a recipe, NEVER a silent mode=merge run_config.
         target = Path(tempfile.mkdtemp(prefix="mgh_wc2_")).resolve()
-        code, out, _ = _run("--target", str(target), "--format", "claude", "--merge", "/tmp/p")
+        code, out, err = _run("--target", str(target), "--format", "claude",
+                              "--merge", "/tmp/p")
+        self.assertEqual(code, 2)
+        self.assertIn("merge", (err + out).lower())
+        self.assertFalse((target / ".mgh-init" / "run_config.json").exists())
+
+    def test_payload_records_no_merge_fields(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_wc2b_")).resolve()
+        code, _, _ = _run("--target", str(target), "--no-scout")
         self.assertEqual(code, 0)
-        ack = json.loads(out)
-        self.assertEqual(ack["mode"], "merge")
+        cfg = json.loads((target / ".mgh-init" / "run_config.json")
+                         .read_text(encoding="utf-8"))
+        for k in ("mode", "merge", "merge_partials_dir"):
+            self.assertNotIn(k, cfg)
 
     def test_atomic_no_tmp_left(self):
         target = Path(tempfile.mkdtemp(prefix="mgh_wc3_")).resolve()
@@ -141,7 +152,7 @@ class TestWriteRunconfig(unittest.TestCase):
         _, o2, _ = _run("--target", str(t2), "--format", "opencode", "--run-root", ".mgh-init")
         a1, a2 = json.loads(o1), json.loads(o2)
         # identical schema/flags; run_config/target differ only by the temp dir.
-        for k in ("format", "mode", "no_scout", "no_codegraph", "skip_consistency"):
+        for k in ("format", "no_scout", "no_codegraph", "skip_consistency"):
             self.assertEqual(a1[k], a2[k])
         self.assertEqual(Path(a1["run_config"]), (t1 / ".mgh-init" / "run_config.json").resolve())
         self.assertEqual(Path(a2["run_config"]), (t2 / ".mgh-init" / "run_config.json").resolve())

@@ -8,7 +8,13 @@ orchestrator scout fan-out (步骤 3b). Closes the fan-out asymmetry: scout now 
 CLI(`--help` 即契约):
 ```
 py list_scout_batches.py --scout-plan <scout_plan.json> [--checkpoints <scout-dir>]
+    [--materialize <inputs/scout>] [--offset N] [--limit N]
+    [--max-unit-bytes B] [--orch-budget-bytes B] [--include-failed]
 ```
+
+
+
+**分页与预算**:`--materialize <dir>`(物化 per-unit input,报 `input_path`/`bytes`/`oversize`)·`--offset N` / `--limit N`(页;`--limit < 1` 退出码 2)· `--orch-budget-bytes B`(页超预算自动收紧、报 `effective_limit`+`shrunk:true`)· `--max-unit-bytes B`(切分/标注界)· `--include-failed`(重列 failed 单元,配 dispatcher `--retry-failed`)。stdout 恒携带 `offset`/`limit`/`effective_limit`/`shrunk` 四字段;`total = done + failed + len(pending)` 恒等式对「磁盘全量口径」成立(单页视图下 `pending` 为当前页)。
 
 stdout(结构化 JSON;stderr 仅诊断):
 ```json

@@ -11,7 +11,8 @@ emitted `controls_candidates.json` + `clusters.json`. Your job (optional LLM
 assist) is to **sanity-check and lightly enrich** that deterministic output —
 NOT to re-scan from scratch.
 
-1. Read `.mgh-init/controls_candidates.json` and `.mgh-init/clusters.json`.
+1. Read `<init-dir>/controls_candidates.json` and `<init-dir>/clusters.json`
+   (ABSOLUTE paths given verbatim by the orchestrator — NEVER repo-relative guesses).
 2. For any cluster whose `shape` is unclear or whose `category` looks wrong,
    Read the `evidence_files` (one or two) and correct the category/kind.
 3. Drop obvious false positives (a token matched outside any security meaning,
@@ -30,7 +31,8 @@ codegraph 已返回源码的同一文件再 `Read`。codegraph 的 blast radius 
 信号为 `codegraph=off` 或缺失时:**完全忽略本段**,行为与无 codegraph 时逐字一致(零 codegraph 调用)。
 
 ## Sanctioned tools(白名单)
-- 读侧:`Read`(仅候选/簇的 `evidence_files`)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
+- 读侧:`Read`(候选/簇的 `evidence_files`,以及第 1 步点名的
+  `controls_candidates.json`/`clusters.json` 两份产物)/ `Glob` / `Grep` ——`path` SHALL 锚 repo 根,**NEVER** 读 repo 根上层 / 兄弟模块(hook 确定性兜底越界读);Bash 里直接 `rg`/`grep`/`findstr`/`find`/… 同禁越界。当 `codegraph=on` 时,外科式上下文首选 MCP `codegraph_explore`(或 CLI `codegraph explore`),按上方 codegraph 段回退 Read;`codegraph=off` 时不发起 codegraph 调用。
 - 脚本侧:无(本层为可选富化,不重扫);确定性脚本由**编排器**调用。
 - `Write`/`Edit`:仅限本 stage 产物文件(`i1_enriched.json`)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入产物为终态**——NEVER 用代码变换/重派生。

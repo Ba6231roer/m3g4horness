@@ -44,6 +44,7 @@ class _State:
         # write run_config via the real writer (stateless-resume intent source).
         # Only pass --run-root for non-default names so the default case exercises the
         # bare --target path (byte-equivalent to the prior hard-coded .mgh-init behavior).
+        merge_legacy = rc_flags.pop("merge", None)   # refused by the real writer now
         argv = ["write_runconfig.py", "--target", str(self.target), "--format", fmt]
         if run_root != ".mgh-init":
             argv += ["--run-root", run_root]
@@ -57,6 +58,15 @@ class _State:
                 WC.main()
         finally:
             sys.argv = old
+        if merge_legacy is not None:
+            # H11(b): the real writer now REFUSES --merge; a legacy pre-refusal
+            # artifact is simulated by patching the payload directly.
+            rc = self.init / "run_config.json"
+            cfg = json.loads(rc.read_text(encoding="utf-8"))
+            cfg["mode"] = "merge"
+            cfg["merge"] = merge_legacy
+            cfg["merge_partials_dir"] = merge_legacy
+            rc.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
     def write_json(self, rel, obj):
         p = self.init / rel
@@ -188,11 +198,22 @@ class TestResumeState(unittest.TestCase):
         self.assertFalse(st["resumable"])
         self.assertEqual(st["next_action"]["kind"], "done")
 
-    def test_merge_mode_short_circuit(self):
+    def test_legacy_merge_mode_run_derives_normally(self):
+        # H11(b): --merge is refused at step 0 and the step vocabulary has no
+        # `merge`; a LEGACY run_config carrying mode=merge (pre-refusal artifact)
+        # still derives normally from disk products.
         s = _State(merge="/tmp/partials")
         st = s.state()
-        self.assertEqual(st["step"], "merge")
-        self.assertEqual(st["next_action"]["kind"], "bash")
+        self.assertNotEqual(st["step"], "merge")
+        vocab = {"not-started", "discover", "survey", "scout", "resolve", "t1",
+                 "t2", "t3", "assemble", "t4", "done"}
+        self.assertIn(st["step"], vocab)
+
+    def test_step_vocab_has_no_merge(self):
+        src = (HERE.parent / "core" / "scripts" / "resume_state.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("t4|merge|done", src)
+        self.assertNotIn('"t4", "merge", "done"', src)
 
     def test_missing_run_config_fails_loud_exit2(self):
         # .mgh-init exists but run_config.json absent (legacy in-flight run) -> exit 2
@@ -951,13 +972,6 @@ class TestDisciplineReminders(unittest.TestCase):
         self.assertEqual(st["discipline_reminders"],
                          {"gates": [], "path_recipes": [], "nevers": []})
 
-    def test_merge_mode_short_circuit_carries_discipline(self):
-        # merge short-circuit state also carries the field (shape stability)
-        s = _State(merge="/tmp/partials")
-        st = s.state()
-        self.assertEqual(st["step"], "merge")
-        self.assertIn("discipline_reminders", st)
-        self.assertTrue(st["discipline_reminders"]["path_recipes"])
 
     def test_stdout_incremental_fields_intact(self):
         # ③ stdout is still single-object JSON; existing 7 fields unchanged + new field
@@ -1042,11 +1056,6 @@ class TestStageFlowFiles(unittest.TestCase):
         self.assertEqual(RS._stage_flow_files("not-started"), [])
         self.assertEqual(RS._stage_flow_files("done"), [self._frag("done")])
 
-    def test_merge_mode_carries_merge_fragment(self):
-        s = _State(merge="/tmp/partials")
-        st = s.state()
-        self.assertEqual(st["step"], "merge")
-        self.assertEqual(st["stage_flow_files"], [self._frag("merge")])
 
     def test_deterministic_same_disk_state(self):
         # ④ 同磁盘状态两次调用逐字一致(衍生量,不持久化)
@@ -1259,11 +1268,6 @@ class TestDoneStepReachability(unittest.TestCase):
         self.assertTrue(st["resumable"])
         self.assertEqual(st["stage_flow_files"], [self._done_frag()])
 
-    def test_merge_branch_carries_stale_fanout(self):
-        s = _State(merge="/tmp/partials")
-        st = s.state()
-        self.assertEqual(st["step"], "merge")
-        self.assertEqual(st["stale_fanout"], [])
 
 
 class TestInvalidateStaleGuard(unittest.TestCase):

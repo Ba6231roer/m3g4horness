@@ -81,7 +81,10 @@ wastes the context loaded on demand).
   or "how it was discovered"; no long code.
 - **Rule-body purity**: describe ONLY the target project's control; `NEVER` mention
   this tool's name / scripts / pipeline tiers / internal paths / scanner-or-regex
-  definitions — `assemble_rules.py --check` fails loud on any leak. A control with no
+  definitions — `assemble_rules.py --check` fails loud on the FORBIDDEN_TOKENS it
+  ships (this tool's name/scripts, inventory-schema fields, YAML fences, scanner-prose
+  phrases; bare tier words and `category:`/`source:`/`evidence:` prefixes are
+  intentionally NOT linted — keep them out by discipline, not by the gate). A control with no
   source anchor gets **no rule**; if the whole category has no implementation, write
   **no detail file** and still touch `done_marker` (see `init-rulewriter.md`).
 - **Never** emit `.claude/rules/` in this format (that is Claude Code).

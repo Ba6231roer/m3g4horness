@@ -4,7 +4,7 @@
 write_runconfig — atomic writer of `<target>/.mgh-init/run_config.json` for /mgh-init.
 
 The start-state intent record: it captures the invocation flags that DECIDE the step graph
-(format / scope / no_scout / no_codegraph / skip_consistency / merge / budgets / scout-*),
+(format / scope / no_scout / no_codegraph / skip_consistency / budgets / scout-*; --merge is REFUSED — see the recipe at the refusal site),
 written once at step 0 (after arg parse, before spending tokens). `resume_state.py` consumes
 it to resolve optional/codepath branches, so `/mgh-init --resume` is stateless — the user
 NEVER re-types flags. It is the START-state counterpart to the terminal `init_manifest.json`
@@ -51,7 +51,7 @@ CLI contract (`--help` is the contract surface, R5.1):
 
 stdout (structured JSON; stderr = diagnostics only, R5.3b):
   {"run_config": "<abs run_config.json>", "target": "<abs target>", "format": "...",
-   "mode": "normal|merge", "no_scout": false, "no_codegraph": false, "skip_consistency": false,
+   "no_scout": false, "no_codegraph": false, "skip_consistency": false,
    "sentinel": "<abs .active>", "gitignore": "<abs .gitignore>"}
   --check: {"check": "ok", "run_config": .., "sentinel": .., "gitignore": ..,
             "sentinel_present": bool, "gitignore_present": bool}
@@ -214,6 +214,18 @@ def main():
             print(f"error: {label} must be an integer (got {raw!r})", file=sys.stderr)
             return 2
 
+    # --merge refusal (H11(b)): the mode has NO deterministic implementation
+    # (no merge script exists anywhere) — refuse with a recipe instead of
+    # recording a mode the pipeline cannot execute, NEVER silently swallow it.
+    if args.merge:
+        print("error: --merge is not supported: no deterministic merger exists, so "
+              "the mode has no executable path. Run scoped passes independently "
+              "(--scope path:<module>, one run per module) — the partial products "
+              "stay independent on disk; cross-module comparison is manual. "
+              "NEVER hand-merge inventories via LLM (no gate, no deterministic "
+              "dedup).", file=sys.stderr)
+        return 2
+
     target_abs = str(Path(args.target).resolve())
     if args.init_dir:
         init_dir = Path(args.init_dir).resolve()
@@ -262,7 +274,6 @@ def main():
     run_config = {
         "target": target_abs,
         "format": args.format,
-        "mode": "merge" if args.merge else "normal",
         "scope": args.scope,
         "scope_mode": args.scope_mode,
         "no_scout": bool(args.no_scout),
@@ -270,8 +281,6 @@ def main():
         "skip_consistency": bool(args.skip_consistency),
         "include_dotfiles": bool(args.include_dotfiles),
         "include_tests": bool(args.include_tests),
-        "merge": args.merge,
-        "merge_partials_dir": args.merge,
         "language": args.language,
         "rules_dir": args.rules_dir,
         "budgets": {
@@ -308,15 +317,14 @@ def main():
         "run_config": str(rc_path),
         "target": target_abs,
         "format": args.format,
-        "mode": run_config["mode"],
         "no_scout": run_config["no_scout"],
         "no_codegraph": run_config["no_codegraph"],
         "skip_consistency": run_config["skip_consistency"],
         "sentinel": str(sentinel_path),
         "gitignore": str(gitignore_path),
     }
-    print(f"[write_runconfig] wrote {rc_path} (mode={run_config['mode']}, "
-          f"format={args.format}, no_scout={run_config['no_scout']}) + sentinel "
+    print(f"[write_runconfig] wrote {rc_path} (format={args.format}, "
+          f"no_scout={run_config['no_scout']}) + sentinel "
           f"{sentinel_path} + gitignore {gitignore_path}", file=sys.stderr)
     print(json.dumps(ack, ensure_ascii=False))
     return 0

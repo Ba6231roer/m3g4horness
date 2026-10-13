@@ -16,6 +16,38 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — mgh-init 收官对齐:`--merge` 显式拒绝 / base agent ack 枚举收口 / stage 提示词七修 / 契约九修 等 (0.1.74)
+
+- **H11 拍板项选 (b)——`--merge` 全链显式拒绝**:该模式声明的 `merge_inventories.py` 全仓不存在(无可执行路径),
+  编排器只能即兴 LLM 徒手合并(无闸门无确定性去重)。现在:`write_runconfig.py` 对 `--merge` 退出码 2 + recipe
+  (指认无确定性实现、多次分模块运行产物独立);run_config 不再记录 `mode`/`merge_partials_dir`;resume_state 删
+  merge 短路分支 + 步词表去 `merge`(历史遗留 `mode=merge` 旧 run 按磁盘产物正常派生);list_steps 删 merge 行;
+  `init-stage/merge.md` fragment 删除;三面壳 flag 表/描述/流程清单去 `--merge`;规格 8 处 MODIFIED(含全部
+  「建议 `--scope`+`--merge`」advice 措辞改「`--scope` 分模块,产物独立」)。(a) 实现确定性合并脚本留待真实诉求立项。
+- **ack 枚举收口(批次 5 遗留三.15)**:全部 agent 定义(三面 20 个:opencode/claude 的 base + fanout/rollup 克隆 +
+  dsh tier agent)回传 ack 枚举删 `oversize <绝对路径>`——stage Return 段从未定义 oversize ack 的行为;base 与克隆
+  漂移致 `TestAgentCloneParity` 在 HEAD 即红,本批同步后转绿;规格 bounded-ack requirement 把 oversize 移出取值枚举
+  (dispatcher `_parse_ack` 历史容错不动;T3 枚举器的 `oversize:true` 输入侧标注不变)。
+- **stage 提示词七修**:①`evidence_snippet` 移出「中文化对象」枚举(init-scout/init-resolve——它是逐字源码行,
+  翻译即破坏证据锚定);②init-induct 补 Form B pack 形态指引(pack id/members[]/成员级 checkpoint/包级 marker)+
+  schema 补 canonical 8 类与「自造类名被闸门拒」;③init-survey 第 1 步改绝对路径 + 读白名单补列该两文件(消互斥);
+  ④init-rulewriter 补读侧三件套(锚 repo 根/NEVER 越界/Bash 搜索同禁);⑤init-rules-consistency「managed block」
+  改详述文件表述;⑥rules-format 两文件 `--check` 覆盖面如实(FORBIDDEN_TOKENS 实况;裸 tier 词有意不拦);
+  ⑦init-scout 删 `regex_known[]` 幽灵输入字段。
+- **契约九修(以源码为准)**:clusters.md cluster_id 公式改实况(集中式 4 段含 file 槽位;判别尾 = sha1 前 12 hex,
+  源码内名 sha8 实取 [:12]);scout-plan.md 幻影 flag 改真名(`--batch-bytes`/`--batch-cap`)+ 补计划自描述;
+  candidates.md 删幻影 source `regex+scout`;unit-inputs.md done 检测改 forward marker 实况 + bytes 按 tier 分列;
+  manifest.md 删「unit record」幻影形状 + resolve 行注记非确定性;三枚举器契约补实况 CLI flag/分页四字段/恒等式
+  改述/pack 模式补记;resolved.md 补「additive 无确定性出口」披露;step-manifest/resume-state 词表与 merge 行同步。
+- **笔误**:t2.md `openmode`→`opencode`;controls-context.md `中和`→mitigation。
+- **测试**:merge 拒绝红绿(write_runconfig exit 2 + recipe/payload 无 mode 字段/resume_state 词表无 merge + 旧 run
+  兼容派生/list_steps 无 merge_inventories 死引用);TestAgentCloneParity 红→绿;定向面 11 文件全绿(write_runconfig 28/
+  resume_state 81/list_steps 15/stuck_run_selfheal/dsh_command_surface/init_flag_table_contract/agent_stage_contract/
+  recipe_visibility/distributed_md_purity/zero_deps/no_compile_warnings);lint 四件套过(contracts 465 flags/budget 17 壳/
+  purity 323 文件零违例/validate --strict);实机冒烟过(--merge 拒绝 recipe + 零产物 + 正常 ack 无 mode)。
+- **评审判定订正**:self-verification/severity-guidance/exhaustiveness 三 fragment 非孤儿(sast-deepdive 分发面引用
+  实存),保留不动。
+
 ### Fixed — mgh-init 发现层扫描韧性:调用图单遍丢边 / 配额混计静默截断 / scope 拼错静默空集 / --check 形状错裸崩 / 续点混合候选集 / 调用图无软时限 / 检查点写放大 等 11 项 (0.1.73)
 
 - **调用图两遍化(H5)**:`expand_scope.build_call_graph` 由单遍(边走边建 def 索引,文件只能解析到枚举序

@@ -5,9 +5,16 @@ T1 fan-out(步骤 4)。编排器取「待跑簇清单」MUST 走本脚本,NEVER 
 / `py -c` 内省(`clusters.json` 是包装字典 `{repo,clusters[],truncated}`,对顶层 `len()`
 得 3 **不是**簇数;簇数真相源 = `list_clusters.py` stdout 的 `total`)。
 
+**分页与预算**:`--materialize <dir>`(物化 per-unit input,报 `input_path`/`bytes`/`oversize`)·`--offset N` / `--limit N`(页;`--limit < 1` 退出码 2)· `--orch-budget-bytes B`(页超预算自动收紧、报 `effective_limit`+`shrunk:true`)· `--max-unit-bytes B`(切分/标注界)· `--include-failed`(重列 failed 单元,配 dispatcher `--retry-failed`)。stdout 恒携带 `offset`/`limit`/`effective_limit`/`shrunk` 四字段;`total = done + failed + len(pending)` 恒等式对「磁盘全量口径」成立(单页视图下 `pending` 为当前页)。
+**pack 模式**(`--pack-bytes > 0`):枚举单元从簇平移为包——`cluster_id` 字段载包 id(`pack::<category>::<sha8>`,sha8 = 成员 id 排序拼接的 sha1 前 8 hex)、`input_path` 载合并 input、新增 `members[]`(成员级绝对路径清单);stdout 另披露 `cluster_total`/`cluster_done`;包 pending ⟺ ≥1 成员缺 `.done`。关闭(缺省 0)时 stdout 形态逐字节不变。
+
+
 CLI(`--help` 即契约):
 ```
 py list_clusters.py --clusters <clusters.json> [--checkpoints <t1-dir>]
+    [--candidates <controls_candidates.json>] [--materialize <inputs/t1>]
+    [--offset N] [--limit N] [--max-unit-bytes B] [--orch-budget-bytes B]
+    [--pack-bytes B] [--pack-max N] [--include-failed]
 ```
 
 > **scout-tier 闸门(确定性 tier 顺序)**:`<clusters.json 同目录>/run_config.json` 存在且 `no_scout`
@@ -24,7 +31,7 @@ stdout(结构化 JSON;stderr 仅诊断):
 
 `<ClusterLite>`:
 ```json
-{"cluster_id": "authorization::Sec::<sha8>", "category": "authorization", "kind": "auth",
+{"cluster_id": "authorization::Sec::<sha1_12>", "category": "authorization", "kind": "auth",
  "shape": "centralized", "evidence_files": ["src/.../Sec.java"], "candidate_count": 2,
  "checkpoint_path": "<abs>/checkpoints/t1/authorization__Sec__<sha8>.json",
  "done_marker": "<abs>/checkpoints/t1/authorization__Sec__<sha8>.json.done",

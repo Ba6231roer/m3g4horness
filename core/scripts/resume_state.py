@@ -56,7 +56,7 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   EMPTY structure (field恒存在, shape stable). `--check` (R5.9) does not cover this field.
   stage_flow_files = the CURRENT step's SINGLE per-step stage-flow fragment
   (<mgh-core>/prompts/fragments/init-stage/<step>.md, `Path.resolve()` absolute, Windows
-  native) for step ∈ discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done; EMPTY []
+  native) for step ∈ discover|survey|scout|resolve|t1|t2|t3|assemble|t4|done; EMPTY []
   for `not-started` (bootstrap is loaded by the shell's fresh-run recipe via fixed-path Read
   of `init-stage/bootstrap.md`). `done` loads `init-stage/done.md` — the teardown discipline
   (manifest finalization + fan-out failure disclosure + sentinel `.active` removal) is
@@ -134,7 +134,7 @@ The two measures differ exactly by `.failed` markers, record bodies, shard
 siblings, and orphans — not data loss. Example: t1 done=472 vs 491 directory
 entries = 472 done + `.failed` markers + record bodies — no data loss.
 
-step ∈ not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done. The blocking
+step ∈ not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|done. The blocking
 sequence is discover→scout→t1→t2→t3→assemble→t4→done; survey/resolve are optional/non-fatal
 (surfaced in notes[], never gate progress). `init_manifest.json` present → step=done
 SHORT-CIRCUITS every tier gate probe (the manifest IS the run's terminal credential; tier
@@ -475,7 +475,7 @@ _STAGE_FLOW_DIR = Path(__file__).resolve().parent.parent / "prompts" / "fragment
 # that discipline was reachable only from a fresh run).
 _FRAGMENT_STEPS = frozenset({
     "discover", "survey", "scout", "resolve", "t1", "t2", "t3", "assemble",
-    "t4", "merge", "done",
+    "t4", "done",
 })
 
 
@@ -503,7 +503,6 @@ def resolve(init_dir: Path):
     fmt = cfg.get("format") or "opencode"
     no_scout = bool(cfg.get("no_scout"))
     skip_consistency = bool(cfg.get("skip_consistency"))
-    mode = cfg.get("mode") or "normal"
     notes = []
 
     candidates = init_dir / "controls_candidates.json"
@@ -517,24 +516,6 @@ def resolve(init_dir: Path):
     scout_cp = init_dir / "checkpoints" / "scout"
     t1_cp = init_dir / "checkpoints" / "t1"
     t3_cp = init_dir / "checkpoints" / "t3"
-
-    # --- mode: merge short-circuit ---
-    if mode == "merge":
-        partials = cfg.get("merge_partials_dir") or "<partials-dir>"
-        state = {
-            "target": target, "format": fmt, "step": "merge", "resumable": True,
-            "tiers": _empty_tiers(),
-            "next_action": _next("bash",
-                f"merge partial inventories from {partials} (evidence-anchor merge) then STOP",
-                [Path(target)]),
-            "notes": notes,
-            # field-always-present promise covers EVERY step branch, incl. this
-            # short-circuit (a consumer subscripting stdout must never KeyError).
-            "stale_fanout": _stale_fanout(init_dir),
-            "discipline_reminders": get_discipline("merge"),
-            "stage_flow_files": _stage_flow_files("merge"),
-        }
-        return state, None
 
     # --- tier counts ---
     discover_done = candidates.is_file() and clusters_p.is_file()

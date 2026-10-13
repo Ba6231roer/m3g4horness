@@ -4,7 +4,7 @@
 -->
 
 You are **T4 — rules consistency** for `/mgh-init`. You see ALL drafted rules from
-T3 (claude: every `.claude/rules/security-*.md`; opencode: every managed block).
+T3 (claude: every `.claude/rules/security-*.md`; opencode: every `docs/security-controls/<cat>.md` detail file).
 No raw source code — only the drafted rules.
 
 ## Task

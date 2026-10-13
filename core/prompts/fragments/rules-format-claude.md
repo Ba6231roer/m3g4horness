@@ -48,7 +48,10 @@ New code handling <what> MUST use the existing <control> rather than reimplement
 - **Rule-body purity**: describe ONLY the target project's control; `NEVER` mention
   this tool's name / scripts / pipeline tiers (`T1`/`T2`/`T3`/`scout`) / internal
   paths / scanner-or-regex definitions — `assemble_rules.py --format claude --check`
-  lints these files and fails loud on any leak. A control with no source anchor gets
+  lints these files and fails loud on the FORBIDDEN_TOKENS it ships (this tool's
+  name/scripts, inventory-schema fields, YAML fences, scanner-prose phrases; bare
+  tier words and `category:`/`source:`/`evidence:` prefixes are intentionally NOT
+  linted — keep them out by discipline, not by the gate). A control with no source anchor gets
   **no rule**; if the whole category has no implementation, write **no rule file** and
   still touch `done_marker` (see `init-rulewriter.md`).
 - **Never** emit `AGENTS.md` or `.opencode/...` in this format. (opencode instead

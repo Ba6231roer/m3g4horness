@@ -55,7 +55,7 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
 }
 ```
 
-- `step` ∈ `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done`。
+- `step` ∈ `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|done`。
   **阻塞序列** = `discover→scout→t1→t2→t3→assemble→t4→done`;`survey`/`resolve` 为可选/non-fatal,
   仅进 `notes[]`、**从不阻塞**(对标二者 advisory/fail-soft 语义)。
 - `tiers` 只覆盖 6 个 fan-out/聚合 tier(discover/scout/t1/t2/t3/t4),各 `{done,failed,total}`;
@@ -76,7 +76,7 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
 - `resumable` = 还有未完工作;仅当 `step=done` **且** `init_manifest.json` 存在(全完)才 false。
 - `stale_fanout[]` = `<init-dir>/fanout_runner.*.pid` liveness 残留扫描(每条
   `{tier,pid_file,pid,pid_alive,note}`;`pid_alive` = OS 进程表探测;任一 alive → note 附
-  `--kill-stale --dry-run` recipe)。**字段恒存在**(无残留 = `[]`),**含 `run_config.mode=merge`
+  `--kill-stale --dry-run` recipe)。**字段恒存在**(无残留 = `[]`),**含历史遗留 `run_config.mode=merge` 旧 run(该模式已被 step 0 拒绝,不再有新产出)
   的短路分支在内的一切 step 分支**(消费方下标访问永不 KeyError)。
 - `discipline_reminders` = 当前 step 的纪律子集 `{gates[],path_recipes[],nevers[]}`(共享静态表;
   `done`/`not-started`/未知 step → 空结构,字段恒存在)。
@@ -88,7 +88,7 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
 
 ## step 判定真值表(阻塞序列;由产物 + `.done` + `run_config` 解析)
 
-顺序探针,首个未完成即当前 step(`run_config.mode=merge` 直接 → `merge`)。
+顺序探针,首个未完成即当前 step(`run_config.mode=merge` 为历史遗留,按磁盘产物正常派生——词表已无 `merge` 步)。
 **manifest 短路**:`init_manifest.json` 存在 → **先于任何 tier 闸门探针**直接 `step=done`
 (manifest 是整条 run 的终态凭证;tier 计数照实输出但不再驱动 step,完成态 run 不因下游
 计数口径的历史漂移被拉回执行态重派)。

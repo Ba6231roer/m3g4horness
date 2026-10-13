@@ -18,10 +18,10 @@
 | 4 | `fix-mgh-init-distribution-links` | ✅ 已 apply + 归档(8b7e7a8,archive/2026-10-13-fix-mgh-init-distribution-links),VERSION 0.1.71;specs 5 能力 8 条已回写;拍板项 A/B 状态见三.14 |
 | 5 | `fix-mgh-init-enumeration-caliber` | ✅ 已 apply + 归档(archive/2026-10-14-fix-mgh-init-enumeration-caliber),VERSION 0.1.72;specs 11 MODIFIED 已回写主规格(control-discovery 5 / request-context-budget 3 / fanout-dispatch、resume-step-discipline、rules-emission 各 1);apply 期新发现见三.15 |
 | 6 | `fix-mgh-init-discover-resilience` | ✅ 已 apply + 归档(archive/2026-10-14-fix-mgh-init-discover-resilience),VERSION 0.1.73;specs 10 MODIFIED 已回写主规格 control-discovery(validate --specs 26/26 过);apply 由 5 分钟定时任务会话自包含执行,红→绿 21 新测,apply 期两处规格自纠与情报见三.16 |
-| 7 | 见第四节 | 未 propose;含批次 4 拍板项 A/B(三.14)与批次 5 遗留三.15(base agent oversize 枚举双面删,归本批分发面对账面) |
+| 7 | `fix-mgh-init-prompts-contracts-sync` | ✅ 已 apply + 归档(archive/2026-10-14-fix-mgh-init-prompts-contracts-sync),VERSION 0.1.74;specs 8 MODIFIED 已回写(control-discovery 7 / request-context-budget 1);**战役七批全清**(遗留清单见三.17) |
 
-**下一步**:指挥部会话说「propose 批次 7」(收官批:stage 提示词与契约批量 + H11 `--merge`
-拍板项 + 三.15 base agent oversize 双面删;动笔前重新核实 HEAD,见三.4)。
+**下一步**:无——七批修复战役全部完成(批次 1-7 均已 apply + 归档)。
+遗留(均为独立事项,非战役欠账):①批次 4 拍板项 A(opencode `edit: deny` ×22 live 验证,需维护者参与)、拍板项 B(purity 第 10 类基线 186 行全家族扫尾,建议独立小批);②H11 若未来出现真实合并诉求,可选 (a) 实现 `merge_inventories.py` 独立立项(当前为显式拒绝);③`test_fanout_runner::TestRateLimitStorm` 存量失败(waves_run 3≠2,三.12);④三个 fragment 的评审「孤儿」结论已订正(三.17)。
 
 ## 二、批次 2 摘要(apply 前必读)
 
@@ -139,6 +139,16 @@
     `open(p,"w")` 在 ValueError 前截空 test_discover_resilience.py——`git checkout --` 恢复后
     以 Edit 工具重做;教训:长补丁一律 Write 落文件、写回禁用先 truncate 的 open("w") 形态。
     ⑥validate --specs 现态 26/26 全过(前批注记的 6 失败已随批次 5 归档消隐,非本批功劳)。
+
+17. **批次 7 apply 期记录与战役完结**:①ack 收口实际清理面 = **三面 20 个 agent**(评审只点名 base
+    与克隆漂移;实况是全部 agent 定义都枚举了 stage 未定义的 oversize ack,批次 4 只删了 6 个克隆)——
+    dsh tier agent(scout/t1/t3)同款清理,`test_dsh_command_surface` 照跑全绿。②残留 `--merge` 的
+    「已拒绝」注记不能写进壳 flag 表 bullet——`check_contracts` 把表内 `--flag` token 当声明解析,
+    会出现 only-opencode=['--merge'] 漂移;拒绝语义由 `write_runconfig.py` 的 recipe 承载(实机冒烟
+    过)。③孤儿 fragment 结论订正:self-verification/severity-guidance/exhaustiveness 被 sast-deepdive
+    分发面(opencode+claude)引用,**非孤儿**,保留。④merge 拒绝选 (b) 的完整对比见该 change 的
+    proposal 人话序;(a) 路径(实现 `merge_inventories.py`)留真实诉求立项。⑤validate --specs 全过
+    (26/26);plain_language exit 2 存量噪音仍在(源 = docs/man/mgh-init-artifacts.md 私档,与战役无关)。
 
 ## 四、剩余批次自包含规划(propose 时直接取用)
 

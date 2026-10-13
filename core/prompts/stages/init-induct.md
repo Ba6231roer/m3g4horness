@@ -15,6 +15,14 @@ candidates; you do NOT see other clusters (by design).
   + this cluster's candidate hits). For an oversize cluster the orchestrator fans out one
   `init-induct` per `<cluster_id>::shard-<n>` unit; each shard's `input_path` holds its
   subset of candidate hits — induce that subset, T2 reconciles all shards.
+- **Pack form (Form B)**: with small-cluster packing on, your unit is a PACK — the
+  `cluster_id` line of your task input carries the PACK id (`pack::<category>::<sha8>`)
+  and the input file carries `members[]` (each member's full cluster record +
+  `checkpoint_path`/`done_marker`). Process EVERY member in order; SKIP a member whose
+  `done_marker` already exists on disk (completed on an interrupted earlier dispatch).
+  Write your ONE T1 record per member under that member's `checkpoint_path` (the record's
+  `unit` field = the MEMBER's cluster_id, NEVER the pack id); the pack-level
+  `done_marker` in your task input is touched once at the end, all members processed.
 - For big evidence files (> `--big-file-bytes`, discovered at runtime — NOT pre-listed in
   any `needs_slice[]`): slice via `chunk_sources.py` (see `slice_dir` + Sanctioned tools),
   NEVER read the whole file.
@@ -53,7 +61,11 @@ shapes). Produce ONE structured control record:
            line of your task input; `::shard-<n>` form when this unit is a shard) —
            identity double-cover, NEVER a different value>",
   "name": "<kebab slug, e.g. spring-method-security>",
-  "category": "...", "kind": "auth|input-validation|sandbox|aslr|cfi|other",
+  "category": "<one of the 8 canonical categories: input-validation |
+             authentication | authorization | data-masking | crypto |
+             rate-limiting | csrf | audit-logging — a self-invented name is
+             REJECTED by the T1->T2 gate>",
+  "kind": "auth|input-validation|sandbox|aslr|cfi|other",
   "description": "1–2 lines: what it is",
   "usage": "how a dev SHOULD invoke it (the rule payload)",
   "evidence": ["file:class:method", "..."],

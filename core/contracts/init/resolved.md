@@ -63,3 +63,4 @@ through the unchanged `form_clusters` clustering (cluster-formation logic is not
 mutated; no regex/scout candidate is altered). `source: "codegraph"` is retained
 as the structural tag into `controls_candidates.json` / `controls_inventory.json`
 for manifest + audit. T1/T2/T3 consume these candidates identically to scout ones.
+> **出口披露**:resolved.json 的 additive 并入**无确定性出口**——`list_clusters` 物化不读它、全仓无 fold-in 脚本;富化实质值依赖 `init-resolve` subagent 按契约写回(该 stage 本身 optional/codegraph-gated)。本契约描述的是产出形状,NEVER 承诺机械并入通道。

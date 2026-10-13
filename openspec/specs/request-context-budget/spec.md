@@ -224,7 +224,7 @@ dispatcher 的 `--time-budget-ms`(软时限先于宿主硬杀触发;否则重派
 每条 `mgh-*` 命令的聚合 stage(init T2/merge/T4、sast scope、sra a2/a4、srr render)SHALL 上报其聚合
 输入字节数(产出者 stdout 字段
 或 `describe_artifact --count --field`),且 MUST 在聚合输入超过 `--max-aggregate-bytes` 时被处置(切分 /
-标注 / 披露之一,**NEVER** 静默整份喂入)。**P0**:编排器 SHALL 建议 `--scope`/`--merge`(init/sast)或
+标注 / 披露之一,**NEVER** 静默整份喂入)。**P0**:编排器 SHALL 建议 `--scope`(init/sast;多次局部运行产物独立)或
 分变更/分文档(sra/srr)并经命令 manifest `boundaries[]` + 人读报告披露该聚合未硬界(对标各命令既有
 optional/advisory/non-fatal 语义)。**P1 目标**(后续 change)SHALL 经分层归约(per-unit summary 分组 →
 逐组归约 → 归约再归约)使聚合请求亦 ≤ `--max-aggregate-bytes`。本 requirement 不声称 P0 已对聚合节点
@@ -236,9 +236,8 @@ optional/advisory/non-fatal 语义)。**P1 目标**(后续 change)SHALL 经分�
 
 #### Scenario: Oversize aggregate advises fallback and is disclosed
 - **WHEN** 任一聚合 stage 输入 > `--max-aggregate-bytes`
-- **THEN** 编排器建议对应的收窄/切分杠杆(`--scope`+`--merge` / 分变更 / `--split`),并在该命令 manifest
+- **THEN** 编排器建议对应的收窄/切分杠杆(`--scope` / 分变更 / `--split`),并在该命令 manifest
   `boundaries[]` 与人读报告披露「聚合超预算、未硬界、建议收窄」(P0 软边界)
-
 ### Requirement: No silent context overflow
 
 任何 fan-out 单元、待办壳页、聚合 stage 输入**超其预算阈值**时,系统 SHALL 以**确定性切分 / 标注 / 披露**

@@ -37,7 +37,6 @@ Your job: read the code the regex skipped and find the security controls it miss
   sibling modules; the hook enforces this deterministically). It equals the input's
   top-level `repo` field — use that field as your working anchor; NEVER re-derive the
   root from memory.
-- `regex_known[]`: controls the regex already found (names/files). Do not re-report these.
 - `checkpoint_path` (absolute, given VERBATIM by the dispatcher) — the exact file you
   MUST write your checkpoint to.
 - `done_marker` (absolute, given VERBATIM) — the exact `.done` path you MUST touch after.
@@ -133,7 +132,7 @@ codegraph 调用)。
 - **硬边界(`NEVER`)**:`Write` 任何 `.py`;`py -c`/`python -c` 内省或重派生。**输入 batch 为终态**——NEVER 用代码变换/重派生;需瞄结构时向派发方请求 `describe_artifact.py` 输出。
 
 ## 输出语言
-面向人读的非代码内容用**简体中文**(`evidence_snippet` 描述、`gaps`、report 文案);
+面向人读的非代码内容用**简体中文**(`gaps`、report 文案);`evidence_snippet` 是逐字源码行,NEVER 翻译;
 代码、文件路径、`file:class:method` 锚点、标识符、`name`/枚举值保持原样。
 
 ## 输出纯净性(硬边界)

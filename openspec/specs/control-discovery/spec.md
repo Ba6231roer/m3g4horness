@@ -442,8 +442,11 @@ recipe(`--line 0` 曾因真值判断静默落入骨架模式,合法请求 0 行�
 `--scope path:<dir>|package:<pkg>|file:<glob>` SHALL 限定分析种子。`--scope-mode`
 SHALL 区分:`defined`(默认,控制定义点在 scope 内)与 `applicable`(控制调用方/入口
 触及 scope)。跨模块但定义点在 scope 外的控制 SHALL 记入 `out_of_scope[]`(披露不丢)。
-`mgh-init --merge <partials-dir>` SHALL 按 `evidence`(`file:class:method`)去重合并
-多次局部产物,并跨模块重算 cluster role。
+`--merge` 模式 SHALL 被显式拒绝(无确定性合并实现):三面壳参数表 SHALL NOT 声明该 flag,
+`write_runconfig.py` 对传入的 `--merge` SHALL 退出码 2 + 可操作 recipe(指认「无确定性合并
+出口;多次局部运行产物独立,跨模块对照由人工/下游完成」),NEVER 静默吞参或路由到不存在的
+合并脚本。多次局部(分模块)运行的产物 SHALL 各自独立落盘,跨模块对照由人工完成——编排器
+SHALL NOT 即兴 LLM 合并 inventory(无 gate、无确定性去重)。
 
 **scope 歧义输入 fail-loud**:`--scope path:<不存在路径>` 与 `--package:<无任何匹配目录>`
 SHALL 退出码 2 + stderr recipe(指认路径/包名),NEVER 以「空种子集 + 退出码 0」静默成功——
@@ -456,8 +459,9 @@ SHALL 退出码 2 + stderr recipe(指认路径/包名),NEVER 以「空种子集 
 - **THEN** 仅分析定义点在 `src/payment` 内的控制;跨模块控制入 `out_of_scope[]`
 
 #### Scenario: Partial runs merge by evidence anchor
-- **WHEN** 对模块 A、B 各跑一次局部 init,再 `mgh-init --merge partials/`
-- **THEN** 合并后 inventory 按 `file:class:method` 去重,同一控制不重复,cluster role 跨模块重算
+- **WHEN** 对模块 A、B 各跑一次局部 init(分模块多次运行形态)
+- **THEN** 两次产物各自独立落盘(两份 candidates/clusters/inventory,互不覆写);不存在自动
+  合并步骤(`--merge` 被拒绝),跨模块对照由人工完成;传 `--merge` 一律退出码 2 + recipe
 
 #### Scenario: 拼错的 scope 路径 fail-loud 而非空集假成功
 
@@ -489,7 +493,7 @@ SHALL 退出码 2 + stderr recipe(指认路径/包名),NEVER 以「空种子集 
 扫描复用;每文件**仅调用一次 `splitlines()`**;候选的 enclosing 锚点 SHALL 通过**每文件预排序的
 结构节点列表 + 按行二分**求解,而非「每候选对全文反复 `finditer`」。系统 SHALL 在扫描期间向
 **stderr** 周期输出进度(每 N 个文件),stdout 仅在末尾输出既有 JSON 摘要(契约不变)。在 i0 阶段
-SHALL 以低成本统计源文件数,命中大仓阈值时**在开始全量扫描前**主动建议 `--scope` 分模块 + `--merge`。
+SHALL 以低成本统计源文件数,命中大仓阈值时**在开始全量扫描前**主动建议 `--scope` 分模块(多次局部运行,产物独立披露)。
 
 **文件配额只数源文件 + 截断显式上浮**:`walk_sources` 的 `limit_files` 配额 SHALL 仅对
 **源扩展名文件**计数(`SOURCE_EXT` 命中者),非源文件(.txt/.xml/.sql/资产等)MUST NOT 消耗
@@ -520,7 +524,7 @@ from a checkpoint」「Discover soft time-budget clean exit」「Discover writes
 
 #### Scenario: Large repo advised to scope before scanning
 - **WHEN** i0 阶段统计的源文件数超过阈值
-- **THEN** 系统在开始全量扫描前提示建议 `--scope` 分模块 + `--merge`,而非静默跑到超时
+- **THEN** 系统在开始全量扫描前提示建议 `--scope` 分模块(多次局部运行,产物独立披露),而非静默跑到超时
 
 #### Scenario: 非源文件不耗配额,触顶显式截断
 
@@ -971,7 +975,7 @@ SHALL 将该目标回灌(重跑其所属批次或直接补候选),并在 `init_m
 `batches`、`deep_read_files`、`audit_sampled`、`audit_found`、`scout_merged`(fold-in 实际并入
 `controls_candidates.json` 的 scout 候选数,取值于 `merge_scout.py` 写入的
 `provenance.scout_merged`;scout 未启用时该字段 SHALL 缺省/为空)、`truncated`(目标超预算时为真
-并建议 `--scope`+`--merge`)。`report.md` 与 `init_manifest.json` 的 `boundaries[]` SHALL
+并建议 `--scope`)。`report.md` 与 `init_manifest.json` 的 `boundaries[]` SHALL
 新增披露:(1) scout 实际审视了 `skeleton_total` 中的多少、深度 Read 了多少、自检了多少
 (**不声称全仓覆盖**);(2) scout 非确定,簇数 run-to-run 可能变化(regex 来源簇仍确定);
 (3) 残留盲区——泛型包 + 泛型类名 + 泛型签名 + 无安全导入 + 低扇因的控制,规则与骨架均
@@ -989,7 +993,6 @@ SHALL 将该目标回灌(重跑其所属批次或直接补候选),并在 `init_m
 #### Scenario: Residual blind spot is disclosed
 - **WHEN** 审阅 `report.md` / `init_manifest.json` 的 `boundaries[]`
 - **THEN** 其中明示「泛型命名 + 低扇因控制可能漏报」这一残留盲区,以及 scout 的非确定性
-
 ### Requirement: Deterministic scout-batch enumeration for fan-out
 
 `/mgh-init` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_scout_batches.py` 取得 scout 工作清单
@@ -1644,11 +1647,13 @@ sanctioned outlet for the orchestrator reflex "which step am I on / what do I do
 remembering progress across the 8-step flow). stdout = slim structured JSON
 `{target, format, step, tiers{discover, scout, t1, t2, t3, t4 each {done, total}}, next_action{kind∈bash|subagent|done,
 desc, absolute_paths}, resumable, notes[]}`; stderr = diagnostics/progress only; exit codes `0/1/2`.
-`step` SHALL be one of `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done`, resolved by
+`step` SHALL be one of `not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|done`, resolved by
 probing product artifacts (`controls_candidates.json`/`clusters.json`/`scout_candidates.json`/`controls_inventory.json`/
 rule files/`init_manifest.json`) and per-tier `.done` markers, **conditional on the persisted run config**
 (see "Persisted run configuration for stateless resume") so optional/codepath branches
-(`--no-scout`/`--no-codegraph`/`--skip-consistency`/`--merge`/survey-skipped/resolve-skipped) are honored.
+(`--no-scout`/`--no-codegraph`/`--skip-consistency`/survey-skipped/resolve-skipped) are honored
+(`--merge` 不再是可持久化的 codepath——该模式在 step 0 即被拒绝,见「Scoped and partial-merge
+analysis」)。
 `next_action.absolute_paths` SHALL reuse the same `Path.resolve()` absolute values the `list_*`/`describe_artifact`
 producers emit (承 "Fan-out checkpoint paths are deterministic absolute values"); the script MUST NOT invent paths or
 template `<target>`. The script MUST be zero-runtime-dependency (承 R2), self-locate `sys.path`, read utf-8, run from
@@ -1681,9 +1686,9 @@ and SHALL NOT determine "current step" from conversation memory.
 
 #### Scenario: --merge short-circuit reflected
 
-- **WHEN** `run_config.json` records `mode` = `merge`
-- **THEN** `resume_state.py` stdout `step` = `merge` and `next_action` directs the `--merge <partials-dir>` flow
-  rather than discover/scout/t1
+- **WHEN** 磁盘上存在历史 run(本要求修订前产物)的 `run_config.json` 遗留 `mode` = `merge`
+- **THEN** `resume_state.py` 仍按磁盘产物正常派生步骤图(`step` 词表已无 `merge`);新版 step 0
+  对 `--merge` 一律退出码 2,该形态不再有新产出
 
 #### Scenario: Scout-merge sub-step is not skipped on resume
 
@@ -1707,13 +1712,13 @@ and SHALL NOT determine "current step" from conversation memory.
 - **WHEN** the orchestrator (on `--resume` or post-compaction) needs to know the current step / next action
 - **THEN** it calls `resume_state.py`, MUST NOT `py -c`/`python -c` introspect `.mgh-init/**`, MUST NOT `Read` whole
   aggregate JSON to reconstruct progress, and MUST NOT rely on remembered step state from conversation
-
 ### Requirement: Persisted run configuration for stateless resume
 
 `/mgh-init` 编排器 SHALL 在 step 0(参数解析后、花 token 前)原子写出
 `<target>/.mgh-init/run_config.json`(`.tmp`+`os.replace`,承 "Discover writes are atomic"),记录**决定步骤图的本次
-调用 flag**:`target`(绝对)、`format`、`scope`/`scope_mode`、`no_scout`、`no_codegraph`、`skip_consistency`、
-`merge`(及 `merge_partials_dir`)、`include_dotfiles`、以及 `--max-unit-bytes`/`--orch-budget-bytes`/`--max-aggregate-bytes`
+调用 flag**(`--merge` 除外——该模式被显式拒绝、不接受、不记录,见
+「Scoped and partial-merge analysis」):`target`(绝对)、`format`、`scope`/`scope_mode`、`no_scout`、`no_codegraph`、`skip_consistency`、
+`include_dotfiles`、以及 `--max-unit-bytes`/`--orch-budget-bytes`/`--max-aggregate-bytes`
 预算与 `--scout-*` 参数。该文件是**起始态**意图记录,与既有**终态** `init_manifest.json`(版本/计数/出处)边界清晰、
 互不替代。`resume_state.py` SHALL 消费 `run_config.json` 解析可选/codepath 分支。`run_config.json` 缺失或破损时,
 `resume_state.py` SHALL fail-loud(退出码 2)+ stderr recipe(指向重跑 `/mgh-init --<flags>` 重建),MUST NOT 静默猜测
@@ -1763,8 +1768,9 @@ mgh-init 的哨兵,激活错误域的写允许集);custom 名 `--init-dir` 保�
 ### Requirement: Subagent return-to-orchestrator is a bounded ack
 
 每份 `core/prompts/stages/init-*.md` SHALL 声明一个 **Return-to-orchestrator** 契约:subagent 的**最终回传消息**
-SHALL 是**单条有界 ack**——取值之一 `ok <绝对 checkpoint_path 或 rule_path> <count>`、`oversize <绝对 path>`、
-`failed <简短原因>`(聚合 stage 的 ack 额外带 `total`/`merged` 计数)——且 **MUST NOT** 回显记录体、原始源码、或
+SHALL 是**单条有界 ack**——取值之一 `ok <绝对 checkpoint_path 或 rule_path> <count>`、`failed <简短原因>`(oversize
+不是 ack 取值——超预算单元由枚举器以 `oversize` 标注 + recipe 处置,stage 提示词与 agent
+定义 SHALL NOT 枚举 oversize ack;dispatcher 对历史 `oversize` 字样保持容错解析)(聚合 stage 的 ack 额外带 `total`/`merged` 计数)——且 **MUST NOT** 回显记录体、原始源码、或
 检查点文件内容(治「subagent 回传随 fan-out 单调膨胀编排器上下文」,承审计发现:9 份提示词此前对回传消息集体沉默)。
 该 ack 是**存活/成功信号**,非数据载体。编排器 SHALL 仅据 ack 判断该单元成败、并以 `.done` 标记 + `resume_state.py`
 确认进度;MUST NOT 为「继续流水线」而内联 `Read` 检查点文件回编排器上下文。聚合节点(T2/scout-merge)的检查点文件
@@ -1788,7 +1794,6 @@ SHALL 是**单条有界 ack**——取值之一 `ok <绝对 checkpoint_path 或 
 - **WHEN** 编排器在 T2 完成后需要确认 inventory 落盘
 - **THEN** 它经 `resume_state.py`(或 `describe_artifact.py --count/--keys`)取得有界摘要,**不** 整份 `Read`
   `controls_inventory.json` 进编排器上下文
-
 ### Requirement: Aggregate nodes enforce a hard request budget via map-reduce
 
 T2(`init-synthesis`)与 scout-merge(`init-scout-merge`)SHALL 把 `--max-aggregate-bytes` 当作**硬闸门**(兑现
@@ -1962,7 +1967,7 @@ fan-out 波次、落 `.done`、不留下半截单元)→ **新 session `/mgh-ini
 `/mgh-init` 的编排器(宿主 agent)SHALL 把每个 fan-out 波次跑到完成,且 MUST NOT 因规模大而中途停下征求用户拆分 / 跳过 / 终止。具体到 scout reader batches / T1 per-cluster induction / T3 per-category rule writing 任一波次:编排器迭代 `list_*` 的 `pending` 工作清单、以 `max_concurrent` 并发起 subagent、跑完一波起下一波,直至无 pending 单元剩余;规模大(数百至 ~1000 单元)本身 NEVER 构成停下征求的理由。规模与边界事实 SHALL 流入既有披露渠道——`init_manifest.json::boundaries[]`、`report.md`、`resume_state.py` `notes[]`——NEVER 作为运行中的阻塞式提问;披露所用计数 SHALL 自磁盘读取(`resume_state.py` / `list_*` stdout),NEVER 据对话记忆编造。
 
 本要求**不改动**既有 **pre-run** 建议:i0 阶段统计源文件数命中 `--large-repo-threshold` 时、
-**在花 token 之前**主动建议 `--scope` 分模块 + `--merge` 的行为(承「Bounded single-pass scan
+**在花 token 之前**主动建议 `--scope` 分模块(多次局部运行,产物独立披露) 的行为(承「Bounded single-pass scan
 performance on large repos」)保持不变。本要求的禁止范围仅限**运行已提交之后**(波次进行中)的
 打断行为。
 
@@ -2002,7 +2007,6 @@ performance on large repos」)保持不变。本要求的禁止范围仅限**运
 - **WHEN** 编排器在摘要/披露中陈述 fan-out 规模、失败数、跳过数或覆盖率
 - **THEN** 这些计数取自 `resume_state.py` / `list_*` stdout 的结构化字段(磁盘真相),NEVER 据对话
   记忆编造
-
 ### Requirement: Partial fan-out unit failure tolerance
 
 A confirmed `/mgh-init` fan-out unit failure SHALL be treated as a terminal, non-blocking state distinct from completion. This covers the scout-reader batch, T1 per-cluster induction, and T3 per-category rule-writing tiers: when a unit's subagent returns the existing `failed <reason>` ack, the orchestrator SHALL record it with a `.failed` marker sibling to its `.done` marker (`<checkpoint_path>.failed`); the unit SHALL NOT be retried on `--resume` and SHALL NOT block tier completion. A tier SHALL be considered complete enough to proceed when `done + failed >= total` (not `done >= total`).

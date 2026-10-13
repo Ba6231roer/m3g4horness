@@ -169,17 +169,7 @@ _STEPS = [
         "input": {"artifact": "rules", "shape": "rule files"},
         "output": {"artifact": "checkpoints/t4/consistency.json.done", "shape": "marker",
                    "path_pattern": "<init-dir>/checkpoints/t4/consistency.json.done"},
-    },
-    {
-        "step": "merge",
-        "kind": "bash",
-        "script_name": "merge_inventories.py",
-        "cli_args": "--partials <partials-dir> --out <init-dir>/controls_inventory.json",
-        "input": {"artifact": "<partials-dir>", "shape": "[partial inventory JSONs]"},
-        "output": {"artifact": "controls_inventory.json", "shape": "{controls[],merged[]}",
-                   "path_pattern": "<init-dir>/controls_inventory.json"},
-    },
-    {
+    },    {
         "step": "done",
         "kind": "bash",
         "script_name": None,  # Terminal state: no script

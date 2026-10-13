@@ -29,7 +29,7 @@ def _load(name):
 # not-started|discover|survey|scout|resolve|t1|t2|t3|assemble|t4|merge|done
 _RESUME_STATE_STEPS = {
     "not-started", "discover", "survey", "scout", "resolve",
-    "t1", "t2", "t3", "assemble", "t4", "merge", "done"
+    "t1", "t2", "t3", "assemble", "t4", "done"
 }
 
 
@@ -302,6 +302,16 @@ class TestListSteps(unittest.TestCase):
             self.assertEqual(impl[step_id]["script"], want_script,
                              f"step {step_id}: script drift contract={script_cell!r} "
                              f"impl={impl[step_id]['script']!r}")
+
+
+
+    def test_no_merge_step_row(self):
+        # H11(b): the merge step (merge_inventories.py dead reference) is gone —
+        # --merge is refused at step 0, never routed.
+        src = (HERE.parent / "core" / "scripts" / "list_steps.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("merge_inventories", src)
+        out = json.loads(self._steps()[-1]) if False else None
 
 
 if __name__ == "__main__":

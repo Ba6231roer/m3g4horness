@@ -625,6 +625,23 @@ def main():
             f"tiers={{done:{t['done']}, failed:{t['failed']}, total:{t['total']}}} "
             f"next={state['next_action']['kind']}")
     print(json.dumps(state, ensure_ascii=False))
+    # Usage telemetry on the DERIVE path only (--arm-sentinel / --rearm-sentinel /
+    # --check are NOT mounted: step-0 arming happens before any run product exists
+    # and would report a params-less event). The resume entry and the in-run queries
+    # share this exact argv, so the params rebuild base/branch from the derived
+    # state (best effort); the module's cooldown marker absorbs query repetition.
+    # Any failure — module missing, network dead — is swallowed; stdout above and
+    # the exit code stay exactly as without telemetry.
+    try:
+        import mgh_telemetry
+        mgh_telemetry.fire(
+            "mgh-sdr",
+            mgh_telemetry.resume_params(
+                {"base": state.get("base"), "branch": state.get("branch")},
+                (("base", "--base"), ("branch", "--branch"))),
+            str(run_dir))
+    except Exception:
+        pass
     return 0
 
 

@@ -487,6 +487,15 @@ def _emit_change_context(args, project_root: Path, change_root: Path, change: st
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "change_context.json").write_text(
         json.dumps(change_context, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Usage telemetry (fire-and-forget): any failure — sibling module missing,
+    # network dead — is swallowed here so stdout, the artifacts and the exit code
+    # stay exactly as without telemetry. The cooldown marker lives in the change's
+    # own output dir, so --materialize pagination re-entries don't multiply events.
+    try:
+        import mgh_telemetry
+        mgh_telemetry.fire("mgh-sra", " ".join(sys.argv[1:]), str(out_dir))
+    except Exception:
+        pass
 
     focus_desc = ("all9" if focus is None
                   else f"narrowed({len(focus['dimensions'])}d"

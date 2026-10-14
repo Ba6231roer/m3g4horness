@@ -11,7 +11,8 @@ matches the sra shape (pending paths absolute + under project_root, degraded is 
 --check accepts a valid context and rejects malformed ones (exit 2). Run from any cwd.
 Run: py tests/test_srr_ingest.py
 """
-import json, subprocess, sys, tempfile, zipfile
+import contextlib, importlib.util, io, json, os, subprocess, sys, tempfile, zipfile
+import unittest.mock as mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -499,6 +500,82 @@ class TestMaterialize(unittest.TestCase):
             json.dumps(d, ensure_ascii=False), encoding="utf-8")
         rc, out, _ = run(["--check", ".mgh-srr/change_context.json"], cwd=p)
         self.assertEqual(rc, 2)
+
+
+class TestTelemetryMount(unittest.TestCase):
+    """Usage-telemetry mount (add-mgh-telemetry-seam): the intake run fires once
+    with the srr output dir as the cooldown-marker home; --check never fires; ANY
+    telemetry failure leaves stdout / artifacts / exit code unchanged. The
+    subprocess harness above cannot patch the sibling import, so these run
+    main() in-process with a fake module in sys.modules."""
+
+    def _main(self, project, *argv):
+        spec = importlib.util.spec_from_file_location(
+            "ingest_requirements_tel", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        old_argv, old_cwd = sys.argv, os.getcwd()
+        sys.argv = ["ingest_requirements.py", *argv]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            os.chdir(project)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = mod.main()
+        finally:
+            sys.argv, _ = old_argv, os.chdir(old_cwd)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_fire_called_with_intake_shape(self):
+        p = make_project()
+        fake = mock.MagicMock()
+        fake.fire.return_value = {"sent": False, "reason": "test"}
+        try:
+            with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+                code, out, err = self._main(p, "--text", "需求正文", "--split")
+            self.assertEqual(code, 0, err)
+            fake.fire.assert_called_once()
+            method, params, marker = fake.fire.call_args[0]
+            self.assertEqual(method, "mgh-srr")
+            self.assertEqual(params, "--text 需求正文 --split")
+            self.assertEqual(Path(marker), (p / ".mgh-srr").resolve())
+            self.assertTrue((p / ".mgh-srr" / "change_context.json").is_file())
+        finally:
+            import shutil
+            shutil.rmtree(p, ignore_errors=True)
+
+    def test_check_path_never_fires(self):
+        p = make_project()
+        try:
+            (p / ".mgh-srr").mkdir()
+            (p / ".mgh-srr" / "change_context.json").write_text(
+                json.dumps({"change": "x", "pending": []}), encoding="utf-8")
+            fake = mock.MagicMock()
+            with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+                code, _, err = self._main(p, "--check", ".mgh-srr/change_context.json")
+            self.assertEqual(code, 2)   # minimal shape fails intake validation
+            fake.fire.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(p, ignore_errors=True)
+
+    def test_fire_raising_and_missing_module_keep_output(self):
+        for patch in (mock.MagicMock(side_effect=RuntimeError("boom")), None):
+            p = make_project()
+            try:
+                f = mock.MagicMock()
+                if patch is not None:
+                    f.fire = patch
+                mod = {"mgh_telemetry": f} if patch is not None \
+                    else {"mgh_telemetry": None}
+                with mock.patch.dict(sys.modules, mod):
+                    code, out, err = self._main(p, "--text", "需求正文")
+                self.assertEqual(code, 0, err)
+                ctx = json.loads(out)
+                self.assertEqual(ctx["degraded"], [])
+                self.assertTrue((p / ".mgh-srr" / "change_context.json").is_file())
+            finally:
+                import shutil
+                shutil.rmtree(p, ignore_errors=True)
 
 
 if __name__ == "__main__":

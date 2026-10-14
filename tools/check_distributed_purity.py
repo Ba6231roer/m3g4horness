@@ -185,7 +185,13 @@ SDD_SKIP_PARTS = frozenset({"archive"})
 # R5.11 carve-out: when a change's REQUIREMENT is to write files under the
 # private docs/ area, the path IS the deliverable rather than a pointer to
 # somewhere else. Keyed by change-folder name.
-SDD_EXEMPT_CHANGES = frozenset({"add-skill-dev-experience-doc"})
+SDD_EXEMPT_CHANGES = frozenset({
+    "add-skill-dev-experience-doc",
+    # telemetry seam: delivers docs/mgh-telemetry-api.md (server-side contract for
+    # the maintainer) and adds docs/glossary.md entries — both docs/ paths are the
+    # change's own deliverables, not pointers to elsewhere
+    "add-mgh-telemetry-seam",
+})
 
 
 def repo_docs_hits(line):

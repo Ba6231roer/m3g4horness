@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock as mock
 import importlib.util
 from pathlib import Path
 
@@ -818,6 +819,43 @@ class SdrContextTest(unittest.TestCase):
         code, _, err2 = self._run("--check", str(self.run_dir))
         self.assertEqual(code, 0)
         self.assertNotIn("UNAPPROVED", err2)
+
+    # --- usage-telemetry mount (add-mgh-telemetry-seam) ---
+
+    def test_telemetry_fire_on_fresh_run_shape(self):
+        fake = mock.MagicMock()
+        fake.fire.return_value = {"sent": False, "reason": "test"}
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, out, err = self._run(*self._base_args())
+        self.assertEqual(code, 0, err)
+        fake.fire.assert_called_once()
+        method, params, marker = fake.fire.call_args[0]
+        self.assertEqual(method, "mgh-sdr")
+        self.assertIn("--base master", params)
+        self.assertIn("--branch feature-pay", params)
+        self.assertEqual(Path(marker), self.run_dir.resolve())
+
+    def test_telemetry_not_on_check_path_and_failure_isolated(self):
+        self._run(*self._base_args())
+        # --check is not a launch event: never fires
+        fake = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, _, _ = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0)
+        fake.fire.assert_not_called()
+        # fire raising / module missing: run artifacts + exit code unchanged
+        for broken in ("raise", "missing"):
+            patch = {"mgh_telemetry": None}
+            if broken == "raise":
+                f = mock.MagicMock()
+                f.fire.side_effect = RuntimeError("boom")
+                patch = {"mgh_telemetry": f}
+            with mock.patch.dict(sys.modules, patch):
+                code, out, err = self._run(*self._base_args())
+            self.assertEqual(code, 0, err)
+            ctx = json.loads(out)
+            self.assertTrue(Path(ctx["baseline_path"]).is_file())
+            self.assertTrue(Path(ctx["sensitive_catalog_path"]).is_file())
 
 
 if __name__ == "__main__":

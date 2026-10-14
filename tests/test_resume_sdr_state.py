@@ -10,12 +10,16 @@ vanished external root), and pure-function idempotence of the reporter.
 
 Run: py tests/test_resume_sdr_state.py
 """
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -490,6 +494,82 @@ class ResumeSdrStateTest(unittest.TestCase):
         self.assertIn("sdr_context.py", desc)
         self.assertLess(desc.index("--arm-sentinel"), desc.index("sdr_context.py"),
                         "pre-arm must come BEFORE step 1 in the recipe")
+
+
+class TelemetryMountTest(unittest.TestCase):
+    """Usage-telemetry mount (add-mgh-telemetry-seam): the DERIVE path fires with
+    `--resume` + state-rebuilt base/branch; --arm-sentinel / --check never fire;
+    ANY telemetry failure leaves the state JSON / exit code unchanged. The
+    subprocess harness above cannot patch the sibling import, so this class runs
+    main() in-process with a fake module in sys.modules."""
+
+    def _main(self, *argv):
+        spec = importlib.util.spec_from_file_location("resume_sdr_state_tel", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        old = sys.argv
+        sys.argv = ["resume_sdr_state.py", *argv]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = mod.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def _run_dir(self):
+        run = Path(tempfile.mkdtemp(prefix="mgh_rsdr_tel_")) / "repo" / ".mgh-sdr" \
+            / "runs" / TS
+        run.mkdir(parents=True)
+        (run / "context.json").write_text(json.dumps(
+            {"repo": str(run.parent.parent.parent), "base": "master",
+             "branch": "feat"}), encoding="utf-8")
+        return run
+
+    def _fake(self):
+        fake = mock.MagicMock()
+        fake.fire.return_value = {"sent": False, "reason": "test"}
+        # the host calls resume_params on the module too — delegate it to the REAL
+        # implementation so the rebuilt params string is assertable
+        spec = importlib.util.spec_from_file_location(
+            "mgh_telemetry_helper", SCRIPT.parent / "mgh_telemetry.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        fake.resume_params = helper.resume_params
+        return fake
+
+    def test_fire_on_derive_path_with_state_params(self):
+        run = self._run_dir()
+        fake = self._fake()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, out, err = self._main("--run-dir", str(run))
+        self.assertEqual(code, 0, err)
+        fake.fire.assert_called_once()
+        method, params, marker = fake.fire.call_args[0]
+        self.assertEqual(method, "mgh-sdr")
+        self.assertEqual(params, "--resume --base master --branch feat")
+        self.assertEqual(marker, str(run))
+
+    def test_arm_sentinel_never_fires(self):
+        run = self._run_dir()
+        fake = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, _, err = self._main("--run-dir", str(run), "--arm-sentinel")
+        self.assertEqual(code, 0, err)
+        fake.fire.assert_not_called()
+
+    def test_fire_raising_and_missing_module_keep_state_output(self):
+        for patch in (mock.MagicMock(side_effect=RuntimeError("boom")), None):
+            run = self._run_dir()
+            f = mock.MagicMock()
+            if patch is not None:
+                f.fire = patch
+            mod = {"mgh_telemetry": f} if patch is not None \
+                else {"mgh_telemetry": None}
+            with mock.patch.dict(sys.modules, mod):
+                code, out, err = self._main("--run-dir", str(run))
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["step"], "group")
 
 
 if __name__ == "__main__":

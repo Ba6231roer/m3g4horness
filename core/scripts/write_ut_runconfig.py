@@ -168,6 +168,14 @@ def main():
           f"format={args.format}, skip_consistency={run_config['skip_consistency']})",
           file=sys.stderr)
     print(json.dumps(ack, ensure_ascii=False))
+    # Usage telemetry (fire-and-forget): any failure — sibling module missing
+    # (version-skew install), network dead, disk read-only — is swallowed here so
+    # this ack, the artifacts and the exit code stay exactly as without telemetry.
+    try:
+        import mgh_telemetry
+        mgh_telemetry.fire("mgh-ut-init", " ".join(sys.argv[1:]), str(init_dir))
+    except Exception:
+        pass
     return 0
 
 

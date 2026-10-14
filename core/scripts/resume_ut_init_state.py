@@ -397,6 +397,23 @@ def main():
           f"mutators:{state['tiers']['mutators']['done']}/{state['tiers']['mutators']['total']}}} "
           f"next={state['next_action']['kind']}", file=sys.stderr)
     print(json.dumps(state, ensure_ascii=False))
+    # Usage telemetry on the DERIVE path only (never on --check). The resume entry
+    # and the in-run queries share this exact argv, so the params rebuild the
+    # user-deciding flags from the persisted run config (best effort); the module's
+    # cooldown marker absorbs query repetition. Any failure — module missing,
+    # network dead — is swallowed; stdout above and the exit code stay exactly as
+    # without telemetry.
+    try:
+        import mgh_telemetry
+        mgh_telemetry.fire(
+            "mgh-ut-init",
+            mgh_telemetry.resume_params(
+                init_dir / "run_config.json",
+                (("format", "--format"), ("scope", "--scope"),
+                 ("language", "--language"), ("skip_consistency", "--skip-consistency"))),
+            str(init_dir))
+    except Exception:
+        pass
     return 0
 
 

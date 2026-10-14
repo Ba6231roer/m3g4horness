@@ -71,7 +71,9 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 ### R2 — 工具脚本:优先 Python 标准库
 
 - **确定性脚本 / 工具脚本实现优先使用 Python 标准库**。当前 `core/scripts/` 与 `tools/`
-  全部只用标准库(`argparse/ast/collections/datetime/json/math/pathlib/re/subprocess/sys`),
+  全部只用标准库(`argparse/ast/collections/datetime/json/math/pathlib/re/subprocess/sys`;
+  另有 `urllib/socket/getpass`,**仅遥测模块 `mgh_telemetry.py` 使用**——启动时向内网
+  遥测端点发一条使用记录,未配端点时零网络行为),
   经 AST 扫描与单测双重验证**无需 `pip install`**,内网可零联网运行。
 - **需要引入/安装任何 pip 依赖时,必须先主动向维护者确认**(给出依赖名、用途、是否影响
   内网零联网分发)。未经确认不得新增 `requirements.txt` 或 import 第三方包。
@@ -393,6 +395,7 @@ helper)或发布前才跑全量。
 | init 起始态 `write_runconfig.py` / ack 契约 | `test_write_runconfig` `test_init_ack_contract` |
 | sdr 面(`diff_group` / `sdr_context` / `sdr_tier` / 报告 / launcher / 步骤与 resume / 读根 / 敏感目录) | `test_diff_group` `test_sdr_context` `test_sdr_tier` `test_render_sdr_report` `test_mgh_sdr_launch` `test_list_sdr_steps` `test_resume_sdr_state` `test_read_roots_config` `test_sensitive_catalog` `test_sdr_failure_chain` |
 | sra / srr 面 | `test_sra_prepare` `test_sra_merge` `test_sra_memory` `test_srr_ingest` `test_srr_report` |
+| `mgh_telemetry.py`(遥测模块)+ 七个挂载脚本的遥测面 | `test_mgh_telemetry` + 挂载点各归其位:`test_write_runconfig` `test_resume_state` `test_write_ut_runconfig` `test_resume_ut_init_state` `test_sdr_context` `test_resume_sdr_state` `test_sra_prepare` `test_srr_ingest`(各文件 `TestTelemetryMount`/`TelemetryMount*` 类) |
 | ut-init 面 | `test_ut_init_runtime` `test_ut_init_ack_contract` `test_resume_ut_init_state` `test_write_ut_runconfig` `test_classify_tests` `test_test_rules_purity` |
 | sast 确定性阶段 | `test_deterministic` `test_sast_runtime` `test_chunk_sources` `test_list_chunks` `test_list_verify_jobs` `test_stage_check` `test_load_controls` `test_focus_scope` |
 | 命令壳 / 提示词 / 分发产物 | `test_distributed_md_purity` `test_plain_language` `test_recipe_visibility` `test_dsh_command_surface` `test_mgh_init_codegraph_parity` `test_mgh_sra_codegraph_parity` `test_mgh_srr_codegraph_parity` + `python tools/check_contracts.py` |
@@ -441,6 +444,7 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   不删除**,也不被当作项目约定;opencode/claude 两面结构不混。
 - `/mgh-sdr` 的发现是 **LLM 候选,非确认漏洞**;接口分组是**注解启发式**(Spring/JAX-RS/Servlet 常用注解),漏分组接口退入独立变更单元(粒度粗、覆盖不丢),非 java web 项目整体退化为 standalone 模式;外部仓结论是**检索时点快照**(不保证前端分支同步);基线经字节预算投影(低优先级细节可能未全量投影);敏感目录来源为 project 或 default-template 回退(目录外字段仅按回退规则识别);报告为**自包含单文件 HTML**(数据同步落 `<run-dir>/sdr_report_data.json`,人读 HTML 与机器读 JSON 同源),源文件链接为仓内相对路径(部分浏览器对 `.java` 等扩展名可能下载而非打开),历史 `.md` 报告不迁移不回写。
 - 守卫 Bash 面路径净网是 **regex-over-string 提取、非 shell 解析器**(与全部 Bash 规则同立场),已知残余:① **未知写动词把数据写进已声明只读根**——token 在读允许集内放行、变异规则又不认得该动词 → 漏(sdr 审批流 change 落地后声明根全部经用户拍板,风险受控);② **别名/变量间接**(`$p='D:\out'; cp x $p`)提取不到裸路径 → 漏;③ 接受的新拦截(原放行→现拦,救济=配置声明或非运行会话):`> /tmp/x` 单写、`--flag=<树外路径>` 取值、`git -C <树外>`、无害提及树外路径;④ **通配按去通配前缀判属**——引号闭合路径后紧邻 glob 段先拼为单 token、含 `*`/`?` 的 token 按首个元字符前的前缀 resolve 判定(治「树内路径+通配」被拆成越树碎片误拦),glob 的**展开结果**不判定、别名/变量间接照旧不可见(同 ②)。
+- 工具族带**尽力而为的启动遥测**(埋点在各命令启动路径的确定性脚本内部,17 个命令壳零改动):未配置遥测端点(env `MGH_TELEMETRY_URL` 与模块内置默认皆空)时**零网络行为**;发送失败/超时静默丢弃,挂载脚本的 stdout/退出码/产物永不因遥测改变;resume 与过程查询的计数是 **30 分钟冷却窗口近似**(「活动窗口开始次数」,不是精确会话数——超 30 分钟的长任务中途查询会多计、30 分钟内快速重启会漏计);params 字段原样透传、可能含项目路径等内网信息(服务端在内网,端点置空即整体停报)。
 
 ## 可参考项目
 

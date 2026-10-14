@@ -16,6 +16,45 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — 启动路径使用遥测:脚本内埋点 + 冷却窗口,17 个命令壳零改动 (0.1.79)
+
+- 新能力规格 `usage-telemetry`:五条已发布命令(mgh-init / mgh-sdr / mgh-sra / mgh-srr /
+  mgh-ut-init)在**启动路径上已有的确定性脚本内部**向内网遥测服务上报一条使用记录——埋点
+  方案为脚本内挂载(2026-10-14 维护者拍板,取代第一版的壳埋点:用户 ~150K 上下文窗口比
+  什么都宝贵,遥测这类低价值内容不占壳 token,且第一版实测两壳预算已贴顶、埋点行还需做
+  预算对冲手术);**17 个编排壳一个字不动**。mgh-sast 无启动期 Python 脚本,不在本版接入
+  (占位提案 `add-mgh-sast-telemetry` 记录背景,缓做)。
+- 新增遥测模块 `core/scripts/mgh_telemetry.py`(仅标准库,导入 + CLI 双形态):
+  `fire(method, params, marker_dir)` 完成采集与上报——username(五级降级链,Windows 域
+  前缀剥离)→ ip(UDP connect 路由表探测,不发包、零特权)→ operation(六命令闭集中文
+  映射单源,映射外回退原名)→ params(500 字符截断)→ `time` 恒为整数 10(服务端历史
+  遥测表遗留列,占位兼容);单次 HTTP POST(UTF-8 JSON,显式空 `ProxyHandler` 直连,内部
+  超时约 2s);采集全链逐级降级、全败填 `unknown`;发送失败/超时/端点未配置一律静默跳过;
+  `fire` 自身绝不抛异常。
+- **冷却标记** `<marker-dir>/telemetry_last.json`(时间戳 + method,阈值默认 30 分钟):
+  同一 run 的过程查询/分页重入不重复上报,超窗口的重入(--resume)计一次新启动。诚实
+  误差已双向披露(模块 docstring + README + AGENTS.md):统计口径是「活动窗口开始次数」,
+  不是精确会话数——超 30 分钟的长任务中途查询会多计、30 分钟内快速重启会漏计。
+- 七个挂载点(均为既有启动路径脚本,各 +几行 try 包裹的 import+fire):`write_runconfig.py`
+  / `resume_state.py`(mgh-init 全新启动与 resume/查询,后者 params 以 `--resume` 起头并
+  从 run_config.json 尽力重建用户 flag)、`write_ut_runconfig.py` / `resume_ut_init_state.py`
+  (mgh-ut-init 同构)、`sdr_context.py` + `resume_sdr_state.py` 的状态派生路径(mgh-sdr;
+  `--arm-sentinel` 路径不埋点——发生时拿不到用户参数)、`prepare_augment.py`(mgh-sra)、
+  `ingest_requirements.py`(mgh-srr)。挂载脚本的 stdout/stderr/退出码/产物 schema/
+  `--check` 行为在遥测缺席、故障、超时三种情况下与无遥测完全一致(双层隔离:`fire` 内
+  吞异常 + 挂载侧 try 包 import,模块缺失即版本错位也不拖垮宿主)。
+- **端点配置** = env `MGH_TELEMETRY_URL` > 模块内置默认常量(初始**空**) > 静默跳过:
+  发布即完全惰性,未配置时零网络、零磁盘、零时延;服务端就绪后回填一行常量或逐机设 env
+  即激活。服务端接口契约(字段表、operation 闭集对照、请求/响应语义、部署建议、请求示例)
+  见 `docs/mgh-telemetry-api.md`(维护者文档区,随本 change 交付;分发面不引用它)。
+- 配套面:`install.sh` 共定位自检清单 +`mgh_telemetry`;新增 `tests/test_mgh_telemetry.py`
+  36 测(闭集内容锚/采集链 mock 降级/载荷六键契约/端点优先级/冷却窗口/失败隔离/CLI 退出
+  码/挂载存在性锚含「17 壳零遥测 token」)+ 八个挂载脚本既有测试文件各补 `TestTelemetryMount`
+  类(fire 被调形状 + fire 抛异常/模块缺失宿主契约不变);`tools/check_distributed_purity.py`
+  的 R5.11 豁免集 +本 change(docs/ 接口文档即交付物);AGENTS.md(R2 stdlib 模块列举、
+  改动面→测试映射表、诚实边界)与 README(「使用统计(遥测)」披露段)各补使用统计披露;
+  `docs/glossary.md` 补「遥测/埋点/端点」词条。VERSION 0.1.78→0.1.79。
+
 ### Added — 人类面输出纪律:词表单源 + 读者评审,mgh-sdr 报告首落地 (0.1.78)
 
 - 新能力规格 `human-facing-output-discipline`(人类面表面登记制 + 校准读者画像 + 内部词汇

@@ -6,6 +6,7 @@ for /mgh-ut-init (ut counterpart of test_write_runconfig.py). Asserts: atomic wr
 --format defaults to opencode (omitted -> exit 0). Run from a non-script cwd (import robustness).
 """
 import contextlib, importlib.util, io, json, sys, tempfile, unittest
+import unittest.mock as mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -56,6 +57,48 @@ class TestWriteUtRunconfig(unittest.TestCase):
         self.assertEqual(code, 0)
         cfg = json.loads((target / ".mgh-ut-init" / "run_config.json").read_text(encoding="utf-8"))
         self.assertEqual(cfg["format"], "claude")
+
+
+class TestTelemetryMount(unittest.TestCase):
+    """Usage-telemetry mount (add-mgh-telemetry-seam): fire is called with the
+    fresh-run shape, and ANY telemetry failure — fire raising, or the sibling
+    module missing (version-skew install) — leaves exit code / ack / artifacts
+    exactly as without telemetry."""
+
+    def _fake(self, **kw):
+        fake = mock.MagicMock()
+        fake.fire.return_value = {"sent": False, "reason": "test"}
+        for k, v in kw.items():
+            setattr(fake.fire, k, v)
+        return fake
+
+    def test_fire_called_with_fresh_run_shape(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_utwc_tel1_")).resolve()
+        fake = self._fake()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, out, _ = _run("--target", str(target), "--language", "java")
+        self.assertEqual(code, 0)
+        fake.fire.assert_called_once()
+        method, params, marker = fake.fire.call_args[0]
+        self.assertEqual(method, "mgh-ut-init")
+        self.assertEqual(params, f"--target {target} --language java")
+        self.assertEqual(marker, str((target / ".mgh-ut-init").resolve()))
+
+    def test_fire_raising_keeps_contract(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_utwc_tel2_")).resolve()
+        fake = self._fake(side_effect=RuntimeError("boom"))
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, out, _ = _run("--target", str(target))
+        self.assertEqual(code, 0)
+        ack = json.loads(out)
+        self.assertTrue(Path(ack["run_config"]).is_file())
+
+    def test_missing_module_keeps_contract(self):
+        target = Path(tempfile.mkdtemp(prefix="mgh_utwc_tel3_")).resolve()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": None}):
+            code, out, _ = _run("--target", str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(Path(json.loads(out)["run_config"]).is_file())
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for prepare_augment.py (a1: parse change -> change_context + signal-1)."""
-import json, subprocess, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, subprocess, sys, tempfile, unittest
+import unittest.mock as mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -509,6 +510,81 @@ class TestMaterialize(unittest.TestCase):
             cc.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
             r = run("prepare_augment", "--check", str(cc), cwd=td)
             self.assertEqual(r.returncode, 2)
+
+
+class TestTelemetryMount(unittest.TestCase):
+    """Usage-telemetry mount (add-mgh-telemetry-seam): the intake run fires once
+    with the change's own output dir as the cooldown-marker home (so --materialize
+    pagination re-entries are deduped by the module, not here); --check never
+    fires; ANY telemetry failure leaves stdout / artifacts / exit code unchanged.
+    The subprocess harness above cannot patch the sibling import, so these run
+    main() in-process with a fake module in sys.modules."""
+
+    def _main(self, td, *argv):
+        spec = importlib.util.spec_from_file_location(
+            "prepare_augment_tel", SCRIPTS / "prepare_augment.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        old_argv, old_cwd = sys.argv, os.getcwd()
+        sys.argv = ["prepare_augment.py", *argv]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            os.chdir(td)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = mod.main()
+        finally:
+            sys.argv, _ = old_argv, os.chdir(old_cwd)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_fire_called_with_intake_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td, with_rules=True)
+            fake = mock.MagicMock()
+            fake.fire.return_value = {"sent": False, "reason": "test"}
+            with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+                code, out, err = self._main(td, "--change", "payment-change",
+                                            "--rules", ".mgh-init")
+            self.assertEqual(code, 0, err)
+            fake.fire.assert_called_once()
+            method, params, marker = fake.fire.call_args[0]
+            self.assertEqual(method, "mgh-sra")
+            self.assertEqual(params,
+                             f"--change payment-change --rules .mgh-init")
+            self.assertEqual(Path(marker),
+                             (td / "openspec" / "changes" / "payment-change"
+                              / ".mgh-sra").resolve())
+            self.assertTrue((td / "openspec" / "changes" / "payment-change"
+                             / ".mgh-sra" / "change_context.json").is_file())
+
+    def test_check_path_never_fires(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            build_project(td, with_rules=True)
+            fake = mock.MagicMock()
+            with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+                code, _, _ = self._main(td, "--check", ".mgh-init")
+            self.assertEqual(code, 0)
+            fake.fire.assert_not_called()
+
+    def test_fire_raising_and_missing_module_keep_output(self):
+        for patch in (mock.MagicMock(side_effect=RuntimeError("boom")), None):
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                build_project(td, with_rules=True)
+                f = mock.MagicMock()
+                if patch is not None:
+                    f.fire = patch
+                mod = {"mgh_telemetry": f} if patch is not None \
+                    else {"mgh_telemetry": None}
+                with mock.patch.dict(sys.modules, mod):
+                    code, out, err = self._main(td, "--change", "payment-change",
+                                                "--rules", ".mgh-init")
+                self.assertEqual(code, 0, err)
+                ctx = json.loads(out)
+                self.assertEqual(ctx["change"], "payment-change")
+                self.assertTrue((td / "openspec" / "changes" / "payment-change"
+                                 / ".mgh-sra" / "change_context.json").is_file())
 
 
 if __name__ == "__main__":

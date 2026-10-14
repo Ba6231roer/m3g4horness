@@ -8,6 +8,7 @@ fresh-session mid-T1 resume, run_config statelessness (--no-scout honored), scou
 skipped, completed run, --merge short-circuit, missing run_config fail-loud, --check.
 """
 import contextlib, importlib.util, io, json, sys, tempfile, unittest
+import unittest.mock as mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -1397,6 +1398,54 @@ class TestRunConfigUnitBudgetLockstep(unittest.TestCase):
         self.assertEqual(st["step"], "t2")
         self.assertEqual(st["tiers"]["t1"], {"done": 3, "failed": 0, "total": 3})
 
+
+class TestTelemetryMount(unittest.TestCase):
+    """Usage-telemetry mount (add-mgh-telemetry-seam): the DERIVE path fires with
+    `--resume` + run-config-rebuilt params; --check and other action paths never
+    fire; ANY telemetry failure leaves the state JSON / exit code unchanged."""
+
+    def _fake(self, **kw):
+        fake = mock.MagicMock()
+        fake.fire.return_value = {"sent": False, "reason": "test"}
+        # the host calls resume_params on the module too — delegate it to the REAL
+        # implementation so the rebuilt params string is assertable
+        fake.resume_params = _load("mgh_telemetry").resume_params
+        for k, v in kw.items():
+            setattr(fake.fire, k, v)
+        return fake
+
+    def test_fire_on_derive_path_with_resume_params(self):
+        s = _State(no_scout=True)
+        fake = self._fake()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, out, _ = s.main()
+        self.assertEqual(code, 0)
+        fake.fire.assert_called_once()
+        method, params, marker = fake.fire.call_args[0]
+        self.assertEqual(method, "mgh-init")
+        self.assertTrue(params.startswith("--resume"), params)
+        self.assertIn("--no-scout", params)          # rebuilt from run_config.json
+        self.assertIn("--format opencode", params)
+        self.assertEqual(marker, str(s.init))
+
+    def test_fire_not_on_check_or_rearm_paths(self):
+        s = _State(no_scout=True)
+        fake = self._fake()
+        with mock.patch.dict(sys.modules, {"mgh_telemetry": fake}):
+            code, _, _ = s.main("--check")
+            self.assertEqual(code, 0)
+            s.main("--rearm-sentinel")
+        fake.fire.assert_not_called()
+
+    def test_fire_raising_and_missing_module_keep_state_output(self):
+        for fake in (self._fake(side_effect=RuntimeError("boom")), None):
+            s = _State(no_scout=True)
+            patch = {"mgh_telemetry": fake} if fake is not None \
+                else {"mgh_telemetry": None}
+            with mock.patch.dict(sys.modules, patch):
+                code, out, _ = s.main()
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["step"], "discover")
 
 
 if __name__ == "__main__":

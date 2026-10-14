@@ -717,6 +717,14 @@ def _run(args) -> dict:
             f"external={len(external)} repo(s) skipped={skipped or 'none'}; "
             f"pending_approval={pending_approval or 'none'}; "
             f"sensitive_catalog_source={source} -> {result['sensitive_catalog_path']}")
+    # Usage telemetry (fire-and-forget): any failure — sibling module missing,
+    # network dead — is swallowed here so stdout, the artifacts and the exit code
+    # stay exactly as without telemetry.
+    try:
+        import mgh_telemetry
+        mgh_telemetry.fire("mgh-sdr", " ".join(sys.argv[1:]), str(run_dir))
+    except Exception:
+        pass
     return result
 
 

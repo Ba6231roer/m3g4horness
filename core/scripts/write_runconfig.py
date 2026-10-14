@@ -327,6 +327,14 @@ def main():
           f"no_scout={run_config['no_scout']}) + sentinel "
           f"{sentinel_path} + gitignore {gitignore_path}", file=sys.stderr)
     print(json.dumps(ack, ensure_ascii=False))
+    # Usage telemetry (fire-and-forget): any failure — sibling module missing
+    # (version-skew install), network dead, disk read-only — is swallowed here so
+    # this ack, the artifacts and the exit code stay exactly as without telemetry.
+    try:
+        import mgh_telemetry
+        mgh_telemetry.fire("mgh-init", " ".join(sys.argv[1:]), str(init_dir))
+    except Exception:
+        pass
     return 0
 
 

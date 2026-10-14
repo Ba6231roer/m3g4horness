@@ -140,8 +140,7 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
    · stdout `empty:true` → 跳过 fan-out,直接 step 4(渲染「无变更」报告);`empty:false`
      但 `total==0` 且 `excluded.count>0` = 全部文件被排除(非零 diff),stderr 有说明,照常渲染。
    · 诊断读 stdout `excluded{count,by_reason}` 与 `codegraph_stats{anchors_changed,
-     anchors_upstream,chain_merged,edges_*}`(codegraph 是否生效/锚定多少,从此可观测;
-     probe 失败原因在 stderr)。
+     anchors_upstream,chain_merged,edges_*}`(probe 失败原因在 stderr)。
    · 校验:`py mgh-core/scripts/diff_group.py --check <run-dir>`(退出码 2 → 回退)。
 3. fan-out(dispatcher;逐字转发调用,**NEVER** 手工循环):
      py mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300 [--resume]
@@ -161,13 +160,16 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
      枚举器 `--include-failed`,认领删 marker),再失败接受缺口并在报告 degraded 披露。
 4. render(Bash,确定性):
      py mgh-core/scripts/render_sdr_report.py --run-dir <abs-run-dir> --repo <abs>
-   → `<project>/mgh-sdr-<branch>-<ts>.html`(**自包含单文件**:样式/脚本/数据全内嵌,浏览器
-     双击即读、离线可用;结构:头部 + 章节一简报表(行=单元,列=入口/调用链/前端两列/维度,
-     severity/维度筛选 + P-NN 页内跳转)+ 章节二问题详述 + 章节三内嵌 SVG 分支调用链图(缩放平移))
+   → `<project>/mgh-sdr-<branch>-<ts>.html`(自包含单文件 HTML,浏览器双击即读;结构:头部
+     + 章节一简报表 + 章节二问题详述(含复现方式/修复对比,数据携带时)+ 章节三分支调用链图)
      + `<run-dir>/sdr_manifest.json` + `<run-dir>/sdr_report_data.json`(canonical 数据文件,
-     下游程序消费它;历史 `.md` 报告不迁移不回写;源文件链接在部分浏览器可能下载而非打开);
-     NEVER 写 openspec/
+     下游程序只消费它,NEVER 解析 HTML;历史 `.md` 报告不迁移不回写;源文件链接部分浏览器
+     可能下载而非打开);NEVER 写 openspec/
    · 校验:`py mgh-core/scripts/render_sdr_report.py --check <run-dir>`。
+4.5 可读性评审(尽力而为;缺席/失败 = 报告少「可读性自检」一节,run 不受影响):读
+    `mgh-core/prompts/fragments/fanout/readability-review.md`,按其头注「编排器指派」
+    替换占位符并派发**一次**评审子代理(失败 **NEVER** 重试超过一次、**NEVER** 阻断
+    run);随后**重渲染**(step 4 同参,幂等)+ 重跑其 `--check`。
 5. 收尾:打印报告绝对路径 + counts(stdout manifest 字段,**NEVER** `py -c` 挖 JSON);
    声明诚实边界;`rm .mgh-sdr/.active`(完成态/干净停止)。
 ```
@@ -239,9 +241,7 @@ py mgh-core/scripts/list_sdr_steps.py --step fanout
 - **基线经字节预算投影**(32KB 默认,优先级截断):低优先级维度的存量设计细节可能未全量投影。
 - **宿主 shell 超时**:dsh per-call 超时 = 工具调用显式毫秒 `timeout` 入参(受部署上限收敛);opencode 全局 shell 超时 env 须启动前就绪;per-call `timeout` 是跨宿主公共
   杠杆。claude Bash per-call 上限 600000ms。
-- **报告形态是自包含单文件 HTML**(样式/脚本/数据全内嵌,离线双击可读):报告数据同步落
-  `<run-dir>/sdr_report_data.json`,下游程序消费该数据文件(NEVER 去解析 HTML);历史 `.md`
-  报告不迁移不回写;源文件链接是仓内相对路径,部分浏览器对 `.java` 等扩展名可能下载而非打开。
+- **可读性自检小节是尽力而为的评审产出**:缺席/失败只少该小节;建议仅提示,采纳由人确认。
 - **launcher 重跑会新建 run 目录**:`mgh_sdr_launch.py` 无 `--resume` / `--run-dir`,每次调用按当前
   时刻新建 `<repo>/.mgh-sdr/runs/<ts>-<branch>/`,上一次 run 的 marker **不被复用**——**NEVER 宣称
   「重跑 launcher 即续跑」**。续跑由调用方带着**同一个** run 目录路径回来经 `resume_sdr_state.py`

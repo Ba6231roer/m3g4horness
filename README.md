@@ -113,11 +113,25 @@ CSRF、审计日志——产出两样东西：
 ```
 
 多分支批量复核（人/定时任务用的一条命令入口；外部仓检索在启动器进程内完成、不打断
-AI 会话）：
+AI 会话）。命令在任意目录都能跑（`--repo` 显式指定项目根）：
 
 ```bash
-py <安装目录>/mgh-core/scripts/mgh_sdr_launch.py --repo <项目绝对路径> --multi-branch branches.txt
+py <项目>/.opencode/mgh-core/scripts/mgh_sdr_launch.py --repo <项目绝对路径> --host opencode --multi-branch branches.txt
+py <项目>/.opencode/mgh-core/scripts/mgh_sdr_launch.py --repo <项目绝对路径> --branch-list "feat/pay,feat/b2"   # 内联清单:临时比两三个分支,不必建文件
+py <项目>/.opencode/mgh-core/scripts/mgh_sdr_launch.py --repo <项目绝对路径> --dry-run   # 冒烟:只做分支预检+运行域准备,零 AI 调用
 ```
+
+`branches.txt` **一行一个分支名**，`#` 注释行与空行忽略，重复分支只跑一次（文件缺失或
+没有分支 → 退出码 2）。临时比两三个分支时也可不建文件，改用**内联清单**
+`--branch-list "feat/pay,feat/b2"`（逗号分隔、引号包住直接写在命令行上）：每项自动去
+首尾空白、重复分支只跑一次、无注释语法；空项（`a,,b`、结尾多逗号、全空白）会报出第
+几项并拒识（退出码 2）。`--branch-list` 与 `--multi-branch` **二选一**，同给时拒识
+（退出码 2），不会猜着取其一；内联清单与单分支 `--branch` 同给时，内联清单优先
+（`--branch` 被忽略）。单分支复核去掉 `--multi-branch`、改传 `--branch <分支名>`；
+`--open` 让每份报告出完自动在浏览器打开。退出码：`0` 全部成功 · `1` 有分支失败
+（stderr 列出 FAILED 分支与原因，其余分支照常跑完）· `2` 用法错误。某分支扇出期间若
+发生 AI 服务断连/限流，失败证据落在该分支 run 目录的 `host_error.log`，无需翻全局日志。
+（dsh / claude 面脚本路径分别为 `<项目>/mgh-core/scripts/`、`<项目>/.claude/mgh-core/scripts/`。）
 
 **产出**：项目根一份**自包含单文件 HTML 报告**（样式/脚本/数据全内嵌，浏览器双击即读、
 离线可用）；机器读的正式数据在 `<项目>/.mgh-sdr/runs/<时间戳>/sdr_report_data.json`。

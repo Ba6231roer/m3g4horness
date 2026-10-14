@@ -1,0 +1,6 @@
+# multi-branch regression (2026-10-14, 0.1.75 host-error-capture), mirrors 2026-10-13 fixture
+sdr-dryrun
+# deliberate failure probe (branch does not exist) — expects FAILED pre-check, zero spawn
+sdr-mb-nonexistent
+sdr-mb-authz
+sdr-mb-sql-sensitive

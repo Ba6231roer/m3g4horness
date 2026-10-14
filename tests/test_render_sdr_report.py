@@ -38,8 +38,18 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "core" / "scripts" / "render_sdr_report.py"
 
 
+VOCAB = HERE.parent / "core" / "scripts" / "human_face_vocab.py"
+
+
 def _load():
     spec = importlib.util.spec_from_file_location("render_sdr_report", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_vocab():
+    spec = importlib.util.spec_from_file_location("human_face_vocab", VOCAB)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -333,7 +343,7 @@ class RenderSdrReportTest(unittest.TestCase):
         self._draft("u1", [self.F1])
         _, _, data, manifest = self._render()
         self.assertEqual(data["meta"]["external_headline"],
-                         "无(外部仓未授权,前端相关检查面未覆盖)")
+                         "无(外部仓未授权,前端相关检查未覆盖)")
         self.assertTrue(any("未经用户确认写入项目配置" in b and "D:/xxx/front" in b
                             for b in manifest["boundaries"]))
         # not-found alone (no unapproved): head stays the unreachable variant
@@ -345,7 +355,7 @@ class RenderSdrReportTest(unittest.TestCase):
         }, ensure_ascii=False), encoding="utf-8")
         _, _, data, _ = self._render()
         self.assertEqual(data["meta"]["external_headline"],
-                         "无(未声明 / 不可达降级,前端相关检查面未覆盖)")
+                         "无(未声明 / 不可达降级,前端相关检查未覆盖)")
         self.assertFalse(any("外部仓未授权" in b for b in data["boundaries"]))
 
     def test_check_ok_with_unapproved_boundaries(self):
@@ -362,9 +372,9 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_grouping_overview_and_exclusion_disclosure(self):
-        # grouping.json in the run dir -> meta.overview entries (unit counts + codegraph
-        # stats + exclusion counts) + the honesty-boundary exclusion entry; manifest
-        # counts.excluded_files passes through.
+        # grouping.json in the run dir -> meta.overview plain-word entries (评审分组 /
+        # 调用链分析 / 排除文件) + collapsed 分组诊断 details + the honesty-boundary
+        # exclusion entry; manifest counts.excluded_files passes through.
         (self.run_dir / "grouping.json").write_text(json.dumps({
             "repo": str(self.repo), "base": "master", "branch": "feature-pay",
             "empty": False, "codegraph": True, "total": 3,
@@ -379,12 +389,26 @@ class RenderSdrReportTest(unittest.TestCase):
             "pending": [],
         }, ensure_ascii=False), encoding="utf-8")
         self._draft("u1", [self.F1])
-        _, _, data, manifest = self._render()
+        _, report, data, manifest = self._render()
         overview = {o["k"]: o["v"] for o in data["meta"]["overview"]}
-        self.assertIn("interface 2 / standalone 1", overview["单元数"])
-        self.assertIn("向上锚定 8", overview["codegraph"])
+        self.assertIn("2 个接口单元", overview["评审分组"])
+        self.assertIn("1 个独立文件单元", overview["评审分组"])
+        self.assertIn("共 3 个", overview["评审分组"])
+        self.assertIn("2 个变更接口作为分组入口", overview["调用链分析"])
+        self.assertIn("8 处改动挂接到未变更接口", overview["调用链分析"])
+        self.assertIn("同入口链路合并 1 组", overview["调用链分析"])
         self.assertIn("120 个", overview["排除文件"])
-        self.assertIn("排除集披露", "".join(data["boundaries"]))
+        details = "、".join(data["meta"]["overview_details"])
+        self.assertIn("捕获调用边 25 条", details)
+        self.assertIn("变更集内 12 条", details)
+        # collapsed 分组诊断 block: a default-folded <details> rendered by the page JS
+        self.assertIn("分组诊断", report)
+        self.assertIn('createElement("details")', report)
+        # plain-wording guard: the retired grouping jargon is gone from the report
+        for retired in ("路由锚", "向上锚定", "链合并", "interface 2", "standalone 1"):
+            self.assertNotIn(retired, report)
+        self.assertIn("排除披露", "".join(data["boundaries"]))
+        self.assertIn("固定排除清单", "".join(data["boundaries"]))
         self.assertIn("test-tree 80", "".join(data["boundaries"]))
         self.assertEqual(manifest["counts"]["excluded_files"], 120)
         code, _, cerr = self._run("--check", str(self.run_dir))
@@ -735,6 +759,214 @@ class RenderSdrReportTest(unittest.TestCase):
         self.assertEqual(f2["loc"]["text"], "OldVO.java(3-5)")
         self.assertEqual(f2["loc"]["href"], "OldVO.java")   # no anchor on degrade
 
+    # --- 复现方式 / 修复对比 + 可读性束与自检小节 ----------------------------------
+
+    def test_repro_and_fix_diff_rendered_and_in_data(self):
+        # draft carrying repro + fix_diff -> the P-NN card renders 复现方式 line and a
+        # 修改前/修改后 <pre> stack (textContent route); the data file carries both
+        # fields; the two carriers stay JSON-equivalent; hostile chars in the diff body
+        # cannot break the embed (same </-escape path as risk text)
+        self._draft("u1", [{
+            "dimension": "horizontal-authz", "severity": "high", "route": "/user/del",
+            "file": "UserController.java", "line_hint": "60-64", "line": 62,
+            "risk": "删除接口未校验记录归属。",
+            "suggestion": "删除前校验记录归属。",
+            "repro": "以任一有效登录会话 POST /user/del 传他人 id → 他人记录被删除。",
+            "fix_diff": [{"before": "userDao.deleteById(<b>id</b>);</script>",
+                          "after": "userDao.deleteByIdAndOwner(id, currentUser.id);"}],
+            "control_ref": None}])
+        _, report, data, _ = self._render()
+        f = data["findings"][0]
+        self.assertEqual(f["repro"],
+                         "以任一有效登录会话 POST /user/del 传他人 id → 他人记录被删除。")
+        self.assertEqual(f["fix_diff"],
+                         [{"before": "userDao.deleteById(<b>id</b>);</script>",
+                           "after": "userDao.deleteByIdAndOwner(id, currentUser.id);"}])
+        self.assertEqual(_embed(self.m, report), data)
+        # the page JS carries the two display blocks (label + verbatim <pre> injection)
+        self.assertIn("复现方式:", report)
+        self.assertIn("修改前", report)
+        self.assertIn("修改后", report)
+        self.assertIn('createElement("pre")', report)
+        self.assertIn('preB.textContent', report)
+        self.assertIn('preA.textContent', report)
+        # hostile body escaped in the embed; page JS stays alive (2 real terminators)
+        self.assertIn("<\\/script>", report)
+        self.assertEqual(report.count("</script>"), 2)
+
+    def test_fix_diff_malformed_pairs_degrade(self):
+        # malformed pairs are dropped (not a crash); cap at 2 well-formed pairs;
+        # whitespace-only repro degrades to absent
+        self._draft("u1", [{
+            "dimension": "input-validation", "severity": "low", "route": "/u/x",
+            "file": "X.java", "line_hint": "1", "risk": "r", "suggestion": "s",
+            "repro": "   ",
+            "fix_diff": ["not-a-dict", {"before": "x"}, {"before": "a", "after": ""},
+                         {"before": "ok", "after": "fine"},
+                         {"before": "two", "after": "also"}],
+            "control_ref": None}])
+        _, _, data, _ = self._render()
+        f = data["findings"][0]
+        self.assertNotIn("repro", f)
+        self.assertEqual(f["fix_diff"], [{"before": "ok", "after": "fine"},
+                                         {"before": "two", "after": "also"}])
+
+    def test_repro_filled_from_duplicate(self):
+        # same-triple duplicate across units: risk/suggestion stay first-writer-wins,
+        # repro/fix_diff fall back to the first duplicate that carries them
+        self._draft("u1", [{"dimension": "horizontal-authz", "severity": "high",
+                            "route": "/user/detail", "file": "UserController.java",
+                            "line_hint": "88-102", "risk": "r1", "suggestion": "s1",
+                            "control_ref": None}])
+        self._draft("u2", [{"dimension": "horizontal-authz", "severity": "medium",
+                            "route": "/user/detail", "file": "UserController.java",
+                            "line_hint": "110", "risk": "dup", "suggestion": "-",
+                            "repro": "登录后调 GET /user/detail?brch_no=他人分支 → 返回他人数据",
+                            "control_ref": None}])
+        _, _, data, _ = self._render()
+        self.assertEqual(len(data["findings"]), 1)
+        self.assertEqual(data["findings"][0]["risk"], "r1")
+        self.assertEqual(data["findings"][0]["repro"],
+                         "登录后调 GET /user/detail?brch_no=他人分支 → 返回他人数据")
+
+    def test_old_draft_without_new_fields_renders_clean(self):
+        # 1.8 compat guard (green by construction, kept to catch implementation-time
+        # regressions): old drafts without repro/fix_diff -> no display, render and
+        # --check both fine
+        self._draft("u1", [self.F1])
+        payload, report, data, _ = self._render()
+        self.assertNotIn("repro", data["findings"][0])
+        self.assertNotIn("fix_diff", data["findings"][0])
+        self.assertEqual(_embed(self.m, report), data)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_check_vocab_hit_warns_without_exit_change(self):
+        # 1.4: model text hitting the closed set -> stderr count warning (field name +
+        # term), exit code unchanged, text preserved verbatim
+        self._draft("u1", [{
+            "dimension": "sql-injection", "severity": "high", "route": "/user/list",
+            "file": "UserDao.java", "line_hint": "40", "risk": "该切片存在基线投影遗漏。",
+            "suggestion": "参考存量 hunk 改写。",
+            "repro": "检查面上重放即可", "control_ref": None}])
+        code, out, err = self._run("--run-dir", str(self.run_dir), "--repo",
+                                   str(self.repo))
+        self.assertEqual(code, 0, err)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)          # soft quality: exit code unchanged
+        self.assertIn("risk", err)
+        self.assertIn("投影", err)
+        self.assertIn("suggestion", err)
+        self.assertIn("hunk", err)
+        self.assertIn("repro", err)
+        data = json.loads((self.run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(data["findings"][0]["risk"], "该切片存在基线投影遗漏。")
+
+    def test_check_vocab_clean_no_warning(self):
+        # the clean counterpart: zero closed-set hits -> zero vocabulary warnings
+        self._draft("u1", [{"dimension": "input-validation", "severity": "low",
+                            "route": "/u/clean", "file": "C.java", "line_hint": "1",
+                            "risk": "干净文本。", "suggestion": "无需处理。",
+                            "control_ref": None}])
+        self._render()
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("内部词闭集", err)
+
+    def test_text_bundle_written_on_render(self):
+        # 1.7: every render writes the readability text bundle (one item per merged
+        # finding, human-face fields only)
+        self._draft("u1", [{
+            "dimension": "horizontal-authz", "severity": "high", "route": "/user/del",
+            "file": "UserController.java", "line_hint": "60-64", "line": 62,
+            "risk": "删除接口未校验记录归属。", "suggestion": "删除前校验记录归属。",
+            "repro": "以任一有效登录会话 POST /user/del 传他人 id → 他人记录被删除。",
+            "fix_diff": [{"before": "a", "after": "b"}], "control_ref": None}])
+        self._draft("u2", [{
+            "dimension": "sql-injection", "severity": "medium", "route": "/user/list",
+            "file": "UserDao.java", "line_hint": "40", "risk": "拼接 SQL。",
+            "suggestion": "改参数化。", "control_ref": None}])
+        self._render()
+        bundle = json.loads((self.run_dir / "readability_text_bundle.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(bundle["v"], 1)
+        self.assertEqual(len(bundle["items"]), 2)
+        by_p = {i["pnum"]: i for i in bundle["items"]}
+        self.assertEqual(by_p["P-01"]["repro"],
+                         "以任一有效登录会话 POST /user/del 传他人 id → 他人记录被删除。")
+        self.assertEqual(by_p["P-01"]["fix_diff"], [{"before": "a", "after": "b"}])
+        self.assertEqual(by_p["P-02"]["risk"], "拼接 SQL。")
+        self.assertNotIn("fix_diff", by_p["P-02"])
+        # idempotent: a second render rewrites the same bundle cleanly
+        self._render()
+        bundle2 = json.loads((self.run_dir / "readability_text_bundle.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(bundle2, bundle)
+
+    def test_advisories_consumed_into_data_and_section(self):
+        # 1.7: parsable advisories file -> data gains readability[], report gains the
+        # default-collapsed 可读性自检 section, exit code unchanged, carriers equal
+        self._draft("u1", [self.F1])
+        self._render()
+        (self.run_dir / "readability_advisories.json").write_text(json.dumps({
+            "v": 1, "advisories": [
+                {"term": "落库链路", "field": "risk", "pnum": "P-01",
+                 "why": "一两年经验读者不懂这个内部词"}]}, ensure_ascii=False),
+            encoding="utf-8")
+        _, report, data, _ = self._render()
+        self.assertEqual(data["readability"],
+                         [{"term": "落库链路", "field": "risk", "pnum": "P-01",
+                           "why": "一两年经验读者不懂这个内部词"}])
+        self.assertEqual(_embed(self.m, report), data)
+        self.assertIn("可读性自检", report)
+        self.assertIn("落库链路", report)          # rides the embedded data block
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_advisories_absent_omits_section(self):
+        # 1.7: no advisory file -> no readability field, no section, exit code unchanged
+        self._draft("u1", [self.F1])
+        _, report, data, _ = self._render()
+        self.assertNotIn("readability", data)
+        code, _, err = self._run("--check", str(self.run_dir))
+        self.assertEqual(code, 0, err)
+
+    def test_advisories_unparsable_omits_with_note(self):
+        self._draft("u1", [self.F1])
+        self._render()
+        (self.run_dir / "readability_advisories.json").write_text("{not json",
+                                                                  encoding="utf-8")
+        code, out, err = self._run("--run-dir", str(self.run_dir), "--repo",
+                                   str(self.repo))
+        self.assertEqual(code, 0, err)
+        data = json.loads((self.run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        self.assertNotIn("readability", data)
+        self.assertIn("unparsable", err)
+
+    def test_advisories_empty_list_omits_section(self):
+        # an empty advisory list is a valid honest outcome — nothing to show, section
+        # and field omitted
+        self._draft("u1", [self.F1])
+        self._render()
+        (self.run_dir / "readability_advisories.json").write_text(
+            '{"v": 1, "advisories": []}', encoding="utf-8")
+        _, _, data, _ = self._render()
+        self.assertNotIn("readability", data)
+
+    def test_advisories_malformed_shape_omits(self):
+        self._draft("u1", [self.F1])
+        self._render()
+        (self.run_dir / "readability_advisories.json").write_text('{"v": 1}',
+                                                                  encoding="utf-8")
+        code, _, err = self._run("--run-dir", str(self.run_dir), "--repo",
+                                 str(self.repo))
+        self.assertEqual(code, 0, err)
+        data = json.loads((self.run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        self.assertNotIn("readability", data)
+
     # --- manifest rows projection + --check ----------------------------------------
 
     def test_rows_projection_consistency_and_check(self):
@@ -952,6 +1184,120 @@ class ChainSegmentsTest(unittest.TestCase):
 
     def test_empty_chain_gives_no_segments(self):
         self.assertEqual(self.m._chain_segments([], self.repo), [])
+
+
+class DeterministicCopyVocabGuardTest(unittest.TestCase):
+    """1.1 禁词守卫:渲染器全部确定性人类面文案零闭集词(核心 + sdr 域,与词表模块
+    import 同一单源)。覆盖:_boundaries 全变体、分组概览与诊断明细、一次代表性渲染的
+    全部确定性字段 + 静态 HTML 模板、维度/severity 标签常量。确定性文案命中闭集 =
+    实现缺陷,测试 fail(全量提取扫描,漏改即红)。模型文本不在本守卫面(那是 --check
+    的告警面,另测)。"""
+
+    def setUp(self):
+        self.m = _load()
+        self.v = _load_vocab()
+
+    def _scan(self, texts):
+        hits = []
+        for t in texts:
+            for term in self.v.scan_text(t, domains=("sdr",)):
+                if term not in hits:
+                    hits.append(term)
+        return hits
+
+    def test_boundary_variants_clean(self):
+        failed = [{"unit": "u9", "reason": "path-drift"}]
+        excluded = {"count": 120, "by_reason": {"test-tree": 80, "build-output": 30}}
+        skipped = ["unapproved: D:/x/front", "not-found: D:/y/gone"]
+        for catalog in ("project", "default-template"):
+            bs = self.m._boundaries({}, failed, catalog,
+                                    [{"slug": "front", "path": "D:/f"}],
+                                    ["sql-injection"], True, excluded, skipped, ["u3"])
+            self.assertEqual(self._scan(bs), [],
+                             f"boundary copy hit closed set (catalog={catalog})")
+        bs = self.m._boundaries({}, [], "project", [], None, False, None, None, None)
+        self.assertEqual(self._scan(bs), [])
+
+    def test_overview_and_details_clean(self):
+        grouping = {"codegraph": True, "total": 8,
+                    "counts": {"interface": 6, "standalone": 2},
+                    "codegraph_stats": {"symbols_queried": 30, "edges_captured": 107,
+                                        "edges_in_changed_set": 80, "anchors_changed": 4,
+                                        "anchors_upstream": 2, "chain_merged": 1}}
+        excluded = {"count": 120, "by_reason": {"test-tree": 120}}
+        overview, details = self.m._overview_and_details(grouping, excluded,
+                                                         grouping["codegraph_stats"])
+        self.assertEqual(self._scan([o["k"] + ":" + o["v"] for o in overview] + details),
+                         [])
+        # codegraph-off branch
+        overview2, details2 = self.m._overview_and_details(
+            {"codegraph": False, "total": 1, "counts": {"interface": 0, "standalone": 1}},
+            None, {})
+        self.assertEqual(self._scan([o["k"] + ":" + o["v"] for o in overview2] + details2),
+                         [])
+
+    def test_full_render_deterministic_copy_clean(self):
+        # end-to-end: a representative render; every deterministic string the data
+        # carries (head labels, headline, catalog note, overview, boundaries, label
+        # constants) + the static HTML template must be closed-set free
+        tmp = Path(tempfile.mkdtemp(prefix="mgh_sdrguard_"))
+        try:
+            repo = tmp / "repo"
+            repo.mkdir()
+            run_dir = repo / ".mgh-sdr" / "runs" / "t1"
+            (run_dir / "markers").mkdir(parents=True)
+            (run_dir / "drafts").mkdir(parents=True)
+            (run_dir / "context.json").write_text(json.dumps({
+                "branch": "feature-pay", "base": "master", "dimensions": None,
+                "sensitive_catalog_source": "default-template",
+                "external_repos": [{"slug": "front", "path": "D:/f", "route_hits": []}],
+                "external_skipped": ["unapproved: D:/x/front"],
+                "pending_approval": ["D:\\x\\front"],
+                "baseline_truncated": False,
+            }, ensure_ascii=False), encoding="utf-8")
+            (run_dir / "grouping.json").write_text(json.dumps({
+                "repo": str(repo), "base": "master", "branch": "feature-pay",
+                "empty": False, "codegraph": True, "total": 8,
+                "counts": {"interface": 6, "standalone": 2},
+                "excluded": {"count": 120, "by_reason": {"test-tree": 120}},
+                "codegraph_stats": {"symbols_queried": 30, "edges_captured": 107,
+                                    "edges_in_changed_set": 80, "anchors_changed": 4,
+                                    "anchors_upstream": 2, "chain_merged": 1},
+                "units": [], "pending": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            (run_dir / "drafts" / "u1.json").write_text(json.dumps(
+                {"unit": "u1", "findings": [
+                    {"dimension": "horizontal-authz", "severity": "high",
+                     "route": "/user/del", "file": "UserController.java",
+                     "line_hint": "60-64", "line": 62,
+                     "risk": "以任一有效登录会话 POST /user/del 传他人 id,"
+                             "他人记录会被删除。",
+                     "suggestion": "删除前校验记录归属(会话用户 vs 记录所有者)。",
+                     "control_ref": None}]}, ensure_ascii=False), encoding="utf-8")
+            (run_dir / "markers" / "u1.done").write_text("{}", encoding="utf-8")
+            sys.argv = ["render_sdr_report.py", "--run-dir", str(run_dir),
+                        "--repo", str(repo)]
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+            self.assertEqual(code, 0, err.getvalue())
+            data = json.loads((run_dir / "sdr_report_data.json").read_text(
+                encoding="utf-8"))
+            meta = data["meta"]
+            surfaces = list(data["boundaries"]) + [meta["external_headline"],
+                                                   meta["catalog_note"]]
+            surfaces += [o["k"] + ":" + o["v"] for o in meta["overview"]]
+            surfaces += list(meta.get("overview_details") or [])
+            surfaces += list(self.m._DIMENSION_LABEL.values()) \
+                + list(self.m._DIMENSION_COL.values()) \
+                + list(self.m._SEVERITY_LABEL.values())
+            surfaces.append(self.m._HTML_TEMPLATE)
+            hits = self._scan(surfaces)
+            self.assertEqual(hits, [],
+                             f"deterministic report copy hit closed set: {hits}")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

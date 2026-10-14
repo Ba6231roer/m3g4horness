@@ -1,0 +1,58 @@
+Step 2 output: `empty: false` (8 units). Running the `--check` gate.
+Step 3: `8/8 done, partial=False`. Now step 4 — render report.
+Step 4: `--check ok`. Now step 5 — remove the active sentinel.
+编排完成(单分支 sdr-dryrun)。
+
+**报告**: `C:\DEV\springBootTemplate\mgh-sdr-sdr-dryrun-20261014_095934.html`
+
+**counts**: units=8, findings=22 (high=10, medium=8, low=4, info=0), failed_units=0, excluded_files=0, boundaries=6
+
+流程摘要:
+- step2 `diff_group`: empty=false, 8 units (6 interface + 2 standalone);`--check` ok
+- step3 `fanout_runner` tier=sdr: 8/8 done, 0 failed, partial=false, exit 0
+- step4 `render_sdr_report`: `--check` ok
+- step5: 已 `rm C:\DEV\springBootTemplate\.mgh-sdr\.active`
+
+> 声明:报告中的发现均为 LLM 候选,需人工复核后方可采信。
+I'll start by locating the mgh-core scripts and understanding the run environment.
+Step 1 done by launcher. I start at step 2. First, interpreter probe (cheap, one-shot) and verify the sentinel.
+The guard blocks `>` redirects. I'll probe interpreters individually without redirects.
+`py` = Python 3.13.2. Running step 2: diff_group.
+diff_group: empty:false, 5 units (3 interface + 2 standalone). Running boundary check.
+Step 2 check ok. Running step 3: fan-out (per-call timeout ≥720000ms).
+Fan-out: 5/5 done, 0 failed. Running step 4: render report.
+Render check ok. Removing sentinel (step 5 cleanup).
+编排完成(step 2→5),all checks RC=0。
+
+**报告(绝对路径)**
+`C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-authz-20261014_100419.html`
+
+**canonical 数据 / manifest**
+- `C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\sdr_report_data.json`
+- `C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\sdr_manifest.json`
+
+**Counts**
+- units: 5(3 interface + 2 standalone)
+- findings: 24 → high 13 / medium 7 / low 4 / info 0
+- branches: 0 · failed_units: 0 · excluded_files: 0 · boundaries: 6
+- fan-out: 5/5 done, 0 failed, partial=False
+
+**声明**:本报告发现均为 **LLM 候选,非已确认漏洞,需人工复核**;引用存量控制仅断言存在、不断言有效。覆盖受基线字节投影与注解启发式分组上界约束(standalone 聚簇粒度较粗)。哨兵 `.mgh-sdr/.active` 已移除(干净停止)。
+I'll start by locating the mgh-core scripts and verifying the run setup.
+Interpreter: `py` = Python 3.13.2. Now step 2 — diff_group materialize.
+`empty:false`, 4 units. Running step 2 check.
+Step 2 check passed. Let me inspect the fanout_runner interface before dispatching.
+Guest dispatcher confirmed (spawns host CLI per unit). Running step 3 fan-out with per-call timeout 900000ms.
+All 4 units done, `partial:false`. Step 4 — render report.
+Step 4 check passed. Finalizing — removing sentinel.
+流水线完成(sdr-mb-sql-sensitive,master..branch)。
+
+**报告**: `C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-sql-sensitive-20261014_100930.html`
+**数据/manifest**: `<run>/sdr_report_data.json` · `<run>/sdr_manifest.json`(下游消费数据文件,勿解析 HTML)
+
+**Counts**(render stdout manifest 字段):
+- units 4(interface 2 / standalone 2),failed_units 0,excluded_files 0
+- findings 15(high 9 / medium 5 / low 1 / info 0),boundaries 6
+- fanout:4/4 done,partial=false;codegraph=on(anchors_changed=2 / upstream=1);敏感目录来源 default-template(37 项,10 类)
+
+**诚实边界**:发现是 LLM 候选,非确认漏洞,需人工复核;接口分组为注解启发式;基线经 32KB 字节预算投影;外部仓为空(本次无 external_repos/external_skipped);`--dimensions` 收窄未下发。哨兵 `.mgh-sdr/.active` 已移除。

@@ -1,0 +1,1102 @@
+[launch] === branch sdr-dryrun ===
+[launch] residual sentinel found for this target — reusing (resume semantics; run dir state on disk is the truth)
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[0m
+> build · deepseek-flash
+[0m
+[0m✱ [0mGlob "**/mgh-core/scripts/*.py"[90m 0 matches[0m
+[0m
+[0m$ [0mls -la "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun" && echo "---" && ls "C:\DEV\springBootTemplate\.mgh-sdr"
+total 45
+drwxr-xr-x 1 megah 197609    0 Oct 14 09:52 .
+drwxr-xr-x 1 megah 197609    0 Oct 14 09:52 ..
+-rw-r--r-- 1 megah 197609 6495 Oct 14 09:52 baseline.md
+-rw-r--r-- 1 megah 197609 7673 Oct 14 09:52 context.json
+-rw-r--r-- 1 megah 197609 2005 Oct 14 09:52 orchestrator_prompt.md
+-rw-r--r-- 1 megah 197609   23 Oct 14 09:52 run_config.json
+-rw-r--r-- 1 megah 197609 6699 Oct 14 09:52 sensitive_catalog.json
+---
+runs
+[0m
+[0m✗ [0mecho "=== search mgh-core ==="; find /c/DEV -maxdepth 4 -type d -name "mgh-core" 2>/dev/null; find /c/Users/megah -maxdepth 5 -type d -name "mgh-core" 2>/dev/null; echo "=== find diff_group ==="; find /c/DEV /c/Users/megah -name "diff_group.py" 2>/dev/null | head; echo "=== find fanout_runner ==="; find /c/DEV /c/Users/megah -name "fanout_runner.py" 2>/dev/null | head failed
+[91m[1mError: [0mblocked: out-of-tree file search in mgh-sdr run-domain: `echo "=== search mgh-core ==="; find /c/DEV -maxdepth 4 -type d -name "mgh-core" 2>/dev/null; find /c/Users/megah -maxdepth 5 -type d -name "mgh-core" 2>/dev/null; echo "=== find diff_group ==="; find /c/DEV /c/Users/megah -name "diff_group.py" 2>/dev/null | head; echo "=== find fanout_runner ==="; find /c/DEV /c/Users/megah -name "fanout_runner.py" 2>/dev/null | head`
+  The native Grep/grep tool's `path` confinement is bypassed by invoking a file-search binary (rg/grep/findstr/find/…) directly in Bash with an out-of-tree scope.
+  target tree = C:\DEV\springBootTemplate
+  Read/Glob/Grep (and Bash rg/grep/find/findstr/…) MUST stay inside the target tree (your cwd's working project). Read only this batch's input_path / targets[]; for sibling-package confirmation use Glob/Grep (or `rg`/`grep` in Bash) with an EXPLICIT `path` anchored at the repo root. NEVER read the parent dir, NEVER read sibling modules, NEVER anchor a search at a path outside the target tree.
+[0m
+[0m$ [0mcat "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\orchestrator_prompt.md"
+执行 /mgh-sdr 编排(单分支)。运行域已激活(哨兵已由 launcher 写入,含 read_roots);sdr_context 已完成——**NEVER** 重跑外部仓检索、**NEVER** 读外部仓原文路径。
+
+repo(绝对根): C:\DEV\springBootTemplate
+branch: sdr-dryrun
+base: master
+run 目录(绝对,产物全部落此): C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun
+检查基线(已投影): C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\baseline.md (truncated=False)
+敏感目录来源: default-template(解析后目录已物化为 run 目录内独立文件——subagent 任务消息只携带该文件只读路径,NEVER 内嵌对象本体,NEVER 截断)
+敏感目录文件(只读,绝对路径): C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\sensitive_catalog.json
+外部仓结论目录: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\external(无:未声明/不可达降级)
+
+按 /mgh-sdr 命令壳的 Orchestration flow 执行 step 2 起:
+2. `py <mgh-core>/scripts/diff_group.py --repo <repo> --base <base> --branch <branch> --checkpoints <run>/markers --materialize <run>/slices`;empty:true → 直接 step 4;跑 `--check <run>`。
+3. `py <mgh-core>/scripts/fanout_runner.py --tier sdr --repo <repo> --base <base> --branch <branch> --checkpoints <run>/markers --inputs-dir <run>/slices --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300`(带 per-call `timeout` ≥ 720000ms 跑;四级超时不变式已按此组合满足,NEVER 省略 call/stall 两级);partial:true → 同参重派;退出码 2 → 转述 stderr 停止。
+4. `py <mgh-core>/scripts/render_sdr_report.py --run-dir <run> --repo <repo>`;跑 `--check <run>`。
+5. 打印报告绝对路径 + counts;声明「发现是 LLM 候选需人工复核」;`rm <repo>/.mgh-sdr/.active`。
+
+铁律:NEVER Write 脚本扩展名;NEVER `py -c` 内省;NEVER Read 叶子 .py 源码;路径一律用脚本 stdout 给定的绝对路径逐字透传。
+[0m
+[0m✱ [0mGlob "**/diff_group.py"[90m 0 matches[0m
+[0m✱ [0mGlob "**/fanout_runner.py"[90m 0 matches[0m
+[0m✱ [0mGlob "**/render_sdr_report.py"[90m 0 matches[0m
+[0m→ [0mRead .mgh-sdr/runs/20261014_095248-sdr-dryrun/run_config.json
+[0m→ [0mRead .mgh-sdr/runs/20261014_095248-sdr-dryrun/context.json
+[0m
+[0m$ [0mls "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts"
+__pycache__
+assemble_rules.py
+assemble_rules.pyc
+assemble_test_rules.py
+assemble_test_rules.pyc
+block_adhoc_scripts.py
+chunk_sources.py
+chunk_sources.pyc
+classify_tests.py
+classify_tests.pyc
+dedup.py
+dedup.pyc
+derive_mutators.py
+derive_mutators.pyc
+describe_artifact.py
+describe_artifact.pyc
+diff_group.py
+diff_group.pyc
+diff_seed.py
+diff_seed.pyc
+discipline_core.py
+discipline_core.pyc
+discover_controls.py
+discover_controls.pyc
+emit_sarif.py
+emit_sarif.pyc
+expand_scope.py
+expand_scope.pyc
+fanout_runner.py
+fanout_runner.pyc
+focus_scope.py
+focus_scope.pyc
+ingest_requirements.py
+ingest_requirements.pyc
+init_tier.py
+init_tier.pyc
+list_chunks.py
+list_chunks.pyc
+list_clusters.py
+list_clusters.pyc
+list_rule_jobs.py
+list_rule_jobs.pyc
+list_scout_batches.py
+list_scout_batches.pyc
+list_sdr_steps.py
+list_steps.py
+list_steps.pyc
+list_test_groups.py
+list_test_groups.pyc
+list_ut_steps.py
+list_ut_steps.pyc
+list_verify_jobs.py
+list_verify_jobs.pyc
+load_controls.py
+load_controls.pyc
+merge_augment.py
+merge_augment.pyc
+merge_memory.py
+merge_memory.pyc
+merge_scout.py
+merge_scout.pyc
+mgh_sdr_launch.py
+mgh_sdr_launch.pyc
+plan_aggregate.py
+plan_aggregate.pyc
+plan_scout.py
+plan_scout.pyc
+prefilter.py
+prefilter.pyc
+prepare_augment.py
+prepare_augment.pyc
+read_roots_config.py
+render_report.py
+render_report.pyc
+render_sdr_report.py
+render_sdr_report.pyc
+resume_sdr_state.py
+resume_state.py
+resume_state.pyc
+resume_ut_init_state.py
+resume_ut_init_state.pyc
+sdr_context.py
+sdr_context.pyc
+sdr_tier.py
+sensitive_catalog.json.example
+sensitive_catalog.py
+sensitive_catalog.pyc
+validate_inventory.py
+validate_inventory.pyc
+validate_t1_records.py
+validate_t1_records.pyc
+validate_test_rules.py
+validate_test_rules.pyc
+write_runconfig.py
+write_runconfig.pyc
+write_ut_runconfig.py
+write_ut_runconfig.pyc
+[0m
+[0m# [0mTodos
+[•] step2 diff_group.py --checkpoints --materialize + --check
+[ ] step3 fanout_runner.py tier=sdr (handle partial:true / exit 2)
+[ ] step4 render_sdr_report.py + --check
+[ ] step5 print report path + counts, disclaimer, rm .active
+[0m
+[0m$ [0mpy "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts\diff_group.py" --repo "C:\DEV\springBootTemplate" --base master --branch sdr-dryrun --checkpoints "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\markers" --materialize "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\slices"
+[diff_group] master..sdr-dryrun: 16 file(s) (excluded 0: -) -> 6 interface + 2 standalone unit(s); codegraph=on anchors_changed=4 anchors_upstream=2 chain_merged=1 done=0 failed=0 pending=8 (grouping: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\grouping.json)
+{"repo": "C:\\DEV\\springBootTemplate", "base": "master", "branch": "sdr-dryrun", "empty": false, "excluded_nonempty": false, "codegraph": true, "total": 8, "units": [{"unit_id": "OrderController___order_batch", "kind": "interface", "route": "/order/batch;/order/submit", "chain": [{"fqn_short": "OrderController.batchSubmit", "label": "OrderController.batchSubmit", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/OrderController.java", "line": 63, "change": "changed", "route": "/order/batch"}, {"fqn_short": "OrderEntity.getCount", "label": "OrderEntity.getCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 48, "change": "changed"}, {"fqn_short": "OrderEntity.getUserId", "label": "OrderEntity.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 32, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderSubmitVO.OrderSubmitVO", "label": "OrderSubmitVO.OrderSubmitVO", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": null, "change": "unchanged", "branch_of": 0}, {"fqn_short": "OrderSubmitVO.getCount", "label": "OrderSubmitVO.getCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 41, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderSubmitVO.getUserId", "label": "OrderSubmitVO.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 25, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderController.submit", "label": "OrderController.submit", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/OrderController.java", "line": 41, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderServiceImpl.submit", "label": "OrderServiceImpl.submit", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 35, "change": "changed", "branch_of": 0}, {"fqn_short": "FileHandleUtil.upload", "label": "FileHandleUtil.upload", "file": "src/main/java/com/linkinstars/springBootTemplate/util/FileHandleUtil.java", "line": 36, "change": "unchanged", "branch_of": 0}, {"fqn_short": "RedisUtil.set", "label": "RedisUtil.set", "file": "src/main/java/com/linkinstars/springBootTemplate/util/RedisUtil.java", "line": 53, "change": "unchanged", "branch_of": 0}, {"fqn_short": "OrderEntity.OrderEntity", "label": "OrderEntity.OrderEntity", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": null, "change": "unchanged"}, {"fqn_short": "OrderEntity.setCount", "label": "OrderEntity.setCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 52, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.setProduct", "label": "OrderEntity.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 44, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.setStatus", "label": "OrderEntity.setStatus", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 60, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.setUserId", "label": "OrderEntity.setUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 36, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderSubmitVO.getProduct", "label": "OrderSubmitVO.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 33, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderDao.insertOrder", "label": "OrderDao.insertOrder", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/OrderDao.java", "line": null, "change": "unchanged", "branch_of": 6}, {"fqn_short": "OrderServiceImpl.checkStock", "label": "OrderServiceImpl.checkStock", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 66, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderServiceImpl.deductStock", "label": "OrderServiceImpl.deductStock", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 77, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.getProduct", "label": "OrderEntity.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 40, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderSubmitVO.setCount", "label": "OrderSubmitVO.setCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 45, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderSubmitVO.setProduct", "label": "OrderSubmitVO.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 37, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderSubmitVO.setUserId", "label": "OrderSubmitVO.setUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 29, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:insertOrder", "file": "build/resources/main/mapper/OrderDaoMapper.xml", "line": null, "change": "external", "branch_of": 16}, {"fqn_short": "OrderDao.updateStock", "label": "OrderDao.updateStock", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/OrderDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:updateStock", "file": "build/resources/main/mapper/OrderDaoMapper.xml", "line": null, "change": "external", "branch_of": 24}], "status": "pending"}, {"unit_id": "OrderController___order_detail_{id}", "kind": "interface", "route": "/order/detail/{id}", "chain": [{"fqn_short": "OrderController.detail", "label": "OrderController.detail", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/OrderController.java", "line": 52, "change": "changed", "route": "/order/detail/{id}"}, {"fqn_short": "OrderEntity.OrderEntity", "label": "OrderEntity.OrderEntity", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": null, "change": "unchanged"}, {"fqn_short": "OrderDao.findById", "label": "OrderDao.findById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/OrderDao.java", "line": null, "change": "unchanged", "branch_of": 0}, {"fqn_short": "OrderServiceImpl.detail", "label": "OrderServiceImpl.detail", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 56, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderServiceImpl.enrichWithUser", "label": "OrderServiceImpl.enrichWithUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 87, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:findById", "file": "build/resources/main/mapper/OrderDaoMapper.xml", "line": null, "change": "external", "branch_of": 2}, {"fqn_short": "OrderEntity.getProduct", "label": "OrderEntity.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 40, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderEntity.getUserId", "label": "OrderEntity.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 32, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderEntity.setProduct", "label": "OrderEntity.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 44, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderSubmitVO.getProduct", "label": "OrderSubmitVO.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 33, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderSubmitVO.getUserId", "label": "OrderSubmitVO.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 25, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderSubmitVO.setProduct", "label": "OrderSubmitVO.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 37, "change": "changed", "branch_of": 4}, {"fqn_short": "UserEntity.getVal", "label": "UserEntity.getVal", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/UserEntity.java", "line": 20, "change": "unchanged", "branch_of": 4}, {"fqn_short": "UserDao.findById", "label": "UserDao.findById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 4}, {"fqn_short": "SecurityUtil.maskPhone", "label": "SecurityUtil.maskPhone", "file": "src/main/java/com/linkinstars/springBootTemplate/util/SecurityUtil.java", "line": 36, "change": "changed", "branch_of": 4}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:findById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 13}], "status": "pending"}, {"unit_id": "UserCacheController___cache_user_direct", "kind": "interface", "route": "/cache/user/direct", "chain": [{"fqn_short": "UserCacheController.directQuery", "label": "UserCacheController.directQuery", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserCacheController.java", "line": 44, "change": "changed", "route": "/cache/user/direct"}, {"fqn_short": "UserDao.findById", "label": "UserDao.findById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:findById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 1}], "status": "pending"}, {"unit_id": "UserController___test", "kind": "interface", "route": "/test", "chain": [{"fqn_short": "UserController.test", "label": "UserController.test", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserController.java", "line": 42, "change": "unchanged", "route": "/test"}, {"fqn_short": "OrderEntity.setId", "label": "OrderEntity.setId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 28, "change": "changed"}], "status": "pending"}, {"unit_id": "UserCacheController___cache_user_delete", "kind": "interface", "route": "/cache/user/delete", "chain": [{"fqn_short": "UserCacheController.deleteUser", "label": "UserCacheController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserCacheController.java", "line": 35, "change": "unchanged", "route": "/cache/user/delete"}, {"fqn_short": "UserServiceImpl.deleteUser", "label": "UserServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserServiceImpl.java", "line": 53, "change": "changed"}, {"fqn_short": "LogDao.insertDeleteLog", "label": "LogDao.insertDeleteLog", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/LogDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDao.deleteById", "label": "UserDao.deleteById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserCacheServiceImpl.deleteUser", "label": "UserCacheServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserCacheServiceImpl.java", "line": 52, "change": "unchanged", "branch_of": 1}, {"fqn_short": "LogDaoMapper.xml", "label": "LogDaoMapper.xml:insertDeleteLog", "file": "build/resources/main/mapper/LogDaoMapper.xml", "line": null, "change": "external", "branch_of": 2}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:deleteById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 3}], "status": "pending"}, {"unit_id": "UserCacheController___cache_user", "kind": "interface", "route": "/cache/user", "chain": [], "status": "pending"}, {"unit_id": "src_main_java_com_linkinstars_springBootTemplate", "kind": "standalone", "route": "", "chain": [], "status": "pending"}, {"unit_id": "mixed", "kind": "standalone", "route": "", "chain": [], "status": "pending"}], "done": 0, "failed": 0, "counts": {"interface": 6, "standalone": 2}, "excluded": {"count": 0, "by_reason": {}}, "budget": {"max_standalone_bytes": 65536, "max_interface_bytes": 262144}, "codegraph_stats": {"symbols_queried": 32, "edges_captured": 107, "edges_in_changed_set": 46, "anchors_changed": 4, "anchors_upstream": 2, "chain_merged": 1, "chains_materialized": 5, "excluded_files": 0}, "pending": [{"unit_id": "OrderController___order_batch", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\OrderController___order_batch.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\OrderController___order_batch.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\OrderController___order_batch.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\OrderController___order_batch.failed", "kind": "interface", "route": "/order/batch;/order/submit", "unit_bytes": 10873, "slimmed": {}, "chain": [{"fqn_short": "OrderController.batchSubmit", "label": "OrderController.batchSubmit", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/OrderController.java", "line": 63, "change": "changed", "route": "/order/batch"}, {"fqn_short": "OrderEntity.getCount", "label": "OrderEntity.getCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 48, "change": "changed"}, {"fqn_short": "OrderEntity.getUserId", "label": "OrderEntity.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 32, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderSubmitVO.OrderSubmitVO", "label": "OrderSubmitVO.OrderSubmitVO", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": null, "change": "unchanged", "branch_of": 0}, {"fqn_short": "OrderSubmitVO.getCount", "label": "OrderSubmitVO.getCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 41, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderSubmitVO.getUserId", "label": "OrderSubmitVO.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 25, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderController.submit", "label": "OrderController.submit", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/OrderController.java", "line": 41, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderServiceImpl.submit", "label": "OrderServiceImpl.submit", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 35, "change": "changed", "branch_of": 0}, {"fqn_short": "FileHandleUtil.upload", "label": "FileHandleUtil.upload", "file": "src/main/java/com/linkinstars/springBootTemplate/util/FileHandleUtil.java", "line": 36, "change": "unchanged", "branch_of": 0}, {"fqn_short": "RedisUtil.set", "label": "RedisUtil.set", "file": "src/main/java/com/linkinstars/springBootTemplate/util/RedisUtil.java", "line": 53, "change": "unchanged", "branch_of": 0}, {"fqn_short": "OrderEntity.OrderEntity", "label": "OrderEntity.OrderEntity", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": null, "change": "unchanged"}, {"fqn_short": "OrderEntity.setCount", "label": "OrderEntity.setCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 52, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.setProduct", "label": "OrderEntity.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 44, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.setStatus", "label": "OrderEntity.setStatus", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 60, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.setUserId", "label": "OrderEntity.setUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 36, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderSubmitVO.getProduct", "label": "OrderSubmitVO.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 33, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderDao.insertOrder", "label": "OrderDao.insertOrder", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/OrderDao.java", "line": null, "change": "unchanged", "branch_of": 6}, {"fqn_short": "OrderServiceImpl.checkStock", "label": "OrderServiceImpl.checkStock", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 66, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderServiceImpl.deductStock", "label": "OrderServiceImpl.deductStock", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 77, "change": "changed", "branch_of": 6}, {"fqn_short": "OrderEntity.getProduct", "label": "OrderEntity.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 40, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderSubmitVO.setCount", "label": "OrderSubmitVO.setCount", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 45, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderSubmitVO.setProduct", "label": "OrderSubmitVO.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 37, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderSubmitVO.setUserId", "label": "OrderSubmitVO.setUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 29, "change": "changed", "branch_of": 7}, {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:insertOrder", "file": "build/resources/main/mapper/OrderDaoMapper.xml", "line": null, "change": "external", "branch_of": 16}, {"fqn_short": "OrderDao.updateStock", "label": "OrderDao.updateStock", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/OrderDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:updateStock", "file": "build/resources/main/mapper/OrderDaoMapper.xml", "line": null, "change": "external", "branch_of": 24}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "OrderController___order_detail_{id}", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\OrderController___order_detail_{id}.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\OrderController___order_detail_{id}.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\OrderController___order_detail_{id}.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\OrderController___order_detail_{id}.failed", "kind": "interface", "route": "/order/detail/{id}", "unit_bytes": 12053, "slimmed": {}, "chain": [{"fqn_short": "OrderController.detail", "label": "OrderController.detail", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/OrderController.java", "line": 52, "change": "changed", "route": "/order/detail/{id}"}, {"fqn_short": "OrderEntity.OrderEntity", "label": "OrderEntity.OrderEntity", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": null, "change": "unchanged"}, {"fqn_short": "OrderDao.findById", "label": "OrderDao.findById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/OrderDao.java", "line": null, "change": "unchanged", "branch_of": 0}, {"fqn_short": "OrderServiceImpl.detail", "label": "OrderServiceImpl.detail", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 56, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderServiceImpl.enrichWithUser", "label": "OrderServiceImpl.enrichWithUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/OrderServiceImpl.java", "line": 87, "change": "changed", "branch_of": 0}, {"fqn_short": "OrderDaoMapper.xml", "label": "OrderDaoMapper.xml:findById", "file": "build/resources/main/mapper/OrderDaoMapper.xml", "line": null, "change": "external", "branch_of": 2}, {"fqn_short": "OrderEntity.getProduct", "label": "OrderEntity.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 40, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderEntity.getUserId", "label": "OrderEntity.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 32, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderEntity.setProduct", "label": "OrderEntity.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 44, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderSubmitVO.getProduct", "label": "OrderSubmitVO.getProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 33, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderSubmitVO.getUserId", "label": "OrderSubmitVO.getUserId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 25, "change": "changed", "branch_of": 4}, {"fqn_short": "OrderSubmitVO.setProduct", "label": "OrderSubmitVO.setProduct", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderSubmitVO.java", "line": 37, "change": "changed", "branch_of": 4}, {"fqn_short": "UserEntity.getVal", "label": "UserEntity.getVal", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/UserEntity.java", "line": 20, "change": "unchanged", "branch_of": 4}, {"fqn_short": "UserDao.findById", "label": "UserDao.findById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 4}, {"fqn_short": "SecurityUtil.maskPhone", "label": "SecurityUtil.maskPhone", "file": "src/main/java/com/linkinstars/springBootTemplate/util/SecurityUtil.java", "line": 36, "change": "changed", "branch_of": 4}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:findById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 13}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "UserCacheController___cache_user_direct", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\UserCacheController___cache_user_direct.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\UserCacheController___cache_user_direct.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserCacheController___cache_user_direct.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserCacheController___cache_user_direct.failed", "kind": "interface", "route": "/cache/user/direct", "unit_bytes": 1216, "slimmed": {}, "chain": [{"fqn_short": "UserCacheController.directQuery", "label": "UserCacheController.directQuery", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserCacheController.java", "line": 44, "change": "changed", "route": "/cache/user/direct"}, {"fqn_short": "UserDao.findById", "label": "UserDao.findById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:findById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 1}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "UserController___test", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\UserController___test.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\UserController___test.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserController___test.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserController___test.failed", "kind": "interface", "route": "/test", "unit_bytes": 3998, "slimmed": {}, "chain": [{"fqn_short": "UserController.test", "label": "UserController.test", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserController.java", "line": 42, "change": "unchanged", "route": "/test"}, {"fqn_short": "OrderEntity.setId", "label": "OrderEntity.setId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/OrderEntity.java", "line": 28, "change": "changed"}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "UserCacheController___cache_user_delete", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\UserCacheController___cache_user_delete.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\UserCacheController___cache_user_delete.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserCacheController___cache_user_delete.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserCacheController___cache_user_delete.failed", "kind": "interface", "route": "/cache/user/delete", "unit_bytes": 1375, "slimmed": {}, "chain": [{"fqn_short": "UserCacheController.deleteUser", "label": "UserCacheController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserCacheController.java", "line": 35, "change": "unchanged", "route": "/cache/user/delete"}, {"fqn_short": "UserServiceImpl.deleteUser", "label": "UserServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserServiceImpl.java", "line": 53, "change": "changed"}, {"fqn_short": "LogDao.insertDeleteLog", "label": "LogDao.insertDeleteLog", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/LogDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDao.deleteById", "label": "UserDao.deleteById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserCacheServiceImpl.deleteUser", "label": "UserCacheServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserCacheServiceImpl.java", "line": 52, "change": "unchanged", "branch_of": 1}, {"fqn_short": "LogDaoMapper.xml", "label": "LogDaoMapper.xml:insertDeleteLog", "file": "build/resources/main/mapper/LogDaoMapper.xml", "line": null, "change": "external", "branch_of": 2}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:deleteById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 3}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "UserCacheController___cache_user", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\UserCacheController___cache_user.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\UserCacheController___cache_user.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserCacheController___cache_user.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\UserCacheController___cache_user.failed", "kind": "interface", "route": "/cache/user", "unit_bytes": 1342, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "src_main_java_com_linkinstars_springBootTemplate", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\src_main_java_com_linkinstars_springBootTemplate.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\src_main_java_com_linkinstars_springBootTemplate.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\src_main_java_com_linkinstars_springBootTemplate.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\src_main_java_com_linkinstars_springBootTemplate.failed", "kind": "standalone", "route": "", "unit_bytes": 5982, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}, {"unit_id": "mixed", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\slices\\mixed.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\drafts\\mixed.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\mixed.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\markers\\mixed.failed", "kind": "standalone", "route": "", "unit_bytes": 3675, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\external"}], "offset": 0, "limit": 8}
+[0m
+[0m$ [0mpy "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts\diff_group.py" --check "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun"; echo "EXIT=$?"
+[diff_group] --check ok: 8 pending unit(s) consistent (C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun)
+EXIT=0
+[0m
+[0m# [0mTodos
+[✓] step2 diff_group.py --checkpoints --materialize + --check
+[•] step3 fanout_runner.py tier=sdr (handle partial:true / exit 2)
+[ ] step4 render_sdr_report.py + --check
+[ ] step5 print report path + counts, disclaimer, rm .active
+[0m
+[0m$ [0mpy "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts\fanout_runner.py" --tier sdr --repo "C:\DEV\springBootTemplate" --base master --branch sdr-dryrun --checkpoints "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\markers" --inputs-dir "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\slices" --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300; echo "EXIT=$?"
+[fanout_runner] tier=sdr host=opencode repo=C:\DEV\springBootTemplate total=8 pending=8 wave=5 codegraph=on
+[fanout_runner sdr] +00:00:00 wave=5 unit=UserCacheController___cache_user_delete spawn done=0/8
+[fanout_runner sdr] +00:00:00 wave=2 unit=OrderController___order_detail_{id} spawn done=0/8
+[fanout_runner sdr] +00:00:00 wave=3 unit=UserCacheController___cache_user_direct spawn done=0/8
+[fanout_runner sdr] +00:00:00 wave=1 unit=OrderController___order_batch spawn done=0/8
+[fanout_runner sdr] +00:00:00 wave=4 unit=UserController___test spawn done=0/8
+[fanout_runner sdr] +00:00:38 wave=4 unit=UserController___test ok done=1/8
+[fanout_runner] unit UserController___test: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\UserController___test.json 0)
+[fanout_runner sdr] +00:00:38 wave=6 unit=UserCacheController___cache_user spawn done=1/8
+[fanout_runner sdr] +00:01:00 inflight=5 unit=UserCacheController___cache_user_delete idle=0s stall_window=300s done=1/8
+[fanout_runner sdr] +00:01:00 inflight=5 unit=OrderController___order_detail_{id} idle=45s stall_window=300s done=1/8
+[fanout_runner sdr] +00:01:00 inflight=5 unit=UserCacheController___cache_user_direct idle=1s stall_window=300s done=1/8
+[fanout_runner sdr] +00:01:00 inflight=5 unit=OrderController___order_batch idle=42s stall_window=300s done=1/8
+[fanout_runner sdr] +00:01:00 inflight=5 unit=UserCacheController___cache_user idle=12s stall_window=300s done=1/8
+[fanout_runner sdr] +00:01:16 wave=3 unit=UserCacheController___cache_user_direct ok done=2/8
+[fanout_runner] unit UserCacheController___cache_user_direct: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\UserCacheController___cache_user_direct.jso)
+[fanout_runner sdr] +00:01:16 wave=7 unit=src_main_java_com_linkinstars_springBootTemplate spawn done=2/8
+[fanout_runner sdr] +00:01:27 wave=5 unit=UserCacheController___cache_user_delete ok done=3/8
+[fanout_runner] unit UserCacheController___cache_user_delete: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\UserCacheController___cache_user_delete.jso)
+[fanout_runner sdr] +00:01:27 wave=8 unit=mixed spawn done=3/8
+[fanout_runner sdr] +00:02:01 inflight=5 unit=OrderController___order_detail_{id} idle=6s stall_window=300s done=3/8
+[fanout_runner sdr] +00:02:01 inflight=5 unit=OrderController___order_batch idle=21s stall_window=300s done=3/8
+[fanout_runner sdr] +00:02:01 inflight=5 unit=UserCacheController___cache_user idle=0s stall_window=300s done=3/8
+[fanout_runner sdr] +00:02:01 inflight=5 unit=src_main_java_com_linkinstars_springBootTemplate idle=0s stall_window=300s done=3/8
+[fanout_runner sdr] +00:02:01 inflight=5 unit=mixed idle=1s stall_window=300s done=3/8
+[fanout_runner sdr] +00:02:09 wave=6 unit=UserCacheController___cache_user ok done=4/8
+[fanout_runner] unit UserCacheController___cache_user: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\UserCacheController___cache_user.json 1)
+[fanout_runner sdr] +00:02:20 wave=7 unit=src_main_java_com_linkinstars_springBootTemplate ok done=5/8
+[fanout_runner] unit src_main_java_com_linkinstars_springBootTemplate: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\src_main_java_com_linkinstars_springBootTem)
+[fanout_runner sdr] +00:02:51 wave=1 unit=OrderController___order_batch ok done=6/8
+[fanout_runner] unit OrderController___order_batch: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\OrderController___order_batch.json 7)
+[fanout_runner sdr] +00:02:57 wave=8 unit=mixed ok done=7/8
+[fanout_runner] unit mixed: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\mixed.json 3)
+[fanout_runner sdr] +00:03:01 inflight=1 unit=OrderController___order_detail_{id} idle=4s stall_window=300s done=7/8
+[fanout_runner sdr] +00:03:35 wave=2 unit=OrderController___order_detail_{id} ok done=8/8
+[fanout_runner] unit OrderController___order_detail_{id}: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\drafts\OrderController___order_detail_{id}.json 6)
+[fanout_runner] done (sdr): 8/8 done, 0 failed, 0 pending, partial=False
+{"runner": "fanout_runner", "tier": "sdr", "repo": "C:\\DEV\\springBootTemplate", "host": "opencode", "total": 8, "done": 8, "failed": 0, "pending": 0, "wave": 5, "waves_run": 8, "partial": false, "stall_killed": [], "stalled": false, "stall_killed_slots_s": 0, "stall_killed_slot_pct": 0.0, "runtime_p50_s": 87, "runtime_p95_s": 216, "runtime_max_s": 216, "cooldowns": 0, "retried_failed": 0, "rate_limited": false}
+EXIT=0
+[0m
+[0m# [0mTodos
+[✓] step2 diff_group.py --checkpoints --materialize + --check
+[✓] step3 fanout_runner.py tier=sdr (handle partial:true / exit 2)
+[•] step4 render_sdr_report.py + --check
+[ ] step5 print report path + counts, disclaimer, rm .active
+[0m
+[0m$ [0mpy "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts\render_sdr_report.py" --run-dir "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun" --repo "C:\DEV\springBootTemplate"; echo "EXIT=$?"
+[render_sdr_report] report=C:\DEV\springBootTemplate\mgh-sdr-sdr-dryrun-20261014_095934.html
+[render_sdr_report] findings=22 failed_units=0 boundaries=6
+{"report": "C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-dryrun-20261014_095934.html", "data": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\sdr_report_data.json", "manifest": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095248-sdr-dryrun\\sdr_manifest.json", "counts": {"units": 8, "interfaces": null, "standalone": null, "findings": 22, "findings_by_severity": {"high": 10, "medium": 8, "low": 4, "info": 0}, "failed_units": 0, "excluded_files": 0}, "boundaries": 6, "checked": false}
+EXIT=0
+[0m
+[0m$ [0mpy "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts\render_sdr_report.py" --check "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun"; echo "EXIT=$?"
+[render_sdr_report] --check ok (C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun)
+EXIT=0
+[0m
+[0m$ [0mrm "C:\DEV\springBootTemplate\.mgh-sdr\.active" && echo "removed .active"; ls -la "C:\DEV\springBootTemplate\.mgh-sdr"
+removed .active
+total 24
+drwxr-xr-x 1 megah 197609 0 Oct 14 09:59 .
+drwxr-xr-x 1 megah 197609 0 Oct 14 09:59 ..
+drwxr-xr-x 1 megah 197609 0 Oct 14 09:52 runs
+[0m
+[0m# [0mTodos
+[✓] step2 diff_group.py --checkpoints --materialize + --check
+[✓] step3 fanout_runner.py tier=sdr (handle partial:true / exit 2)
+[✓] step4 render_sdr_report.py + --check
+[✓] step5 print report path + counts, disclaimer, rm .active
+[0m
+[launch] host error evidence: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095248-sdr-dryrun\host_error.log (0 ERROR line(s) in window)
+[launch] branch sdr-dryrun: ok -> C:\DEV\springBootTemplate\mgh-sdr-sdr-dryrun-20261014_095934.html
+[launch] === branch sdr-mb-nonexistent ===
+[launch] branch sdr-mb-nonexistent: FAILED pre-check (ref does not resolve) — zero spawn, zero artifacts; sweep continues
+[launch] branch sdr-mb-nonexistent: FAILED (branch not found: sdr-mb-nonexistent)
+[launch] === branch sdr-mb-authz ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[0m
+> build · deepseek-flash
+[0m
+[0m$ [0mls -la "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz" 2>&1; echo "---MARKERS---"; ls -la "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/markers" 2>&1; echo "---SLICES---"; ls -la "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/slices" 2>&1
+total 45
+drwxr-xr-x 1 megah 197609    0 Oct 14 09:59 .
+drwxr-xr-x 1 megah 197609    0 Oct 14 09:59 ..
+-rw-r--r-- 1 megah 197609 6495 Oct 14 09:59 baseline.md
+-rw-r--r-- 1 megah 197609 7681 Oct 14 09:59 context.json
+-rw-r--r-- 1 megah 197609 2015 Oct 14 09:59 orchestrator_prompt.md
+-rw-r--r-- 1 megah 197609   23 Oct 14 09:59 run_config.json
+-rw-r--r-- 1 megah 197609 6699 Oct 14 09:59 sensitive_catalog.json
+---MARKERS---
+ls: cannot access 'C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/markers': No such file or directory
+---SLICES---
+ls: cannot access 'C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/slices': No such file or directory
+[0m
+[0m$ [0mfind "C:/DEV/springBootTemplate/.mgh-sdr" -maxdepth 3 -name "*.py" 2>&1 | head -50; echo "---CORE---"; find "C:/DEV/springBootTemplate" -maxdepth 4 -type d -name "mgh-core" 2>&1
+---CORE---
+C:/DEV/springBootTemplate/.claude/mgh-core
+C:/DEV/springBootTemplate/.opencode/mgh-core
+[0m
+[0m$ [0mfind "C:/DEV/springBootTemplate/.claude" "C:/DEV/springBootTemplate/.opencode" -iname "*sdr*" -maxdepth 4 2>&1 | head -40
+C:/DEV/springBootTemplate/.claude/agents/sdr-review-fanout.md
+C:/DEV/springBootTemplate/.claude/commands/mgh-sdr.md
+C:/DEV/springBootTemplate/.claude/mgh-core/contracts/sdr
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/list_sdr_steps.py
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/mgh_sdr_launch.py
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/mgh_sdr_launch.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/render_sdr_report.py
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/render_sdr_report.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/resume_sdr_state.py
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/sdr_context.py
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/sdr_context.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/sdr_tier.py
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/__pycache__/list_sdr_steps.cpython-313.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/__pycache__/mgh_sdr_launch.cpython-313.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/__pycache__/render_sdr_report.cpython-313.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/__pycache__/resume_sdr_state.cpython-313.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/__pycache__/sdr_context.cpython-313.pyc
+C:/DEV/springBootTemplate/.claude/mgh-core/scripts/__pycache__/sdr_tier.cpython-313.pyc
+C:/DEV/springBootTemplate/.opencode/agent/sdr-review-fanout.md
+C:/DEV/springBootTemplate/.opencode/command/mgh-sdr.md
+C:/DEV/springBootTemplate/.opencode/mgh-core/contracts/sdr
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/list_sdr_steps.py
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/mgh_sdr_launch.py
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/mgh_sdr_launch.pyc
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/render_sdr_report.py
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/render_sdr_report.pyc
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/resume_sdr_state.py
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/sdr_context.py
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/sdr_context.pyc
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/sdr_tier.py
+C:/DEV/springBootTemplate/.opencode/mgh-core/scripts/__pycache__/sdr_tier.cpython-313.pyc
+[0m
+[0m$ [0mls -la "C:/DEV/springBootTemplate/.claude/mgh-core/scripts" 2>&1; echo "===OPENCODE==="; ls -la "C:/DEV/springBootTemplate/.opencode/mgh-core/scripts" 2>&1
+total 2508
+drwxr-xr-x 1 megah 197609      0 Oct 12 14:23 .
+drwxr-xr-x 1 megah 197609      0 Oct 12 14:23 ..
+drwxr-xr-x 1 megah 197609      0 Oct 12 14:24 __pycache__
+-rwxr-xr-x 1 megah 197609  16524 Oct 12 15:32 assemble_rules.py
+-rw-r--r-- 1 megah 197609  18623 Oct 12 15:32 assemble_rules.pyc
+-rwxr-xr-x 1 megah 197609  11819 Oct 12 15:32 assemble_test_rules.py
+-rw-r--r-- 1 megah 197609  15288 Oct 12 15:32 assemble_test_rules.pyc
+-rwxr-xr-x 1 megah 197609  92490 Oct 12 15:32 block_adhoc_scripts.py
+-rwxr-xr-x 1 megah 197609   7852 Oct 12 15:32 chunk_sources.py
+-rw-r--r-- 1 megah 197609  10257 Oct 12 15:32 chunk_sources.pyc
+-rwxr-xr-x 1 megah 197609  22664 Oct 12 15:32 classify_tests.py
+-rw-r--r-- 1 megah 197609  26555 Oct 12 15:32 classify_tests.pyc
+-rwxr-xr-x 1 megah 197609   5992 Oct 12 15:32 dedup.py
+-rw-r--r-- 1 megah 197609   9366 Oct 12 15:32 dedup.pyc
+-rwxr-xr-x 1 megah 197609   7694 Oct 12 15:32 derive_mutators.py
+-rw-r--r-- 1 megah 197609  10257 Oct 12 15:32 derive_mutators.pyc
+-rwxr-xr-x 1 megah 197609   7420 Oct 12 15:32 describe_artifact.py
+-rw-r--r-- 1 megah 197609   9694 Oct 12 15:32 describe_artifact.pyc
+-rwxr-xr-x 1 megah 197609 109644 Oct 12 15:32 diff_group.py
+-rw-r--r-- 1 megah 197609 104783 Oct 12 15:32 diff_group.pyc
+-rwxr-xr-x 1 megah 197609   3680 Oct 12 15:32 diff_seed.py
+-rw-r--r-- 1 megah 197609   5276 Oct 12 15:32 diff_seed.pyc
+-rwxr-xr-x 1 megah 197609  25305 Oct 12 15:32 discipline_core.py
+-rw-r--r-- 1 megah 197609  10085 Oct 12 15:32 discipline_core.pyc
+-rwxr-xr-x 1 megah 197609  49014 Oct 12 15:32 discover_controls.py
+-rw-r--r-- 1 megah 197609  51957 Oct 12 15:32 discover_controls.pyc
+-rwxr-xr-x 1 megah 197609  10338 Oct 12 15:32 emit_sarif.py
+-rw-r--r-- 1 megah 197609  14489 Oct 12 15:32 emit_sarif.pyc
+-rwxr-xr-x 1 megah 197609  15234 Oct 12 15:32 expand_scope.py
+-rw-r--r-- 1 megah 197609  17972 Oct 12 15:32 expand_scope.pyc
+-rwxr-xr-x 1 megah 197609 154842 Oct 12 15:32 fanout_runner.py
+-rw-r--r-- 1 megah 197609  75561 Oct 12 15:32 fanout_runner.pyc
+-rwxr-xr-x 1 megah 197609  15247 Oct 12 15:32 focus_scope.py
+-rw-r--r-- 1 megah 197609  17893 Oct 12 15:32 focus_scope.pyc
+-rwxr-xr-x 1 megah 197609  36280 Oct 12 15:32 ingest_requirements.py
+-rw-r--r-- 1 megah 197609  48761 Oct 12 15:32 ingest_requirements.pyc
+-rwxr-xr-x 1 megah 197609  10351 Oct 12 15:32 init_tier.py
+-rw-r--r-- 1 megah 197609  11238 Oct 12 15:32 init_tier.pyc
+-rwxr-xr-x 1 megah 197609  16941 Oct 12 15:32 list_chunks.py
+-rw-r--r-- 1 megah 197609  20139 Oct 12 15:32 list_chunks.pyc
+-rwxr-xr-x 1 megah 197609  51331 Oct 12 15:32 list_clusters.py
+-rw-r--r-- 1 megah 197609  33572 Oct 12 15:32 list_clusters.pyc
+-rwxr-xr-x 1 megah 197609  14841 Oct 12 15:32 list_rule_jobs.py
+-rw-r--r-- 1 megah 197609  16591 Oct 12 15:32 list_rule_jobs.pyc
+-rwxr-xr-x 1 megah 197609  17335 Oct 12 15:32 list_scout_batches.py
+-rw-r--r-- 1 megah 197609  18689 Oct 12 15:32 list_scout_batches.pyc
+-rwxr-xr-x 1 megah 197609   9773 Oct 12 15:32 list_sdr_steps.py
+-rwxr-xr-x 1 megah 197609  14106 Oct 12 15:32 list_steps.py
+-rw-r--r-- 1 megah 197609  10682 Oct 12 15:32 list_steps.pyc
+-rwxr-xr-x 1 megah 197609  19193 Oct 12 15:32 list_test_groups.py
+-rw-r--r-- 1 megah 197609  25438 Oct 12 15:32 list_test_groups.pyc
+-rwxr-xr-x 1 megah 197609   9592 Oct 12 15:32 list_ut_steps.py
+-rw-r--r-- 1 megah 197609   8895 Oct 12 15:32 list_ut_steps.pyc
+-rwxr-xr-x 1 megah 197609  13553 Oct 12 15:32 list_verify_jobs.py
+-rw-r--r-- 1 megah 197609  16885 Oct 12 15:32 list_verify_jobs.pyc
+-rwxr-xr-x 1 megah 197609  11168 Oct 12 15:32 load_controls.py
+-rw-r--r-- 1 megah 197609  14896 Oct 12 15:32 load_controls.pyc
+-rwxr-xr-x 1 megah 197609  12709 Oct 12 15:32 merge_augment.py
+-rw-r--r-- 1 megah 197609  18788 Oct 12 15:32 merge_augment.pyc
+-rwxr-xr-x 1 megah 197609   8555 Oct 12 15:32 merge_memory.py
+-rw-r--r-- 1 megah 197609  12513 Oct 12 15:32 merge_memory.pyc
+-rwxr-xr-x 1 megah 197609  12911 Oct 12 15:32 merge_scout.py
+-rw-r--r-- 1 megah 197609  17153 Oct 12 15:32 merge_scout.pyc
+-rwxr-xr-x 1 megah 197609  24204 Oct 12 15:32 mgh_sdr_launch.py
+-rw-r--r-- 1 megah 197609  22574 Oct 12 15:32 mgh_sdr_launch.pyc
+-rwxr-xr-x 1 megah 197609  32855 Oct 12 15:32 plan_aggregate.py
+-rw-r--r-- 1 megah 197609  16500 Oct 12 15:32 plan_aggregate.pyc
+-rwxr-xr-x 1 megah 197609   9560 Oct 12 15:32 plan_scout.py
+-rw-r--r-- 1 megah 197609  12535 Oct 12 15:32 plan_scout.pyc
+-rwxr-xr-x 1 megah 197609   5881 Oct 12 15:32 prefilter.py
+-rw-r--r-- 1 megah 197609   8428 Oct 12 15:32 prefilter.pyc
+-rwxr-xr-x 1 megah 197609  36013 Oct 12 15:32 prepare_augment.py
+-rw-r--r-- 1 megah 197609  46299 Oct 12 15:32 prepare_augment.pyc
+-rwxr-xr-x 1 megah 197609  12782 Oct 12 15:32 read_roots_config.py
+-rwxr-xr-x 1 megah 197609  22570 Oct 12 15:32 render_report.py
+-rw-r--r-- 1 megah 197609  30458 Oct 12 15:32 render_report.pyc
+-rwxr-xr-x 1 megah 197609  64619 Oct 12 15:32 render_sdr_report.py
+-rw-r--r-- 1 megah 197609  49199 Oct 12 15:32 render_sdr_report.pyc
+-rwxr-xr-x 1 megah 197609  32806 Oct 12 15:32 resume_sdr_state.py
+-rwxr-xr-x 1 megah 197609  55133 Oct 12 15:32 resume_state.py
+-rw-r--r-- 1 megah 197609  53291 Oct 12 15:32 resume_state.pyc
+-rwxr-xr-x 1 megah 197609  20112 Oct 12 15:32 resume_ut_init_state.py
+-rw-r--r-- 1 megah 197609  22769 Oct 12 15:32 resume_ut_init_state.pyc
+-rwxr-xr-x 1 megah 197609  49241 Oct 12 15:32 sdr_context.py
+-rw-r--r-- 1 megah 197609  39114 Oct 12 15:32 sdr_context.pyc
+-rwxr-xr-x 1 megah 197609   5550 Oct 12 15:32 sdr_tier.py
+-rw-r--r-- 1 megah 197609   4918 Oct 12 15:32 sensitive_catalog.json.example
+-rwxr-xr-x 1 megah 197609  20471 Oct 12 15:32 sensitive_catalog.py
+-rw-r--r-- 1 megah 197609  25092 Oct 12 15:32 sensitive_catalog.pyc
+-rwxr-xr-x 1 megah 197609   4442 Oct 12 15:32 validate_inventory.py
+-rw-r--r-- 1 megah 197609   5838 Oct 12 15:32 validate_inventory.pyc
+-rwxr-xr-x 1 megah 197609  11670 Oct 12 15:32 validate_t1_records.py
+-rw-r--r-- 1 megah 197609  14182 Oct 12 15:32 validate_t1_records.pyc
+-rwxr-xr-x 1 megah 197609   5089 Oct 12 15:32 validate_test_rules.py
+-rw-r--r-- 1 megah 197609   6918 Oct 12 15:32 validate_test_rules.pyc
+-rwxr-xr-x 1 megah 197609  12714 Oct 12 15:32 write_runconfig.py
+-rw-r--r-- 1 megah 197609  14182 Oct 12 15:32 write_runconfig.pyc
+-rwxr-xr-x 1 megah 197609   8150 Oct 12 15:32 write_ut_runconfig.py
+-rw-r--r-- 1 megah 197609   9520 Oct 12 15:32 write_ut_runconfig.pyc
+===OPENCODE===
+total 2612
+drwxr-xr-x 1 megah 197609      0 Oct 14 09:52 .
+drwxr-xr-x 1 megah 197609      0 Oct 12 16:36 ..
+drwxr-xr-x 1 megah 197609      0 Oct 14 09:54 __pycache__
+-rwxr-xr-x 1 megah 197609  16524 Oct 14 09:52 assemble_rules.py
+-rw-r--r-- 1 megah 197609  18623 Oct 14 09:52 assemble_rules.pyc
+-rwxr-xr-x 1 megah 197609  11819 Oct 14 09:52 assemble_test_rules.py
+-rw-r--r-- 1 megah 197609  15288 Oct 14 09:52 assemble_test_rules.pyc
+-rwxr-xr-x 1 megah 197609 100107 Oct 14 09:52 block_adhoc_scripts.py
+-rwxr-xr-x 1 megah 197609   9975 Oct 14 09:52 chunk_sources.py
+-rw-r--r-- 1 megah 197609  10257 Oct 14 09:52 chunk_sources.pyc
+-rwxr-xr-x 1 megah 197609  22664 Oct 14 09:52 classify_tests.py
+-rw-r--r-- 1 megah 197609  26555 Oct 14 09:52 classify_tests.pyc
+-rwxr-xr-x 1 megah 197609   5992 Oct 14 09:52 dedup.py
+-rw-r--r-- 1 megah 197609   9366 Oct 14 09:52 dedup.pyc
+-rwxr-xr-x 1 megah 197609   7694 Oct 14 09:52 derive_mutators.py
+-rw-r--r-- 1 megah 197609  10257 Oct 14 09:52 derive_mutators.pyc
+-rwxr-xr-x 1 megah 197609   9759 Oct 14 09:52 describe_artifact.py
+-rw-r--r-- 1 megah 197609   9694 Oct 14 09:52 describe_artifact.pyc
+-rwxr-xr-x 1 megah 197609 112271 Oct 14 09:52 diff_group.py
+-rw-r--r-- 1 megah 197609 104783 Oct 14 09:52 diff_group.pyc
+-rwxr-xr-x 1 megah 197609   4192 Oct 14 09:52 diff_seed.py
+-rw-r--r-- 1 megah 197609   5276 Oct 14 09:52 diff_seed.pyc
+-rwxr-xr-x 1 megah 197609  25568 Oct 14 09:52 discipline_core.py
+-rw-r--r-- 1 megah 197609  10085 Oct 14 09:52 discipline_core.pyc
+-rwxr-xr-x 1 megah 197609  58577 Oct 14 09:52 discover_controls.py
+-rw-r--r-- 1 megah 197609  51957 Oct 14 09:52 discover_controls.pyc
+-rwxr-xr-x 1 megah 197609  10338 Oct 14 09:52 emit_sarif.py
+-rw-r--r-- 1 megah 197609  14489 Oct 14 09:52 emit_sarif.pyc
+-rwxr-xr-x 1 megah 197609  18507 Oct 14 09:52 expand_scope.py
+-rw-r--r-- 1 megah 197609  17972 Oct 14 09:52 expand_scope.pyc
+-rwxr-xr-x 1 megah 197609 176312 Oct 14 09:52 fanout_runner.py
+-rw-r--r-- 1 megah 197609  75561 Oct 14 09:52 fanout_runner.pyc
+-rwxr-xr-x 1 megah 197609  15247 Oct 14 09:52 focus_scope.py
+-rw-r--r-- 1 megah 197609  17893 Oct 14 09:52 focus_scope.pyc
+-rwxr-xr-x 1 megah 197609  36280 Oct 14 09:52 ingest_requirements.py
+-rw-r--r-- 1 megah 197609  48761 Oct 14 09:52 ingest_requirements.pyc
+-rwxr-xr-x 1 megah 197609  10351 Oct 14 09:52 init_tier.py
+-rw-r--r-- 1 megah 197609  11238 Oct 14 09:52 init_tier.pyc
+-rwxr-xr-x 1 megah 197609  16941 Oct 14 09:52 list_chunks.py
+-rw-r--r-- 1 megah 197609  20139 Oct 14 09:52 list_chunks.pyc
+-rwxr-xr-x 1 megah 197609  57808 Oct 14 09:52 list_clusters.py
+-rw-r--r-- 1 megah 197609  33572 Oct 14 09:52 list_clusters.pyc
+-rwxr-xr-x 1 megah 197609  16399 Oct 14 09:52 list_rule_jobs.py
+-rw-r--r-- 1 megah 197609  16591 Oct 14 09:52 list_rule_jobs.pyc
+-rwxr-xr-x 1 megah 197609  18575 Oct 14 09:52 list_scout_batches.py
+-rw-r--r-- 1 megah 197609  18689 Oct 14 09:52 list_scout_batches.pyc
+-rwxr-xr-x 1 megah 197609   9773 Oct 14 09:52 list_sdr_steps.py
+-rwxr-xr-x 1 megah 197609  13643 Oct 14 09:52 list_steps.py
+-rw-r--r-- 1 megah 197609  10682 Oct 14 09:52 list_steps.pyc
+-rwxr-xr-x 1 megah 197609  19193 Oct 14 09:52 list_test_groups.py
+-rw-r--r-- 1 megah 197609  25438 Oct 14 09:52 list_test_groups.pyc
+-rwxr-xr-x 1 megah 197609   9592 Oct 14 09:52 list_ut_steps.py
+-rw-r--r-- 1 megah 197609   8895 Oct 14 09:52 list_ut_steps.pyc
+-rwxr-xr-x 1 megah 197609  13553 Oct 14 09:52 list_verify_jobs.py
+-rw-r--r-- 1 megah 197609  16885 Oct 14 09:52 list_verify_jobs.pyc
+-rwxr-xr-x 1 megah 197609  11168 Oct 14 09:52 load_controls.py
+-rw-r--r-- 1 megah 197609  14896 Oct 14 09:52 load_controls.pyc
+-rwxr-xr-x 1 megah 197609  12709 Oct 14 09:52 merge_augment.py
+-rw-r--r-- 1 megah 197609  18788 Oct 14 09:52 merge_augment.pyc
+-rwxr-xr-x 1 megah 197609   8555 Oct 14 09:52 merge_memory.py
+-rw-r--r-- 1 megah 197609  12513 Oct 14 09:52 merge_memory.pyc
+-rwxr-xr-x 1 megah 197609  17180 Oct 14 09:52 merge_scout.py
+-rw-r--r-- 1 megah 197609  17153 Oct 14 09:52 merge_scout.pyc
+-rwxr-xr-x 1 megah 197609  37875 Oct 14 09:52 mgh_sdr_launch.py
+-rw-r--r-- 1 megah 197609  22574 Oct 14 09:52 mgh_sdr_launch.pyc
+-rwxr-xr-x 1 megah 197609  36942 Oct 14 09:52 plan_aggregate.py
+-rw-r--r-- 1 megah 197609  16500 Oct 14 09:52 plan_aggregate.pyc
+-rwxr-xr-x 1 megah 197609  11152 Oct 14 09:52 plan_scout.py
+-rw-r--r-- 1 megah 197609  12535 Oct 14 09:52 plan_scout.pyc
+-rwxr-xr-x 1 megah 197609   5881 Oct 14 09:52 prefilter.py
+-rw-r--r-- 1 megah 197609   8428 Oct 14 09:52 prefilter.pyc
+-rwxr-xr-x 1 megah 197609  36013 Oct 14 09:52 prepare_augment.py
+-rw-r--r-- 1 megah 197609  46299 Oct 14 09:52 prepare_augment.pyc
+-rwxr-xr-x 1 megah 197609  13223 Oct 14 09:52 read_roots_config.py
+-rwxr-xr-x 1 megah 197609  22570 Oct 14 09:52 render_report.py
+-rw-r--r-- 1 megah 197609  30458 Oct 14 09:52 render_report.pyc
+-rwxr-xr-x 1 megah 197609  67587 Oct 14 09:52 render_sdr_report.py
+-rw-r--r-- 1 megah 197609  49199 Oct 14 09:52 render_sdr_report.pyc
+-rwxr-xr-x 1 megah 197609  33367 Oct 14 09:52 resume_sdr_state.py
+-rwxr-xr-x 1 megah 197609  63171 Oct 14 09:52 resume_state.py
+-rw-r--r-- 1 megah 197609  53291 Oct 14 09:52 resume_state.pyc
+-rwxr-xr-x 1 megah 197609  20112 Oct 14 09:52 resume_ut_init_state.py
+-rw-r--r-- 1 megah 197609  22769 Oct 14 09:52 resume_ut_init_state.pyc
+-rwxr-xr-x 1 megah 197609  53627 Oct 14 09:52 sdr_context.py
+-rw-r--r-- 1 megah 197609  39114 Oct 14 09:52 sdr_context.pyc
+-rwxr-xr-x 1 megah 197609   6111 Oct 14 09:52 sdr_tier.py
+-rw-r--r-- 1 megah 197609   4918 Oct 14 09:52 sensitive_catalog.json.example
+-rwxr-xr-x 1 megah 197609  20471 Oct 14 09:52 sensitive_catalog.py
+-rw-r--r-- 1 megah 197609  25092 Oct 14 09:52 sensitive_catalog.pyc
+-rwxr-xr-x 1 megah 197609   4442 Oct 14 09:52 validate_inventory.py
+-rw-r--r-- 1 megah 197609   5838 Oct 14 09:52 validate_inventory.pyc
+-rwxr-xr-x 1 megah 197609  11670 Oct 14 09:52 validate_t1_records.py
+-rw-r--r-- 1 megah 197609  14182 Oct 14 09:52 validate_t1_records.pyc
+-rwxr-xr-x 1 megah 197609   5089 Oct 14 09:52 validate_test_rules.py
+-rw-r--r-- 1 megah 197609   6918 Oct 14 09:52 validate_test_rules.pyc
+-rwxr-xr-x 1 megah 197609  18123 Oct 14 09:52 write_runconfig.py
+-rw-r--r-- 1 megah 197609  14182 Oct 14 09:52 write_runconfig.pyc
+-rwxr-xr-x 1 megah 197609   8150 Oct 14 09:52 write_ut_runconfig.py
+-rw-r--r-- 1 megah 197609   9520 Oct 14 09:52 write_ut_runconfig.pyc
+[0m
+[0m→ [0mRead .opencode/command/mgh-sdr.md
+[0m✗ [0mfor c in py python python3; do "$c" --version >/dev/null 2>&1 && echo "PYPROBE $c OK $("$c" --version 2>&1)" || echo "PYPROBE $c UNAVAILABLE"; done failed
+[91m[1mError: [0mblocked: out-of-tree redirect in mgh-sdr run-domain: `for c in py python python3; do "$c" --version >/dev/null 2>&1 && echo "PYPROBE $c OK $("$c" --version 2>&1)" || echo "PYPROBE $c UNAVAILABLE"; done`
+  The Write/Edit tool's confinement is bypassed by a `>`/`>>` redirect to a path outside the target tree.
+  target tree = C:\DEV\springBootTemplate
+  Writes/Moves/Copies MUST land inside the target tree (your cwd's working project). Use the producer's stdout path verbatim (checkpoint_path / rule_path / draft_path — already absolute, inside <target>/.mgh-init | .claude/rules | docs/security-controls | .mgh-ut-init | docs/test-conventions, or a sentinel out_root). NEVER Bash Set-Content / New-Item / tee / > redirect outside the tree; NEVER apply_patch / MultiEdit / NotebookEdit outside the tree.
+[0m
+[0m$ [0mls -la "C:/DEV/springBootTemplate/.mgh-sdr" 2>&1; echo "---ACTIVE---"; cat "C:/DEV/springBootTemplate/.mgh-sdr/.active" 2>&1
+total 25
+drwxr-xr-x 1 megah 197609   0 Oct 14 09:59 .
+drwxr-xr-x 1 megah 197609   0 Oct 14 09:59 ..
+-rw-r--r-- 1 megah 197609 105 Oct 14 09:59 .active
+drwxr-xr-x 1 megah 197609   0 Oct 14 09:59 runs
+---ACTIVE---
+{"domain": "mgh-sdr", "target": "C:\\DEV\\springBootTemplate", "out_roots": [], "read_roots": [], "v": 1}
+[0m
+[0m$ [0mpy --version 2>&1; echo "RC=$?"
+Python 3.13.2
+RC=0
+[0m
+[0m$ [0mpython --version 2>&1; echo "RC=$?"
+RC=49
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/diff_group.py --repo "C:/DEV/springBootTemplate" --base master --branch sdr-mb-authz --checkpoints "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/markers" --materialize "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/slices"
+[diff_group] master..sdr-mb-authz: 8 file(s) (excluded 0: -) -> 3 interface + 2 standalone unit(s); codegraph=on anchors_changed=6 anchors_upstream=1 chain_merged=4 done=0 failed=0 pending=5 (grouping: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\grouping.json)
+{"repo": "C:\\DEV\\springBootTemplate", "base": "master", "branch": "sdr-mb-authz", "empty": false, "excluded_nonempty": false, "codegraph": true, "total": 5, "units": [{"unit_id": "AdminController___admin_system_config_reset", "kind": "interface", "route": "/admin/system/config/reset;/admin/user/delete;/admin/user/list;/admin/user/reset", "chain": [{"fqn_short": "AdminController.resetSystemConfig", "label": "AdminController.resetSystemConfig", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 54, "change": "changed", "route": "/admin/system/config/reset"}, {"fqn_short": "AdminController.deleteUser", "label": "AdminController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 31, "change": "changed", "route": "/admin/user/delete", "branch_of": 0}, {"fqn_short": "LogDao.insertDeleteLog", "label": "LogDao.insertDeleteLog", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/LogDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDao.deleteById", "label": "UserDao.deleteById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserCacheServiceImpl.deleteUser", "label": "UserCacheServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserCacheServiceImpl.java", "line": 52, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserServiceImpl.deleteUser", "label": "UserServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserServiceImpl.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "LogDaoMapper.xml", "label": "LogDaoMapper.xml:insertDeleteLog", "file": "build/resources/main/mapper/LogDaoMapper.xml", "line": null, "change": "external", "branch_of": 2}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:deleteById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 3}, {"fqn_short": "AdminController.listAllUsers", "label": "AdminController.listAllUsers", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 64, "change": "changed", "route": "/admin/user/list", "branch_of": 0}, {"fqn_short": "AdminController.resetUsers", "label": "AdminController.resetUsers", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 41, "change": "changed", "route": "/admin/user/reset", "branch_of": 0}], "status": "pending"}, {"unit_id": "UserProfileController___profile_update", "kind": "interface", "route": "/profile/update;/profile/view", "chain": [{"fqn_short": "UserProfileController.updateProfile", "label": "UserProfileController.updateProfile", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserProfileController.java", "line": 38, "change": "changed", "route": "/profile/update"}, {"fqn_short": "UserProfileController.viewProfile", "label": "UserProfileController.viewProfile", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserProfileController.java", "line": 29, "change": "changed", "route": "/profile/view", "branch_of": 0}], "status": "pending"}, {"unit_id": "UserCacheController___cache_user_delete", "kind": "interface", "route": "/cache/user/delete", "chain": [{"fqn_short": "UserCacheController.deleteUser", "label": "UserCacheController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserCacheController.java", "line": 29, "change": "unchanged", "route": "/cache/user/delete"}, {"fqn_short": "AdminController.deleteUser", "label": "AdminController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 31, "change": "changed"}, {"fqn_short": "AdminServiceImpl.deleteUser", "label": "AdminServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/AdminServiceImpl.java", "line": 25, "change": "changed", "branch_of": 0}, {"fqn_short": "LogDao.insertDeleteLog", "label": "LogDao.insertDeleteLog", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/LogDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDao.deleteById", "label": "UserDao.deleteById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserCacheServiceImpl.deleteUser", "label": "UserCacheServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserCacheServiceImpl.java", "line": 52, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserServiceImpl.deleteUser", "label": "UserServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserServiceImpl.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "LogDaoMapper.xml", "label": "LogDaoMapper.xml:insertDeleteLog", "file": "build/resources/main/mapper/LogDaoMapper.xml", "line": null, "change": "external", "branch_of": 3}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:deleteById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 4}], "status": "pending"}, {"unit_id": "src_main_java_com_linkinstars_springBootTemplate", "kind": "standalone", "route": "", "chain": [], "status": "pending"}, {"unit_id": "src_main_resources_mapper", "kind": "standalone", "route": "", "chain": [], "status": "pending"}], "done": 0, "failed": 0, "counts": {"interface": 3, "standalone": 2}, "excluded": {"count": 0, "by_reason": {}}, "budget": {"max_standalone_bytes": 65536, "max_interface_bytes": 262144}, "codegraph_stats": {"symbols_queried": 17, "edges_captured": 19, "edges_in_changed_set": 0, "anchors_changed": 6, "anchors_upstream": 1, "chain_merged": 4, "chains_materialized": 3, "excluded_files": 0}, "pending": [{"unit_id": "AdminController___admin_system_config_reset", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\slices\\AdminController___admin_system_config_reset.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\drafts\\AdminController___admin_system_config_reset.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\AdminController___admin_system_config_reset.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\AdminController___admin_system_config_reset.failed", "kind": "interface", "route": "/admin/system/config/reset;/admin/user/delete;/admin/user/list;/admin/user/reset", "unit_bytes": 3898, "slimmed": {}, "chain": [{"fqn_short": "AdminController.resetSystemConfig", "label": "AdminController.resetSystemConfig", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 54, "change": "changed", "route": "/admin/system/config/reset"}, {"fqn_short": "AdminController.deleteUser", "label": "AdminController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 31, "change": "changed", "route": "/admin/user/delete", "branch_of": 0}, {"fqn_short": "LogDao.insertDeleteLog", "label": "LogDao.insertDeleteLog", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/LogDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDao.deleteById", "label": "UserDao.deleteById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserCacheServiceImpl.deleteUser", "label": "UserCacheServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserCacheServiceImpl.java", "line": 52, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserServiceImpl.deleteUser", "label": "UserServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserServiceImpl.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "LogDaoMapper.xml", "label": "LogDaoMapper.xml:insertDeleteLog", "file": "build/resources/main/mapper/LogDaoMapper.xml", "line": null, "change": "external", "branch_of": 2}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:deleteById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 3}, {"fqn_short": "AdminController.listAllUsers", "label": "AdminController.listAllUsers", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 64, "change": "changed", "route": "/admin/user/list", "branch_of": 0}, {"fqn_short": "AdminController.resetUsers", "label": "AdminController.resetUsers", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 41, "change": "changed", "route": "/admin/user/reset", "branch_of": 0}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\external"}, {"unit_id": "UserProfileController___profile_update", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\slices\\UserProfileController___profile_update.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\drafts\\UserProfileController___profile_update.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\UserProfileController___profile_update.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\UserProfileController___profile_update.failed", "kind": "interface", "route": "/profile/update;/profile/view", "unit_bytes": 2563, "slimmed": {}, "chain": [{"fqn_short": "UserProfileController.updateProfile", "label": "UserProfileController.updateProfile", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserProfileController.java", "line": 38, "change": "changed", "route": "/profile/update"}, {"fqn_short": "UserProfileController.viewProfile", "label": "UserProfileController.viewProfile", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserProfileController.java", "line": 29, "change": "changed", "route": "/profile/view", "branch_of": 0}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\external"}, {"unit_id": "UserCacheController___cache_user_delete", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\slices\\UserCacheController___cache_user_delete.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\drafts\\UserCacheController___cache_user_delete.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\UserCacheController___cache_user_delete.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\UserCacheController___cache_user_delete.failed", "kind": "interface", "route": "/cache/user/delete", "unit_bytes": 2389, "slimmed": {}, "chain": [{"fqn_short": "UserCacheController.deleteUser", "label": "UserCacheController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserCacheController.java", "line": 29, "change": "unchanged", "route": "/cache/user/delete"}, {"fqn_short": "AdminController.deleteUser", "label": "AdminController.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/AdminController.java", "line": 31, "change": "changed"}, {"fqn_short": "AdminServiceImpl.deleteUser", "label": "AdminServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/AdminServiceImpl.java", "line": 25, "change": "changed", "branch_of": 0}, {"fqn_short": "LogDao.insertDeleteLog", "label": "LogDao.insertDeleteLog", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/LogDao.java", "line": null, "change": "unchanged"}, {"fqn_short": "UserDao.deleteById", "label": "UserDao.deleteById", "file": "src/main/java/com/linkinstars/springBootTemplate/dao/UserDao.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserCacheServiceImpl.deleteUser", "label": "UserCacheServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserCacheServiceImpl.java", "line": 52, "change": "unchanged", "branch_of": 1}, {"fqn_short": "UserServiceImpl.deleteUser", "label": "UserServiceImpl.deleteUser", "file": "src/main/java/com/linkinstars/springBootTemplate/service/Impl/UserServiceImpl.java", "line": null, "change": "unchanged", "branch_of": 1}, {"fqn_short": "LogDaoMapper.xml", "label": "LogDaoMapper.xml:insertDeleteLog", "file": "build/resources/main/mapper/LogDaoMapper.xml", "line": null, "change": "external", "branch_of": 3}, {"fqn_short": "UserDaoMapper.xml", "label": "UserDaoMapper.xml:deleteById", "file": "build/resources/main/mapper/UserDaoMapper.xml", "line": null, "change": "external", "branch_of": 4}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\external"}, {"unit_id": "src_main_java_com_linkinstars_springBootTemplate", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\slices\\src_main_java_com_linkinstars_springBootTemplate.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\drafts\\src_main_java_com_linkinstars_springBootTemplate.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\src_main_java_com_linkinstars_springBootTemplate.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\src_main_java_com_linkinstars_springBootTemplate.failed", "kind": "standalone", "route": "", "unit_bytes": 4726, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\external"}, {"unit_id": "src_main_resources_mapper", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\slices\\src_main_resources_mapper.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\drafts\\src_main_resources_mapper.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\src_main_resources_mapper.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\markers\\src_main_resources_mapper.failed", "kind": "standalone", "route": "", "unit_bytes": 1419, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\external"}], "offset": 0, "limit": 5}
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/diff_group.py --check "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz"; echo "RC=$?"
+[diff_group] --check ok: 5 pending unit(s) consistent (C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz)
+RC=0
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo "C:/DEV/springBootTemplate" --base master --branch sdr-mb-authz --checkpoints "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/markers" --inputs-dir "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz/slices" --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300; echo "RC=$?"
+[fanout_runner] tier=sdr host=opencode repo=C:\DEV\springBootTemplate total=5 pending=5 wave=5 codegraph=on
+[fanout_runner sdr] +00:00:00 wave=2 unit=UserProfileController___profile_update spawn done=0/5
+[fanout_runner sdr] +00:00:00 wave=1 unit=AdminController___admin_system_config_reset spawn done=0/5
+[fanout_runner sdr] +00:00:00 wave=3 unit=UserCacheController___cache_user_delete spawn done=0/5
+[fanout_runner sdr] +00:00:00 wave=4 unit=src_main_java_com_linkinstars_springBootTemplate spawn done=0/5
+[fanout_runner sdr] +00:00:00 wave=5 unit=src_main_resources_mapper spawn done=0/5
+[fanout_runner sdr] +00:01:00 inflight=5 unit=UserProfileController___profile_update idle=16s stall_window=300s done=0/5
+[fanout_runner sdr] +00:01:00 inflight=5 unit=AdminController___admin_system_config_reset idle=15s stall_window=300s done=0/5
+[fanout_runner sdr] +00:01:00 inflight=5 unit=UserCacheController___cache_user_delete idle=44s stall_window=300s done=0/5
+[fanout_runner sdr] +00:01:00 inflight=5 unit=src_main_java_com_linkinstars_springBootTemplate idle=48s stall_window=300s done=0/5
+[fanout_runner sdr] +00:01:00 inflight=5 unit=src_main_resources_mapper idle=1s stall_window=300s done=0/5
+[fanout_runner sdr] +00:01:20 wave=2 unit=UserProfileController___profile_update ok done=1/5
+[fanout_runner] unit UserProfileController___profile_update: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\drafts\UserProfileController___profile_update.js)
+[fanout_runner sdr] +00:01:29 wave=1 unit=AdminController___admin_system_config_reset ok done=2/5
+[fanout_runner] unit AdminController___admin_system_config_reset: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\drafts\AdminController___admin_system_config_res)
+[fanout_runner sdr] +00:01:32 wave=5 unit=src_main_resources_mapper ok done=3/5
+[fanout_runner] unit src_main_resources_mapper: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\drafts\src_main_resources_mapper.json 3)
+[fanout_runner sdr] +00:01:49 wave=4 unit=src_main_java_com_linkinstars_springBootTemplate ok done=4/5
+[fanout_runner] unit src_main_java_com_linkinstars_springBootTemplate: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\drafts\src_main_java_com_linkinstars_springBootT)
+[fanout_runner sdr] +00:02:00 inflight=1 unit=UserCacheController___cache_user_delete idle=10s stall_window=300s done=4/5
+[fanout_runner sdr] +00:02:27 wave=3 unit=UserCacheController___cache_user_delete ok done=5/5
+[fanout_runner] unit UserCacheController___cache_user_delete: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\drafts\UserCacheController___cache_user_delete.j)
+[fanout_runner] done (sdr): 5/5 done, 0 failed, 0 pending, partial=False
+{"runner": "fanout_runner", "tier": "sdr", "repo": "C:\\DEV\\springBootTemplate", "host": "opencode", "total": 5, "done": 5, "failed": 0, "pending": 0, "wave": 5, "waves_run": 5, "partial": false, "stall_killed": [], "stalled": false, "stall_killed_slots_s": 0, "stall_killed_slot_pct": 0.0, "runtime_p50_s": 93, "runtime_p95_s": 148, "runtime_max_s": 148, "cooldowns": 0, "retried_failed": 0, "rate_limited": false}
+RC=0
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/render_sdr_report.py --run-dir "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz" --repo "C:/DEV/springBootTemplate"; echo "RC=$?"
+[render_sdr_report] report=C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-authz-20261014_100419.html
+[render_sdr_report] findings=24 failed_units=0 boundaries=6
+{"report": "C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-mb-authz-20261014_100419.html", "data": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\sdr_report_data.json", "manifest": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_095949-sdr-mb-authz\\sdr_manifest.json", "counts": {"units": 5, "interfaces": null, "standalone": null, "findings": 24, "findings_by_severity": {"high": 13, "medium": 7, "low": 4, "info": 0}, "failed_units": 0, "excluded_files": 0}, "boundaries": 6, "checked": false}
+RC=0
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/render_sdr_report.py --check "C:/DEV/springBootTemplate/.mgh-sdr/runs/20261014_095949-sdr-mb-authz"; echo "RC=$?"
+[render_sdr_report] --check ok (C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz)
+RC=0
+[0m
+[0m$ [0mrm "C:/DEV/springBootTemplate/.mgh-sdr/.active"; echo "RC=$?"; ls -la "C:/DEV/springBootTemplate/.mgh-sdr" 2>&1
+RC=0
+total 24
+drwxr-xr-x 1 megah 197609 0 Oct 14 10:04 .
+drwxr-xr-x 1 megah 197609 0 Oct 14 10:04 ..
+drwxr-xr-x 1 megah 197609 0 Oct 14 09:59 runs
+[0m
+[launch] host error evidence: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_095949-sdr-mb-authz\host_error.log (0 ERROR line(s) in window)
+[launch] branch sdr-mb-authz: ok -> C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-authz-20261014_100419.html
+[launch] === branch sdr-mb-sql-sensitive ===
+[launch] baseline=6495B truncated=False; external=0; pending_approval=0; catalog=default-template
+[launch] sentinel written (read_roots=0 root(s))
+[launch] orchestrator prompt: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\orchestrator_prompt.md
+[launch] spawning opencode (task on stdin; cwd=C:\DEV\springBootTemplate)
+[0m
+> build · deepseek-flash
+[0m
+[0m✗ [0mls "C:\DEV\springBootTemplate\.claude" 2>/dev/null; echo "---"; ls "C:\DEV\springBootTemplate" failed
+[91m[1mError: [0mblocked: out-of-tree redirect in mgh-sdr run-domain: `ls "C:\DEV\springBootTemplate\.claude" 2>/dev/null; echo "---"; ls "C:\DEV\springBootTemplate"`
+  The Write/Edit tool's confinement is bypassed by a `>`/`>>` redirect to a path outside the target tree.
+  target tree = C:\DEV\springBootTemplate
+  Writes/Moves/Copies MUST land inside the target tree (your cwd's working project). Use the producer's stdout path verbatim (checkpoint_path / rule_path / draft_path — already absolute, inside <target>/.mgh-init | .claude/rules | docs/security-controls | .mgh-ut-init | docs/test-conventions, or a sentinel out_root). NEVER Bash Set-Content / New-Item / tee / > redirect outside the tree; NEVER apply_patch / MultiEdit / NotebookEdit outside the tree.
+[0m
+[0m$ [0mls "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive"
+baseline.md
+context.json
+orchestrator_prompt.md
+run_config.json
+sensitive_catalog.json
+[0m
+[0m→ [0mRead .mgh-sdr/runs/20261014_100432-sdr-mb-sql-sensitive/run_config.json
+[0m→ [0mRead .mgh-sdr/runs/20261014_100432-sdr-mb-sql-sensitive/context.json
+[0m
+[0m$ [0mls "C:\DEV\springBootTemplate\.opencode\mgh-core\scripts"
+__pycache__
+assemble_rules.py
+assemble_rules.pyc
+assemble_test_rules.py
+assemble_test_rules.pyc
+block_adhoc_scripts.py
+chunk_sources.py
+chunk_sources.pyc
+classify_tests.py
+classify_tests.pyc
+dedup.py
+dedup.pyc
+derive_mutators.py
+derive_mutators.pyc
+describe_artifact.py
+describe_artifact.pyc
+diff_group.py
+diff_group.pyc
+diff_seed.py
+diff_seed.pyc
+discipline_core.py
+discipline_core.pyc
+discover_controls.py
+discover_controls.pyc
+emit_sarif.py
+emit_sarif.pyc
+expand_scope.py
+expand_scope.pyc
+fanout_runner.py
+fanout_runner.pyc
+focus_scope.py
+focus_scope.pyc
+ingest_requirements.py
+ingest_requirements.pyc
+init_tier.py
+init_tier.pyc
+list_chunks.py
+list_chunks.pyc
+list_clusters.py
+list_clusters.pyc
+list_rule_jobs.py
+list_rule_jobs.pyc
+list_scout_batches.py
+list_scout_batches.pyc
+list_sdr_steps.py
+list_steps.py
+list_steps.pyc
+list_test_groups.py
+list_test_groups.pyc
+list_ut_steps.py
+list_ut_steps.pyc
+list_verify_jobs.py
+list_verify_jobs.pyc
+load_controls.py
+load_controls.pyc
+merge_augment.py
+merge_augment.pyc
+merge_memory.py
+merge_memory.pyc
+merge_scout.py
+merge_scout.pyc
+mgh_sdr_launch.py
+mgh_sdr_launch.pyc
+plan_aggregate.py
+plan_aggregate.pyc
+plan_scout.py
+plan_scout.pyc
+prefilter.py
+prefilter.pyc
+prepare_augment.py
+prepare_augment.pyc
+read_roots_config.py
+render_report.py
+render_report.pyc
+render_sdr_report.py
+render_sdr_report.pyc
+resume_sdr_state.py
+resume_state.py
+resume_state.pyc
+resume_ut_init_state.py
+resume_ut_init_state.pyc
+sdr_context.py
+sdr_context.pyc
+sdr_tier.py
+sensitive_catalog.json.example
+sensitive_catalog.py
+sensitive_catalog.pyc
+validate_inventory.py
+validate_inventory.pyc
+validate_t1_records.py
+validate_t1_records.pyc
+validate_test_rules.py
+validate_test_rules.pyc
+write_runconfig.py
+write_runconfig.pyc
+write_ut_runconfig.py
+write_ut_runconfig.pyc
+[0m
+[0m$ [0mls "C:\DEV\springBootTemplate\.mgh-sdr"; echo "---markers---"; ls "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\markers" 2>&1
+runs
+---markers---
+ls: cannot access 'C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\markers': No such file or directory
+[0m
+[0m$ [0mls "C:\DEV\springBootTemplate\.opencode"; echo "---command---"; ls "C:\DEV\springBootTemplate\.opencode\command" 2>&1
+agent
+command
+hooks
+mgh-core
+node_modules
+opencode.json
+package-lock.json
+package.json
+plugins
+---command---
+mgh-blst.md
+mgh-init.md
+mgh-sast.md
+mgh-sdr.md
+mgh-sra.md
+mgh-srr.md
+mgh-ut-init.md
+[0m
+[0m$ [0mls -a "C:\DEV\springBootTemplate\.mgh-sdr"; echo "---active---"; ls -a "C:\DEV\springBootTemplate\.mgh-sdr\.active" 2>&1
+.
+..
+.active
+runs
+---active---
+C:\DEV\springBootTemplate\.mgh-sdr\.active
+[0m
+[0m→ [0mRead .opencode/command/mgh-sdr.md
+[0m
+[0m# [0mTodos
+[•] Probe interpreter (py/python/python3)
+[ ] Step 2: diff_group.py materialize + --check
+[ ] Step 3: fanout_runner --tier sdr (retry partial)
+[ ] Step 4: render_sdr_report.py + --check
+[ ] Step 5: print report path + counts, disclose, rm .active
+[0m
+[0m✗ [0mfor c in py python python3; do "$c" --version >/dev/null 2>&1 && echo "PYPROBE $c OK $("$c" --version 2>&1)" || echo "PYPROBE $c UNAVAILABLE"; done failed
+[91m[1mError: [0mblocked: out-of-tree redirect in mgh-sdr run-domain: `for c in py python python3; do "$c" --version >/dev/null 2>&1 && echo "PYPROBE $c OK $("$c" --version 2>&1)" || echo "PYPROBE $c UNAVAILABLE"; done`
+  The Write/Edit tool's confinement is bypassed by a `>`/`>>` redirect to a path outside the target tree.
+  target tree = C:\DEV\springBootTemplate
+  Writes/Moves/Copies MUST land inside the target tree (your cwd's working project). Use the producer's stdout path verbatim (checkpoint_path / rule_path / draft_path — already absolute, inside <target>/.mgh-init | .claude/rules | docs/security-controls | .mgh-ut-init | docs/test-conventions, or a sentinel out_root). NEVER Bash Set-Content / New-Item / tee / > redirect outside the tree; NEVER apply_patch / MultiEdit / NotebookEdit outside the tree.
+[0m
+[0m$ [0mpy --version
+Python 3.13.2
+[0m
+[0m$ [0mpython --version
+(no output)
+[0m
+[0m# [0mTodos
+[✓] Probe interpreter (py/python/python3)
+[•] Step 2: diff_group.py materialize + --check
+[ ] Step 3: fanout_runner --tier sdr (retry partial)
+[ ] Step 4: render_sdr_report.py + --check
+[ ] Step 5: print report path + counts, disclose, rm .active
+[0m
+[0m$ [0mexport MGH_SDR_ACTIVE=1; py .opencode/mgh-core/scripts/diff_group.py --repo "C:\DEV\springBootTemplate" --base master --branch sdr-mb-sql-sensitive --checkpoints "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\markers" --materialize "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\slices"
+[diff_group] master..sdr-mb-sql-sensitive: 8 file(s) (excluded 0: -) -> 2 interface + 2 standalone unit(s); codegraph=on anchors_changed=2 anchors_upstream=1 chain_merged=1 done=0 failed=0 pending=4 (grouping: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\grouping.json)
+{"repo": "C:\\DEV\\springBootTemplate", "base": "master", "branch": "sdr-mb-sql-sensitive", "empty": false, "excluded_nonempty": false, "codegraph": true, "total": 4, "units": [{"unit_id": "DataQueryController___query_contact", "kind": "interface", "route": "/query/contact;/query/users", "chain": [{"fqn_short": "DataQueryController.queryContact", "label": "DataQueryController.queryContact", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/DataQueryController.java", "line": 42, "change": "changed", "route": "/query/contact"}, {"fqn_short": "DataQueryController.queryUsers", "label": "DataQueryController.queryUsers", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/DataQueryController.java", "line": 31, "change": "changed", "route": "/query/users", "branch_of": 0}], "status": "pending"}, {"unit_id": "UserController___test", "kind": "interface", "route": "/test", "chain": [{"fqn_short": "UserController.test", "label": "UserController.test", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserController.java", "line": 42, "change": "unchanged", "route": "/test"}, {"fqn_short": "UserContactEntity.setId", "label": "UserContactEntity.setId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/UserContactEntity.java", "line": 21, "change": "changed"}], "status": "pending"}, {"unit_id": "src_main_java_com_linkinstars_springBootTemplate", "kind": "standalone", "route": "", "chain": [], "status": "pending"}, {"unit_id": "src_main_resources_mapper", "kind": "standalone", "route": "", "chain": [], "status": "pending"}], "done": 0, "failed": 0, "counts": {"interface": 2, "standalone": 2}, "excluded": {"count": 0, "by_reason": {}}, "budget": {"max_standalone_bytes": 65536, "max_interface_bytes": 262144}, "codegraph_stats": {"symbols_queried": 15, "edges_captured": 2, "edges_in_changed_set": 0, "anchors_changed": 2, "anchors_upstream": 1, "chain_merged": 1, "chains_materialized": 2, "excluded_files": 0}, "pending": [{"unit_id": "DataQueryController___query_contact", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\slices\\DataQueryController___query_contact.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\drafts\\DataQueryController___query_contact.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\DataQueryController___query_contact.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\DataQueryController___query_contact.failed", "kind": "interface", "route": "/query/contact;/query/users", "unit_bytes": 2932, "slimmed": {}, "chain": [{"fqn_short": "DataQueryController.queryContact", "label": "DataQueryController.queryContact", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/DataQueryController.java", "line": 42, "change": "changed", "route": "/query/contact"}, {"fqn_short": "DataQueryController.queryUsers", "label": "DataQueryController.queryUsers", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/DataQueryController.java", "line": 31, "change": "changed", "route": "/query/users", "branch_of": 0}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\external"}, {"unit_id": "UserController___test", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\slices\\UserController___test.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\drafts\\UserController___test.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\UserController___test.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\UserController___test.failed", "kind": "interface", "route": "/test", "unit_bytes": 3517, "slimmed": {}, "chain": [{"fqn_short": "UserController.test", "label": "UserController.test", "file": "src/main/java/com/linkinstars/springBootTemplate/controller/UserController.java", "line": 42, "change": "unchanged", "route": "/test"}, {"fqn_short": "UserContactEntity.setId", "label": "UserContactEntity.setId", "file": "src/main/java/com/linkinstars/springBootTemplate/bean/UserContactEntity.java", "line": 21, "change": "changed"}], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\external"}, {"unit_id": "src_main_java_com_linkinstars_springBootTemplate", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\slices\\src_main_java_com_linkinstars_springBootTemplate.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\drafts\\src_main_java_com_linkinstars_springBootTemplate.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\src_main_java_com_linkinstars_springBootTemplate.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\src_main_java_com_linkinstars_springBootTemplate.failed", "kind": "standalone", "route": "", "unit_bytes": 5873, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\external"}, {"unit_id": "src_main_resources_mapper", "input_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\slices\\src_main_resources_mapper.slice.md", "draft_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\drafts\\src_main_resources_mapper.json", "done_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\src_main_resources_mapper.done", "failed_marker": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\markers\\src_main_resources_mapper.failed", "kind": "standalone", "route": "", "unit_bytes": 1340, "slimmed": {}, "chain": [], "baseline_path": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\baseline.md", "external_dir": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\external"}], "offset": 0, "limit": 4}
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/diff_group.py --check "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive"; echo "EXIT=$?"
+[diff_group] --check ok: 4 pending unit(s) consistent (C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive)
+EXIT=0
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/fanout_runner.py --help
+usage: fanout_runner.py [-h] [--tier {scout,scout-merge,t1,t2,t3,sdr}]
+                        [--scout-plan SCOUT_PLAN] [--clusters CLUSTERS]
+                        [--candidates CANDIDATES] [--init-dir INIT_DIR]
+                        [--budget BUDGET] [--inventory INVENTORY]
+                        [--format {opencode,claude}] [--rules-dir RULES_DIR]
+                        [--target TARGET] [--repo REPO] [--base BASE]
+                        [--branch BRANCH] [--checkpoints CHECKPOINTS]
+                        [--inputs-dir INPUTS_DIR]
+                        [--host {claude,opencode,dsh}] [--wave WAVE]
+                        [--time-budget-ms TIME_BUDGET_MS]
+                        [--call-timeout-s CALL_TIMEOUT_S]
+                        [--stall-timeout-s STALL_TIMEOUT_S]
+                        [--hb-interval-s HB_INTERVAL_S]
+                        [--stall-waves STALL_WAVES] [--resume]
+                        [--cooldown-s COOLDOWN_S] [--no-rate-limit-stop]
+                        [--retry-failed] [--kill-stale]
+                        [--pending-file <list-stdout.json>] [--purge-audit]
+                        [--dry-run] [--template <tier-task.md>]
+
+deterministic tier-aware slot-backfill dispatcher for /mgh-init + /mgh-sdr
+fan-out (tiers: scout/scout-merge/t1/t2/t3/sdr; zero LLM turns; fixed template
++ verbatim fields; in-flight-capped host-CLI spawn; per-unit stall kill)
+
+options:
+  -h, --help            show this help message and exit
+  --tier {scout,scout-merge,t1,t2,t3,sdr}
+                        fan-out tier (default scout). Selects the enumeration
+                        script, task template, placeholder set, and fanout
+                        agent; scout call shape (--scout-plan etc.) is
+                        unchanged. t2 tier (map stage only): plan_aggregate.py
+                        --node t2 --init-dir/[--budget]/--materialize. scout-
+                        merge tier (map stage only; identical call shape):
+                        plan_aggregate.py --node scout-merge --init-
+                        dir/[--budget]/--materialize. sdr tier: diff_group.py
+                        --repo/--base/--branch/--checkpoints/--materialize
+  --scout-plan SCOUT_PLAN
+                        path to scout_plan.json (scout tier; forwarded to
+                        list_scout_batches)
+  --clusters CLUSTERS   path to clusters.json (t1 tier; forwarded to
+                        list_clusters)
+  --candidates CANDIDATES
+                        path to controls_candidates.json (t1 tier; hit lookup
+                        for --materialize)
+  --init-dir INIT_DIR   path to .mgh-init dir (t2 tier; forwarded to
+                        plan_aggregate --init-dir; run_config.json under it
+                        anchors the sidecar/liveness home)
+  --budget BUDGET       per-request aggregate byte cap (t2 tier; forwarded to
+                        plan_aggregate --budget; default None ->
+                        plan_aggregate DEFAULT_BUDGET)
+  --inventory INVENTORY
+                        path to controls_inventory.json (t3 tier; forwarded to
+                        list_rule_jobs)
+  --format {opencode,claude}
+                        rule format (t3 tier; determines rule_path)
+  --rules-dir RULES_DIR
+                        opencode rules detail dir (t3 tier; rule_path base)
+  --target TARGET       target project root (t3 tier; rule_path base, default
+                        .)
+  --repo REPO           absolute target git repo root (sdr tier; forwarded to
+                        diff_group + the tree anchor)
+  --base BASE           base ref (sdr tier; default master; forwarded to
+                        diff_group)
+  --branch BRANCH       branch ref (sdr tier; default: current branch,
+                        resolved by diff_group; forwarded verbatim)
+  --checkpoints CHECKPOINTS
+                        tier checkpoint dir (markers; forwarded to the tier's
+                        list script). REQUIRED for dispatch; OPTIONAL for
+                        --kill-stale recovery (scan hint only — the run dir is
+                        then anchored by the tier's plan artifact, e.g.
+                        --scout-plan/--init-dir/--repo)
+  --inputs-dir INPUTS_DIR
+                        per-unit input dir (forwarded as --materialize; audit
+                        <unit>.task.md copies land here). REQUIRED for
+                        dispatch; OPTIONAL for --kill-stale recovery (scan
+                        hint only)
+  --host {claude,opencode,dsh}
+                        explicit host CLI; default: opencode in PATH, else
+                        claude, else dsh, else exit 2 + manual-dispatch
+                        fallback recipe
+  --wave WAVE           in-flight subprocess cap (default 5) - a slot-backfill
+                        concurrency limit, not a batch size: any unit reaching
+                        a terminal state frees its slot and the next queued
+                        unit is dispatched immediately
+  --time-budget-ms TIME_BUDGET_MS
+                        soft deadline in ms: stop dispatching new units, drain
+                        in-flight, exit 0 with partial:true (re-dispatch the
+                        same command). RECOMMENDED = host per-call timeout x
+                        0.8 (host 900000ms -> 720000; claude Bash cap 600000ms
+                        -> 480000); MUST stay BELOW the host per-call timeout
+                        (soft deadline fires before the host hard kill; four-
+                        level invariant: stall-timeout-s < call-timeout-s <
+                        time-budget-ms x 0.8 < host per-call timeout, >=20%
+                        per level — the innermost level is dropped when
+                        --stall-timeout-s 0). When passed, --call-timeout-s
+                        MUST be passed explicitly and stay below budget x 0.8
+                        (spawn-time validation, exit 2 otherwise)
+  --call-timeout-s CALL_TIMEOUT_S
+                        per-subprocess absolute timeout in seconds (default
+                        7200 for out-of-host manual runs; calibrated for slow
+                        intranet LLM endpoints, ~4x headroom; better-slow-
+                        than-killed: a killed unit leaves no marker, stays
+                        pending, re-dispatch wastes a whole run). When --time-
+                        budget-ms is passed this flag MUST be passed
+                        explicitly and stay below budget x 0.8. The kill path
+                        is the whole-tree kill (see --stall-timeout-s)
+  --stall-timeout-s STALL_TIMEOUT_S
+                        per-unit output-silence window in seconds, INITIAL
+                        value. FOUR-segment value domain: 0 = disable the
+                        criterion outright; 1..59 = rejected with exit 2 (this
+                        is the HARD REJECTION FLOOR = 60); 60.. = a valid
+                        silence window. The default 900 is the OUT-OF-HOST
+                        MANUAL-RUN default ONLY - it is NEVER a rejection
+                        floor and MUST NOT be described as one (the floor is
+                        60). When --time-budget-ms is passed (a host-driven
+                        run) this flag MUST be passed explicitly and stay
+                        below --call-timeout-s (the same four-level invariant)
+                        - NEVER omit it and rely on the default 900: the host-
+                        driven --call-timeout-s is far smaller, so the stall <
+                        call spawn-time check would refuse to start with exit
+                        2 and make the tier unusable. Recommended host-driven
+                        value: 300. Semantics: no stdout/stderr bytes for this
+                        long -> that unit's whole process tree is killed
+                        (taskkill /T /F - the .cmd shim chain's real host-CLI
+                        process dies too) and the unit stays pending for re-
+                        dispatch. Byte-silence means the unit produced NOTHING
+                        for that long; it does NOT mean the unit is hung - on
+                        a rate-limited gateway the usual cause is the call
+                        waiting in the gateway's queue, which is locally
+                        indistinguishable from a real hang (same silence, same
+                        zero output). The criterion's job is to bound how long
+                        one slot may sit idle in this run - a convergence
+                        bound - never to diagnose unit health. Silence means
+                        BOTH streams idle (the clock takes the newer of the
+                        two streams' last-byte stamps), so a unit whose stderr
+                        never emits is not mistaken for silent. Default
+                        calibration: p99(completed-unit runtime) x 2, rounded
+                        down to the minute and never below 900 (observed
+                        sample n=84: p50 134s / p95 229s / p99 325s / max 325s
+                        -> 650s -> 600s -> floor 900s). That sample is the
+                        SURVIVING population only - units killed for gateway
+                        queueing are absent from it by construction - so it
+                        bounds healthy units and MUST NOT be read as 'past
+                        this it deserves to die'. Re-calibrate from the
+                        runtime_* fields every exit reports. The EFFECTIVE
+                        window widens within a run on false-kill self-
+                        evidence: if a stall-killed unit then completes on re-
+                        dispatch in the same run, the window becomes min(2x
+                        current, --call-timeout-s x 0.8) for the rest of the
+                        run (stderr-disclosed, once per triggering unit). 0
+                        disables the criterion outright - convergence is then
+                        bounded by --call-timeout-s ALONE, so a host-driven
+                        run SHOULD tighten that value; the 'stall < call'
+                        ordering constraint does not apply in this mode. A
+                        mis-killed unit re-dispatches and its
+                        <checkpoints>/<tier>/<unit>.run.log keeps the
+                        evidence, but it also loses the work already done AND
+                        its queue position. Kill scope is the unit's own
+                        session (units are spawned with start_new_session) -
+                        it NEVER terminates the dispatcher, and an interactive
+                        Ctrl-C no longer reaches in-flight units (the exit
+                        path tree-kills them; a hard kill's orphans are
+                        cleared with --kill-stale)
+  --hb-interval-s HB_INTERVAL_S
+                        stderr in-flight heartbeat period in seconds (default
+                        60): one line per running unit (unit id + seconds
+                        since its child's last output) so a human
+                        distinguishes 'slow' from 'hung' live from the host
+                        TUI; stdout stays a single JSON line
+  --stall-waves STALL_WAVES
+                        convergence circuit breaker window multiplier: every
+                        --stall-waves x --wave dispatched units the disk
+                        terminal count (done+failed markers) is re-derived
+                        once; --stall-waves consecutive zero-growth re-
+                        derivations with units still queued/in-flight -> stop
+                        dispatching, exit 2 (default 2; stdout carries
+                        stalled:true + stalled_pending[] with each stuck
+                        unit's marker existence; a stall-killed unit does not
+                        raise the disk count, so a deterministic hang is
+                        truncated here; recipe: stop re-dispatching, diagnose
+                        via resume_state.py --check)
+  --resume              re-derive pending from disk markers (same entry point
+                        as a fresh call; kept for call-shape parity)
+  --cooldown-s COOLDOWN_S
+                        fast-fail storm cooldown in seconds (default 300; 0 =
+                        off): when >= 3 requeue events
+                        (crash/timeout/stall/spawn-error units returning to
+                        the queue tail; failed acks and pre-spawn anchor
+                        failures NEVER count — they terminate without
+                        requeueing) accumulate within a 120s sliding window,
+                        new dispatch pauses for this many seconds while in-
+                        flight units keep running and harvesting. The wait is
+                        capped by the remaining --time-budget-ms minus an in-
+                        flight convergence margin (observed avg unit duration
+                        x in-flight count); when the budget cannot cover it
+                        the cooldown degrades to continuing immediately with a
+                        stderr disclosure. Also arms the pre-breaker backoff:
+                        when the zero-progress breaker is about to exit 2, one
+                        single 'cooldown -> full disk re-derivation -> re-
+                        observe' round runs first (disk growth disarms the
+                        breaker; still zero growth exits 2 stalled) — never
+                        more than once per call. 0 disables the cooldown AND
+                        the pre-breaker backoff. stdout summary carries
+                        cooldowns:<n>
+  --no-rate-limit-stop  disable the rate-limit crash-storm fast-path
+                        truncation (default: ON). With it on, every crashed
+                        unit's output tails are classified against quota
+                        signatures (429 / too many requests / rate limit /
+                        quota, case-insensitive, crash terminal states only);
+                        when >= --wave crashes since the last disk terminal
+                        advance are ALL rate-limit, dispatch stops immediately
+                        (fast path, ahead of any new cooldown) and the runner
+                        exits 2 with stdout rate_limited:true +
+                        rate_limited_crashes:[ids] and a stderr wait-one-
+                        quota-window recipe. Signature drift (all crashes
+                        classify unknown) degrades gracefully: no truncation,
+                        the event-driven cooldown and the breaker still
+                        backstop. Non-rate-limit crashes never count toward
+                        the threshold
+  --retry-failed        re-dispatch units the tier enumerator re-lists as
+                        failed (it is invoked with --include-failed when this
+                        flag is set — unit identity ALWAYS comes from the
+                        enumerator, never from filename stems). At claim the
+                        unit's .failed marker is deleted (the failure evidence
+                        stays in the unit's *.run.log) and the unit dispatches
+                        normally; a re-failure writes a fresh marker
+                        (naturally bounded — failed acks never requeue) and
+                        each unit is retried at most once per call. stdout
+                        summary carries retried_failed:<n>. Orchestrator
+                        discipline: at most one --retry-failed round per tier
+                        wrap-up (failed>0 with provider-transient run.log
+                        shape), then accept the gap and disclose it in the
+                        report
+  --kill-stale          orphan-tree cleanup: inspect <init-
+                        dir>/fanout_runner.<tier>.pid liveness files and kill
+                        what they record (runner tree; or, when the runner is
+                        dead, recorded host-CLI child trees — matched by the
+                        EXECUTABLE TOKEN (argv[0] basename, .exe/.cmd/.bat
+                        stripped, never a whole-cmdline substring match, so an
+                        unrelated process merely mentioning a host name in its
+                        arguments is never killed)). Needed after a HARD kill
+                        only: units lead their own session, so an interactive
+                        Ctrl-C no longer reaches in-flight units through the
+                        tty, and the dispatcher's exit path tree-kills
+                        whatever is still registered before deregistering.
+                        DESTRUCTIVE: run with --dry-run first - a real kill
+                        with detected targets and no prior dry-run review
+                        exits 2 + recipe. Idempotent; tier-agnostic
+  --pending-file <list-stdout.json>
+                        TEST HOOK: consume the tier listing from a file (no
+                        spawn, no list invocation)
+  --purge-audit         delete <inputs-dir>/*.task.md audit copies (with
+                        --dry-run: list only)
+  --dry-run             with --purge-audit: list without deleting; alone: skip
+                        dispatch
+  --template <tier-task.md>
+                        override task-message template path (default: sibling
+                        prompts/fragments/fanout/<tier>-task.md of this
+                        install)
+[0m
+[0m# [0mTodos
+[✓] Probe interpreter (py/python/python3)
+[✓] Step 2: diff_group.py materialize + --check
+[•] Step 3: fanout_runner --tier sdr (retry partial)
+[ ] Step 4: render_sdr_report.py + --check
+[ ] Step 5: print report path + counts, disclose, rm .active
+[0m
+[0m$ [0mexport MGH_SDR_ACTIVE=1; py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo "C:\DEV\springBootTemplate" --base master --branch sdr-mb-sql-sensitive --checkpoints "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\markers" --inputs-dir "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\slices" --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300
+[fanout_runner] tier=sdr host=opencode repo=C:\DEV\springBootTemplate total=4 pending=4 wave=5 codegraph=on
+[fanout_runner sdr] +00:00:00 wave=3 unit=src_main_java_com_linkinstars_springBootTemplate spawn done=0/4
+[fanout_runner sdr] +00:00:00 wave=2 unit=UserController___test spawn done=0/4
+[fanout_runner sdr] +00:00:00 wave=1 unit=DataQueryController___query_contact spawn done=0/4
+[fanout_runner sdr] +00:00:00 wave=4 unit=src_main_resources_mapper spawn done=0/4
+[fanout_runner sdr] +00:01:00 inflight=4 unit=src_main_java_com_linkinstars_springBootTemplate idle=1s stall_window=300s done=0/4
+[fanout_runner sdr] +00:01:00 inflight=4 unit=UserController___test idle=0s stall_window=300s done=0/4
+[fanout_runner sdr] +00:01:00 inflight=4 unit=DataQueryController___query_contact idle=9s stall_window=300s done=0/4
+[fanout_runner sdr] +00:01:00 inflight=4 unit=src_main_resources_mapper idle=0s stall_window=300s done=0/4
+[fanout_runner sdr] +00:01:02 wave=2 unit=UserController___test ok done=1/4
+[fanout_runner] unit UserController___test: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\drafts\UserController___test.json 1)
+[fanout_runner sdr] +00:01:13 wave=4 unit=src_main_resources_mapper ok done=2/4
+[fanout_runner] unit src_main_resources_mapper: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\drafts\src_main_resources_mapper.json 4)
+[fanout_runner sdr] +00:02:01 inflight=2 unit=src_main_java_com_linkinstars_springBootTemplate idle=3s stall_window=300s done=2/4
+[fanout_runner sdr] +00:02:01 inflight=2 unit=DataQueryController___query_contact idle=0s stall_window=300s done=2/4
+[fanout_runner sdr] +00:02:09 wave=1 unit=DataQueryController___query_contact ok done=3/4
+[fanout_runner] unit DataQueryController___query_contact: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\drafts\DataQueryController___query_conta)
+[fanout_runner sdr] +00:02:33 wave=3 unit=src_main_java_com_linkinstars_springBootTemplate ok done=4/4
+[fanout_runner] unit src_main_java_com_linkinstars_springBootTemplate: ok (ok C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\drafts\src_main_java_com_linkinstars_spr)
+[fanout_runner] done (sdr): 4/4 done, 0 failed, 0 pending, partial=False
+{"runner": "fanout_runner", "tier": "sdr", "repo": "C:\\DEV\\springBootTemplate", "host": "opencode", "total": 4, "done": 4, "failed": 0, "pending": 0, "wave": 5, "waves_run": 4, "partial": false, "stall_killed": [], "stalled": false, "stall_killed_slots_s": 0, "stall_killed_slot_pct": 0.0, "runtime_p50_s": 73, "runtime_p95_s": 153, "runtime_max_s": 153, "cooldowns": 0, "retried_failed": 0, "rate_limited": false}
+[0m
+[0m# [0mTodos
+[✓] Probe interpreter (py/python/python3)
+[✓] Step 2: diff_group.py materialize + --check
+[✓] Step 3: fanout_runner --tier sdr (retry partial)
+[•] Step 4: render_sdr_report.py + --check
+[ ] Step 5: print report path + counts, disclose, rm .active
+[0m
+[0m$ [0mexport MGH_SDR_ACTIVE=1; py .opencode/mgh-core/scripts/render_sdr_report.py --run-dir "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive" --repo "C:\DEV\springBootTemplate"
+[render_sdr_report] report=C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-sql-sensitive-20261014_100930.html
+[render_sdr_report] findings=15 failed_units=0 boundaries=6
+{"report": "C:\\DEV\\springBootTemplate\\mgh-sdr-sdr-mb-sql-sensitive-20261014_100930.html", "data": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\sdr_report_data.json", "manifest": "C:\\DEV\\springBootTemplate\\.mgh-sdr\\runs\\20261014_100432-sdr-mb-sql-sensitive\\sdr_manifest.json", "counts": {"units": 4, "interfaces": null, "standalone": null, "findings": 15, "findings_by_severity": {"high": 9, "medium": 5, "low": 1, "info": 0}, "failed_units": 0, "excluded_files": 0}, "boundaries": 6, "checked": false}
+[0m
+[0m$ [0mpy .opencode/mgh-core/scripts/render_sdr_report.py --check "C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive"; echo "EXIT=$?"
+[render_sdr_report] --check ok (C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive)
+EXIT=0
+[0m
+[0m$ [0mrm "C:\DEV\springBootTemplate\.mgh-sdr\.active"; ls -a "C:\DEV\springBootTemplate\.mgh-sdr"
+.
+..
+runs
+[0m
+[0m# [0mTodos
+[✓] Probe interpreter (py/python/python3)
+[✓] Step 2: diff_group.py materialize + --check
+[✓] Step 3: fanout_runner --tier sdr (retry partial)
+[✓] Step 4: render_sdr_report.py + --check
+[✓] Step 5: print report path + counts, disclose, rm .active
+[0m
+[launch] host error evidence: C:\DEV\springBootTemplate\.mgh-sdr\runs\20261014_100432-sdr-mb-sql-sensitive\host_error.log (0 ERROR line(s) in window)
+[launch] branch sdr-mb-sql-sensitive: ok -> C:\DEV\springBootTemplate\mgh-sdr-sdr-mb-sql-sensitive-20261014_100930.html
+[launch] FAILED BRANCHES (1):
+  - sdr-mb-nonexistent: branch not found: sdr-mb-nonexistent

@@ -16,6 +16,112 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — 人类面输出纪律:词表单源 + 读者评审,mgh-sdr 报告首落地 (0.1.78)
+
+- 新能力规格 `human-facing-output-discipline`(人类面表面登记制 + 校准读者画像 + 内部词汇
+  闭集与两面守卫 + 读者模拟评审 + 写作纪律;初版登记 = mgh-sdr HTML 报告全文 + 数据文件
+  人类文本字段)。凡是人要读的产物不许出现只有本工具研发者才懂的词;过程文档按上下文预算
+  保持紧凑,不在辖内。
+- 新增词表单源 `core/scripts/human_face_vocab.py`:核心 10 词条(投影/切片/hunk/扇出/物化/
+  待办壳/facet/闭集/vvah/vvaharness,每条带「人话替身」)+ 按域补充词(sdr 激活;init/
+  ut-init、sra、sast/srr 预置数据,登记时才激活)+ `scan_text` 扫描函数;零依赖、无 CLI。
+  同形词守则:同形不同义按域收精确词形、NEVER 单词子串禁(「锚点/锚定/基线/单元/哨兵/
+  存量/簇/扫描器」全不收——「锚点」是产品概念,只有「路由锚/向上锚定/锚定单元」是 sdr
+  算法词)。增长闭环 = 读者评审建议 + 维护者人工发现 → 确认 → 加一行 → 同步改内容锚测试;
+  `tests/test_human_face_vocab.py` 以精确集内容锚定「改词不改测试 = 红」。
+- `render_sdr_report.py` 确定性文案平实化:分组概览改「评审分组:N 个接口单元、M 个独立文件
+  单元(共 K 个)」+「调用链分析:启用——N 个变更接口作为分组入口、M 处改动挂接到未变更
+  接口、同入口链路合并 K 组」平实主句,调用边计数收进默认折叠「分组诊断」明细(信息不丢,
+  默认视图不闹;grouping.json 字段不动);诚实边界 ①–⑦ 与排除/失败/截断披露逐条转述
+  (「目录聚簇/投影/闭集/facet/切片/hunk/检查面」等黑话全数清除,语义保留);头部标签
+  「检查面:」改「检查维度:」。新守卫测 `DeterministicCopyVocabGuardTest` 全量提取
+  boundaries 变体/概览/模板文本/标签常量扫闭集,漏改即红(确定性文案命中 = 实现缺陷)。
+- draft 问题记录 schema 增两个可选人类面字段:`repro`(复现方式:怎么调 + 传什么 + 看到
+  什么)与 `fix_diff`(1–2 组 `{before, after}`,`before` 从 slice 逐字摘原文)。问题卡片
+  渲染「复现方式」行 + 「修改前/修改后」上下堆叠 `<pre>` 代码块(等宽;文本走 textContent
+  注入路线,`</script>`/`<!--` 由 `_json_embed` 转义继续覆盖);数据文件 `findings[]` 透传,
+  HTML 与 JSON 同源;旧 draft 缺字段安静省略(渲染与 `--check` 不失败);跨单元三元组去重时
+  两个新字段按首个携带者回填(risk/suggestion 维持首写者赢)。
+- `--check` 增模型文本闭集扫描(`risk`/`suggestion`/`repro`/`fix_diff` 含对比块两侧):
+  命中仅 stderr 计数告警(字段名 + 词),退出码与文本零改动、绝不改写——模型措辞是软质量,
+  不因它卡死跑完的长流程;确定性文案闭集合规由回归测试保障,不入 `--check` 面。告警面与
+  回归测试 import 同一词表模块(单一真相源,全仓无第二份副本)。
+- 读者模拟评审(拦词表拦不住的临场新造词):每次渲染原子写出
+  `<run-dir>/readability_text_bundle.json`(合并后全部问题记录的人类面文本单束,评审唯一
+  输入);编排器在首次渲染后派发**一次**有界评审子代理(新任务模板
+  `core/prompts/fragments/fanout/readability-review.md`:恰好读束 → 恰好写
+  `readability_advisories.json` → 单行 ack,至多 20 条建议)后**重渲染**(幂等原子覆盖):
+  建议文件可解析 → 数据文件增 `readability[]` + 报告增默认折叠「可读性自检」小节 + stderr
+  计数;缺席/不可解析/空产出 → 小节与字段省略 + stderr note,退出码不变、resume 收尾不受
+  影响(尽力而为;只建议不改写,建议词经维护者确认才进词表)。
+- 提示词与三面镜像同步:`sdr-task.md` 扩字段 schema + 写作纪律节(读者画像/`risk` 首句写
+  现象/复现形态示例/前后对比适用条件/禁词,输出字段描述文字自身改读者语言——模型模仿字段
+  描述语域,这是防污染最高杠杆点);三面 agent 定义(opencode/claude `sdr-review-fanout`、
+  dsh `sdr`)Output schema 行字节一致 + 纪律指针;三面 mgh-sdr 壳加 step 4.5 可读性评审
+  (尽力而为、失败 NEVER 重试超过一次、NEVER 阻断 run;派发机制按各宿主——dsh 走
+  `MGH_TASK_TEXT` env 无 stdin 通道)。壳预算对冲:step 4 报告结构描述与「报告形态」披露条
+  去重(内容并入 step 4),三面增量净零,dsh skill 维持 4997/5000。
+- `core/contracts/sdr/pipeline.md` 同步:run 目录布局补两个约定路径、draft schema 块扩
+  可选字段 + 兼容降级、render 契约行补平实文案/复现修复对比/文本束与自检小节/`--check`
+  告警面、编排器 step 链补评审与重渲染。`install.sh` 自检清单补 `human_face_vocab` 脚本
+  与 `readability-review.md` fragment(co-location 断言)。
+- 测试:新增 `tests/test_human_face_vocab.py` 18 测(核心/sdr 精确集内容锚、预置域抽查、
+  同形负向锚、扫描命中/边界/域门控、双端同源 import、模板与三面 agent 定义/壳对账);
+  `test_render_sdr_report` 增 13 测(确定性文案禁词守卫 ×3、复现/修复对比渲染与畸形降级
+  ×3、`--check` 告警与干净对照 ×2、文本束与自检小节缺席/消费/坏产出 ×5)+ 存量措辞锚随
+  平实化更新(「向上锚定 8」→ 新句式锚)。定向面 10 套全绿;全量回归 66 文件除
+  `test_diff_group` 一例 codegraph probe 措辞失败(经 stash 对照为 HEAD 存量、环境相关,
+  非本 change 引入)外全绿;lint 四件套过(contracts 465 flags / purity 334 文件零违例,
+  基线钉扎随插入行号漂移同步更新且条目数不变 / budget 17 壳全过 / plain_language exit 2
+  为既有噪音)。
+
+### Added — /mgh-sdr launcher 内联多分支清单 `--branch-list` (0.1.77)
+
+- `mgh_sdr_launch.py` 新增 `--branch-list "b1,b2"`：逗号分隔的分支名内联清单，引号包住
+  直接写在命令行上——临时比两三个分支时不必先建清单文件。解析规则：按逗号切分、逐项去
+  首尾空白、重复分支保序去重（只跑一次）；**空项拒识**（`a,,b`、结尾多逗号、全空白 →
+  退出码 2 并报出第几项，绝不静默跳过——被吞掉的分支就是无声的复核缺口）；**无注释语法**
+  （每个逗号项都是字面分支名）。与文件喂法 `--multi-branch` **互斥**：同给 → 退出码 2 +
+  recipe（逗号在 git 分支名中合法，"值含逗号即列表"的双重语义对合法分支名有歧义，故独立
+  参数 + 显式拒识，不猜优先级）；与单分支 `--branch` 同给时内联清单优先（与
+  `--multi-branch` 压过 `--branch` 的既有行为同形）。内联清单汇入与 `--multi-branch`
+  完全相同的串行逐分支流程（每分支独立 run 目录 + 独立报告，退出码 0/1/2 语义不变）；
+  `--help` 载明该 flag（launcher 的唯一契约面）。README 多分支段同步补第三种喂法。
+
+### Added — README 补 /mgh-sdr launcher 完整命令行与参数示例 (0.1.76)
+
+- 多分支批量复核段补全:`--host opencode`、`--dry-run` 冒烟、`--branch` 单分支、`--open`、退出码 0/1/2、
+  `branches.txt` 格式(一行一分支/`#` 注释/重复去重);修正示例脚本路径——原文 `<安装目录>/mgh-core/scripts/`
+  是 dsh 面布局,opencode 面(首选宿主)实为 `<项目>/.opencode/mgh-core/scripts/`,照抄会找不到文件;顺带
+  披露 0.1.75 的失败证据落点(`host_error.log` 免翻全局日志)。
+
+### Added — 研发流程规则：openspec SDD 工件按人类可读写作（只约束增量） (0.1.76)
+
+- AGENTS.md 研发铁律 R3 增补一条：proposal / design / tasks / spec delta 按人类面可读写作。
+  动机：这些工件是维护者评审的对象，此前沿用了 agent 面的压缩文风（复合名词堆叠、嵌套括号、
+  连发的规范动词），维护者评审越来越吃力；而 SDD 工件与目标用户的 150K 预算完全无关——本仓
+  研发阶段上下文 1M、token 无限制，压缩没有正当性。规则要点：基准读者 = 一两年 Java Web 经验、
+  不了解本项目内部语境的工程师；完整句子、一句一个信息；术语首现给白话解释；禁自造复合名词；
+  括号嵌套 ≤1 层；RFC-2119 只用于真正的规范断言。openspec 结构约束与人话序要求不变；历史归档
+  与既有主规格存量段落不回溯。纯流程文档规则，无代码改动。
+
+### Fixed — /mgh-sdr launcher 失败可诊断性:扇出子会话 provider 错误时间窗证据落盘(上轮真仓复测 F1) (0.1.75)
+
+- **F1 收口——`--print-logs --log-level ERROR` 对扇出子会话 provider 错误行为级无效**:该 flag 组合只路由
+  opencode **父 run 进程自身**的日志;编排器经 Bash 派发的扇出 subagent 是独立会话,其 provider 错误(2026-10-13
+  实测 2 次 `AI_APICallError` stream 断连)只落用户级全局日志 `~/.local/share/opencode/log/opencode.log`,
+  launcher stderr 零浮出——「失败可诊断」承诺在其目标失败形态上不成立,排障须脱离 run 目录人肉翻全局日志。
+  现在:flags 保留(父进程自身错误仍尽力披露,承诺面在 docstring/spec 双处收窄),宿主退出后 launcher 从全局日志
+  **时间窗提取** `level=ERROR` 行逐字落盘 `<run-dir>/host_error.log`(两行来源/窗口头注;opencode 宿主、真跑分支、
+  **成功与失败同治**——被 opencode 内部重试吸收的瞬时断连同样留痕);stderr 披露一行证据计数与路径;分支 FAILED 时
+  失败信封与 `FAILED BRANCHES` 汇总携带证据文件指针,零捕获时 recipe 改指全局日志绝对路径;提取一律 fail-soft
+  (全局日志缺失/不可读/无任何 `timestamp=` 键/ERROR 行时间戳不可解析 → stderr note 注明假定路径——opencode 换
+  路由时自我暴露——**NEVER** 影响分支判定与退出码);证据文件三态可区分(缺席=未提取/仅头注=零捕获/有正文=窗内
+  ERROR 行);诚实边界:时间窗提取是诊断近似,同机并发 opencode 会话窗内 ERROR 行可能混入。规格 launcher 要求
+  第 ⑧ 项改述为真实机制 + 3 个新 scenario;`test_mgh_sdr_launch` 新增 `TestHostErrorEvidence` 11 测
+  (窗界/解析拒绝/多字节逐字/三态/fail-soft/claude 跳过/失败指针),假宿主面全局日志钉扎 hermetic(测试永不读
+  真机全局日志)。
+
 ### Fixed — mgh-init 收官对齐:`--merge` 显式拒绝 / base agent ack 枚举收口 / stage 提示词七修 / 契约九修 等 (0.1.74)
 
 - **H11 拍板项选 (b)——`--merge` 全链显式拒绝**:该模式声明的 `merge_inventories.py` 全仓不存在(无可执行路径),

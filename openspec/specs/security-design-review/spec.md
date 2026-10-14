@@ -228,8 +228,26 @@ JSON 问题记录)+ touch `done_marker`,NEVER 读其他单元的 slice 或其他
 校验);检查面 SHALL 经 `--dimensions <inline-json|@path>` 参数化收窄或扩展(闭集校验,维度键
 闭集 + 扩展维度仅作自由文本检查项透传;非法键退出码 2 早停,任何 LLM token 之前)。每条问题
 记录(draft `findings[]` 项)SHALL 统一 schema:`{dimension, severity(high|medium|low|info),
-route, file, line_hint, risk(简体中文风险描述), suggestion(简体中文整改建议), control_ref
-(命中的存量安全设计名或 null)}`。`sensitive-data` 维度 SHALL 依编排器透传的敏感目录执行(见
+route, file, line_hint, line(int,问题锚定行,可选), risk(风险描述,写法见下方写作纪律),
+suggestion(整改建议,写法见下方写作纪律), repro(可选,复现方式), fix_diff(可选,修复
+前后代码对比), control_ref(命中的存量安全设计名或 null)}`。
+
+**人类面字段写作纪律**(任务模板 SHALL 逐字承载,三面 agent 定义的 Output schema 行同步):
+`risk`/`suggestion`/`repro`/`fix_diff` 是给人读的文本——读者画像见能力
+`human-facing-output-discipline`(一两年 Java Web 经验的工程师,不懂本工具内部概念)。
+写法上 SHALL:
+
+- `risk` 第一句写现象:谁、从什么入口、传什么参数 → 发生什么;技术根因放后面。
+- 问题能落到具体接口/方法调用时 SHALL 带 `repro`,写「怎么调 + 传什么 + 看到什么」
+  (示例:以任一有效登录会话 POST /user/del 传他人 id → 他人记录被删除);设计缺失类
+  构造不出具体调用的,可以省略。
+- 改动只有一两处代码时 SHALL 带 `fix_diff`(1–2 组 `{before, after}`;`before` 从 slice
+  里逐字摘原文,`after` 写改后的样子);改动更多或跨文件重构时省略,`suggestion` 文字
+  说清楚即可。
+- 禁用能力 `human-facing-output-discipline` 闭集里的内部词;越权、IDOR、SQL 注入、脱敏、
+  白名单这类安全常用词是读者的工作语言,不受限。
+
+`sensitive-data` 维度 SHALL 依编排器透传的敏感目录执行(见
 「敏感目录复用与回退」要求);6 维度各自的判定锚点是**存量安全设计**(AGENTS.md 安全章节 +
 `docs/security-controls/*.md` + 项目记忆),subagent task 消息 SHALL 逐字携带编排器从存量设计
 投影出的**检查基线摘要**(确定性由 `sdr_context.py` 产出,≤ 预算字节),NEVER 要求 subagent 自行
@@ -242,6 +260,25 @@ route, file, line_hint, risk(简体中文风险描述), suggestion(简体中文�
 - **THEN** 该单元 draft 含一条 `{dimension:"horizontal-authz", severity:"high", route:"/user/detail",
   file:"UserController.java", risk:<未按存量设计校验的中文描述>, control_ref:<存量设计名>}` 的
   finding,且该 finding 可被渲染器与其他单元的去重合并
+
+#### Scenario: 可复现问题携带复现方式
+
+- **WHEN** slice 显示新增接口 `/user/del` 直接以请求参数 `id` 调用 DAO 删除(无归属校验)
+- **THEN** 该 finding 带 `repro`,内容是「怎么调 + 传什么 + 看到什么」(如:以任一有效登录
+  会话 POST `/user/del` 传他人 `id` → 他人记录被删除),不含闭集词
+
+#### Scenario: 局部修复携带前后代码对比
+
+- **WHEN** 某 finding 的整改点 = 在 DAO 查询单处追加数据归属条件
+- **THEN** 该 finding 带 `fix_diff: [{before: <slice 内原查询原文>, after: <含归属条件的
+  修改后形态>}]`;整改点超过 2 处或属跨文件重构的 finding 省略该字段
+
+#### Scenario: 写作纪律进任务模板与 agent 定义
+
+- **WHEN** 检查 `sdr-task.md` 任务模板与三面 agent 定义(opencode/claude `sdr-review-fanout`、
+  dsh tier agent)的产物文件
+- **THEN** 模板含写作纪律节和扩字段后的 draft schema 示例,输出字段的描述文字自身零闭集词,
+  三面 agent 定义的 Output schema 行与之一致(确定性文档面,机器可对账)
 
 #### Scenario: 检查面参数化收窄
 
@@ -328,7 +365,9 @@ manifest `failed_units[]` 计入,不阻断渲染),按 `{dimension, route, file}`
 file:// 双击用任意现代浏览器打开即可阅读,不依赖联网与任何已安装工具。报告 SHALL 为简体中文、
 面向人读,结构:
 
-- **头部**(分支/base/时间/检查面/敏感目录来源/外部仓结论摘要 + 分组概览,保留现行);
+- **头部**(分支/base/时间/检查面/敏感目录来源/外部仓结论摘要 + 分组概览):分组概览 SHALL
+  满足本需求「报告确定性文案措辞」段和能力 `human-facing-output-discipline` 的出口守卫
+  要求;
 - **章节一「简报表」**(本需求的核心结构):HTML 表格,**行 = 评审单元**(排序:interface 按
   route 升序、standalone 殿后按 unit_id;多路由单元按首路由参与排序),列 = 接口/方法入口、
   调用链、是否前端接口、前端使用次数、6 维度各一列(默认闭集维度;自由扩展维度各追加一列)。
@@ -350,7 +389,10 @@ file:// 双击用任意现代浏览器打开即可阅读,不依赖联网与任�
   条目锚点 = 其页内跳转目标),标题形态 `P-01 · <维度中文标签> · <route 或独立方法> ·
   <severity 中文>`;正文含位置(`file:line`——line 取 draft 新增 `line` 字段(问题锚定行号,
   数值);draft 缺 `line` 时降级为 `file`(不硬失败,旧 draft 兼容);位置文本 SHALL 渲染为
-  指向该源文件的链接(见「源文件链接渲染」段))、风险、建议、control_ref;排序 severity
+  指向该源文件的链接(见「源文件链接渲染」段))、风险、建议、control_ref,以及两项可选
+  展示——**复现方式**(draft 带 `repro` 就渲染一行「复现方式」;没有就省略,不报错)与
+  **修复对比**(draft 带 `fix_diff` 就按 1–2 组「修改前/修改后」代码块渲染:等宽字体、
+  上下堆叠、代码文本走 textContent 注入路线;没有就省略,不报错);排序 severity
   升序(高→提示)、同 severity 按 P-NN;
 - **章节三「分支调用链图」**:仅含带真实分支(`chain[]` 存在 **非 external** 节点携带
   `branch_of`——即 java 调用扇出;mapper 终端节点按编码也带 `branch_of`,但不构成真实
@@ -359,8 +401,29 @@ file:// 双击用任意现代浏览器打开即可阅读,不依赖联网与任�
   SHALL 支持缩放与平移(页内交互),SHALL NOT 依赖任何外部图形库;线性链单元(含仅 ⇢ 终端
   带 `branch_of` 的直连 dao 短链)SHALL NOT 入本节;SVG 节点 SHALL NOT 承载源文件超链接
   (源文件跳转统一由章节一表格与章节二承担,图形节点仅悬停提示 `file:line`);
-- **「无问题单元」清单**(保留,供 merge 前放行参考)+ **诚实边界节**(≥7 条,含排除集披
-  露,保留现行)。
+- **「无问题单元」清单**(保留,供 merge 前放行参考)+ **诚实边界节**(≥7 条,含排除集披露,
+  保留现行)。
+
+**报告确定性文案措辞**:报告里全部由渲染器**确定性产出**的文案——头部分组概览、诚实边界
+条目、排除/失败/截断披露、章节标题、表头、图例——SHALL 用校准读者(一两年 Java Web 开发
+经验的工程师,见能力 `human-facing-output-discipline`)能顺读的平实简体中文书写,SHALL NOT
+携带分组算法/流水线的实现词汇。禁用闭集 = 能力 `human-facing-output-discipline` 的核心
+词表 + sdr 域补充词表(路由锚、向上锚定、锚定单元、目录聚簇、判不穿、残余归并、链合并、
+检查面,及概览分类语境的 interface / standalone)。闭集词的概念要用
+读者的话转述(词表每个词条都带公认的人话替身,如「向上锚定」→「改动挂接到未变更的接口」);分组诊断的数字(调用边数等)
+SHALL 保留在数据文件里,报告默认视图可以收进默认折叠的「分组诊断」明细——信息不丢,
+默认视图不闹。诚实边界 ①–⑦ 条的**语义逐条保留**,措辞按本段转述。
+
+**读者模拟评审与文本束**(拦模型临场新造的难懂词,机制见能力 `human-facing-output-discipline`
+的「读者模拟评审」要求):渲染 SHALL 同步写出 `<run-dir>/readability_text_bundle.json`——
+合并后全部人类面文本字段(P-NN + risk/suggestion/repro/fix_diff 文本)的单一文本束,它是
+读者模拟评审的唯一输入。编排器 SHALL 在首次渲染后派发**一次**有界评审 subagent(任务模板
+`core/prompts/fragments/fanout/readability-review.md`:读文本束 → 写
+`<run-dir>/readability_advisories.json` → 回传单行有界 ack),然后**重渲染**(渲染幂等、原子
+覆盖):建议文件存在且可解析 → 数据文件增可选 `readability[]` 字段、报告增设默认折叠的
+「可读性自检」小节 + stderr 报一条计数;缺席或不可解析 → 小节与字段省略 + stderr note。
+评审是尽力而为:未派发、失败、空产出都不阻断流程、不改退出码、不影响 resume 收尾;
+评审 SHALL NOT 改写任何产物正文;建议词经维护者确认后进闭集(「发现 → 沉淀」增长闭环)。
 
 **源文件链接渲染**(渲染规则,报告写在目标仓根目录 ⇒ 链接目标 = 源文件相对仓根的相对路径):
 
@@ -381,22 +444,71 @@ file:// 双击用任意现代浏览器打开即可阅读,不依赖联网与任�
 
 **数据文件**:渲染 SHALL 同步写出 `<run-dir>/sdr_report_data.json`,承载报告全量结构化
 数据(单元行 `rows[]`、合并去重后的 `findings[]`(含 P-NN/维度/severity/位置/风险/建议/
-control_ref)、分支调用链图数据、诚实边界条目、头部元信息),HTML 内嵌**同一份数据**
-(JSON 等价一致)——人读 HTML 与机器读 JSON 同源;下游确定性消费(如未来 /mgh-blst、
-报告后处理工具)SHALL 以数据文件为接口。`--check` SHALL 校验:数据文件存在且可解析、
-与 HTML 内嵌数据一致、manifest 计数与 draft 实际一致。
+control_ref,以及可选的复现方式 `repro`、修复对比 `fix_diff`)、分支调用链图数据、诚实边界
+条目、头部元信息,以及可选的 `readability[]` 建议清单——「可读性自检」小节的数据源),
+HTML 内嵌**同一份数据**(JSON 等价一致)——人读 HTML 与机器读 JSON 同源;下游确定性消费
+(如未来 /mgh-blst、报告后处理工具)SHALL 以数据文件为接口,新字段按「字段缺席 = 不适用」
+消费。`--check` SHALL 校验:数据文件存在且可解析、与 HTML 内嵌数据一致、manifest 计数与
+draft 实际一致;另 SHALL 对模型文本字段(`risk`/`suggestion`/`repro`/`fix_diff` 的说明文本)
+做闭集扫描(闭集取值 import 能力 `human-facing-output-discipline` 的单源模块)——命中只在
+stderr 打计数告警(字段名 + 词),SHALL NOT 改变退出码:模型措辞是软质量,不能因为它卡死
+跑完的长流程;确定性文案的闭集合规由回归测试保障,不入 `--check` 面。
 
 同名报告文件已存在 SHALL 原子覆盖(时间戳到秒内重跑)。`sdr_manifest.json` `rows[]`
 (`{unit_id, entry, chain, frontend_is, frontend_count, issue_refs[]}`;issue_refs = 该单元
 各维度问题编号的展平列表)语义不变;`counts` 语义不变;其余字段保留现行(`excluded_files`
-透传等)。draft 问题记录 schema 不变(`line` int 可选,任务模板与 agent 定义双端同步披露)。
+透传等)。draft 问题记录 schema 增可选 `repro`/`fix_diff` 字段(`line` int 可选保留;
+本 change 之前的旧 draft 没有这些字段 = 章节二省略对应展示,渲染不失败;任务模板与
+agent 定义双端同步披露)。
 
 诚实边界 SHALL 至少含 7 条(现行 7 条语义保留):① 发现是 LLM 候选需人工复核,非确认漏洞;
 ② 接口分组是启发式,漏分组接口退入独立单元(分析粒度粗但覆盖不丢);③ 引用存量控制断言存在、
 不断言有效;④ 外部仓结论是检索时点快照(不保证前端分支已同步);⑤ 基线经字节预算投影,低优先
 级细节可能未全量投影;⑥ 敏感目录来源与覆盖范围(目录外字段仅按回退规则识别);⑦ 排除集披露。
+各条措辞 SHALL 满足「报告确定性文案措辞」段。
 渲染器 NEVER 写 `openspec/`、NEVER 写 run 目录、数据文件与报告文件之外的目标仓文件;历史
 `.md` 报告 SHALL NOT 被回写或迁移。
+
+#### Scenario: 分组概览与诚实边界的平实措辞
+
+- **WHEN** 渲染一个 codegraph=on 的 run(分组统计含 `anchors_changed=4`、`anchors_upstream=2`)
+- **THEN** 头部分组概览输出平实中文(如「按变更接口归组 4 条调用链、2 处改动挂接到未变更
+  接口」形态),全文确定性文案不含禁用闭集词(「路由锚」「向上锚定」等);诊断数字可在
+  默认折叠的明细中保留,数据文件字段不变
+
+#### Scenario: 复现方式与修复对比的渲染
+
+- **WHEN** 某 `.done` draft 的 finding 带 `repro:"以任一有效会话 POST /user/del 传他人 id
+  → 他人记录被删除"` 和 `fix_diff:[{before:"deleteById(id)",after:"deleteByIdAndOwner(id,
+  currentUserId)"}]`
+- **THEN** 章节二该 P-NN 条目渲染「复现方式」文本行和一组「修改前/修改后」代码块(等宽、
+  逐字注入、无 HTML 语法破损),数据文件 `findings[]` 对应项带这两字段
+
+#### Scenario: 旧 draft 无新字段省略
+
+- **WHEN** 某 `.done` draft 的 finding 没有 `repro`/`fix_diff` 字段(本 change 之前产出的
+  旧 draft)
+- **THEN** 章节二该条目不出现「复现方式」行和修复对比块,渲染不失败,`--check` 不视为
+  不一致
+
+#### Scenario: --check 禁词扫描只告警
+
+- **WHEN** 某 draft 的 `risk` 文本包含「基线投影」(闭集词)
+- **THEN** `render_sdr_report.py --check` 对该 run 的退出码与没有该词时相同,stderr 带至少
+  一条计数告警(字段名 + 词)
+
+#### Scenario: 文本束与可读性自检小节
+
+- **WHEN** 某 run 9 份 draft 合并渲染,编排器随后派发读者模拟评审、建议文件落盘,再重渲染
+- **THEN** 首次渲染就产出 `readability_text_bundle.json`(每条 P-NN 的人类面文本);重渲染
+  后数据文件带 `readability[]` 字段、报告含默认折叠的「可读性自检」小节,正文其余内容与
+  退出码不变,`--check` 的数据等价校验通过
+
+#### Scenario: 评审缺席报告仍完整
+
+- **WHEN** 读者模拟评审未派发或建议文件不可解析
+- **THEN** 数据文件与报告都没有 `readability` 字段/小节,渲染退出码不变;resume 把该 run
+  收尾为完成(评审缺席不是失败)
 
 #### Scenario: 简报表行覆盖全单元形态
 
@@ -481,7 +593,8 @@ control_ref)、分支调用链图数据、诚实边界条目、头部元信息),
 - **WHEN** 本次 run 排除了 120 个文件(测试 80/构建产物 30/静态资源 10)且 codegraph 捕获
   25 条变更集内调用边、向上锚定 8 条链
 - **THEN** 报告诚实边界含排除计数与分类,manifest `counts.excluded_files == 120`;分组统计
-  在报告头部「分组概览」可见,供操作者判断分组质量
+  在报告头部「分组概览」以平实措辞可见(满足「报告确定性文案措辞」段;明细数字可收纳于
+  默认折叠的「分组诊断」),供操作者判断分组质量
 
 #### Scenario: 报告离线自包含
 
@@ -642,6 +755,43 @@ launcher 自身退出码:0 全部分支成功 · 1 运行时失败(任一分支 
 - **WHEN** launcher 以 `--model deepseek/deepseek-flash` 启动
 - **THEN** 宿主 CLI 以该模型 id 启动(opencode `run --model …` / claude `-p --model …`);
   未传 `--model` 时 launcher 不附加任何模型参数(沿用宿主自身默认)
+
+### Requirement: launcher 内联多分支清单 --branch-list
+
+launcher `core/scripts/mgh_sdr_launch.py` SHALL 额外接受内联多分支参数
+`--branch-list "<b1,b2,...>"`——值为**逗号分隔的分支名清单**,直接写在命令行上(引号
+包裹),与文件喂法 `--multi-branch <file>` 覆盖同一「多分支串行 sweep」需求。解析规则:
+按 `,` 切分,逐项去除首尾空白,**任一空项**(如 `a,,b`、结尾多逗号、整体为空或全空白)
+→ 退出码 2 + 可操作 stderr(报出违规项序号),NEVER 静默跳过;重复分支名保序去重
+(只跑一次,与 `--multi-branch` 文件模式行为一致);内联模式无注释语法(每个逗号项都是
+分支名)。`--branch-list` 与 `--multi-branch` **互斥**:两者同时给出 → 退出码 2 + 可操作
+stderr(二选一),NEVER 静默按优先级取其一(歧义输入 fail-loud;逗号在 git 分支名中
+合法,NEVER 以「值含逗号」推断喂法)。`--branch-list` 与单分支参数 `--branch` 同给时,
+内联清单优先(`--branch` 被忽略),与 `--multi-branch` 压过 `--branch` 的既有行为同形。
+内联清单 SHALL 汇入与 `--multi-branch` **完全相同**的串行逐分支流程:每分支独立 run
+目录 + 独立报告;单分支失败记录后后续分支照常执行;launcher 自身退出码语义不变
+(0 全部分支成功 · 1 任一分支 FAILED · 2 误用)。`--help` SHALL 载明该 flag(命令壳
+不展 launcher flag 表,`--help` 是该参数的唯一契约面)。
+
+#### Scenario: 内联清单串行同语义
+
+- **WHEN** 用户运行 `py mgh_sdr_launch.py --repo <项目> --branch-list "feat/a, feat/b"`
+  (含一个带首尾空白的项),两分支在目标仓均可解析
+- **THEN** launcher 串行执行两轮完整流程,产出两份独立报告 + 各自 run 目录;项首尾
+  空白被去除后按分支名正常预检;退出码 0
+
+#### Scenario: 双参数互斥拒识
+
+- **WHEN** 同一次调用同时给出 `--multi-branch branches.txt` 与 `--branch-list "a,b"`
+- **THEN** launcher 退出码 2,stderr 报出二选一的 recipe,零分支执行、零产物写入
+  (fail-loud,不猜不静默取其一)
+
+#### Scenario: 空项拒识
+
+- **WHEN** `--branch-list "feat/a,,feat/b"`(中间空项)或 `--branch-list "feat/a,"`
+  (结尾逗号)或 `--branch-list "  "`
+- **THEN** launcher 退出码 2,stderr 可操作地报出违规项(序号/原因:空分支项),零
+  分支执行;后续分支 NEVER 被静默吞掉
 
 ### Requirement: 外部仓读取授权经用户确认并持久化到项目配置
 

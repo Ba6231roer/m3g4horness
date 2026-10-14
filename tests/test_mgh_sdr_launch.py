@@ -8,7 +8,8 @@ gates pass, sdr_context artifacts (baseline/external conclusions/context.json) e
 the sentinel is written with read_roots[] = the searched external root, the orchestrator
 prompt file carries the verbatim absolute paths, and --dry-run KEEPS the sentinel.
 Also covers misuse gates: missing --repo (2), non-git repo (2), unknown --host (2),
-missing multi-branch file (2).
+missing multi-branch file (2), inline branch-list misuse (empty item / --multi-branch
+conflict, both 2).
 
 Run: py tests/test_mgh_sdr_launch.py
 """
@@ -447,6 +448,13 @@ class _FakeHostMixin:
         self.m = m
         self.spawned = []
         self.run_dirs = []
+        # hermetic host-error extraction (fix-mgh-sdr-host-error-capture): tests must
+        # NEVER read the maintainer's real opencode global log — default to a
+        # nonexistent tmp path (the absent/fail-soft state); evidence tests override
+        # with a crafted log
+        self.ev_dir = Path(tempfile.mkdtemp(prefix="mgh_launch_glog_"))
+        self.addCleanup(shutil.rmtree, self.ev_dir, ignore_errors=True)
+        m._opencode_global_log_path = lambda: self.ev_dir / "opencode.log"
 
         def fake_context(repo, run_dir, base, branch, dims, read_roots,
                          no_codegraph=False):
@@ -458,7 +466,7 @@ class _FakeHostMixin:
                     "sensitive_catalog_source": "default-template",
                     "sensitive_catalog": {}}
 
-        def fake_spawn(host, repo, prompt, model=None):
+        def fake_spawn(host, repo, prompt, model=None, spawn_window=None):
             self.spawned.append({"host": host, "repo": str(repo), "model": model,
                                  "prompt": prompt})
             if self.run_dirs:
@@ -611,7 +619,7 @@ class TestReportClaimManifest(unittest.TestCase, _FakeHostMixin):
 
     def test_manifest_with_missing_report_file_is_failed(self):
         # manifest present but its `report` file is not on disk => FAILED (no-report)
-        def fake_spawn_broken(host, repo, prompt, model=None):
+        def fake_spawn_broken(host, repo, prompt, model=None, spawn_window=None):
             self.spawned.append({"host": host, "repo": str(repo), "model": model})
             rd = self.run_dirs[-1]
             (rd / "sdr_manifest.json").write_text(
@@ -652,6 +660,111 @@ class TestReportClaimManifest(unittest.TestCase, _FakeHostMixin):
             self.assertEqual(opened, [], "--open must NOT fire on a FAILED branch")
         finally:
             webbrowser.open = orig
+
+
+class TestInlineBranchList(unittest.TestCase, _FakeHostMixin):
+    """add-mgh-sdr-inline-branch-list: `--branch-list "b1,b2"` is the INLINE multi-branch
+    form feeding the SAME serial per-branch sweep as --multi-branch. Fail-loud misuse:
+    any empty item (a,,b / trailing comma / all-whitespace value) exits 2 naming the
+    offending item; --branch-list together with --multi-branch exits 2 (never a silent
+    priority); --branch-list overrides the single --branch (same shape as --multi-branch
+    over --branch)."""
+
+    def setUp(self):
+        self.m = _load()
+        self._two_branch_repo()
+        self._install_fakes(self.m)
+        self.m._detect_host = lambda explicit=None: "claude"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # --- pure function `_split_branch_list` ---
+
+    def _split(self, value):
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                return self.m._split_branch_list(value), err.getvalue(), None
+        except SystemExit as e:
+            return None, err.getvalue(), e.code
+
+    def test_split_trims_items_and_preserves_order(self):
+        branches, err, code = self._split(" feature-pay , feature-b2 ")
+        self.assertIsNone(code, err)
+        self.assertEqual(branches, ["feature-pay", "feature-b2"])
+
+    def test_split_dedupes_keeping_first_and_order(self):
+        branches, _, code = self._split("feature-pay,feature-b2,feature-pay")
+        self.assertIsNone(code)
+        self.assertEqual(branches, ["feature-pay", "feature-b2"])
+
+    def test_empty_item_exits_2_naming_the_item_number(self):
+        for value, bad_index in (("feature-pay,,feature-b2", 2), ("feature-pay,", 2),
+                                 (",feature-pay", 1)):
+            with self.subTest(value=value):
+                branches, err, code = self._split(value)
+                self.assertIsNone(branches)
+                self.assertEqual(code, 2)
+                self.assertIn(f"item {bad_index}", err, err)
+                self.assertIn("recipe", err)
+
+    def test_all_whitespace_exits_2(self):
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                branches, err, code = self._split(value)
+                self.assertIsNone(branches)
+                self.assertEqual(code, 2)
+
+    # --- integration through main() (fake host, fake sdr_context) ---
+
+    def test_branch_list_runs_the_serial_full_flow(self):
+        code, out, err = self._launch(["--repo", str(self.repo), "--branch-list",
+                                       "feature-pay, feature-b2"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["branches"], ["feature-pay", "feature-b2"])
+        self.assertEqual(len(payload["reports"]), 2)
+        self.assertEqual(len(self.spawned), 2)
+        run_dirs = list((self.repo / ".mgh-sdr" / "runs").iterdir())
+        self.assertEqual(len(run_dirs), 2, f"run dirs: {run_dirs}")
+        self.assertFalse((self.repo / ".mgh-sdr" / ".active").exists(),
+                         "sentinel must not survive the sweep")
+
+    def test_branch_list_and_multi_branch_conflict_exits_2(self):
+        mb = self.tmp / "branches.txt"
+        mb.write_text("feature-pay\n", encoding="utf-8")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--multi-branch", str(mb),
+                                       "--branch-list", "feature-b2"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("recipe", err)
+        self.assertEqual(self.spawned, [], "a misuse refusal spawns nothing")
+        runs = self.repo / ".mgh-sdr" / "runs"
+        self.assertFalse(runs.is_dir() and any(runs.iterdir()), "zero run dirs")
+        self.assertFalse((self.repo / ".mgh-sdr" / ".active").exists(), "zero sentinel")
+
+    def test_branch_list_overrides_single_branch(self):
+        code, out, err = self._launch(["--repo", str(self.repo), "--branch",
+                                       "feature-pay", "--branch-list", "feature-b2"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["branches"], ["feature-b2"])
+        self.assertEqual(len(self.spawned), 1)
+        names = [d.name for d in (self.repo / ".mgh-sdr" / "runs").iterdir()]
+        self.assertEqual(len(names), 1, names)
+        self.assertIn("feature-b2", names[0])
+        self.assertNotIn("feature-pay", names[0])
+
+    def test_help_documents_branch_list_flag(self):
+        # real subprocess --help is the contract surface for the new flag (mirrors
+        # test_help_documents_model_flag)
+        r = subprocess.run([sys.executable, str(LAUNCH), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--branch-list", r.stdout)
 
 
 class TestSpawnEnvAndFlags(unittest.TestCase):
@@ -756,6 +869,11 @@ class TestUpstreamOutputGuard(unittest.TestCase, _FakeHostMixin):
         record; the fake spawn renders manifest+report for its run dir."""
         real_run = self.m.subprocess.run
         calls = {"n": 0}
+        # hermetic global log (fix-mgh-sdr-host-error-capture): same contract as the
+        # _FakeHostMixin patch — tests never touch the real opencode log
+        ev_dir = Path(tempfile.mkdtemp(prefix="mgh_launch_glog_"))
+        self.addCleanup(shutil.rmtree, ev_dir, ignore_errors=True)
+        self.m._opencode_global_log_path = lambda: ev_dir / "opencode.log"
 
         def fake_run(cmd, **kwargs):
             if any("sdr_context.py" in str(c) for c in cmd):
@@ -777,7 +895,7 @@ class TestUpstreamOutputGuard(unittest.TestCase, _FakeHostMixin):
                                                    stderr="")
             return real_run(cmd, **kwargs)
 
-        def fake_spawn(host, repo, prompt, model=None):
+        def fake_spawn(host, repo, prompt, model=None, spawn_window=None):
             self.spawned.append(host)
             rd = self.run_dirs[-1]
             (rd / "report.html").write_text("<html></html>", encoding="utf-8")
@@ -839,6 +957,198 @@ class TestUpstreamOutputGuard(unittest.TestCase, _FakeHostMixin):
             self.m.subprocess.run = real_run
         self.assertFalse(ok)
         self.assertIn("upstream output unusable", outcome)
+
+
+from datetime import datetime, timedelta, timezone  # noqa: E402  (host-error evidence tests)
+
+
+class TestHostErrorEvidence(unittest.TestCase, _FakeHostMixin):
+    """fix-mgh-sdr-host-error-capture: fanout sub-session provider errors are invisible
+    on the parent `run --print-logs` face (they belong to OTHER opencode runs — verified
+    2026-10-13 real-repo rerun, findings F1). The launcher therefore extracts
+    time-window `level=ERROR` lines from the opencode user-level global log into
+    <run-dir>/host_error.log after the host exits — success branches too (errors
+    absorbed by opencode's internal retry are evidence), fail-soft (a missing/
+    unparsable global log is a stderr note, NEVER a branch failure), and failure
+    envelopes carry the evidence pointer (zero captures => recipe names the global
+    log instead)."""
+
+    T0 = datetime(2026, 10, 13, 9, 40, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.m = _load()
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_launch_ev_"))
+        self.glog = self.tmp / "global" / "opencode.log"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # --- pure extraction function ---
+
+    def _write_log(self, text):
+        self.glog.parent.mkdir(parents=True, exist_ok=True)
+        self.glog.write_text(text, encoding="utf-8")
+
+    def _extract(self, log_text=None, start=None, end=None):
+        if log_text is not None:
+            self._write_log(log_text)
+        out = self.tmp / "run" / "host_error.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        n = self.m._extract_host_errors(self.glog, start or self.T0,
+                                        end or self.T0 + timedelta(minutes=5), out)
+        return n, out
+
+    def test_window_capture_and_edges(self):
+        n, out = self._extract(
+            "timestamp=2026-10-13T09:39:59.000Z level=ERROR old failure\n"
+            "timestamp=2026-10-13T09:40:00.000Z level=ERROR at start\n"
+            "timestamp=2026-10-13T09:40:30.000Z level=INFO noise\n"
+            "timestamp=2026-10-13T09:40:30.500Z level=ERROR socket closed 断连\n"
+            "timestamp=2026-10-13T09:40:31.000Z level=WARN warn noise\n"
+            "timestamp=2026-10-13T09:45:00.000Z level=ERROR at end\n"
+            "timestamp=2026-10-13T09:45:01.000Z level=ERROR after end\n")
+        self.assertEqual(n, 2, "start-inclusive, end-exclusive, ERROR-only")
+        body = out.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len([l for l in body if not l.startswith("#")]), 2)
+        self.assertIn("at start", body[2])
+        self.assertIn("socket closed 断连", body[3])
+        self.assertNotIn("old failure", "\n".join(body))
+        self.assertNotIn("at end", "\n".join(body))
+        self.assertNotIn("after end", "\n".join(body))
+        self.assertNotIn("WARN", "\n".join(body))
+
+    def test_header_carries_source_and_utc_window(self):
+        n, out = self._extract(
+            "timestamp=2026-10-13T09:41:00.000Z level=ERROR boom\n")
+        self.assertEqual(n, 1)
+        head = out.read_text(encoding="utf-8").splitlines()[:2]
+        self.assertTrue(head[0].startswith("# source: "))
+        self.assertIn(str(self.glog), head[0])
+        self.assertTrue(head[1].startswith("# window: "))
+        self.assertIn("(UTC)", head[1])
+
+    def test_error_line_without_parsable_timestamp_refuses_evidence(self):
+        # an ERROR-shaped line we cannot time-bind makes the whole slice untrustworthy:
+        # refuse it entirely (no file) rather than emit evidence of unknown provenance
+        n, out = self._extract(
+            "timestamp=2026-10-13T09:41:00.000Z level=INFO ok line\n"
+            "level=ERROR no timestamp at all\n")
+        self.assertIsNone(n)
+        self.assertFalse(out.exists())
+        n, out = self._extract(
+            "timestamp=2026-10-13T09:41:00.000Z level=INFO ok line\n"
+            "timestamp=not-a-date level=ERROR garbage timestamp\n")
+        self.assertIsNone(n)
+        self.assertFalse(out.exists())
+
+    def test_naive_and_offset_timestamps_read_as_utc(self):
+        n, out = self._extract(
+            "timestamp=2026-10-13T09:40:30.000 level=ERROR naive\n"
+            "timestamp=2026-10-13T17:40:31.000+08:00 level=ERROR offset\n")
+        self.assertEqual(n, 2)
+        self.assertIn("naive", out.read_text(encoding="utf-8"))
+        self.assertIn("offset", out.read_text(encoding="utf-8"))
+
+    def test_zero_capture_writes_header_only(self):
+        n, out = self._extract(
+            "timestamp=2026-10-13T09:39:00.000Z level=ERROR outside window\n")
+        self.assertEqual(n, 0)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([l for l in lines if not l.startswith("#")], [],
+                         "header-only => 'extracted, zero captures' is distinguishable")
+
+    def test_missing_log_is_not_extracted_no_file(self):
+        n, out = self._extract()
+        self.assertIsNone(n)
+        self.assertFalse(out.exists())
+
+    def test_log_without_any_timestamp_key_is_refused(self):
+        # non-empty content with no `timestamp=` anywhere: upstream format drift —
+        # refuse (same absent state) instead of a silent header-only "no errors"
+        n, out = self._extract("level=ERROR something\nplain text\n")
+        self.assertIsNone(n)
+        self.assertFalse(out.exists())
+
+    # --- integration through _run_one / main with a fake host + fake global log ---
+
+    def _install_ev_fakes(self, spawn_code=0, error_in_window=False, host="opencode"):
+        self._two_branch_repo()
+        self._install_fakes(self.m, spawn_code=spawn_code)
+        self.m._opencode_global_log_path = lambda: self.glog
+        self.m._detect_host = lambda explicit=None: host
+        m = self.m
+
+        def fake_spawn(h, repo, prompt, model=None, spawn_window=None):
+            self.spawned.append(h)
+            if spawn_window is not None:
+                spawn_window.append(datetime.now(timezone.utc))
+            if error_in_window:
+                glog = m._opencode_global_log_path()
+                glog.parent.mkdir(parents=True, exist_ok=True)
+                with open(glog, "a", encoding="utf-8") as f:
+                    f.write(f"timestamp={datetime.now(timezone.utc).isoformat()} "
+                            "level=ERROR session=fan-1 AI_APICallError: socket 断连\n")
+            rd = self.run_dirs[-1]
+            (rd / "report.html").write_text("<html></html>", encoding="utf-8")
+            (rd / "sdr_manifest.json").write_text(
+                json.dumps({"report": str(rd / "report.html")}), encoding="utf-8")
+            return spawn_code
+
+        m._spawn_host = fake_spawn
+
+    def _launch_branch(self, spawn_code=0, error_in_window=False, host="opencode"):
+        self._install_ev_fakes(spawn_code=spawn_code, error_in_window=error_in_window,
+                               host=host)
+        return self._launch(["--repo", str(self.repo), "--branch", "feature-pay"])
+
+    def _ev_file(self):
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        return run_dir / "host_error.log"
+
+    def test_success_branch_captures_evidence_too(self):
+        # errors ABSORBED by opencode's internal retry still leave evidence (N4 sample:
+        # 2 stream errors, branch converged 4/4) — extraction runs on success as well
+        code, out, err = self._launch_branch(error_in_window=True)
+        self.assertEqual(code, 0, err)
+        ev = self._ev_file()
+        self.assertTrue(ev.is_file())
+        body = ev.read_text(encoding="utf-8")
+        self.assertIn("AI_APICallError", body)
+        self.assertIn("# source:", body)
+        self.assertIn("host error evidence", err)
+        self.assertIn("1 ERROR line(s)", err)
+
+    def test_failure_envelope_and_summary_carry_evidence_pointer(self):
+        code, out, err = self._launch_branch(spawn_code=3, error_in_window=True)
+        self.assertEqual(code, 1, out)
+        self.assertIn("host CLI exited 3 for feature-pay (host error evidence: ", err)
+        self.assertIn(str(self._ev_file()), err)
+        self.assertIn("FAILED BRANCHES (1)", err)
+
+    def test_zero_capture_failure_recipe_names_global_log(self):
+        # evidence file extracted but header-only => the failure reason must point at
+        # the global log (the only place a root cause could still live)
+        self._write_log("timestamp=2020-01-01T00:00:00.000Z level=ERROR ancient\n")
+        code, out, err = self._launch_branch(spawn_code=3)
+        self.assertEqual(code, 1, out)
+        self.assertIn("no host error line captured", err)
+        self.assertIn(str(self.glog), err)
+
+    def test_claude_host_skips_extraction(self):
+        code, out, err = self._launch_branch(error_in_window=True, host="claude")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self._ev_file().exists(),
+                         "claude takes no log flags and has no extraction face")
+        self.assertNotIn("host error evidence", err)
+
+    def test_missing_global_log_is_fail_soft(self):
+        # diagnosability tooling must NEVER become a new failure source: the branch
+        # stays ok, the note names the assumed path (self-exposure on routing drift)
+        code, out, err = self._launch_branch(error_in_window=False)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self._ev_file().exists())
+        self.assertIn("not extracted", err)
+        self.assertIn(str(self.glog), err)
 
 
 if __name__ == "__main__":

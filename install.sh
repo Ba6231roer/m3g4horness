@@ -120,7 +120,7 @@ for s in expand_scope discover_controls chunk_sources plan_scout merge_scout ass
          list_chunks list_verify_jobs prefilter dedup emit_sarif \
          classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \
          resume_ut_init_state write_ut_runconfig list_ut_steps \
-         diff_group sdr_context render_sdr_report mgh_sdr_launch read_roots_config \
+         diff_group sdr_context render_sdr_report human_face_vocab mgh_sdr_launch read_roots_config \
          resume_sdr_state list_sdr_steps sdr_tier; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
@@ -128,7 +128,7 @@ if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, /mgh-srr, /mgh-ut-init, or /mgh-sdr may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/scout-merge/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/mgh_sdr_launch/read_roots_config/resume_sdr_state/list_sdr_steps/sdr_tier"
+  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/scout-merge/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/human_face_vocab/mgh_sdr_launch/read_roots_config/resume_sdr_state/list_sdr_steps/sdr_tier"
 fi
 
 # 4a) Fan-out tier payload self-check (fail-soft per R5.8): the tier-aware
@@ -136,7 +136,7 @@ fi
 #     the fanout agent clones (mode: primary) by name at spawn time — a missing
 #     file breaks that tier's dispatch at runtime. Warn only; CI enforces.
 _fanout_missing=()
-for t in scout-task scout-merge-task t1-task t2-task t3-task sdr-task; do
+for t in scout-task scout-merge-task t1-task t2-task t3-task sdr-task readability-review; do
   [[ -f "$DEST/mgh-core/prompts/fragments/fanout/$t.md" ]] || _fanout_missing+=("prompts/fragments/fanout/$t.md")
 done
 # T2 synthesis map-reduce split prompts (t2 map-stage adoption): the partial (per-shard) and
@@ -156,7 +156,7 @@ fi
 if (( ${#_fanout_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing fan-out tier payload: ${_fanout_missing[*]}" >&2
 else
-  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter-fanout,sdr-review-fanout}.md" )"
+  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/fragments/fanout/readability-review.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter-fanout,sdr-review-fanout}.md" )"
 fi
 
 # 4b-2) Distribution-completeness self-check (fail-soft; CI enforces via

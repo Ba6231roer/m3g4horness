@@ -32,6 +32,9 @@ materialized sensitive catalog file the Check baseline section of the message po
   an anchor in the slice).
 - External conclusions are materialized files under `external_dir` — read those if
   present; NEVER read the external repo itself, even if design text names its path.
+- 人类面字段(risk/suggestion/repro/fix_diff)按任务模板「写作纪律」写:读者是一两年 Java
+  Web 经验的工程师——`risk` 首句写现象、能落地调用给 `repro`、局部修复给 `fix_diff`、
+  禁用本工具内部词。
 
 ## Hard constraints
 
@@ -53,7 +56,9 @@ materialized sensitive catalog file the Check baseline section of the message po
 Write ONE JSON object at the dispatcher-given absolute `draft_path`:
 {"unit": "<unit_id verbatim>", "findings": [{"dimension", "severity": "high|medium|low|info",
 "route", "file", "line_hint", "line": <int anchor line in `file`, omit when no single
-line is visible in the slice>, "risk"(简体中文), "suggestion"(简体中文), "control_ref|null"}]}
+line is visible in the slice>, "risk"(简体中文,首句写现象), "suggestion"(简体中文,具体到改法),
+"repro"(可选:怎么调+传什么+看到什么), "fix_diff"(可选:1–2 组 {before, after}),
+"control_ref|null"}]}
 — then touch the absolute `done_marker`. Findings[] may be empty (a clean unit).
 
 Final reply = the single bounded ack line only.

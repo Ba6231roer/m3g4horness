@@ -19,6 +19,8 @@ JSON / stderr=诊断严格分流、退出码 `0` 成功 · `1` 输入错误(文�
     ├── external/<repo-slug>/        # sdr_context 物化的外部仓结论文件(summary.json + hits.md)
     ├── baseline.md                  # 存量安全设计基线投影(≤32KB 默认,优先级截断)
     ├── sensitive_catalog.json       # sdr_context 物化的解析后敏感目录对象(subagent 只读路径的指向)
+    ├── readability_text_bundle.json # render 每次渲染写出;全部问题记录人类面文本的单束(读者模拟评审唯一输入)
+    ├── readability_advisories.json  # 读者模拟评审建议(编排器在首次渲染后派发一次评审产出;可选)
     ├── markers/                     # <unit_id>.done / <unit_id>.failed(磁盘真相,resume 锚)
     └── sdr_manifest.json            # render 产出 counts + boundaries + failed_units[];整条 run 的终止凭证
 ```
@@ -85,12 +87,13 @@ py render_sdr_report.py --check <run-dir>
 | 项 | 契约 |
 |---|---|
 | 输入 | `<run-dir>/drafts/*.json`(`.done` 且 JSON 可解析者);`.failed` 单元不阻断,计入 `failed_units[]` |
-| 去重 | findings 按 `{dimension, route, file}` 三元组去重合并(`line_hint` 取并集) |
-| 报告 | `<repo>/mgh-sdr-<branch-safe>-<YYYYMMDD_HHMMSS>.html` **自包含单文件**(工具名固定 `mgh-sdr`;分支名文件系统安全命名;秒级本地时间戳;同名原子覆盖幂等;样式/脚本/数据全内嵌、零外部引用,file:// 浏览器直开)。简体中文、面向人:头部(branch/base/时间/检查面/敏感目录来源/外部仓结论摘要 + 分组概览)→ 章节一简报表(行=单元,severity/维度筛选,P-NN 页内锚点跳转)→ 章节二问题详述(P-NN · 维度 · route · severity;位置/risk/suggestion/control_ref)→ 章节三内嵌 SVG 分支调用链图(缩放平移;线性链不入)→ 无问题单元清单 → 诚实边界节(**≥6 条**,见下) |
-| 数据文件 | `<run-dir>/sdr_report_data.json`:报告全量结构化数据(单元行 `rows[]`、`findings[]` 含 P-NN、分支链图数据、`boundaries[]`、头部元信息),与报告内嵌数据块 **JSON 等价**——下游确定性消费以它为接口,NEVER 解析 HTML |
+| 去重 | findings 按 `{dimension, route, file}` 三元组去重合并(`line_hint` 取并集;`repro`/`fix_diff` 取首个携带者) |
+| 报告 | `<repo>/mgh-sdr-<branch-safe>-<YYYYMMDD_HHMMSS>.html` **自包含单文件**(工具名固定 `mgh-sdr`;分支名文件系统安全命名;秒级本地时间戳;同名原子覆盖幂等;样式/脚本/数据全内嵌、零外部引用,file:// 浏览器直开)。简体中文、面向人:头部(branch/base/时间/检查维度/敏感目录来源/外部仓结论摘要 + 分组概览平实主句 + 默认折叠「分组诊断」明细)→ 章节一简报表(行=单元,severity/维度筛选,P-NN 页内锚点跳转)→ 章节二问题详述(P-NN · 维度 · route · severity;位置/risk/suggestion/control_ref + 可选「复现方式」行与「修改前/修改后」对比块,数据携带才展示)→ 章节三内嵌 SVG 分支调用链图(缩放平移;线性链不入)→ 无问题单元清单 → 诚实边界节(**≥6 条**,见下)+ 默认折叠「可读性自检」小节(仅当建议文件可解析)。确定性文案措辞按能力 `human-facing-output-discipline`(闭集取值单源 `human_face_vocab.py`,回归测试强制) |
+| 数据文件 | `<run-dir>/sdr_report_data.json`:报告全量结构化数据(单元行 `rows[]`、`findings[]` 含 P-NN 与可选 `repro`/`fix_diff`、分支链图数据、`boundaries[]`、头部元信息含 `overview_details`、可选 `readability[]`),与报告内嵌数据块 **JSON 等价**——下游确定性消费以它为接口,新字段按「字段缺席 = 不适用」,NEVER 解析 HTML |
+| 可读性评审消费 | 每次渲染原子写出 `<run-dir>/readability_text_bundle.json`(合并后全部问题记录的人类面文本);发现可解析的 `<run-dir>/readability_advisories.json` → 数据文件增 `readability[]` + 报告增默认折叠「可读性自检」小节 + stderr 计数;缺席/不可解析/空 → 省略 + stderr note,退出码不变(评审是尽力而为,缺席不影响 resume 收尾) |
 | manifest | `<run-dir>/sdr_manifest.json`:`{branch, base, dimensions, sensitive_catalog_source, external_repos[], rows[], counts:{units, interfaces, standalone, findings, findings_by_severity, failed_units, excluded_files}, boundaries[], failed_units[]}`(`rows[]` 的 `entry`/`chain` 保持纯文本短形) |
-| 写面 | NEVER 写 `openspec/`、NEVER 写 run 目录与报告/数据文件之外的任何目标仓文件 |
-| `--check` | run 目录自洽:manifest 计数与 draft 实际一致、数据文件存在可解析且与报告内嵌数据块 JSON 等价、manifest `rows[]` 与数据文件一致、报告(若已渲染)为 `.html` 且含内嵌数据块与各章节锚点标记;违例退出 2 |
+| 写面 | NEVER 写 `openspec/`、NEVER 写 run 目录与报告/数据文件/文本束之外的目标仓文件 |
+| `--check` | run 目录自洽:manifest 计数与 draft 实际一致、数据文件存在可解析且与报告内嵌数据块 JSON 等价、manifest `rows[]` 与数据文件一致、报告(若已渲染)为 `.html` 且含内嵌数据块与各章节锚点标记;另对模型人类面文本(`risk`/`suggestion`/`repro`/`fix_diff`)做闭集扫描(闭集 import `human_face_vocab.py` 单源)——命中仅 stderr 计数告警(字段名 + 词),**退出码不变**(模型措辞是软质量);确定性文案闭集合规由回归测试保障,不入 `--check` 面。违例退出 2 |
 
 ## draft JSON schema(fan-out 单元问题记录)
 
@@ -100,7 +103,11 @@ py render_sdr_report.py --check <run-dir>
   "findings": [
     {"dimension": "horizontal-authz", "severity": "high",
      "route": "/user/detail", "file": "UserController.java", "line_hint": "88-102",
-     "risk": "简体中文风险描述", "suggestion": "简体中文整改建议",
+     "line": 95,
+     "risk": "简体中文风险描述(首句写现象)",
+     "suggestion": "简体中文整改建议",
+     "repro": "可选,复现方式(怎么调 + 传什么 + 看到什么)",
+     "fix_diff": [{"before": "修改前代码(slice 原文逐字)", "after": "修改后形态"}],
      "control_ref": "命中的存量安全设计名或 null"}
   ]
 }
@@ -113,13 +120,23 @@ py render_sdr_report.py --check <run-dir>
   任务消息——评审仍按全部 6 维进行(与三面命令壳的披露同口径;真正把收窄接线进任务消息后,
   恢复「扩展检查项随消息透传」的表述并同步三面壳)。
 - `severity` 四枚举:`high` / `medium` / `low` / `info`。
+- `repro`/`fix_diff` 可选(人类面写作纪律由任务模板 `sdr-task.md` 承载,三面 agent 定义同步):
+  能落到具体接口/方法调用才带 `repro`(怎么调 + 传什么 + 看到什么);改动只有一两处代码才带
+  `fix_diff`(1–2 组,`before` 从 slice 逐字摘原文)。本 schema 之前产出的旧 draft 没有这些
+  字段 = 报告省略对应展示,渲染与 `--check` 不失败(字段缺席 = 不适用)。
+- 读者模拟评审的两个约定路径(不新增 CLI flag):`<run-dir>/readability_text_bundle.json`
+  (渲染器每次渲染原子写出;评审唯一输入)与 `<run-dir>/readability_advisories.json`
+  (评审建议,`{"v":1,"advisories":[{term,field,pnum,why}]}`;可解析时渲染并入数据文件
+  `readability[]` 与报告「可读性自检」小节,缺席/不可解析 = 省略 + stderr note)。
 
 ## 消费方
 
 - `fanout_runner.py --tier sdr`:`diff_group.py --materialize` 是 pending 唯一来源;
   模板 `core/prompts/fragments/fanout/sdr-task.md`;agent `sdr-review-fanout`。
-- 编排器(双壳):step 链 sdr_context → diff_group → fanout_runner → render,每步后跑
-  产出者 `--check`,失败(退出码 2)回退重跑。
+- 编排器(双壳):step 链 sdr_context → diff_group → fanout_runner → render →
+  (尽力而为的读者模拟评审,一次,经 `readability-review.md` 评审模板——与
+  `sdr-task.md` 同目录)→ 重渲染,每步后跑产出者 `--check`,失败(退出码 2)回退重跑;
+  评审失败只少「可读性自检」小节,NEVER 阻断 run、NEVER 影响 resume 收尾。
 - `resume_sdr_state.py`:恢复入口(崩溃 / 压缩 / 新会话)——从运行目录磁盘产物重派生
   `step` / `next_action` / 纪律子集;`list_sdr_steps.py` 给任一步的确切调用。详见
   [`resume-state.md`](resume-state.md)。

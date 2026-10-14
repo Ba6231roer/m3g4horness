@@ -7,6 +7,7 @@ the full review without cloning this dev repo:
 
   py mgh_sdr_launch.py --repo <abs-target> [--branch <ref>] [--base <ref>]
       [--host opencode|claude] [--dimensions <json>] [--multi-branch <file>]
+      [--branch-list <b1,b2,...>]
       [--read-root <abs>]... [--model <provider/model>] [--open] [--dry-run]
 
 Why a launcher: the two experience/safety problems of an external (frontend) repo are
@@ -46,6 +47,13 @@ Per-branch flow (single branch, or serially per --multi-branch line):
   ERROR` with the task on stdin / `claude -p` likewise; claude gets a 480000ms
   soft-deadline note — claude Bash per-call cap 600000 x 0.8; the child env is spawned
   WITHOUT `PWD` so the host resolves the project by the explicit cwd = the target repo)
+  -> host-error evidence: after the host exits, the launcher extracts time-window
+  `level=ERROR` lines from the opencode user-level global log into
+  <run-dir>/host_error.log (opencode host only; fanout sub-session provider errors are
+  NOT visible on the parent `--print-logs` face — they belong to separate opencode runs
+  and land only in that global file. Fail-soft: a missing/unparsable global log is a
+  stderr note naming the assumed path, NEVER a branch failure; success branches extract
+  too — errors absorbed by opencode's internal retry are evidence)
   -> sentinel removal -> report claim: the ONLY accepted source is THIS branch's run-dir
   `sdr_manifest.json` `report` field (the renderer's deterministic co-product); missing
   manifest or report file not on disk => FAILED (no-report) — a repo-root
@@ -56,6 +64,14 @@ Per-branch flow (single branch, or serially per --multi-branch line):
 blank lines ignored); each branch runs the COMPLETE flow serially with its own run dir
 (+= "-<branch-safe>") + report + sentinel lifecycle; a branch failure is recorded and
 the loop continues; launcher exit 1 iff any branch failed.
+
+--branch-list "b1,b2": the INLINE form of the same serial multi-branch sweep — a quoted
+comma-separated list on the command line, for comparing two or three branches without
+creating a file. Items are whitespace-trimmed and deduplicated keeping the first
+occurrence; NO comment syntax (every comma item is a literal branch name); an empty
+item (`a,,b` / trailing comma / all-whitespace value) is rejected with exit 2 naming
+the item. Mutually exclusive with --multi-branch: both given => exit 2, NEVER a silent
+priority; overrides the single --branch when both are given.
 
 --dry-run: the SAME branch pre-check runs first (an unresolvable branch ref fails the
 dry-run too — a green smoke must not bless an invalid branch list), then gates +
@@ -79,10 +95,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -360,13 +377,124 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
     return "\n".join(lines) + "\n"
 
 
-def _spawn_host(host: str, repo: Path, prompt: str, model: str | None = None) -> int:
+def _opencode_global_log_path() -> Path:
+    """Assumed opencode user-level global log (2026-10-13 real-machine verified shape:
+    fanout sub-session / provider errors land ONLY here, never on the parent `run`
+    process's `--print-logs` face). If opencode changes its routing, the extraction's
+    fail-soft note — which names this assumed path — is the self-exposure signal,
+    never a crash."""
+    return Path.home() / ".local" / "share" / "opencode" / "log" / "opencode.log"
+
+
+def _parse_log_timestamp(token: str) -> datetime:
+    """ISO-8601 log timestamp -> aware datetime; `Z` suffixes and naive values are
+    read as UTC (the opencode global log is UTC — verified against the 2026-10-13
+    evidence window). Raises ValueError on garbage."""
+    t = token.rstrip(",.;)]}\"'")
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    dt = datetime.fromisoformat(t)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _extract_host_errors(log_path: Path, window_start: datetime, window_end: datetime,
+                         out_path: Path) -> int | None:
+    """Time-window ERROR-line extraction from the opencode global log into
+    `<run-dir>/host_error.log` (fix-mgh-sdr-host-error-capture). Returns the captured
+    line count, or None when extraction did NOT run — log missing/unreadable, a
+    non-empty log with no `timestamp=` key anywhere (upstream format drift), or an
+    ERROR-shaped line whose timestamp cannot be parsed (fail-closed on evidence trust:
+    a slice we cannot time-bind is refused outright rather than emitted with unknown
+    provenance; the caller's fail-soft note names the assumed path instead). The file
+    gets two `#` header lines (source + window) and the captured lines verbatim; zero
+    captures => header-only, so "extracted, nothing found" stays distinguishable from
+    "not extracted". Lines are matched regex-over-string (`timestamp=` / `level=`
+    keys); non-ERROR lines and out-of-window `[start, end)` ERROR lines are skipped.
+    Any OSError is failure-to-extract (None), never an exception escape."""
+    ts_re = re.compile(r"timestamp=(\S+)")
+    lvl_re = re.compile(r"level=([A-Za-z]+)")
+    captured: list[str] = []
+    saw_ts = False
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "timestamp=" in line:
+                    saw_ts = True
+                m = lvl_re.search(line)
+                if not m or m.group(1).upper() != "ERROR":
+                    continue
+                tm = ts_re.search(line)
+                if tm is None:
+                    return None
+                try:
+                    ts = _parse_log_timestamp(tm.group(1))
+                except ValueError:
+                    return None
+                if window_start <= ts < window_end:
+                    captured.append(line.rstrip("\r\n"))
+    except OSError:
+        return None
+    if not saw_ts:
+        return None
+    header = (f"# source: {log_path}\n"
+              f"# window: {window_start.isoformat()} .. {window_end.isoformat()} (UTC)\n")
+    out_path.write_text(header + "".join(l + "\n" for l in captured), encoding="utf-8")
+    return len(captured)
+
+
+def _capture_host_error_evidence(host: str, run_dir: Path,
+                                 spawn_window: list) -> tuple:
+    """Post-host-exit evidence capture (opencode host only — claude takes no log
+    flags and has no extraction face; a missing spawn window = nothing to bind the
+    slice to). Fail-soft by contract: every problem is a stderr note naming the
+    assumed global-log path, NEVER a branch failure. Returns
+    (captured_count_or_None, evidence_path_or_None, global_log_path_str)."""
+    glog = _opencode_global_log_path()
+    if host != "opencode" or not spawn_window:
+        return None, None, str(glog)
+    out_path = run_dir / "host_error.log"
+    try:
+        n = _extract_host_errors(glog, spawn_window[0], datetime.now(timezone.utc),
+                                 out_path)
+    except OSError:
+        n = None
+    if n is None:
+        _eprint(f"[launch] note: host error evidence not extracted — opencode global "
+                f"log missing/unparsable at the assumed path {glog} (diagnosability "
+                f"is best-effort; never affects the run)")
+        return None, None, str(glog)
+    _eprint(f"[launch] host error evidence: {out_path} ({n} ERROR line(s) in window)")
+    return n, str(out_path), str(glog)
+
+
+def _evidence_suffix(count, ev_path, glog: str) -> str:
+    """Failure-reason decoration: evidence pointer when captured, global-log recipe
+    when the extraction ran but found nothing, nothing when not extracted (the
+    extraction-skip note already covered that case on stderr)."""
+    if ev_path is None:
+        return ""
+    if count:
+        return f" (host error evidence: {ev_path})"
+    return (f" (no host error line captured; recipe: grep 'level=ERROR' inside the "
+            f"run window in the opencode global log {glog})")
+
+
+def _spawn_host(host: str, repo: Path, prompt: str, model: str | None = None,
+                spawn_window: list | None = None) -> int:
     """Spawn the host CLI with the task message on stdin; return its exit code.
 
-    opencode gets `--print-logs --log-level ERROR` (provider-shaped failures must be
-    diagnosable from this process's stderr — an error envelope line alone is not);
+    opencode gets `--print-logs --log-level ERROR` — best-effort disclosure of the
+    PARENT run process's OWN errors only. Fanout sub-session errors (provider stream
+    breaks, rate limits) belong to separate opencode runs: they land in the user-level
+    global log and NEVER on this face — that gap is closed by the launcher's
+    time-window extraction (`_capture_host_error_evidence`, wired in `_run_one`).
     claude takes no log flags. `--model` is passed through verbatim to either host,
-    appended only when given. Env hygiene: the child env is `os.environ` WITHOUT `PWD`
+    appended only when given. `spawn_window` is a mutable carrier (the int return
+    contract is unchanged): when a list is passed, the UTC spawn moment is appended
+    immediately before the child starts — the start of the evidence-extraction window.
+    Env hygiene: the child env is `os.environ` WITHOUT `PWD`
     — opencode resolves the project by `PWD ?? cwd`, so an inherited PWD (whatever dir
     this launcher was started from) would land the session in the WRONG project; with
     it stripped the host falls back to the explicit cwd = the target repo. claude takes
@@ -380,6 +508,8 @@ def _spawn_host(host: str, repo: Path, prompt: str, model: str | None = None) ->
         cmd += ["--model", model]
     _eprint(f"[launch] spawning {host} (task on stdin; cwd={repo})")
     try:
+        if spawn_window is not None:
+            spawn_window.append(datetime.now(timezone.utc))
         env = {k: v for k, v in os.environ.items() if k != "PWD"}
         r = subprocess.run(cmd, input=prompt, cwd=str(repo), env=env, text=True,
                            encoding="utf-8", errors="replace")
@@ -401,6 +531,33 @@ def _read_multi_branch(path: Path) -> list[str]:
     if not branches:
         _eprint(f"error: --multi-branch file has no branch entries: {path}")
         sys.exit(2)
+    return branches
+
+
+def _split_branch_list(value: str) -> list[str]:
+    """Parse an inline `--branch-list` value into the branch-name list.
+
+    Split on "," -> strip each item -> ANY empty item is misuse (exit 2 + the 1-based
+    item number: `a,,b` and a trailing comma are the usual hand-slip shapes, and a
+    silently skipped item would quietly drop one branch from the review). Deduplicated
+    keeping the first occurrence and order — same contract as `_read_multi_branch`.
+    NO comment syntax: the inline value is machine-passed one-shot input, so every
+    comma item is a literal branch name (a `#` special case would only create the
+    implicit "why didn't this branch run" behavior)."""
+    items = [item.strip() for item in value.split(",")]
+    for i, item in enumerate(items, 1):
+        if not item:
+            _eprint(f"error: --branch-list item {i} is empty after trimming whitespace "
+                    f"(value: {value!r})\n"
+                    f'recipe: pass a comma-separated list with no empty items, e.g. '
+                    f'--branch-list "b1,b2" — a doubled or trailing comma is rejected '
+                    f"because the branch it would swallow would silently drop out of "
+                    f"the sweep")
+            sys.exit(2)
+    branches: list[str] = []
+    for item in items:
+        if item not in branches:
+            branches.append(item)
     return branches
 
 
@@ -469,12 +626,16 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
         _eprint("[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; "
                 "NOT spawning the host CLI (sentinel kept for the next real run)")
         return True, str(prompt_path), pending
-    code = _spawn_host(host, repo, prompt, model)
+    spawn_window: list[datetime] = []
+    code = _spawn_host(host, repo, prompt, model, spawn_window=spawn_window)
+    ev_count, ev_path, ev_glog = _capture_host_error_evidence(host, run_dir,
+                                                              spawn_window)
+    ev_suffix = _evidence_suffix(ev_count, ev_path, ev_glog)
     # the host session's step 5 also removes the sentinel; this is the launcher-side
     # guarantee (covers host crash-exit paths that skip step 5)
     _remove_sentinel(repo)
     if code != 0:
-        return False, f"host CLI exited {code} for {branch}", pending
+        return False, f"host CLI exited {code} for {branch}{ev_suffix}", pending
     # Report claim: the ONLY source is THIS branch's run-dir sdr_manifest.json `report`
     # field (the renderer's deterministic co-product, atomically written in the same
     # transaction as the report — a successful render always leaves the manifest, so a
@@ -490,7 +651,7 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     except (OSError, ValueError):
         pass
     if report is None:
-        return False, f"no report produced for {branch}", pending
+        return False, f"no report produced for {branch}{ev_suffix}", pending
     return True, report, pending
 
 
@@ -510,6 +671,13 @@ def main():
     ap.add_argument("--multi-branch", metavar="<file>",
                     help="text file, one branch name per line (# comments ignored); "
                          "serial full flow per branch, failures recorded + continue")
+    ap.add_argument("--branch-list", metavar="<b1,b2,...>",
+                    help='inline comma-separated branch list, quoted on the command '
+                         'line (e.g. --branch-list "b1,b2"); serial full flow per '
+                         "branch, same semantics as --multi-branch; items are "
+                         "whitespace-trimmed + deduplicated keeping order, NO comment "
+                         "syntax, an empty item exits 2; MUTUALLY EXCLUSIVE with "
+                         "--multi-branch (both given => exit 2); overrides --branch")
     ap.add_argument("--read-root", action="append", metavar="<abs>",
                     help="extra confirmed read-only root for sentinel read_roots[] "
                          "(repeatable)")
@@ -540,14 +708,27 @@ def main():
         except (AttributeError, ValueError):
             pass
 
+    # misuse check BEFORE any gate/branch work: the two multi-branch sources are
+    # mutually exclusive — never a silent priority (a comma is a legal git branch
+    # name character, so the two input shapes are not intercomprehensible)
+    if args.branch_list and args.multi_branch:
+        _eprint("error: --branch-list and --multi-branch are mutually exclusive "
+                "(both given)\n"
+                "recipe: pass exactly ONE multi-branch source — the inline "
+                '--branch-list "b1,b2" OR the file --multi-branch <file>')
+        return 2
     if not args.repo:
         _eprint("error: --repo <abs-target> is required")
         return 2
     repo = Path(args.repo).resolve()
     _gate(repo)
     host = _detect_host(args.host)
-    branches = _read_multi_branch(Path(args.multi_branch)) if args.multi_branch \
-        else [args.branch or _current_branch(repo)]
+    if args.branch_list:
+        branches = _split_branch_list(args.branch_list)
+    elif args.multi_branch:
+        branches = _read_multi_branch(Path(args.multi_branch))
+    else:
+        branches = [args.branch or _current_branch(repo)]
 
     failed: list[str] = []
     reports: list[str] = []

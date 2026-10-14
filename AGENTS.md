@@ -86,6 +86,14 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 - **受众声明制**:每份产物声明受众 ∈ {人类 / agent / 双受众},按下表归类;R5.5 措辞纪律
   (RFC-2119 动词、`NEVER` 链、recipe)只辖 agent 操作面,SHALL NOT 蔓延到人类面。`proposal.md`
   是唯一双受众文件(人话序对维护者讲 why,对 apply agent 亦提供背景)。
+- **SDD 工件按人类可读写作(2026-10-14 立,只约束增量)**:openspec 的 proposal / design /
+  tasks 与 spec delta 是给维护者评审的共享记录,也会被未来的 agent 当背景资料读。本仓研发
+  阶段上下文 1M、token 无预算压力,**为省字而压缩它们没有正当性**。写作基准 = 一个有一两年
+  Java Web 经验、不了解本项目内部语境的工程师能顺读:完整句子,一句只讲一个信息;术语第一
+  次出现用一句白话解释;NEVER 自造复合名词堆叠(如「确定性发现扇出归纳」);括号嵌套不超过
+  一层;RFC-2119 动词只用于真正的规范断言,不连发。openspec 结构约束(delta 头 / Requirement
+  / Scenario / checkbox 格式)与 proposal 人话序要求照旧。历史归档(`openspec/changes/archive/**`)
+  与既有主规格的存量段落不回溯改写。
 - **人类面用词前词典必有**:`docs/glossary.md` 缺条目则先补词典再使用;词典自由增补,不设准入审批。
 - **不保留长代码块**(最多 3–5 行内联片段)。让 AI 通过 **文件名 / 类名 / 方法名 / `文件:行号`**
   自行索引到具体实现,不要把实现贴进文档。

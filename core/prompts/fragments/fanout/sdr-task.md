@@ -77,13 +77,37 @@ the slice => no finding for that dimension (never speculate beyond the diff).
    "line_hint": "<hunk line range, e.g. 88-102>",
    "line": <int: the finding's anchor line in `file` (the hunk line the evidence sits
    on); omit ONLY when no single line can be named>,
-   "risk": "简体中文:风险描述(具体、可复核)",
-   "suggestion": "简体中文:整改建议(具体到改法)",
+   "risk": "简体中文,第一句写现象:谁、经什么入口、传什么 → 发生什么;技术根因放后面",
+   "suggestion": "简体中文:怎么改,具体到改法",
+   "repro": "简体中文,可选:怎么调 + 传什么 + 看到什么(如:以任一有效登录会话 POST
+   /user/del 传他人 id → 他人记录被删除)",
+   "fix_diff": [{"before": "<slice 内原代码逐字摘录>", "after": "<修改后的代码形态>"}],
    "control_ref": "<命中的存量安全设计名,或 null>"}]}
 
 `line_hint` stays the hunk-range evidence cite; `line` (int, optional) is the precise
 anchor the report's 位置 field prints as `file:line` (omitted => the report degrades to
 `file` — never guess a line you cannot see in the slice).
+
+`repro`/`fix_diff` are OPTIONAL human-face fields: a finding that pins a concrete call
+carries `repro`; a fix touching only 1–2 code spots carries `fix_diff` (1–2 pairs,
+`before` copied VERBATIM from the slice). Design gaps with no concrete call, and larger
+or cross-file fixes, omit them — the report degrades silently, the pipeline never fails
+on a missing optional field.
+
+## Human-face writing discipline (写作纪律 — risk/suggestion/repro/fix_diff are read by humans)
+
+Reader = an engineer with 1–2 years of Java Web experience: fluent in the target repo's
+everyday vocabulary (Mapper/DAO/注解/接口/SQL) and common security terms (越权/IDOR/SQL
+注入/脱敏/白名单 — these stay, they are the reader's working language), but NOT aware of
+this toolchain's internal words.
+
+- `risk` 第一句写现象:谁、从什么入口、传什么参数 → 发生什么;技术根因放后面。
+- 问题能落到具体接口/方法调用 → 给 `repro`(怎么调 + 传什么 + 看到什么,一句话);
+  设计缺失构造不出具体调用的省略。
+- 改动只有一两处代码 → 给 `fix_diff`(1–2 组;`before` 从 slice 里逐字摘原文,`after`
+  写改后的样子);改动更多或跨文件重构时省略,`suggestion` 文字说清楚即可。
+- 禁用本工具的内部词(如 投影/切片/hunk/扇出/物化/闭集/路由锚/向上锚定/检查面)——报告
+  读者不认识它们,用读者的话转述(例:「向上锚定」→「改动挂接到未变更的接口」)。
 
 Dimension closed set (default): vertical-authz / horizontal-authz / other-authz /
 sql-injection / sensitive-data / input-validation. (The run's `--dimensions` narrowing,

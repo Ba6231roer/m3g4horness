@@ -14,6 +14,19 @@ a `<script type="application/json">` block and rendered into the DOM by the page
 inline JS. JSON-equivalence between the two carriers holds by construction; `--check`
 parses and compares them, so the human page and the machine file can never drift.
 
+Readability (human-face output discipline): every render also writes
+`<run-dir>/readability_text_bundle.json` — the single text bundle (every merged
+finding's human-face text fields) a best-effort readability-review subagent reads.
+When `<run-dir>/readability_advisories.json` exists and parses (written by that
+review after the first render, before an idempotent re-render), its normalized list
+rides the data as `readability[]` and the report gains a default-collapsed 可读性自检
+section; absent/unparsable/empty -> both omitted + a stderr note, exit code unchanged.
+`--check` additionally scans the LLM-produced human-face field text (risk/suggestion/
+repro/fix_diff) against the closed-set vocabulary (single source: sibling
+`human_face_vocab.py`) — a hit prints a stderr count warning (field name + term) and
+NEVER changes the exit code (soft quality; the deterministic-copy counterpart is
+enforced by the regression suite, not here).
+
 The HTML is fully self-contained: styles, scripts and data are all INLINE — zero
 external references (no CDN, no web fonts, no images, no network), double-click opens
 it in any modern browser over file://. Page interactions are plain vanilla JS:
@@ -68,8 +81,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import human_face_vocab  # sibling single source: closed-set vocabulary + scanner
+
 TOOL_NAME = "mgh-sdr"
 DATA_FILE = "sdr_report_data.json"
+BUNDLE_FILE = "readability_text_bundle.json"
+ADVISORIES_FILE = "readability_advisories.json"
 
 # Default closed-set dimension keys (the report groups by whatever the drafts actually
 # carry; free-text extension dimensions render under their own name).
@@ -151,9 +168,38 @@ def _load_drafts(run_dir: Path):
     return drafts, failed
 
 
+def _clean_repro(v):
+    """`repro` is ONE plain string (how to call + with what passed + what happens);
+    anything else (absent / blank / drifted shape) degrades to None — optional field,
+    old drafts never hard-fail."""
+    if isinstance(v, str) and v.strip():
+        return v
+    return None
+
+
+def _clean_fix_diff(v):
+    """`fix_diff` is 1-2 {before, after} pairs of non-empty strings (before copied
+    verbatim from the slice, after the fixed form). Malformed pairs are dropped (not a
+    crash); more than two pairs are cut; an all-malformed field degrades to None."""
+    if not isinstance(v, list):
+        return None
+    out = []
+    for item in v:
+        if not isinstance(item, dict):
+            continue
+        b, a = item.get("before"), item.get("after")
+        if isinstance(b, str) and b.strip() and isinstance(a, str) and a.strip():
+            out.append({"before": b, "after": a})
+        if len(out) == 2:
+            break
+    return out or None
+
+
 def _merge_findings(drafts: list) -> dict:
     """Dedup-merge by {dimension, route, file}; line_hint union; first-writer-wins for
-    the text fields. Returns {dimension: [finding...]} severity-sorted."""
+    the text fields (repro/fix_diff fall back to the first duplicate that carries them
+    — structured evidence, more beats less). Returns {dimension: [finding...]}
+    severity-sorted."""
     merged: dict[tuple, dict] = {}
     warned_sev = False
     for d in drafts:
@@ -167,6 +213,10 @@ def _merge_findings(drafts: list) -> dict:
                 prev = merged[key]
                 if hint and hint not in prev["line_hint"]:
                     prev["line_hint"] = ", ".join(x for x in (prev["line_hint"], hint) if x)
+                if prev.get("repro") is None:
+                    prev["repro"] = _clean_repro(f.get("repro"))
+                if prev.get("fix_diff") is None:
+                    prev["fix_diff"] = _clean_fix_diff(f.get("fix_diff"))
                 continue
             sev = f.get("severity")
             if not (isinstance(sev, str) and sev in _SEVERITY_ORDER):
@@ -184,6 +234,8 @@ def _merge_findings(drafts: list) -> dict:
                         and not isinstance(f.get("line"), bool) else None,
                 "risk": str(f.get("risk", "") or ""),
                 "suggestion": str(f.get("suggestion", "") or ""),
+                "repro": _clean_repro(f.get("repro")),
+                "fix_diff": _clean_fix_diff(f.get("fix_diff")),
                 "control_ref": f.get("control_ref"),
             }
     by_dim: dict[str, list] = {}
@@ -526,45 +578,47 @@ def _boundaries(by_dim, failed, catalog_source, external, dims, baseline_truncat
     b = [
         "发现是 LLM 生成的待复核候选,不是已确认漏洞;每次运行非确定性,需人工复核后再处置。",
         "接口分组是注解启发式(Spring/JAX-RS/Servlet 常用注解):未识别的接口或调用链退入"
-        "目录聚簇单元(分析粒度粗但覆盖不丢);非 java web 项目整体退化为目录聚簇模式。",
+        "按目录归堆的兜底单元(分析粒度粗但覆盖不丢);非 java web 项目整体退化为按目录归堆"
+        "的兜底分组。",
         "引用存量安全控制仅断言其「存在」,不断言其「有效」;控制有效性须另行验证。",
         "外部仓结论是检索时点快照,不保证前端分支已同步;同名分支缺失时回退其默认分支检索。",
-        "检查基线经字节预算投影(优先级:接口授权 > SQL > 输入校验 > 敏感数据),低优先级维度的"
-        "存量设计细节可能未全量投影。",
+        "存量设计参考按优先级截断后提供给评审(优先保留:接口授权 > SQL > 输入校验 > 敏感"
+        "数据),低优先级细节可能未完整包含。",
         f"敏感目录来源:{catalog_source}("
-        + ("项目目录复用" if catalog_source == "project"
-           else "默认模板回退:与 sra/srr 的显式行为分歧,复核域回退 37 项模板,不收窄到 6 facet")
+        + ("项目提供的敏感字段清单" if catalog_source == "project"
+           else "默认模板回退:使用内置 37 项模板,不按维度收窄")
         + ");目录外字段仅按回退规则识别,非穷尽所有敏感字段。",
     ]
     if excluded and excluded.get("count"):
         by_reason = excluded.get("by_reason") or {}
         detail = "、".join(f"{k} {v}" for k, v in sorted(by_reason.items())) or "-"
-        b.append(f"排除集披露:本次运行按闭集排除了 {excluded['count']} 个文件(测试树/构建产物/"
-                 f"静态资源/锁文件/构建脚本;{detail}),它们未进入评审;如需全量评审可用 "
-                 f"--include-excluded 兜底重跑。")
+        b.append(f"排除披露:本次评审按固定排除清单排除了 {excluded['count']} 个文件(测试树/"
+                 f"构建产物/静态资源/锁文件/构建脚本;{detail}),它们未进入评审;如需全量评审"
+                 f"可用 --include-excluded 兜底重跑。")
     if dims and sorted(dims) != sorted(DEFAULT_DIMENSIONS):
-        b.append(f"本次检查面经参数化收窄为 {len(dims)} 个维度({', '.join(dims)}),"
+        b.append(f"本次检查范围经参数收窄为 {len(dims)} 个维度({', '.join(dims)}),"
                  f"范围外维度未覆盖。")
     if failed:
         b.append(f"{len(failed)} 个评审单元失败({'、'.join(u['unit'] for u in failed[:5])}"
                  f"{'…' if len(failed) > 5 else ''}),其覆盖范围本次未复核;建议重跑补齐。")
     if baseline_truncated:
-        b.append("基线投影发生截断(超字节预算),部分存量设计段落未进入检查基线。")
+        b.append("存量设计参考发生截断(超出字节预算),部分存量设计段落未参与本次评审。")
     # Only when this run actually slimmed something: the unit's diff body, file list and
     # hunk locators are intact, but its descriptive context was cut, so a "no finding" from
     # it is weaker evidence than from a normal unit. Silent degradation is not allowed.
     if slimmed:
         shown = "、".join(slimmed[:5]) + ("…" if len(slimmed) > 5 else "")
-        b.append(f"输入完整度披露:本次有 {len(slimmed)} 个复核单元因切片超出字节预算,其辅助"
-                 f"上下文块(注解上下文 / 符号表)被确定性截断({shown})——这些单元的 diff 正文、"
-                 f"文件清单与 hunk 定位头仍完整,但方法/路由的定位信息少于常规单元,"
+        b.append(f"输入完整度披露:本次有 {len(slimmed)} 个复核单元因评审内容超出字节预算,其"
+                 f"辅助上下文块(注解上下文 / 符号表)被确定性截断({shown})——这些单元的 diff "
+                 f"正文、文件清单与改动定位头仍完整,但方法/路由的定位信息少于常规单元,"
                  f"来自它们的「无问题」结论的充分性应据此打折。")
     if external:
-        b.append(f"外部仓检索覆盖 {len(external)} 个声明仓;未声明/不可达的外部仓不在本次检查面内。")
+        b.append(f"外部仓检索覆盖 {len(external)} 个声明仓;未声明/不可达的外部仓不在本次评审"
+                 f"范围内。")
     if unapproved:
         shown = "、".join(unapproved[:3]) + ("…" if len(unapproved) > 3 else "")
         b.append(f"外部仓未授权:存量设计声明了 {len(unapproved)} 个外部目录({shown}),"
-                 f"未经用户确认写入项目配置,本次未检索;前端相关检查面未覆盖,经用户确认后"
+                 f"未经用户确认写入项目配置,本次未检索;前端相关检查未覆盖,经用户确认后"
                  f"重跑可覆盖。")
     return b
 
@@ -580,6 +634,45 @@ def _load_grouping(run_dir: Path) -> dict:
         return {}
 
 
+def _overview_and_details(grouping: dict, excluded, cg_stats) -> tuple[list, list]:
+    """分组概览 as plain-word main sentences + the call-edge quality numbers tucked into
+    a default-collapsed 分组诊断 details block. Main sentences carry the grouping-shape
+    counts a reviewer needs at a glance; the collapsed details keep every diagnostic
+    number (nothing lost, default view quiet). grouping.json fields are read-only
+    inputs — the machine face is untouched. English classification keys become the
+    reader's words: interface -> 接口单元, standalone -> 独立文件单元."""
+    overview: list = []
+    details: list = []
+    g_counts = grouping.get("counts") or {}
+    if g_counts:
+        overview.append({
+            "k": "评审分组",
+            "v": (f"{g_counts.get('interface', 0)} 个接口单元、"
+                  f"{g_counts.get('standalone', 0)} 个独立文件单元"
+                  f"(共 {grouping.get('total', '?')} 个)")})
+    if cg_stats:
+        if grouping.get("codegraph"):
+            overview.append({
+                "k": "调用链分析",
+                "v": (f"启用——{cg_stats.get('anchors_changed', 0)} 个变更接口作为分组入口、"
+                      f"{cg_stats.get('anchors_upstream', 0)} 处改动挂接到未变更接口、"
+                      f"同入口链路合并 {cg_stats.get('chain_merged', 0)} 组")})
+        else:
+            overview.append({"k": "调用链分析", "v": "未启用(按接口注解与目录归堆分组)"})
+        if cg_stats.get("edges_captured") is not None:
+            details.append(f"捕获调用边 {cg_stats.get('edges_captured', 0)} 条"
+                           f"(变更集内 {cg_stats.get('edges_in_changed_set', 0)} 条)")
+        if cg_stats.get("symbols_queried") is not None:
+            details.append(f"查询变更符号 {cg_stats.get('symbols_queried')} 个")
+    if isinstance(excluded, dict) and excluded.get("count"):
+        by_reason = excluded.get("by_reason") or {}
+        detail = "、".join(f"{k} {v}" for k, v in sorted(by_reason.items())) or "-"
+        overview.append({
+            "k": "排除文件",
+            "v": (f"{excluded['count']} 个({detail})(未进入评审,详见诚实边界)")})
+    return overview, details
+
+
 def _json_embed(data: dict) -> str:
     r"""The data dict serialized for the HTML embed: every `</` becomes `<\/` — a legal
     JSON string escape that parses identically — so a `</script>` literal carried in
@@ -590,6 +683,75 @@ def _json_embed(data: dict) -> str:
     return (json.dumps(data, ensure_ascii=False)
             .replace("</", "<\\/")
             .replace("<!--", "<\\u0021--"))
+
+
+def _readability_bundle(findings: list) -> dict:
+    """The single text bundle for the best-effort readability review: every merged
+    finding's human-face text fields, keyed by P-NN (+ its dimension label and route
+    for context). Written on EVERY render; the review subagent reads exactly this file
+    and nothing else."""
+    items = []
+    for f in findings:
+        item = {"pnum": f["pnum"], "dimension_label": f["dimension_label"],
+                "route": f["route"]}
+        for k in ("risk", "suggestion", "repro"):
+            if f.get(k):
+                item[k] = f[k]
+        if f.get("fix_diff"):
+            item["fix_diff"] = f["fix_diff"]
+        items.append(item)
+    return {"v": 1, "items": items}
+
+
+def _load_advisories(run_dir: Path):
+    """Normalized readability advisories, or None when absent / unparsable / malformed /
+    empty. Best-effort by contract: a missing or broken review only costs the report
+    its optional readability section — never a failure, never a different exit code."""
+    p = run_dir / ADVISORIES_FILE
+    if not p.is_file():
+        return None
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        _eprint(f"[render_sdr_report] note: {ADVISORIES_FILE} unparsable ({e}); "
+                f"可读性自检小节省略")
+        return None
+    items = raw.get("advisories") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        _eprint(f"[render_sdr_report] note: {ADVISORIES_FILE} shape malformed; "
+                f"可读性自检小节省略")
+        return None
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        out.append({"term": str(it.get("term", "")), "field": str(it.get("field", "")),
+                    "pnum": str(it.get("pnum", "")), "why": str(it.get("why", ""))})
+    return out or None
+
+
+def _vocab_warn(findings: list):
+    """Advisory closed-set scan over the LLM-produced human-face field text
+    (risk/suggestion/repro/fix_diff). Soft quality by contract: stderr count warning
+    (field name + term) only — NEVER a different exit code, NEVER a rewrite."""
+    hits: dict = {}
+    for f in findings:
+        for field in ("risk", "suggestion", "repro"):
+            t = f.get(field) or ""
+            for term in human_face_vocab.scan_text(t, domains=("sdr",)):
+                k = (field, term)
+                hits[k] = hits.get(k, 0) + 1
+        for pair in f.get("fix_diff") or []:
+            for side in ("before", "after"):
+                for term in human_face_vocab.scan_text(str(pair.get(side) or ""),
+                                                       domains=("sdr",)):
+                    k = ("fix_diff", term)
+                    hits[k] = hits.get(k, 0) + 1
+    if hits:
+        summary = ", ".join(f"{field}×{n}「{term}」"
+                            for (field, term), n in sorted(hits.items()))
+        _eprint(f"[render_sdr_report] warning: 人类面文本命中内部词闭集(仅告警:退出码不变、"
+                f"文本未改写;词条单源 human_face_vocab): {summary}")
 
 
 # ============================================================================
@@ -670,6 +832,14 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
                                    stroke-dasharray: 4 3; }
   .graph svg .node text { font-size: 13px; fill: var(--ink); }
   .graph svg .node:hover rect { stroke: var(--accent); }
+  /* 折叠明细(分组诊断 / 可读性自检)与修复对比 */
+  details { margin: 8px 0; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .fixdiff pre { margin: 4px 0; padding: 8px 10px; background: #f3f4f6;
+                 border: 1px solid var(--line); border-radius: 5px;
+                 font: 12.5px/1.5 Consolas, "Courier New", monospace;
+                 white-space: pre-wrap; overflow-wrap: anywhere; }
+  .fixdiff-label { font-size: 12px; color: var(--muted); margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -737,7 +907,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     var ul = el("ul", "meta");
     ul.appendChild(el("li", null, "分支:" + m.branch + "(base:" + m.base + ")"));
     ul.appendChild(el("li", null, "时间:" + m.time_display));
-    ul.appendChild(el("li", null, "检查面:" + m.dimensions.join(", ")));
+    ul.appendChild(el("li", null, "检查维度:" + m.dimensions.join(", ")));
     ul.appendChild(el("li", null, "敏感目录来源:" + m.sensitive_catalog_source
       + m.catalog_note));
     ul.appendChild(el("li", null, "外部仓结论:" + m.external_headline));
@@ -755,6 +925,17 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         oul.appendChild(el("li", null, o.k + ":" + o.v));
       });
       ov.appendChild(oul);
+      // 分组质量信号(调用边计数等)收进默认折叠的明细:信息不丢,默认视图不闹
+      if (m.overview_details && m.overview_details.length) {
+        var det = document.createElement("details");
+        det.appendChild(el("summary", null, "分组诊断"));
+        var dul = el("ul", "meta");
+        m.overview_details.forEach(function (t) {
+          dul.appendChild(el("li", null, t));
+        });
+        det.appendChild(dul);
+        ov.appendChild(det);
+      }
     }
   }
 
@@ -888,8 +1069,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     var box = document.getElementById("findings");
     if (!d.findings.length) {
       box.appendChild(el("p", null,
-        "本次检查面内未产出任何问题记录;不代表「无风险」,仅代表本次检查面 + 基线"
-        + "投影下未命中。"));
+        "本次检查范围内未产出任何问题记录;不代表「无风险」,仅代表在本次检查范围与存量"
+        + "设计参考下未命中。"));
       return;
     }
     d.findings.forEach(function (f) {
@@ -904,7 +1085,28 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
       else li.appendChild(el("span", null, f.loc.text));
       ul.appendChild(li);
       if (f.risk) ul.appendChild(el("li", null, "风险:" + f.risk));
+      // 复现方式:怎么调 + 传什么 + 看到什么(数据缺该字段 = 省略,不报错)
+      if (f.repro) ul.appendChild(el("li", null, "复现方式:" + f.repro));
       if (f.suggestion) ul.appendChild(el("li", null, "建议:" + f.suggestion));
+      // 修复对比:每组「修改前 / 修改后」两块上下堆叠的 <pre>,代码文本走
+      // textContent 注入(与 finding 正文同一防注入路线)
+      if (f.fix_diff && f.fix_diff.length) {
+        var liFd = el("li");
+        liFd.appendChild(document.createTextNode("修复对比:"));
+        var wrap = el("div", "fixdiff");
+        f.fix_diff.forEach(function (pair) {
+          wrap.appendChild(el("div", "fixdiff-label", "修改前"));
+          var preB = document.createElement("pre");
+          preB.textContent = String(pair.before);
+          wrap.appendChild(preB);
+          wrap.appendChild(el("div", "fixdiff-label", "修改后"));
+          var preA = document.createElement("pre");
+          preA.textContent = String(pair.after);
+          wrap.appendChild(preA);
+        });
+        liFd.appendChild(wrap);
+        ul.appendChild(liFd);
+      }
       if (f.control_ref) ul.appendChild(el("li", null, "命中存量控制:" + f.control_ref));
       card.appendChild(ul);
       box.appendChild(card);
@@ -1026,12 +1228,34 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     d.boundaries.forEach(function (b) { box.appendChild(el("li", null, b)); });
   }
 
+  // 可读性自检:默认折叠的小节,列一次读者模拟评审的建议(仅建议、须人确认;评审缺席
+  // = 整节不渲染,报告其余内容不变)。section 由 JS 动态创建——缺席时文件里没有该小节。
+  function renderReadability(d) {
+    var items = d.readability;
+    if (!items || !items.length) return;
+    var main = document.querySelector("main");
+    var sec = el("section");
+    sec.id = "sec-readability";
+    var det = el("details");
+    det.appendChild(el("summary", null, "可读性自检(" + items.length
+      + " 条建议;来自一次读者模拟评审,仅建议、采纳由人确认)"));
+    var ul = el("ul");
+    items.forEach(function (adv) {
+      var where = (adv.pnum ? adv.pnum + " " : "") + (adv.field || "");
+      ul.appendChild(el("li", null, "「" + adv.term + "」(" + where + "):" + adv.why));
+    });
+    det.appendChild(ul);
+    sec.appendChild(det);
+    main.appendChild(sec);
+  }
+
   renderMeta(DATA);
   renderTable(DATA);
   renderFindings(DATA);
   renderGraphs(DATA);
   renderOkUnits(DATA);
   renderBoundaries(DATA);
+  renderReadability(DATA);
 })();
 </script>
 </body>
@@ -1104,7 +1328,7 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
             loc_txt += f":{f['line']}"
         elif f.get("line_hint"):
             loc_txt += f"({f['line_hint']})"
-        findings.append({
+        rec = {
             "pnum": f["pnum"],
             "dimension": f["dimension"],
             "dimension_label": _DIMENSION_LABEL.get(f["dimension"], f["dimension"]),
@@ -1117,7 +1341,14 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
             "risk": f["risk"],
             "suggestion": f["suggestion"],
             "control_ref": f.get("control_ref"),
-        })
+        }
+        # optional human-face fields: present keys only (absent = not applicable; old
+        # drafts degrade silently)
+        if f.get("repro"):
+            rec["repro"] = f["repro"]
+        if f.get("fix_diff"):
+            rec["fix_diff"] = f["fix_diff"]
+        findings.append(rec)
 
     # 章节三: real branches only = a NON-external node carries branch_of (a java
     # fan-out). branch_of on an `external` mapper-terminal node is encoding, NOT a
@@ -1136,38 +1367,16 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
         ext_headline = (f"{', '.join(e.get('slug', '?') for e in external)}"
                         f"({len(external)} 仓,检索时点快照)")
     elif unapproved:
-        ext_headline = "无(外部仓未授权,前端相关检查面未覆盖)"
+        ext_headline = "无(外部仓未授权,前端相关检查未覆盖)"
     else:
-        ext_headline = "无(未声明 / 不可达降级,前端相关检查面未覆盖)"
-    catalog_note = ("(项目目录复用)" if catalog_source == "project"
-                    else "(默认模板回退:PIPL/GB-T 35273 37 项;与 sra/srr 的显式行为分歧)")
+        ext_headline = "无(未声明 / 不可达降级,前端相关检查未覆盖)"
+    catalog_note = ("(项目提供的敏感字段清单)" if catalog_source == "project"
+                    else "(默认模板回退:内置 37 项模板,不按维度收窄)")
 
-    # 分组概览: unit counts + anchoring/merge summary + exclusion counts (grouping
-    # quality at a glance — observable without opening grouping.json). Rides
-    # grouping.json in the run dir (older layouts: the section is simply absent).
-    overview = []
-    g_counts = grouping.get("counts") or {}
-    if g_counts or excluded or cg_stats:
-        if g_counts:
-            overview.append({"k": "单元数",
-                             "v": f"interface {g_counts.get('interface', 0)} / "
-                                  f"standalone {g_counts.get('standalone', 0)}"
-                                  f"(total {grouping.get('total', '?')})"})
-        if cg_stats:
-            overview.append({"k": "codegraph",
-                             "v": ("on" if grouping.get("codegraph") else "off")
-                                  + f"(路由锚 {cg_stats.get('anchors_changed', 0)}、"
-                                    f"向上锚定 {cg_stats.get('anchors_upstream', 0)}、"
-                                    f"链合并 {cg_stats.get('chain_merged', 0)}、"
-                                    f"捕获调用边 {cg_stats.get('edges_captured', 0)}、"
-                                    f"变更集内边 {cg_stats.get('edges_in_changed_set', 0)})"})
-        if isinstance(excluded, dict) and excluded.get("count"):
-            detail = "、".join(f"{k} {v}" for k, v in
-                               sorted((excluded.get("by_reason") or {}).items()))
-            overview.append({"k": "排除文件",
-                             "v": f"{excluded['count']} 个"
-                                  + (f"({detail})" if detail else "")
-                                  + "(未进入评审,详见诚实边界)"})
+    # 分组概览: plain-word main sentences + collapsed 分组诊断 details (grouping quality
+    # at a glance — observable without opening grouping.json). Rides grouping.json in
+    # the run dir (older layouts: the section is simply absent).
+    overview, overview_details = _overview_and_details(grouping, excluded, cg_stats)
 
     boundaries = _boundaries(by_dim, failed, catalog_source, external, dims,
                              ctx.get("baseline_truncated", False), excluded,
@@ -1195,6 +1404,7 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
             "findings_total": total,
             "by_severity": by_sev,
             "overview": overview,
+            "overview_details": overview_details,
         },
         "dimension_columns": dim_cols,
         "rows": manifest_rows,
@@ -1204,6 +1414,15 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
         "ok_units": ok_units,
         "boundaries": boundaries,
     }
+
+    # best-effort readability review consumption: a parsable advisory file (written by
+    # the review subagent between the first render and this re-render) rides the data
+    # and the report; anything else just omits the section (exit code untouched)
+    advisories = _load_advisories(run_dir)
+    if advisories:
+        data["readability"] = advisories
+        _eprint(f"[render_sdr_report] readability advisories: {len(advisories)} 条"
+                f"(已并入报告「可读性自检」小节;仅建议,采纳由人确认)")
 
     html_text = _HTML_TEMPLATE.replace("__MGH_DATA_JSON__", _json_embed(data))
 
@@ -1245,6 +1464,14 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
     os.replace(tmp, report_path)
     os.replace(dtmp, out_dir / DATA_FILE)
     os.replace(mtmp, out_dir / "sdr_manifest.json")
+    # the readability text bundle: written on EVERY render (run dir, not out_dir — a
+    # fixed convention path so the review subagent's contract never depends on flags)
+    btmp = run_dir / (BUNDLE_FILE + ".tmp")
+    btmp.write_text(json.dumps(_readability_bundle(findings), ensure_ascii=False,
+                               indent=1) + "\n", encoding="utf-8")
+    os.replace(btmp, run_dir / BUNDLE_FILE)
+    _eprint(f"[render_sdr_report] readability_text_bundle: {run_dir / BUNDLE_FILE} "
+            f"({len(findings)} items)")
     return report_path, manifest, data
 
 
@@ -1313,6 +1540,10 @@ def _check(run_dir: Path) -> int:
     # draft truth vs manifest counts
     drafts, failed = _load_drafts(run_dir)
     by_dim = _merge_findings(drafts)
+    # soft-quality vocabulary scan over the LLM-produced human-face field text: stderr
+    # count warning only — the exit code below is driven exclusively by the hard
+    # consistency violations, never by model wording
+    _vocab_warn([f for lst in by_dim.values() for f in lst])
     actual = sum(len(v) for v in by_dim.values())
     if m.get("counts", {}).get("findings") != actual:
         violations.append(f"counts.findings mismatch (manifest "

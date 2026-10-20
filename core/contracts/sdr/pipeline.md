@@ -14,8 +14,10 @@ JSON / stderr=诊断严格分流、退出码 `0` 成功 · `1` 输入错误(文�
 └── runs/<ts>/                       # 一次评审 run(ts = YYYYMMDD_HHMMSS 本地时区)
     ├── context.json                 # sdr_context 产出(base/branch/baseline_path/external_repos[]);起始态唯一真相源
     ├── run_config.json              # 脚本写出,**唯一载荷** {"no_codegraph": bool};起始态字段 NEVER 写入
-    ├── slices/                      # diff_group 物化的只读单元 slice(<unit_id>.slice.md)
+    ├── slices/                      # diff_group 物化的只读单元 slice(<unit_id>.slice.md);原生形态下 emit_native_plan 另落每单元任务文件 <unit_id>.task.md(同目录)
     ├── drafts/                      # fan-out 单元 draft JSON(<unit_id>.json)+ .done/.failed 落 markers/
+    ├── native_plan.json             # emit_native_plan 产出(仅原生形态):波次表 + 短号三方映射 + 任务文件路径(全绝对);每轮重物化 = 重枚举
+    ├── watchdog/                    # native_watchdog 工件(仅原生形态):events.jsonl 追加 + state.json 原子写(自退后留存)
     ├── external/<repo-slug>/        # sdr_context 物化的外部仓结论文件(summary.json + hits.md)
     ├── baseline.md                  # 存量安全设计基线投影(≤32KB 默认,优先级截断)
     ├── sensitive_catalog.json       # sdr_context 物化的解析后敏感目录对象(subagent 只读路径的指向)
@@ -99,6 +101,29 @@ py render_sdr_report.py --check <run-dir>
 | 写面 | NEVER 写 `openspec/`、NEVER 写 run 目录与报告/数据文件/文本束之外的目标仓文件 |
 | `--check` | run 目录自洽:manifest 计数与 draft 实际一致、数据文件存在可解析且与报告内嵌数据块 JSON 等价、manifest `rows[]` 与数据文件一致、报告(若已渲染)为 `.html` 且含内嵌数据块与各章节锚点标记;另对模型人类面文本(`risk`/`suggestion`/`repro`/`fix_diff`)做闭集扫描(闭集 import `human_face_vocab.py` 单源)——命中仅 stderr 计数告警(字段名 + 词),**退出码不变**(模型措辞是软质量);确定性文案闭集合规由回归测试保障,不入 `--check` 面。违例退出 2 |
 
+## 原生派发形态(opencode 面,画像显式 native)
+
+fan-out 的双形态契约。子进程形态(`fanout_runner.py --tier sdr`,见上「消费方」)是缺省与
+永久回退;本节只约束原生形态。**激活条件 = 项目环境画像 `<project>/.mgh/env-profile.json`
+的 `dispatch_mode` 显式为 `"native"`**——画像缺失 / `auto` / `runner` 一律现行子进程形态,
+行为逐字节不变;坏画像 fail-closed(退出码 2 + recipe),由步骤/恢复脚本在读画像时透传。
+评审本体(六维检查面、draft schema、写作纪律、检查基线投影)与形态无关,两形态同源,报告
+数据可跨形态对照。
+
+| 项 | 契约 |
+|---|---|
+| 物化与自检 | 每轮 `py emit_native_plan.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --profile <project>` 物化 `<run-dir>/native_plan.json` + `<run-dir>/slices/<unit_id>.task.md`,随后**同参** `--check`(退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划)。**每轮重跑物化 = 重枚举**:pending 由磁盘标记重派生,有终态标记的单元自动出局 |
+| 波次派发 | 编排器**同一条 assistant 消息**并发发出当前波全部子代理调用(agent `sdr-review-native`,`mode: subagent`,权限面与 fanout 孪生一致);每调用 `description` = 计划短号(逐字复制),任务体 = 固定一句 + 该单元 `task_file` 绝对路径(逐字透传)。波次尺寸 = 计划 `wave_size`(并发与画像配额算术的较小者)。NEVER 跨波合并 / NEVER 自增并发 / NEVER 自撰任务文本 / NEVER 拼接改写路径 |
+| 标记写者 | `.done`/`.failed` 的唯一写者是子代理自身(指令仅住在 `sdr-review-native` agent 定义:成功 touch `done_marker`;失败自写 `failed_marker`,内容 `{"unit_id", "reason"}`);计划物化、看门狗、编排器 NEVER 写任何单元标记(唯一例外 = 重派认领时删除旧 `.failed`,与派发器 `--retry-failed` 的认领即删同形——是删除不是写入)。子进程形态的模板行与派发器写标记行为零改动——两形态失败终态语义等价、写者各自单一 |
+| 重派与等窗 | `.failed` 单元(原因非限流特征)至多重派一轮:删旧 `.failed` → 重物化加 `--retry-failed`(该单元回 pending)→ 派发一次;再失败接受缺口随报告披露(`failed_units[]`),NEVER 无限重派。上一波失败原因含限流特征(429/rate limit/quota)→ 按画像配额窗口等满一窗再查询/重派,等待事实入 run 过程记录 |
+| 看门狗接线 | native 步**第一波前**以后台形态启动 `native_watchdog.py --run-dir <run-dir>`(根会话 = 宿主注入的 `OPENCODE_SESSION_ID`,零手工传参;阈值缺省);run 落定自退;编排器 NEVER 代替看门狗做会话中止。启动/重启/收尾纪律在 fragment `prompts/fragments/sdr-native-dispatch.md` |
+| 步骤与恢复形态感知 | `list_sdr_steps.py`(原生形态):fanout 步入口 = 物化脚本 + 新增 `native_arc` 三相(materialize→waves→render)+ native 纪律变体,顶层增 `dispatch` 字段;`resume_sdr_state.py`(原生形态):stdout 增 `dispatch` 字段,fanout `next_action` 按计划工件在场与否指到物化/派波次,纪律变体与清单同表(字节等价断言在原生形态同样成立)。进度仍纯磁盘重派生;子进程形态输出零新字段 |
+| 报告披露 | `render_sdr_report.py` 在「计划工件在场 ∧ 画像 native」时:数据文件 `meta.dispatch`、manifest `dispatch`、报告头部「派发形态」行、诚实边界增一条(波次粒度止损 / 父会话单点 / 路径转述残余)。依据不成立 → 零新字段(既有 run 输出字节不变);坏画像在渲染侧降级为不披露(fail-closed 启动契约属派发面脚本,它们根本不会带着坏画像跑到渲染) |
+| 三面分歧 | 原生形态当前仅 opencode 面;claude/dsh 面保留子进程形态,各面壳以一行如实披露当前支持面(宿主机制差异白名单类,非镜像断裂),后续按宿主能力另行接入 |
+
+版本矩阵:opencode 2.1.0 实机闸门(本机);企业 2.0.32 CAS 真仓对照 = 交接内网闸门(差异
+回填 fanout 运行契约([`fanout/runtime.md`](../fanout/runtime.md))的版本矩阵)。
+
 ## draft JSON schema(fan-out 单元问题记录)
 
 ```json
@@ -137,6 +162,9 @@ py render_sdr_report.py --check <run-dir>
 
 - `fanout_runner.py --tier sdr`:`diff_group.py --materialize` 是 pending 唯一来源;
   模板 `core/prompts/fragments/fanout/sdr-task.md`;agent `sdr-review-fanout`。
+- 原生形态(opencode 面,画像显式 native):`emit_native_plan.py --tier sdr` 物化计划
+  (同一 pending 源、同一模板),编排器按「原生派发形态」节的波次循环派 `sdr-review-native`
+  子代理;子进程形态原样保留为回退。
 - 编排器(双壳):step 链 sdr_context → diff_group → fanout_runner → render →
   (尽力而为的读者模拟评审,一次,经 `readability-review.md` 评审模板——与
   `sdr-task.md` 同目录)→ 重渲染,每步后跑产出者 `--check`,失败(退出码 2)回退重跑;

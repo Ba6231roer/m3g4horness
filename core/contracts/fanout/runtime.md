@@ -60,6 +60,11 @@ Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)、`emit_native_pl
 
 Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画像读取);消费方
 = 后续接入原生派发的命令壳/步骤清单(编排会话直接派同宿主 subagent,零 headless 子进程)。
+**首个消费方 = `/mgh-sdr`(opencode 面,环境画像显式 `dispatch_mode:"native"` 时)**:
+波次循环、标记写者、看门狗接线与报告披露的编排契约见
+[`sdr/pipeline.md`](../sdr/pipeline.md)「原生派发形态」节;子进程派发器形态
+(`fanout_runner.py --tier sdr`)是缺省与永久回退——画像缺失/auto/runner 一律回退形态,
+行为逐字节不变,两形态的单元输入构造同源零漂移。
 两脚本与子进程派发器的关系 = **旁路供给面**:`emit_native_plan.py` 以兄弟导入复用派发器
 的 tier 表、枚举器调用与 run 目录锚定、模板加载与逐字填充、锚树校验、安全文件名(**派发器
 源码零改动、其行为零变化**),使原生形态与子进程形态的单元输入构造零漂移。

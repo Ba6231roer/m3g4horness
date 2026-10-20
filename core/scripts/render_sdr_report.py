@@ -82,6 +82,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import human_face_vocab  # sibling single source: closed-set vocabulary + scanner
+import env_profile  # sibling: native-dispatch disclosure basis (profile read)
 
 TOOL_NAME = "mgh-sdr"
 DATA_FILE = "sdr_report_data.json"
@@ -571,7 +572,7 @@ def _build_rows(g_units: list, by_dim: dict, unit_refs: dict,
 
 
 def _boundaries(by_dim, failed, catalog_source, external, dims, baseline_truncated,
-                excluded=None, skipped=None, slimmed=None):
+                excluded=None, skipped=None, slimmed=None, dispatch=None):
     sk = [s for s in (skipped or []) if isinstance(s, str)]
     unapproved = [s[len("unapproved: "):].strip() for s in sk
                   if s.startswith("unapproved: ")]
@@ -615,6 +616,12 @@ def _boundaries(by_dim, failed, catalog_source, external, dims, baseline_truncat
     if external:
         b.append(f"外部仓检索覆盖 {len(external)} 个声明仓;未声明/不可达的外部仓不在本次评审"
                  f"范围内。")
+    if dispatch:
+        b.append("派发形态为原生子代理波次派发(opencode 宿主会话内并发):止损为波次粒度"
+                 "(无进程树杀,挂死单元由看门狗按静默/超时阈值中止兜底);编排父会话是单点"
+                 "(进度在磁盘,恢复会话经状态查询接上,已完成单元不重做);单元任务文件路径经"
+                 "编排器转述存在残余错抄面(越树路径被运行域守卫拦截,树内错配单元经重枚举回"
+                 "待派,重派代价有界)。")
     if unapproved:
         shown = "、".join(unapproved[:3]) + ("…" if len(unapproved) > 3 else "")
         b.append(f"外部仓未授权:存量设计声明了 {len(unapproved)} 个外部目录({shown}),"
@@ -632,6 +639,29 @@ def _load_grouping(run_dir: Path) -> dict:
         return g if isinstance(g, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _dispatch_disclosure(repo: Path, run_dir: Path):
+    """Native-dispatch disclosure basis, CONJUNCTIVE: the run dir carries the
+    native plan artifact AND the repo's env profile explicitly selects
+    `dispatch_mode: "native"`. Anything else (no plan artifact, profile missing
+    / auto / runner / corrupt) -> None, and the report keeps byte-identical
+    output — absent means not applicable, so every pre-native run is unchanged.
+    A corrupt profile degrades to no disclosure here (this is a report reader,
+    not a dispatch consumer; the fail-closed startup contract belongs to the
+    dispatch-facing scripts, which refuse to run on a corrupt profile in the
+    first place)."""
+    plan = run_dir / "native_plan.json"
+    if not plan.is_file():
+        return None
+    try:
+        profile = env_profile.load(repo)
+    except Exception:
+        return None
+    if profile.dispatch_mode != "native":
+        return None
+    return {"form": "native", "plan_artifact": str(plan.resolve()),
+            "evidence": "native_plan.json + env-profile dispatch_mode=native"}
 
 
 def _overview_and_details(grouping: dict, excluded, cg_stats) -> tuple[list, list]:
@@ -911,6 +941,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     ul.appendChild(el("li", null, "敏感目录来源:" + m.sensitive_catalog_source
       + m.catalog_note));
     ul.appendChild(el("li", null, "外部仓结论:" + m.external_headline));
+    if (m.dispatch) ul.appendChild(el("li", null, "派发形态:" + m.dispatch.form
+      + "(原生子代理波次派发;计划工件在场,证据:" + m.dispatch.evidence + ")"));
     ul.appendChild(el("li", null, "单元:" + m.units_total + " 个(done "
       + m.units_done + " / failed " + m.units_failed + ");findings 去重后 "
       + m.findings_total + " 条(高 " + m.by_severity.high + " / 中 "
@@ -1378,9 +1410,13 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
     # the run dir (older layouts: the section is simply absent).
     overview, overview_details = _overview_and_details(grouping, excluded, cg_stats)
 
+    # native-dispatch disclosure: conjunctive basis (plan artifact + profile);
+    # None = no disclosure field anywhere (byte-identical pre-native output)
+    dispatch = _dispatch_disclosure(repo, run_dir)
+
     boundaries = _boundaries(by_dim, failed, catalog_source, external, dims,
                              ctx.get("baseline_truncated", False), excluded,
-                             skipped, slimmed)
+                             skipped, slimmed, dispatch)
 
     data = {
         "v": 1,
@@ -1414,6 +1450,8 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
         "ok_units": ok_units,
         "boundaries": boundaries,
     }
+    if dispatch:
+        data["meta"]["dispatch"] = dispatch
 
     # best-effort readability review consumption: a parsable advisory file (written by
     # the review subagent between the first render and this re-render) rides the data
@@ -1457,6 +1495,8 @@ def _render(repo: Path, run_dir: Path, ctx: dict, by_dim: dict, drafts, failed,
         "report": str(report_path),
         "ts": ts,
     }
+    if dispatch:
+        manifest["dispatch"] = dispatch
     mtmp = out_dir / "sdr_manifest.json.tmp"
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n",
                     encoding="utf-8")

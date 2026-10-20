@@ -1300,5 +1300,126 @@ class DeterministicCopyVocabGuardTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class DispatchDisclosureTest(unittest.TestCase):
+    """fix-mgh-sdr-native-dispatch: the dispatch-form disclosure rides a
+    CONJUNCTIVE basis (native_plan.json in the run dir AND the repo profile
+    explicitly native). Any non-native run keeps byte-identical carriers (no
+    `dispatch` key anywhere); a native run adds meta.dispatch + manifest.dispatch
+    + one head-meta line + exactly one extra honesty-boundary entry, with the
+    canonical review data (rows/findings/counts) unchanged — the dual-form
+    same-data diff below asserts the disclosure is the ONLY delta."""
+
+    F1 = {"dimension": "horizontal-authz", "severity": "high", "route": "/user/detail",
+          "file": "UserController.java", "line_hint": "88-102", "risk": "风险一",
+          "suggestion": "建议一", "control_ref": "横向越权规约"}
+
+    def setUp(self):
+        self.m = _load()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _build(self, native):
+        repo = self.tmp / ("native" if native else "plain")
+        run_dir = repo / ".mgh-sdr" / "runs" / "t1"
+        (run_dir / "markers").mkdir(parents=True)
+        (run_dir / "drafts").mkdir(parents=True)
+        (run_dir / "context.json").write_text(json.dumps({
+            "branch": "feature-pay", "base": "master", "dimensions": None,
+            "sensitive_catalog_source": "default-template", "external_repos": [],
+            "baseline_truncated": False,
+        }), encoding="utf-8")
+        (run_dir / "drafts" / "u1.json").write_text(json.dumps(
+            {"unit": "u1", "findings": [dict(self.F1)]}, ensure_ascii=False),
+            encoding="utf-8")
+        (run_dir / "markers" / "u1.done").write_text("{}", encoding="utf-8")
+        if native:
+            (run_dir / "native_plan.json").write_text("{}", encoding="utf-8")
+            (repo / ".mgh").mkdir(parents=True)
+            (repo / ".mgh" / "env-profile.json").write_text(json.dumps(
+                {"v": 1, "dispatch_mode": "native"}), encoding="utf-8")
+        return repo, run_dir
+
+    @staticmethod
+    def _render_call(mod, *args):
+        sys.argv = ["render_sdr_report.py"] + list(args)
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = mod.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def _render(self, repo, run_dir):
+        code, out, err = self._render_call(
+            self.m, "--run-dir", str(run_dir), "--repo", str(repo))
+        self.assertEqual(code, 0, err)
+        data = json.loads((run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        manifest = json.loads((run_dir / "sdr_manifest.json").read_text(
+            encoding="utf-8"))
+        report = Path(json.loads(out)["report"]).read_text(encoding="utf-8")
+        return data, manifest, report
+
+    def test_subprocess_run_has_no_disclosure_fields(self):
+        repo, run_dir = self._build(native=False)
+        data, manifest, report = self._render(repo, run_dir)
+        self.assertNotIn("dispatch", data["meta"])
+        self.assertNotIn("dispatch", manifest)
+        # the head-meta conditional exists once (JS shape); the embedded data
+        # carries no dispatch object, so the rendered line never appears
+        self.assertEqual(report.count("if (m.dispatch)"), 1)
+        self.assertNotIn("dispatch", _embed(self.m, report)["meta"])
+
+    def test_plan_without_profile_or_bad_profile_stays_silent(self):
+        repo, run_dir = self._build(native=False)
+        (run_dir / "native_plan.json").write_text("{}", encoding="utf-8")
+        data, manifest, report = self._render(repo, run_dir)
+        self.assertNotIn("dispatch", _embed(self.m, report)["meta"])
+        self.assertNotIn("dispatch", data["meta"])
+        # corrupt profile: report-reader degrades to no disclosure
+        (repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (repo / ".mgh" / "env-profile.json").write_text("{broken", encoding="utf-8")
+        data2, manifest2, _ = self._render(repo, run_dir)
+        self.assertNotIn("dispatch", data2["meta"])
+        self.assertNotIn("dispatch", manifest2)
+
+    def test_native_run_discloses_form_and_boundaries(self):
+        repo, run_dir = self._build(native=True)
+        data, manifest, report = self._render(repo, run_dir)
+        d = data["meta"]["dispatch"]
+        self.assertEqual(d["form"], "native")
+        self.assertTrue(Path(d["plan_artifact"]).is_absolute())
+        self.assertIn("native_plan.json", d["evidence"])
+        self.assertEqual(manifest["dispatch"]["form"], "native")
+        # the head-meta data (rendered by JS in a browser) carries the line's payload
+        self.assertEqual(_embed(self.m, report)["meta"]["dispatch"]["form"], "native")
+        joined = "\n".join(data["boundaries"])
+        for needle in ("波次粒度", "父会话是单点", "残余错抄面"):
+            self.assertIn(needle, joined, needle)
+
+    def test_dual_form_same_data_diff_is_disclosure_only(self):
+        plain_repo, plain_run = self._build(native=False)
+        nat_repo, nat_run = self._build(native=True)
+        pdata, pmanifest, _ = self._render(plain_repo, plain_run)
+        ndata, nmanifest, _ = self._render(nat_repo, nat_run)
+        # time-stamped fields drift between renders; everything canonical must not
+        for d in (pdata, ndata):
+            d["meta"].pop("ts"), d["meta"].pop("time_display")
+        self.assertEqual(pdata["rows"], ndata["rows"])
+        self.assertEqual(pdata["findings"], ndata["findings"])
+        # boundaries differ by EXACTLY the one native disclosure entry
+        self.assertEqual(len(ndata["boundaries"]), len(pdata["boundaries"]) + 1)
+        self.assertEqual(ndata["boundaries"][:-1], pdata["boundaries"])
+        self.assertIn("派发形态为原生子代理波次派发", ndata["boundaries"][-1])
+        self.assertNotEqual(pdata["meta"], ndata["meta"])
+        self.assertEqual(set(ndata["meta"]) - set(pdata["meta"]), {"dispatch"})
+        self.assertEqual(set(nmanifest) - set(pmanifest), {"dispatch"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

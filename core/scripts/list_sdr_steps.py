@@ -13,10 +13,22 @@ installed, NEVER hardcoded or passed via prompt. Sister script of init's
 
 Zero disk preconditions: does NOT read `context.json`, does NOT scan
 `<repo>/.mgh-sdr/`, does NOT depend on any run-state artifact. Queryable pre-run, during
-compaction recovery, or for pure documentation review. The ONE allowed disk probe is the
-optional special-auth deployment doc (`<mgh-core>/mgh-special-auth.md`, maintainer-carried,
-absent in generic installs): its presence is reported in the top-level `special_auth`
-field so the orchestrator can consult it before the fan-out step; no other state is read.
+compaction recovery, or for pure documentation review. The allowed disk probes are:
+the optional special-auth deployment doc (`<mgh-core>/mgh-special-auth.md`,
+maintainer-carried, absent in generic installs): its presence is reported in the
+top-level `special_auth` field so the orchestrator can consult it before the fan-out
+step; and — ONLY when the project env profile explicitly selects the native dispatch
+form — the profile read itself plus a `native_plan.json` presence glob (reported in the
+top-level `dispatch` field, see below). No other state is read.
+
+Dispatch-form awareness (zero-change by construction): the project env profile
+(`<target>/.mgh/env-profile.json`, read via the shared `env_profile` module) decides the
+fan-out step's shape. Profile absent / `auto` / `runner` → the ESTABLISHED subprocess
+manifest, byte-identical output (no new stdout fields). Profile `native` → the fanout
+step entry switches to the native plan materializer and gains a `native_arc` field
+(materialize → same-message wave dispatch → render), and the top-level `dispatch` field
+appears. A malformed profile is fail-closed: exit 2 + recipe (NEVER silently treated as
+defaults — a "configured native but actually ran runner" mismatch must blow up here).
 
 Complements `resume_sdr_state.py` (disk-derived "where am I / what's next"):
 resume_sdr_state gives the CURRENT step; list_sdr_steps gives the exact invocation line
@@ -36,12 +48,18 @@ CLI contract (`--help` is the contract surface, R5.1):
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"steps": [{step, kind, script, script_abs, invocation, input{}, output{}, discipline}],
-   "special_auth": {present, path}}
+   "special_auth": {present, path}
+   [, "dispatch": {form, profile_path, plan_present, native_agent, discipline_fragment}]}
   - special_auth = {present: bool, path: <abs>|null} — presence of the optional
                    special-auth deployment doc in this install tree. present=true →
                    the orchestrator reads it BEFORE the fan-out step and follows it
                    for credential preparation and dispatch flags; present=false →
                    the generic flow needs nothing else.
+  - dispatch     = present ONLY in the native form (profile dispatch_mode "native"):
+                   {form:"native", profile_path, plan_present (any
+                   <target>/.mgh-sdr/runs/*/native_plan.json — corroboration only,
+                   the profile is the binding decision), native_agent, and the
+                   installed wave-discipline fragment path}. Absent otherwise.
   - step        = step id (enum matching resume_sdr_state.py)
   - kind        = "bash" | "done"
   - script      = sibling script file name (None for the terminal step)
@@ -66,7 +84,8 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
                 rate-limit window wait / retry-failed once) and the group entry the
                 slice-budget calibration.
 
-Exit codes (R5.3b): 0 ok · 1 target not a dir · 2 misuse (--step not found).
+Exit codes (R5.3b): 0 ok · 1 target not a dir · 2 misuse (--step not found) or
+malformed env profile (fail-closed, with recipe).
 Idempotent, no TTY, read-only.
 """
 from __future__ import annotations
@@ -82,6 +101,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # resume_sdr_state.py stdout `discipline_reminders` for the same step (the test
 # asserts byte-verbatim equality). discipline_core is pure data — no IO.
 from discipline_core import get_discipline  # noqa: E402
+import env_profile  # noqa: E402 — sibling; profile read + fail-closed semantics
 
 
 # Static step→IO table, defined once. The step id set matches resume_sdr_state.py's
@@ -154,13 +174,84 @@ _STEPS = [
 
 
 def _special_auth() -> dict:
-    """Presence probe for the optional special-auth deployment doc (the ONE
-    disk probe this manifest makes; see module docstring). present=false is
-    the generic-install shape and carries path=null."""
+    """Presence probe for the optional special-auth deployment doc (see module
+    docstring for the allowed disk probes). present=false is the generic-install
+    shape and carries path=null."""
     doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
     if doc.is_file():
         return {"present": True, "path": str(doc)}
     return {"present": False, "path": None}
+
+
+def _dispatch_form(target: Path):
+    """Native-form detection. The env profile is the BINDING decision
+    (`dispatch_mode: "native"` and nothing else — missing / auto / runner keep
+    the established subprocess form); the `native_plan.json` presence glob is
+    corroboration only, reported so the orchestrator can see whether a prior
+    wave round already materialized. A malformed profile is fail-closed
+    (exit 2 + recipe) per the shared env-profile contract. Returns None unless
+    the native form is active — the caller then omits the `dispatch` field
+    entirely, so every subprocess-form invocation keeps byte-identical stdout."""
+    try:
+        profile = env_profile.load(target)
+    except env_profile.EnvProfileError as e:
+        print(f"error: env profile rejected: {e}\n"
+              f"recipe: fix or delete the config — a malformed profile is NEVER "
+              f"silently treated as defaults (a 'configured native but actually "
+              f"ran runner' mismatch must fail at startup).", file=sys.stderr)
+        sys.exit(2)
+    if profile.dispatch_mode != "native":
+        return None
+    runs = target / ".mgh-sdr" / "runs"
+    plan_present = runs.is_dir() and any(runs.glob("*/native_plan.json"))
+    return {
+        "form": "native",
+        "profile_path": str(target / env_profile.CONFIG_REL),
+        "plan_present": plan_present,
+        "native_agent": "sdr-review-native",
+        "discipline_fragment": str(
+            Path(__file__).resolve().parent.parent / "prompts" / "fragments"
+            / "sdr-native-dispatch.md"),
+    }
+
+
+def _native_fanout_step(dispatch: dict) -> dict:
+    """The fanout step's NATIVE face: the deterministic entry point is the plan
+    materializer (re-materialize = re-enumerate); the wave dispatch itself is
+    orchestrator discipline, carried by the `native_arc` phases + the native
+    discipline variant (same table resume_sdr_state reports)."""
+    emit_abs = _script_abs("emit_native_plan.py")
+    cli_args = ("--tier sdr --repo <target> --base <ref> [--branch <ref>] "
+                "--checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices "
+                "--profile <target>")
+    return {
+        "step": "fanout",
+        "kind": "bash",
+        "script": "emit_native_plan.py",
+        "script_abs": emit_abs,
+        "invocation": _invocation(emit_abs, cli_args),
+        "input": {"artifact": "grouping.json::pending[]", "shape": "[unit work-list]"},
+        "output": {"artifact": "native_plan.json + <unit>.task.md + drafts/markers",
+                   "shape": "[wave split + per-unit task file; terminal markers "
+                            "written by the subagents themselves]",
+                   "path_pattern": "<run-dir>/native_plan.json "
+                                   "(+ <run-dir>/slices/<unit_id>.task.md)"},
+        "native_arc": [
+            {"phase": "materialize", "kind": "bash", "script": "emit_native_plan.py",
+             "invocation": _invocation(emit_abs, cli_args),
+             "note": ("每轮重跑 = 重枚举(pending 由磁盘标记重派生);物化后同参跑 --check;"
+                      "计划与任务文件以最新一次物化为准")},
+            {"phase": "waves", "kind": "subagent", "agent": dispatch["native_agent"],
+             "discipline_fragment": dispatch["discipline_fragment"],
+             "note": ("同一条 assistant 消息并发派当前波全部单元(description=计划短号,"
+                      "任务体=固定句+task_file 绝对路径逐字透传);看门狗先行(启动与收尾"
+                      "参数见 fragment 第 0 节)")},
+            {"phase": "render", "kind": "bash", "step_ref": "render",
+             "note": ("pending 清空(失败缺口已按至多一轮重派纪律接受)→ 进清单 render 步"
+                      "(render_sdr_report.py + --check)")},
+        ],
+        "discipline": get_discipline("fanout", domain="sdr", form="native"),
+    }
 
 
 def _script_abs(script_name: str | None) -> str | None:
@@ -221,7 +312,11 @@ def main():
         print(f"error: target not a directory: {target}", file=sys.stderr)
         return 1
 
+    dispatch = _dispatch_form(target)
     steps = [_build_step(e) for e in _STEPS]
+    if dispatch is not None:
+        steps = [_native_fanout_step(dispatch) if s["step"] == "fanout" else s
+                 for s in steps]
     step_ids = {s["step"] for s in steps}
 
     if args.step:
@@ -239,8 +334,10 @@ def main():
         print(f"[list_sdr_steps] emitting {len(steps)} steps (use --step <id> for "
               f"single step)", file=sys.stderr)
 
-    print(json.dumps({"steps": steps, "special_auth": _special_auth()},
-                     ensure_ascii=False, indent=2))
+    payload = {"steps": steps, "special_auth": _special_auth()}
+    if dispatch is not None:
+        payload["dispatch"] = dispatch
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 

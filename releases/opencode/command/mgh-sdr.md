@@ -86,6 +86,10 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
    · **零参默认路径**:`--base`/`--branch` 整体省略(脚本 argparse 兜底 master/当前分支),
      run 目录命名只用 `<ts>` 不含分支;后续步骤与报告消费 step 1 stdout 已解析的 `branch`/`base`
      字段,NEVER 在壳里 `git rev-parse` 猜分支。
+   · **派发形态判定**(step 0,缺省零变化):`py .opencode/mgh-core/scripts/env_profile.py
+     --target <abs>` ——退出码 2 = 画像损坏:转述 stderr recipe 后 STOP(NEVER 带着坏画像
+     跑);缺文件 / `auto` / `runner` = 现行子进程形态(本壳下文零变化);仅
+     `dispatch_mode == "native"` → step 3 fan-out 改走**原生形态**。
    · **预武装哨兵**(先于 step 1 唤醒守卫;确定性脚本副作用,**NEVER** 手执行 `printf` 配方写哨兵):
      `py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir> --repo <abs> --arm-sentinel`
      (同 target 重复执行 = no-op)。哨兵细化覆盖(read_roots)与 codegraph 信号
@@ -114,6 +118,13 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
      `excluded{}`/`codegraph_stats{}`(probe 失败原因在 stderr)。
 3. fan-out(清单 step id `fanout`;逐字执行 invocation,配额三 flag 按参数表指引追加;
    **NEVER** 手工循环):取清单 → 执行(带 per-call timeout)。
+   · **画像 native(step 0 判定)→ 原生形态,本步以下 runner 子流程不适用**:读
+     `.opencode/mgh-core/prompts/fragments/sdr-native-dispatch.md` 并按其执行——看门狗
+     先行(后台,`OPENCODE_SESSION_ID` 宿主注入)→ `emit_native_plan.py --tier sdr` 每轮
+     物化 + `--check`(重物化即重枚举)→ **同一条 assistant 消息**并发派 `sdr-review-native`
+     子代理(description=计划短号、任务体=固定句+任务文件绝对路径,逐字透传)→ 标记唯一
+     写者是子代理 → 失败单元至多一轮重派、限流特征按画像配额等窗 → pending 清空进 step 4。
+     步骤调用行与恢复的原生分支由 `list_sdr_steps.py` / `resume_sdr_state.py` 形态感知给出。
    · **special-auth 前置检查(先于 invocation,不可跳过)**:清单 stdout
      `special_auth.present==true` → MUST 先 Read 该文档并按文档完成凭证准备(写参数文件
      `cred_source.json` → 跑 `mgh_credentials.py` 取证 → 本步追加
@@ -200,6 +211,9 @@ py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> -
 - **special-auth 部署文档是可选覆盖**:安装树携带 `mgh-special-auth.md`(清单 stdout
   `special_auth` 字段披露)时,fan-out 步的凭证准备与派发 flag 以该文档为准;缺席时通用
   流程完整可用、行为零差异。
+- **派发形态支持面(三面分歧,如实披露)**:本面(opencode)= 子进程形态(缺省/回退)+
+  原生形态(环境画像显式 `dispatch_mode:"native"` 才启用,缺省行为零变化);claude/dsh
+  面当前仅子进程形态——属宿主机制差异,非镜像断裂,后续按宿主能力另行接入。
 - **发现是 LLM 候选,非确认漏洞**;覆盖受基线投影与启发式分组上界约束。
 - **接口分组是注解启发式**:未识别接口/链退入目录聚簇单元(粒度粗、覆盖不丢);非 java web
   项目整体退化为 standalone 模式,仍可运行。

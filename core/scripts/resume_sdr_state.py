@@ -60,6 +60,16 @@ failure, NOT retried on --resume, NOT blocking). Any non-zero `failed` is surfac
 `notes[]` (advisory). Every path on stdout is `Path.resolve()` absolute (Windows-native,
 NEVER a shell MSYS form).
 
+Native-dispatch face (zero-change by construction): when the run's repo profile
+explicitly selects `dispatch_mode: "native"`, the stdout gains a top-level `dispatch`
+field {form, profile_path, plan_present, native_agent, discipline_fragment}, the fanout
+step's `next_action` points at the native arc (plan materialization → same-message wave
+dispatch → render; the plan artifact's presence picks the sub-phase), and
+`discipline_reminders` resolves the native variant — progress derivation stays purely
+on-disk. A malformed profile is fail-closed (exit 2 + recipe). Profile missing / auto /
+runner → byte-identical to the established output (no `dispatch` field, the subprocess
+fanout next_action, the subprocess discipline).
+
 Exit codes (R5.3b): 0 ok · 1 run-dir missing/not a dir · 2 misuse (argparse) or
 underivable state (malformed context.json/grouping.json, or a `--check` violation) —
 the script NEVER guesses a step from a damaged product. Read-only, idempotent, no TTY.
@@ -80,12 +90,19 @@ from discipline_core import get_discipline  # noqa: E402
 from sdr_tier import (  # noqa: E402
     forward_done_ids, forward_failed_ids, forward_marker_paths, orphan_markers,
 )
+import env_profile  # noqa: E402 — sibling; profile read + fail-closed semantics
 
 # The run dir layout the launcher stamps and the shell accepts:
 # <repo>/.mgh-sdr/runs/<ts>-<branch>/  →  the repo root is three levels up.
 RUN_ROOT_NAME = ".mgh-sdr"
 RUNS_DIRNAME = "runs"
 SENTINEL = Path(RUN_ROOT_NAME) / ".active"
+
+# Native-dispatch face (profile-explicit `native`): the plan artifact inside the
+# run dir and the installed wave-discipline fragment (same <mgh-core> root as
+# this script's install layout).
+NATIVE_PLAN_NAME = "native_plan.json"
+NATIVE_AGENT = "sdr-review-native"
 
 # Steps during which the runtime guard is expected to be armed: the run already has
 # products on disk, so a missing sentinel means the guard is silently asleep (the
@@ -112,6 +129,42 @@ def _load_json(path: Path):
 def _script_abs(name: str) -> str:
     """Absolute path of a sibling leaf script (same install dir — R5.3a)."""
     return str(Path(__file__).resolve().parent / name)
+
+
+def _fragment_abs() -> str:
+    """Absolute path of the installed native wave-discipline fragment (the
+    prompts/ sibling of this script's <mgh-core> install root)."""
+    return str(Path(__file__).resolve().parent.parent / "prompts" / "fragments"
+               / "sdr-native-dispatch.md")
+
+
+def _dispatch_form(repo: str, run_dir: Path, notes: list):
+    """Native-form detection for the run's repo. The env profile is the BINDING
+    decision (`dispatch_mode: "native"`); the plan artifact inside THIS run dir
+    (`native_plan.json`) is the sub-phase signal (absent = the wave loop has not
+    materialized yet) and the render-disclosure evidence. A malformed profile is
+    fail-closed: returns (None, recipe) — the caller exits 2, NEVER guessing the
+    step graph off a profile it could not read. Returns (None, None) unless the
+    native form is active, so every subprocess-form invocation keeps
+    byte-identical stdout (the `dispatch` field simply never appears)."""
+    if not repo:
+        return None, None
+    profile_path = Path(repo) / env_profile.CONFIG_REL
+    try:
+        profile = env_profile.load(repo)
+    except env_profile.EnvProfileError as e:
+        return None, (f"env profile rejected: {e} — fix or delete the config "
+                      f"(fail-closed: a malformed profile is NEVER silently "
+                      f"treated as defaults).")
+    if profile.dispatch_mode != "native":
+        return None, None
+    return {
+        "form": "native",
+        "profile_path": str(profile_path),
+        "plan_present": (run_dir / NATIVE_PLAN_NAME).is_file(),
+        "native_agent": NATIVE_AGENT,
+        "discipline_fragment": _fragment_abs(),
+    }, None
 
 
 def _repo_from_layout(run_dir: Path):
@@ -236,6 +289,11 @@ def resolve(run_dir: Path, args) -> tuple:
 
     repo = _resolve_repo(ctx, args, run_dir, notes)
 
+    # --- dispatch form (profile-binding; fail-closed on a malformed profile) --
+    dispatch, recipe = _dispatch_form(repo, run_dir, notes)
+    if recipe:
+        return None, recipe
+
     # --- start state (base/branch) -------------------------------------------
     base = ctx.get("base") or grp.get("base") or ""
     branch = ctx.get("branch") or grp.get("branch") or ""
@@ -293,15 +351,30 @@ def resolve(run_dir: Path, args) -> tuple:
     if step == "fanout":
         notes.append(f"{pending_n}/{total} unit(s) have no terminal marker yet "
                      f"(done={len(done_ids)} failed={len(failed_ids)}).")
-        auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
-        if auth_doc.is_file():
-            notes.append(f"special-auth deployment doc present ({auth_doc}) — "
-                         f"credential renewal and the re-dispatch flags for this "
-                         f"step follow that doc when it covers them.")
+        if dispatch is None:
+            auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+            if auth_doc.is_file():
+                notes.append(f"special-auth deployment doc present ({auth_doc}) — "
+                             f"credential renewal and the re-dispatch flags for this "
+                             f"step follow that doc when it covers them.")
+        else:
+            if not (run_dir / "watchdog" / "state.json").is_file():
+                notes.append("watchdog artifacts absent (<run-dir>/watchdog/) — before "
+                             "dispatching further waves, start the watchdog in the "
+                             "background per the wave-discipline fragment "
+                             "(root session = host-injected OPENCODE_SESSION_ID; "
+                             "it self-exits when the run settles).")
     if failed_ids:
         notes.append(f"{len(failed_ids)}/{total} unit(s) terminated as FAILED (terminal — "
                      f"NOT retried on --resume); see the .failed markers and each unit's "
                      f"run.log under {checkpoints}/sdr/ for the reason (advisory, non-gating).")
+    if failed_ids and dispatch is not None:
+        notes.append("native form: a failed unit may be re-dispatched AT MOST ONE more "
+                     "round (delete its stale .failed marker, re-materialize with "
+                     "--retry-failed, dispatch once); a second failure closes it as a "
+                     "disclosed gap. A rate-limit-featured failure reason waits one "
+                     "profile quota window before any re-dispatch (wave-discipline "
+                     "fragment §2).")
     if orphans:
         notes.append(f"{len(orphans)} orphan marker file(s) on disk belong to no canonical "
                      f"unit id (legacy/renamed run products); they are NOT counted as "
@@ -337,30 +410,62 @@ def resolve(run_dir: Path, args) -> tuple:
                     f"(exit 2 → fix and re-run; NEVER carry a broken work-list into fan-out)",
                     [repo, checkpoints, slices, grp_path])
     elif step == "fanout":
-        fanout_desc = (f"run `py {_script_abs('fanout_runner.py')} --tier sdr --repo {repo} "
-                       f"--base {base or 'master'} --branch {branch} "
-                       f"--checkpoints {checkpoints} --inputs-dir {slices} "
-                       f"--time-budget-ms 480000 --call-timeout-s 360 --stall-timeout-s 300` "
-                       f"(four-level timeout invariant; opencode hosts calibrated to 900s use "
-                       f"720000/540/300) — unit paths come from that command's own "
-                       f"`pending[]`, never hand-built")
-        auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
-        if auth_doc.is_file():
-            # Rides next_action.desc (NOT just notes): the recovering
-            # orchestrator executes desc verbatim and may never read notes —
-            # the doc pointer must be on the executed path itself.
-            fanout_desc = (
-                f"special-auth deployment doc is PRESENT ({auth_doc}): FIRST Read it "
-                f"and complete credential preparation per the doc (write "
-                f"<run-dir>/cred_source.json, run mgh_credentials.py to produce "
-                f"<run-dir>/cred.json — home-dir paths go INSIDE the parameter file, "
-                f"never on a command line), THEN run the command below with "
-                f"`--cred-file <run-dir>/cred.json` appended; on "
+        if dispatch is not None:
+            frag = dispatch["discipline_fragment"]
+            emit_cli = (f"--tier sdr --repo {repo} --base {base or 'master'} "
+                        f"--branch {branch} --checkpoints {checkpoints} "
+                        f"--inputs-dir {slices} --profile {repo}")
+            emit = f"py {_script_abs('emit_native_plan.py')} {emit_cli}"
+            if dispatch["plan_present"]:
+                desc = (f"wave round: FIRST re-materialize (`{emit}`, then the same "
+                        f"args with `--check`; exit 2 → re-materialize per stderr "
+                        f"recipe) — re-materialization IS re-enumeration (pending "
+                        f"re-derived from disk markers); THEN in ONE assistant message "
+                        f"dispatch the current wave's units (agent {NATIVE_AGENT}; "
+                        f"description = the plan's short unit id verbatim, task body = "
+                        f"the fixed sentence + the unit's task_file absolute path "
+                        f"verbatim from the plan) — full wave discipline "
+                        f"(watchdog-first, marker truth source, at-most-one retry "
+                        f"round, rate-limit wait): Read {frag} and follow it")
+                nxt = _next("subagent", desc,
+                            [repo, checkpoints, slices, run_dir / NATIVE_PLAN_NAME])
+            else:
+                desc = (f"native form is active but this run has no plan artifact yet: "
+                        f"run `{emit}`, then the same args with `--check` (exit 2 → "
+                        f"re-materialize per stderr recipe) — that materializes "
+                        f"{NATIVE_PLAN_NAME} + the per-unit task files. BEFORE the "
+                        f"first wave, start the watchdog in the background (`py "
+                        f"{_script_abs('native_watchdog.py')} --run-dir {run_dir}`; "
+                        f"root session from the host-injected OPENCODE_SESSION_ID, "
+                        f"default thresholds). Full wave discipline: Read {frag} and "
+                        f"follow it")
+                nxt = _next("bash", desc,
+                            [repo, checkpoints, slices, run_dir / NATIVE_PLAN_NAME])
+        else:
+            fanout_desc = (f"run `py {_script_abs('fanout_runner.py')} --tier sdr --repo {repo} "
+                           f"--base {base or 'master'} --branch {branch} "
+                           f"--checkpoints {checkpoints} --inputs-dir {slices} "
+                           f"--time-budget-ms 480000 --call-timeout-s 360 --stall-timeout-s 300` "
+                           f"(four-level timeout invariant; opencode hosts calibrated to 900s use "
+                           f"720000/540/300) — unit paths come from that command's own "
+                           f"`pending[]`, never hand-built")
+            auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+            if auth_doc.is_file():
+                # Rides next_action.desc (NOT just notes): the recovering
+                # orchestrator executes desc verbatim and may never read notes —
+                # the doc pointer must be on the executed path itself.
+                fanout_desc = (
+                    f"special-auth deployment doc is PRESENT ({auth_doc}): FIRST Read it "
+                    f"and complete credential preparation per the doc (write "
+                    f"<run-dir>/cred_source.json, run mgh_credentials.py to produce "
+                    f"<run-dir>/cred.json — home-dir paths go INSIDE the parameter file, "
+                    f"never on a command line), THEN run the command below with "
+                    f"`--cred-file <run-dir>/cred.json` appended; on "
                 f"`credential_expired:true` (exit 2) re-acquire and re-run with "
                 f"`--resume --retry-failed` (done units never re-dispatched). — "
                 + fanout_desc)
-        nxt = _next("bash", fanout_desc,
-                    [repo, checkpoints, slices, grp_path])
+            nxt = _next("bash", fanout_desc,
+                        [repo, checkpoints, slices, grp_path])
     elif step == "render":
         nxt = _next("bash",
                     f"run `py {_script_abs('render_sdr_report.py')} --run-dir {run_dir} "
@@ -383,9 +488,14 @@ def resolve(run_dir: Path, args) -> tuple:
         "tiers": {"done": len(done_ids), "failed": len(failed_ids), "total": total},
         "next_action": nxt,
         "notes": notes,
-        "discipline_reminders": get_discipline(step, domain="sdr"),
+        "discipline_reminders": get_discipline(
+            step, domain="sdr",
+            form="native" if (dispatch is not None and step == "fanout")
+            else "subprocess"),
         "stale_fanout": _scan_stale_fanout(run_dir),
     }
+    if dispatch is not None:
+        state["dispatch"] = dispatch
     return state, None
 
 

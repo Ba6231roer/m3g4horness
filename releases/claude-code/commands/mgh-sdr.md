@@ -200,6 +200,9 @@ py .claude/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> --c
 - **special-auth 部署文档是可选覆盖**:安装树携带 `mgh-special-auth.md`(清单 stdout
   `special_auth` 字段披露)时,fan-out 步的凭证准备与派发 flag 以该文档为准;缺席时通用
   流程完整可用、行为零差异。
+- **派发形态(三面分歧,如实披露)**:本命令当前仅子进程形态(`fanout_runner --tier sdr`);
+  原生派发(环境画像 `dispatch_mode:"native"`)当前仅 opencode 面支持,本面行为与该画像
+  无关(配了 native 也不改变本面)——宿主机制差异,非镜像断裂。
 - **发现是 LLM 候选,非确认漏洞**;覆盖受基线投影与启发式分组上界约束。
 - **接口分组是注解启发式**:未识别接口/链退入目录聚簇单元(粒度粗、覆盖不丢);非 java web
   项目整体退化为 standalone 模式,仍可运行。

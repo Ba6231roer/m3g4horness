@@ -652,5 +652,167 @@ class SpecialAuthFanoutNoteTest(unittest.TestCase):
             self.fail("doc exists but the fanout note is missing")
 
 
+class NativeFormResumeTest(unittest.TestCase):
+    """fix-mgh-sdr-native-dispatch: the run's repo env profile decides the
+    native face. Missing/auto/runner profile → byte-shape unchanged (no
+    `dispatch` field, subprocess fanout next_action); profile `native` → the
+    `dispatch` field + the fanout arc's sub-phase next_action (materialize when
+    no plan artifact yet, same-message wave dispatch once it exists) + the
+    native discipline variant on the fanout step only; a malformed profile is
+    fail-closed exit 2 through BOTH the derive and --check paths. Progress
+    derivation stays purely on-disk in every case."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.repo = self.tmp / "repo"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_dir(self):
+        run = self.repo / ".mgh-sdr" / "runs" / TS
+        (run / "markers").mkdir(parents=True, exist_ok=True)
+        (run / "slices").mkdir(exist_ok=True)
+        return run
+
+    def _profile(self, body):
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps(body), encoding="utf-8")
+
+    def _seed(self, run, uids=("u1", "u2", "u3")):
+        (run / "context.json").write_text(json.dumps({
+            "repo": str(self.repo), "run_dir": str(run), "base": "master",
+            "branch": "feat", "baseline_path": str(run / "baseline.md"),
+            "external_repos": []}), encoding="utf-8")
+        (run / "grouping.json").write_text(json.dumps({
+            "repo": str(self.repo), "base": "master", "branch": "feat",
+            "empty": False, "total": len(uids),
+            "units": [{"unit_id": u, "kind": "interface", "route": "/x",
+                       "chain": [], "status": "pending"} for u in uids],
+            "done": 0, "failed": 0,
+            "excluded": {"count": 0, "by_reason": {}}, "pending": [],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def _mark(self, run, uid, kind="done"):
+        (run / "markers" / f"{uid}.{kind}").write_text("{}", encoding="utf-8")
+
+    def _state(self, run, *extra):
+        p = subprocess.run([sys.executable, str(SCRIPT), "--run-dir", str(run),
+                            *extra], capture_output=True, text=True,
+                           encoding="utf-8")
+        return p.returncode, p.stdout, p.stderr
+
+    def test_missing_profile_has_no_dispatch_field(self):
+        run = self._run_dir()
+        self._seed(run)
+        code, out, err = self._state(run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "fanout")
+        self.assertNotIn("dispatch", st)
+        self.assertIn("fanout_runner.py", st["next_action"]["desc"])
+
+    def test_auto_profile_is_subprocess_face(self):
+        run = self._run_dir()
+        self._seed(run)
+        self._profile({"v": 1, "dispatch_mode": "auto"})
+        code, out, err = self._state(run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertNotIn("dispatch", st)
+        self.assertIn("fanout_runner.py", st["next_action"]["desc"])
+
+    def test_native_no_plan_next_action_is_materialize(self):
+        run = self._run_dir()
+        self._seed(run)
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        code, out, err = self._state(run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "fanout")
+        self.assertEqual(st["dispatch"]["form"], "native")
+        self.assertFalse(st["dispatch"]["plan_present"])
+        self.assertEqual(st["next_action"]["kind"], "bash")
+        desc = st["next_action"]["desc"]
+        self.assertIn("emit_native_plan.py", desc)
+        self.assertIn("--profile", desc)
+        self.assertIn("native_watchdog.py", desc, "watchdog-first rides the arc start")
+        self.assertIn("sdr-native-dispatch.md", desc)
+        self.assertTrue(Path(st["dispatch"]["discipline_fragment"]).is_absolute())
+
+    def test_native_plan_present_next_action_is_wave_dispatch(self):
+        run = self._run_dir()
+        self._seed(run)
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        (run / "native_plan.json").write_text("{}", encoding="utf-8")
+        code, out, err = self._state(run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertTrue(st["dispatch"]["plan_present"])
+        self.assertEqual(st["next_action"]["kind"], "subagent")
+        desc = st["next_action"]["desc"]
+        self.assertIn("ONE assistant message", desc)
+        self.assertIn("sdr-review-native", desc)
+        self.assertIn("task_file", desc)
+        self.assertIn("sdr-native-dispatch.md", desc)
+
+    def test_native_marker_combos(self):
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        # partial done → still fanout, wave dispatch, tiers correct
+        run = self._run_dir()
+        self._seed(run)
+        (run / "native_plan.json").write_text("{}", encoding="utf-8")
+        self._mark(run, "u1")
+        code, out, err = self._state(run)
+        st = json.loads(out)
+        self.assertEqual((code, st["step"]), (0, "fanout"))
+        self.assertEqual(st["tiers"], {"done": 1, "failed": 0, "total": 3})
+        # has failed → retry-once note rides notes
+        self._mark(run, "u2", "failed")
+        code, out, err = self._state(run)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "fanout")
+        self.assertTrue(any("AT MOST ONE" in n for n in st["notes"]), st["notes"])
+        self.assertEqual(st["tiers"], {"done": 1, "failed": 1, "total": 3})
+        # native discipline variant on the fanout step only
+        self.assertIn("sdr-native-wave",
+                      json.dumps(st["discipline_reminders"]))
+        # all terminal → render, dispatch field still present (form-level)
+        self._mark(run, "u3")
+        code, out, err = self._state(run)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "render")
+        self.assertIn("dispatch", st)
+        self.assertNotIn("sdr-native-wave",
+                         json.dumps(st["discipline_reminders"]))
+
+    def test_bad_profile_fail_closed_derive_and_check(self):
+        run = self._run_dir()
+        self._seed(run)
+        self._profile({"v": 1, "dispatch_mode": "wrong"})
+        code, out, err = self._state(run)
+        self.assertEqual(code, 2)
+        self.assertIn("env profile rejected", err)
+        code, out, err = self._state(run, "--check")
+        self.assertEqual(code, 2)
+        self.assertIn("env profile rejected", out + err)
+
+    def test_native_no_plan_watchdog_note_when_artifacts_absent(self):
+        run = self._run_dir()
+        self._seed(run)
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        code, out, err = self._state(run)
+        st = json.loads(out)
+        self.assertTrue(any("watchdog artifacts absent" in n for n in st["notes"]))
+        # subprocess face (profile removed) never carries the watchdog note
+        (self.repo / ".mgh" / "env-profile.json").unlink()
+        code, out, err = self._state(run)
+        st2 = json.loads(out)
+        self.assertNotIn("dispatch", st2)
+        self.assertFalse(any("watchdog artifacts absent" in n for n in st2["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -18,6 +18,11 @@ One table per domain, selected by `get_discipline(step, domain=...)`:
   * `init` — the /mgh-init step graph (default; existing callers unchanged).
   * `sdr`  — the /mgh-sdr step graph (`not-started|group|fanout|render|done`).
 
+The sdr fanout step additionally carries a NATIVE-dispatch variant (opencode
+face, profile-explicit `dispatch_mode: "native"`), selected by
+`get_discipline(step, domain="sdr", form="native")`; "subprocess" (the default)
+resolves the base table, so every pre-existing caller is unchanged.
+
 Tables live in ONE module (not one file per domain) so "is sdr's defense line
 still adjacent to init's?" stays answerable at a glance, and so a rename on
 either side cannot silently collide across a shared namespace. Unknown/
@@ -272,6 +277,38 @@ _DISCIPLINE = {
 # gets the same defense line whether it re-reads the shell or the disk state.
 # ---------------------------------------------------------------------
 
+# Native-dispatch variant of the sdr fanout step (opencode face only; active
+# when the project env profile explicitly selects dispatch_mode "native").
+# Selected via get_discipline(..., form="native") by BOTH sdr step scripts so
+# the byte-verbatim list==resume equality holds in the native form too. The
+# subprocess recipes above stay the default and the permanent fallback.
+_SDR_NATIVE_WAVE_RECIPE = (
+    "每轮 = 重物化 → 自检 → 同消息并发派当前波 → 波收尾重枚举:①`emit_native_plan.py "
+    "--tier sdr --repo <target> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers "
+    "--inputs-dir <run-dir>/slices --profile <target>` + 同参 `--check`(退出码 2 → 重跑同参"
+    "物化即修复;计划与任务文件以最新一次物化为准);②当前波全部单元在**同一条 assistant 消息**"
+    "派发(agent sdr-review-native;description=计划短号逐字复制,任务体=固定句+task_file "
+    "绝对路径逐字透传);③波收尾重跑物化 = 重枚举(pending 由磁盘标记重派生,NEVER 自记账"
+    "「哪些派过了」)")
+_SDR_NATIVE_MARKER_RECIPE = (
+    "标记真相源:`.done`/`.failed` 唯一写者是子代理自身(成功 touch done_marker;失败自写 "
+    "failed_marker,内容 {unit_id, reason});计划物化、看门狗、编排器 NEVER 写任何单元标记"
+    "(唯一例外 = 重派认领时删除该单元旧 `.failed`,与派发器 --retry-failed 的认领即删语义"
+    "同形,是删除不是写入);被中止/未落标记的单元经重枚举自然回待派")
+_SDR_NATIVE_RETRY_RECIPE = (
+    "`.failed` 单元至多重派一轮:删旧 .failed → 重物化加 --retry-failed(该单元回 pending)"
+    "→ 派发一次;再失败接受缺口随报告披露(渲染器 failed_units[]),NEVER 无限重派;恢复会话"
+    "无法判定是否已重派过时允许再一轮(代价有界=一轮配额);上一波失败原因含限流特征"
+    "(429/rate limit/quota)→ 按环境画像配额窗口等满一窗再查询/重派,等待事实入 run 过程记录")
+_SDR_NATIVE_WATCHDOG_RECIPE = (
+    "看门狗先行:第一波派发前以**脱离工具调用的独立进程**启动 `native_watchdog.py --run-dir "
+    "<run-dir>`(根会话取宿主注入的 OPENCODE_SESSION_ID,零手工传参;阈值缺省;Windows 宿主 "
+    "shell 工具是 PowerShell,用 `Start-Process … -WindowStyle Hidden -PassThru` 并记录回写 "
+    "pid,NEVER 用 `cmd &` 形态——PowerShell 解析器直接拒绝;POSIX 宿主用 `> log 2>&1 &` 记 "
+    "$!;路径全树内绝对——守卫对裸相对重定向目标保守拦截);run 落定自退;每波边界确认 "
+    "<run-dir>/watchdog/state.json 仍在新更新,缺席则同命令重启;渲染完成后仍存活 → 等自退"
+    "(落定即退),确需立即收尾按记录的 pid 停;NEVER 前台跑看门狗、NEVER 代替看门狗做会话中止")
+
 # sdr-domain resilience recipes. NOTE the integrity check is the sdr-domain
 # executable one (`diff_group.py --check <run-dir>`); the init-domain
 # `resume_state.py --check` resolves its run dir under `.mgh-init` and therefore
@@ -321,6 +358,36 @@ _SDR_RUN_LOG_RECIPE = (
 _SDR_RENDER_MANIFEST_RECIPE = (
     "终态凭证 = <run-dir>/sdr_manifest.json(renderer 先写报告再写 manifest ⟹ manifest 存在即"
     "报告已产出);收尾 counts 读 manifest stdout 字段,**NEVER** `py -c` 挖 JSON")
+
+# Native-dispatch variant of the sdr fanout step (opencode face only; active
+# when the project env profile explicitly selects dispatch_mode "native").
+# Selected via get_discipline(..., form="native") by BOTH sdr step scripts so
+# the byte-verbatim list==resume equality holds in the native form too. The
+# subprocess recipes above stay the default and the permanent fallback.
+_DISCIPLINE_SDR_NATIVE_FANOUT = {
+    "gates": [
+        _g("sdr-native-plan-check",
+           "每轮计划自检(计划与全部任务文件 vs 重物化逐字节 + 单元集 vs 当前 pending + 短号"
+           "映射闭合):退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划",
+           "emit_native_plan.py --tier sdr … --check(与物化同参)"),
+    ],
+    "path_recipes": [
+        _pr("sdr-native-wave", _SDR_NATIVE_WAVE_RECIPE, "emit_native_plan --step 契约"),
+        _pr("sdr-native-marker", _SDR_NATIVE_MARKER_RECIPE, "sdr-native-dispatch fragment"),
+        _pr("sdr-native-retry", _SDR_NATIVE_RETRY_RECIPE, "sdr-native-dispatch fragment"),
+        _pr("sdr-native-watchdog", _SDR_NATIVE_WATCHDOG_RECIPE,
+            "sdr-native-dispatch fragment"),
+        _pr("sdr-fanout-path", _SDR_FANOUT_PATH_RECIPE, "diff_group --step 契约"),
+    ],
+    "nevers": [
+        "NEVER 跨波合并派发 / 自增并发(波次尺寸来自计划:并发与配额算术的较小者)",
+        "NEVER 自撰任务文本 / 拼接改写任务文件路径(短号与路径只从计划逐字复制)",
+        "NEVER 写任何单元标记(.done/.failed 唯一写者是子代理自身)",
+        "NEVER 逐个串行派发 / 手动翻页(同消息并发是形态承重点)",
+        "NEVER 用 `py -c` 内省 grouping.json / 计划工件",
+        "NEVER Read 叶子脚本源码(报错看 stderr)",
+    ],
+}
 
 # step keys are exactly resume_sdr_state.py's closed set.
 _DISCIPLINE_SDR = {
@@ -402,12 +469,15 @@ _DOMAINS = {
 }
 
 
-def get_discipline(step: str, domain: str = "init") -> dict:
+def get_discipline(step: str, domain: str = "init", form: str = "subprocess") -> dict:
     """Return the discipline subset for `step` as {gates, path_recipes, nevers}.
 
     `domain` selects the run domain's table (default `init` — the pre-existing
-    callers are unchanged by this parameter's arrival). Unknown domain, unknown
-    step, and no-discipline steps (`done`, `not-started`) all → EMPTY structure
+    callers are unchanged by this parameter's arrival). `form` selects the
+    dispatch-form variant of a step where one exists (today: sdr `fanout` only;
+    "subprocess" = the default and the permanent fallback — every pre-existing
+    caller resolves through it unchanged). Unknown domain, unknown step, unknown
+    form, and no-discipline steps (`done`, `not-started`) all → EMPTY structure
     (all three keys present, empty lists) so the stdout field shape is stable
     everywhere. The return value is a DEFENSIVE DEEP COPY: a consumer mutating the
     returned subset (e.g. appending to `gates`) can never pollute the module-level
@@ -416,4 +486,6 @@ def get_discipline(step: str, domain: str = "init") -> dict:
     table = _DOMAINS.get(domain)
     if table is None:
         return copy.deepcopy(_EMPTY)
+    if domain == "sdr" and step == "fanout" and form == "native":
+        return copy.deepcopy(_DISCIPLINE_SDR_NATIVE_FANOUT)
     return copy.deepcopy(table.get(step, _EMPTY))

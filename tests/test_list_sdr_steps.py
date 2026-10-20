@@ -231,5 +231,124 @@ class SpecialAuthFieldTest(unittest.TestCase):
                 self.doc.unlink(missing_ok=True)
 
 
+class NativeDispatchFormTest(unittest.TestCase):
+    """fix-mgh-sdr-native-dispatch: the env profile decides the fanout step's
+    face. Missing/auto/runner profile = the established subprocess manifest with
+    byte-identical stdout (no `dispatch` field, no `native_arc`); profile
+    `native` = the plan materializer entry + `native_arc` + the native
+    discipline variant (byte-verbatim equal to resume_sdr_state's reminders, so
+    the one-table-two-consumers invariant survives the native form too); a
+    malformed profile is fail-closed exit 2 + recipe."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *args):
+        p = subprocess.run([sys.executable, str(SCRIPT), *args],
+                           capture_output=True, text=True, encoding="utf-8")
+        return p.returncode, p.stdout, p.stderr
+
+    def _profile(self, body):
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps(body), encoding="utf-8")
+
+    def test_missing_profile_subprocess_face_unchanged(self):
+        code, out, err = self._run("--target", str(self.repo))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        fan = [s for s in d["steps"] if s["step"] == "fanout"][0]
+        self.assertEqual(fan["script"], "fanout_runner.py")
+        self.assertNotIn("native_arc", fan)
+
+    def test_auto_profile_is_subprocess_face(self):
+        self._profile({"v": 1, "dispatch_mode": "auto"})
+        code, out, err = self._run("--target", str(self.repo))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        fan = [s for s in d["steps"] if s["step"] == "fanout"][0]
+        self.assertEqual(fan["script"], "fanout_runner.py")
+
+    def test_native_profile_expands_fanout(self):
+        self._profile({"v": 1, "dispatch_mode": "native", "native_concurrency": 2})
+        code, out, err = self._run("--target", str(self.repo), "--step", "fanout")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["dispatch"]["form"], "native")
+        self.assertTrue(Path(d["dispatch"]["profile_path"]).is_absolute())
+        self.assertFalse(d["dispatch"]["plan_present"])
+        self.assertEqual(d["dispatch"]["native_agent"], "sdr-review-native")
+        self.assertTrue(Path(d["dispatch"]["discipline_fragment"]).is_absolute())
+        fan = d["steps"][0]
+        self.assertEqual(fan["script"], "emit_native_plan.py")
+        self.assertTrue(fan["invocation"].startswith("py "))
+        self.assertIn("--profile <target>", fan["invocation"])
+        self.assertEqual([p["phase"] for p in fan["native_arc"]],
+                         ["materialize", "waves", "render"])
+        waves = fan["native_arc"][1]
+        self.assertEqual(waves["kind"], "subagent")
+        self.assertEqual(waves["agent"], "sdr-review-native")
+        self.assertEqual(waves["discipline_fragment"],
+                         d["dispatch"]["discipline_fragment"])
+        # the native discipline variant rides the step (wave recipe + marker truth)
+        text = json.dumps(fan["discipline"], ensure_ascii=False)
+        for needle in ("sdr-native-wave", "emit_native_plan.py", "--retry-failed",
+                       "同一条 assistant 消息", "唯一写者"):
+            self.assertIn(needle, text, needle)
+
+    def test_native_plan_artifact_corroboration(self):
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        runs = self.repo / ".mgh-sdr" / "runs" / "20260101_000000-feat"
+        runs.mkdir(parents=True)
+        (runs / "native_plan.json").write_text("{}", encoding="utf-8")
+        code, out, err = self._run("--target", str(self.repo), "--step", "fanout")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["dispatch"]["plan_present"])
+
+    def test_bad_profile_fail_closed(self):
+        self._profile({"v": 1, "dispatch_mode": "bogus"})
+        code, out, err = self._run("--target", str(self.repo))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("env profile rejected", err)
+        self.assertIn("recipe:", err)
+
+    def test_native_discipline_verbatim_equals_resume_native_reminders(self):
+        # one static table, two consumers — the native form must hold the same
+        # byte-verbatim equality the subprocess form asserts.
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        run = self.repo / ".mgh-sdr" / "runs" / "20260101_000000-feat"
+        (run / "markers").mkdir(parents=True)
+        (run / "slices").mkdir()
+        (run / "context.json").write_text(json.dumps(
+            {"repo": str(self.repo), "base": "master", "branch": "feat"}),
+            encoding="utf-8")
+        (run / "grouping.json").write_text(json.dumps(dict(
+            repo=str(self.repo), base="master", branch="feat", empty=False,
+            total=2, units=[{"unit_id": "u1"}, {"unit_id": "u2"}], done=0,
+            failed=0, excluded={"count": 0, "by_reason": {}}, pending=[])),
+            encoding="utf-8")
+        (run / "native_plan.json").write_text("{}", encoding="utf-8")
+        p = subprocess.run([sys.executable, str(RESUME), "--run-dir", str(run)],
+                           capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        state = json.loads(p.stdout)
+        self.assertEqual(state["step"], "fanout")
+        self.assertEqual(state["dispatch"]["form"], "native")
+        self.assertEqual(state["next_action"]["kind"], "subagent")
+        code, out, err = self._run("--target", str(self.repo), "--step", "fanout")
+        self.assertEqual(code, 0, err)
+        listed = json.loads(out)["steps"][0]["discipline"]
+        self.assertEqual(listed, state["discipline_reminders"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

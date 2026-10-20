@@ -16,6 +16,45 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — /mgh-sdr 原生派发接入:波次同消息并发 + 标记自写 + 看门狗无人值守闭环(0.1.86)
+
+- **双形态派发(缺省零变化)**:fan-out 派发形态升级为双形态——子进程形态
+  (`fanout_runner --tier sdr`)缺省保留、永久回退;仅当项目环境画像
+  `.mgh/env-profile.json` 显式 `dispatch_mode:"native"` 时,opencode 面 fan-out 改走
+  原生形态:每轮 `emit_native_plan.py --tier sdr` 物化计划(任务文件 + 波次表 + 防错抄
+  短单元号)+ 同参 `--check`,编排器**同一条 assistant 消息**并发派当前波全部
+  `sdr-review-native` 子代理(`mode: subagent` 孪生,任务体 = 固定句 + 任务文件绝对
+  路径逐字透传),波收尾重物化 = 重枚举(pending 由磁盘标记重派生)。画像缺失 / auto /
+  runner 行为逐字节不变;坏画像 fail-closed(退出码 2 + recipe)。
+- **标记自写(写者分离)**:`.done`/`.failed` 唯一写者是子代理自身(成功 touch
+  done_marker;失败自写 failed_marker,内容 `{unit_id, reason}`——指令仅住在原生 agent
+  定义);计划物化、看门狗、编排器 NEVER 写任何单元标记(唯一例外 = 重派认领时删除旧
+  `.failed`,与 runner `--retry-failed` 认领即删同形)。子进程形态的模板行与派发器写
+  标记行为零改动,两形态失败终态语义等价。
+- **失败单元有界重派**:`.failed` 单元至多重派一轮(重派再败接受缺口随报告披露);
+  上一波失败原因含限流特征 → 按画像配额窗口等满一窗再查询/重派。看门狗接线:第一波前
+  后台启动 `native_watchdog.py --run-dir <run-dir>`(根会话取宿主注入的
+  `OPENCODE_SESSION_ID`;Windows 宿主 shell 工具是 PowerShell,启动配方 =
+  `Start-Process … -PassThru`——POSIX `&` 形态在 PowerShell 下解析失败已实测),run
+  落定自退。
+- **步骤与恢复的形态感知(最小侵入)**:`list_sdr_steps.py` 原生形态下 fanout 步入口 =
+  计划物化脚本 + 新增 `native_arc` 三相 + native 纪律变体;`resume_sdr_state.py` 原生
+  分支派生 step/next_action(进度仍纯磁盘重派生);`render_sdr_report.py` 在「计划工件
+  在场 ∧ 画像 native」时报告与 manifest 增派发形态披露 + 诚实边界增一条(波次粒度止损 /
+  父会话单点 / 路径转述残余);依据不成立零新字段(既有 run 输出字节不变)。
+- **三面分歧显式披露**:原生形态当前仅 opencode 面;claude/dsh 面保留子进程形态,三面壳
+  各以一行如实披露当前支持面(宿主机制差异,非静默镜像断裂)。
+- **契约**:`core/contracts/sdr/pipeline.md` 增「原生派发形态」节(形态选择/波次循环/
+  标记写者/重派与等窗/看门狗接线/形态感知/报告披露/三面分歧/版本矩阵);fanout 运行契约
+  native plan 节补「sdr 为首个消费方」与回退关系。
+- **测试**:`test_list_sdr_steps`/`test_resume_sdr_state`/`test_render_sdr_report` 增原生
+  分支用例(三形态快照/标记组合派生/披露行双形态同数据对照);新增
+  `tests/test_sdr_native_dispatch.py` 16 锚(壳/fragment/agent 孪生克隆对账/三面披露行/
+  契约,删任一锚即红);sdr 面 + 基础件 + purity/dsh_surface 定向回归过。
+- **实机闸门(本机 2.1.0)**:小仓 7 单元两形态对照全链、故障注入五件套、缺省零变化
+  抽查(结果与本笔记见 change 实机笔记);企业 2.0.32 CAS 真仓对照 = 交接内网闸门
+  (复现清单在实机笔记 §5,不阻塞归档)。
+
 ## [Unreleased]
 
 ### Added — 原生派发看门狗:运行树进程外安全网,卡住形态有界处置(0.1.85)

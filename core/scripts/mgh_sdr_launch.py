@@ -353,6 +353,32 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
             "拒绝 → 不写配置,按当前降级继续,报告如实披露。",
             "铁律:**NEVER 未经用户明确同意写配置**。",
         ]
+    # Special-auth deployment face: the launcher is the PREFERRED zero-prompt
+    # entry, so the credential-preparation guidance must ride THIS prompt — a
+    # host session that only ever sees this file would otherwise dispatch
+    # fanout with per-child SSO logins (the structural all-but-one-stall
+    # failure). Probe is deterministic: the doc lives beside the scripts tree
+    # in every host layout, exactly where the runner/manifest/resume probes
+    # look for it. Absent doc (generic install) => prompt bytes unchanged.
+    own_mgh_core = Path(__file__).resolve().parent.parent
+    auth_doc = own_mgh_core / "mgh-special-auth.md"
+    cred_suffix = ""
+    if auth_doc.is_file():
+        cred_suffix = " --cred-file <run>/cred.json"
+        lines += [
+            "",
+            f"special-auth 部署文档在场({auth_doc})——本环境模型网关走统一认证,"
+            "每个 fanout 子进程各自弹浏览器登录必然互相挤掉(登录票据一次有效),"
+            "step 3 之前 MUST 先完成凭证准备:",
+            f"  a. Read 上述文档;凭证准备与故障处置以它为准;",
+            f"  b. 按文档写 <run>/cred_source.json(编排器 Write 的 JSON 参数文件;"
+            f"家目录路径写进文件内,NEVER 上命令行),再跑 "
+            f"`py {_script_path('mgh_credentials.py')} --source <run>/cred_source.json "
+            f"--out <run>/cred.json` 取证(出现浏览器弹窗属预期,完成登录即可);",
+            f"  c. 凭证就绪后才执行 step 3(下方调用行已带 --cred-file);"
+            f"step 3 以 `credential_expired:true` + 退出码 2 收口 → 按文档重新取证、"
+            f"更新 <run>/cred.json 后同参 + `--retry-failed` 续跑(已完成单元不重跑)。",
+        ]
     time_budget = CLAUDE_TIME_BUDGET_MS if host == "claude" else OPENCODE_TIME_BUDGET_MS
     call_timeout = CALL_TIMEOUT_S[host]
     lines += [
@@ -363,9 +389,11 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
         "跑 `--check <run>`。",
         f"3. `py <mgh-core>/scripts/fanout_runner.py --tier sdr --repo <repo> --base <base> "
         f"--branch <branch> --checkpoints <run>/markers --inputs-dir <run>/slices "
-        f"--time-budget-ms {time_budget} --call-timeout-s {call_timeout} "
-        f"--stall-timeout-s {STALL_TIMEOUT_S}`(带 per-call `timeout` ≥ "
-        f"{time_budget}ms 跑;四级超时不变式已按此组合满足,NEVER 省略 call/stall 两级)"
+        f"--wave 1 --time-budget-ms {time_budget} --call-timeout-s {call_timeout} "
+        f"--stall-timeout-s {STALL_TIMEOUT_S}{cred_suffix}`(带 per-call `timeout` ≥ "
+        f"{time_budget}ms 跑;四级超时不变式已按此组合满足,NEVER 省略 call/stall 两级;"
+        f"调用次数限流网关再加配额三 flag `--quota-calls <N> --quota-window-s <W> "
+        f"[--quota-calls-per-unit <K>]`,估算式准入、未配置零变化)"
         f";partial:true → 同参重派;退出码 2 → 转述 stderr 停止。",
         "4. `py <mgh-core>/scripts/render_sdr_report.py --run-dir <run> --repo <repo>`;"
         "跑 `--check <run>`。",
@@ -622,6 +650,11 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     prompt_path = run_dir / "orchestrator_prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
     _eprint(f"[launch] orchestrator prompt: {prompt_path}")
+    auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+    if auth_doc.is_file():
+        _eprint(f"[launch] note: special-auth deployment doc present "
+                f"({auth_doc}) — credential-preparation guidance embedded in "
+                f"the orchestrator prompt (step 3 carries --cred-file)")
     if dry_run:
         _eprint("[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; "
                 "NOT spawning the host CLI (sentinel kept for the next real run)")

@@ -16,6 +16,150 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — SDR fan-out 凭证注入与执行环境隔离:CAS 网关下子进程零登录 + 共享目录去互踩 (0.1.81)
+
+`fix-mgh-sdr-fanout-auth-isolation`(openspec 变更,规格增量 `fanout-dispatch` 4 处
+requirement〔3 ADDED + 1 MODIFIED〕+ `security-design-review` 1 处 ADDED)。依据企业内网
+Linux 真仓实测:fan-out 的 N 个 opencode 子进程各自走 CAS 登录闭环(票据单次有效 +
+127.0.0.1 回调端口互抢)→ 除波次最前一个外全部 300 秒零输出转 stall,6 个复核单元仅
+1 个 standalone 存活;Windows 补充实测暴露全部子进程共享 `~/.local/share/opencode`
+(sqlite/log/repos)的并发互踩(`database is locked`/`EPERM` 随机崩溃,重试吃满槽位)。
+根因都在「让每个子进程自理凭证与状态」,调参不可修(降 wave 5→2 无改善已实测)。
+
+- **静态凭证注入(可选,默认关)**:`fanout_runner.py` 新增 `--cred-file <run>/cred.json`
+  (仅 opencode host 形;claude/dsh 退出码 2 拒识 NEVER 静默退化;in-process 测试钩子
+  允许物化验证)。激活后按单元物化子配置 `<run>/childcfg/<unit>/opencode/opencode.json`
+  (全局配置副本,仅 cred 指定 provider 覆盖为静态 baseURL+apiKey,**provider id 不变**
+  ——model id 前缀耦合;`keep_plugins:false` 时摘 plugin 列表),spawn env 按单元增设
+  `XDG_CONFIG_HOME` + `XDG_DATA_HOME`——子进程只见自己的子配置(不自登录)与独立数据
+  目录(log/sqlite/repos 随变量隔离,消除互踩)。cred 文件闭集 schema 校验器单源在
+  `mgh_credentials.py`(生产者与 dispatcher import 同一个);缺文件/坏 JSON/缺字段 →
+  启动期退出码 2 零 spawn 零枚举副作用;物化失败 = 该单元 pre-spawn 失败(`.failed`
+  marker);幂等,续期后重物化新值生效。apikey 只落子配置文件一处,NEVER 进
+  stdout/stderr/marker/run.log/遥测。`--isolate-data` 单独开关(无凭证场景单治数据库锁;
+  其它 host note 后忽略)。两 flag 全缺席 = 派发行为/env 逐字节不变(既有 203 测全绿)。
+- **凭证中心一次性取证**:新增 `core/scripts/mgh_credentials.py`(命令无关,全部 mgh-*
+  流程共用):三模式 inherit(读本进程 env,宿主会话已登录则零登录)→ env-file(KEY=VALUE
+  凭证文件)→ login-process(物化泛型探测插件 → 外科式追加进全局 opencode 配置 plugin
+  列表 → 起一次 `opencode run --print-logs` 登录子进程〔预期浏览器弹窗〕→ 捕获 token →
+  try/finally **外科式还原**全局配置〔重读盘仅摘自己条目,并发修改幸存;失败/超时同样
+  还原〕→ 写 cred.json 权限收紧 0600)。企业参数(变量名/路径/provider/baseURL/过期
+  特征)全部住参数文件 `cred_source.json`(special-auth 部署文档提供取值;`~` 路径脚本内
+  expanduser,命令行 NEVER 携家目录字面路径——运行域守卫 Bash 面路径净网相容);
+  stdout 摘要 NEVER 含 token;`--check` 只验 schema 零联网。
+- **凭证过期独立分类与暂停续跑**:`--cred-file` 激活时,非 ok 终态输出尾部按 cred 文件
+  `expired_signatures[]`(大小写不敏感子串)扫描;首个命中 → 停止新派发(优先级高于限流
+  风暴截断与快败冷却),在飞照常收割,退出码 2:stdout `credential_expired` +
+  `credential_expired_units[]`,stderr recipe = 重取证 → 更新 cred 文件 → 同参
+  `--resume --retry-failed`(已完成单元零丢失)。与 stall/限流分开统计;marker 语义不变;
+  空特征集 = 扫描不激活;签名漂移优雅退化到既有兜底(签名层 NEVER 唯一防线)。
+- **`--dry-run` 纯计划**:派发形态改为零写盘零 spawn 短路(不再写 `<inputs-dir>/*.task.md`
+  审计副本/liveness/sidecar;此前审计副本写入是使用者误以为「零副作用」的实底),单元
+  清单 + 将写路径 + 命令形 + pre-spawn 锚检查预判只走 stdout,退出码 0;`--kill-stale`/
+  `--purge-audit` 的 dry-run 审视守卫语义不变。壳披露同步:三面 mgh-sdr 壳如实列明壳级
+  dry-run 会产生 run 目录/context.json/哨兵(**不是**零副作用试跑)。
+- **special-auth 部署面覆盖机制(命令无关)**:可选部署面文件 `mgh-special-auth.md`
+  (企业认证与执行环境手册,wizard 插件/CAS 细节/取证三步/故障对照只住在里面;
+  `.gitignore` 排除,维护者随包分发)。引导两路落地:sdr 面 = `list_sdr_steps.py` stdout
+  顶层 `special_auth{present,path}` 字段(该清单唯一允许的磁盘探测,docstring 承诺同步
+  收窄)+ 三面 mgh-sdr 壳 fan-out 步前引导行(在场 → 先读文档、凭证准备与派发 flag 以
+  文档为准,**NEVER 链硬边界不可被文档放宽**;缺席 → 通用流程逐字节不变)+
+  `resume_sdr_state.py` fanout 步在场提示一行;通用面 = `fanout_runner.py` 在文档在场
+  未传 `--cred-file` 时 stderr 一行 advisory——mgh-init/ut-init 等扇出零改壳即被覆盖。
+  `install.sh`/`install.ps1` 复制收敛:源在场才落盘 `<dest>/mgh-core/`,源缺席移除目标
+  侧残留(收敛态 = 目标副本当且仅当源存在;三态有测)。
+- **启动孤儿 advisory**:runner 启动时检出本 tier 残留 liveness 文件 → stderr 一行
+  (存活匹配 runner = 提醒已有派发在跑;残留 = 上次硬杀,recipe 指向既有
+  `--kill-stale --dry-run`)。非阻塞、不改退出码,复用既有清理机制零新路径。
+- **超时四级不变式冻结**:`stall-timeout < call-timeout < budget×0.8 < 宿主上限` 与全部
+  默认值零改动(mgh-init 专项实验校准结论承袭);注入移除子进程登录等待后首 token 即
+  业务时延,慢模型场景由既有 wave/配额机制消化。
+- **配套**:新增 `test_mgh_credentials` 18 测(三模式/外科还原含并发修改幸存/`--check`/
+  权限/stdout 无 token)+ `test_fanout_runner` 增 20 测(物化形状幂等续期/cred 损坏
+  fail-loud/host 拒识/401 端到端截断〔真 _run_unit + spy Popen〕/dry-run 全树快照零写/
+  advisory 两态/孤儿提示/env 认领语义;全套 223 测绿)+ `test_install_special_auth`
+  (install 三态收敛,真跑 install)+ `test_list_sdr_steps`/`test_resume_sdr_state` 各扩
+  两态;契约同步(`core/contracts/fanout/runtime.md` 注入/过期/纯计划节 +
+  `core/contracts/sdr/pipeline.md` run 目录布局补 `childcfg/`/`ocdata/`/`cred*.json`);
+  `docs/glossary.md` 补凭证中心/静态注入/子配置目录/数据目录隔离四词条(零企业词汇);
+  `docs/man/mgh-sdr.md` 补通用机制段;AGENTS.md 环境约束节加必读指引(细节下沉不入 git
+  的 `docs/enterprise-environment.md`)+ R5.9/映射表/诚实边界三处;`tools/
+  check_distributed_purity.py` SDD 豁免登记本 change(交付物含 docs/ 路径)+
+  `purity_allowlist.txt` pipeline.md 钉扎随行号漂移同步;`install.sh` 共定位自检清单补
+  `mgh_credentials`;VERSION 0.1.80→0.1.81。
+- **修正批(首次真仓反馈:fanout 起飞前没读 special-auth 文档)**:定位 = launcher
+  (零打断优选入口)是规划漏掉的第四消费面——`_build_prompt` 把 step 2–5 连调用行硬编码,
+  宿主会话从不经清单拿到 `special_auth` 字段。修:`_build_prompt` 探测
+  `<mgh-core>/mgh-special-auth.md`,在场 → 提示词插凭证准备前置块(读文档 → 写
+  cred_source.json → 跑 mgh_credentials.py)+ step 3 调用行条件追加 `--cred-file`,launcher
+  spawn 前 stderr 披露一行;缺席 → 提示词逐字节不变。resume 面同步加固:fanout 步指引从
+  `notes[]` 前置进 `next_action.desc`(恢复编排器逐字执行 desc,NEVER 假定其读 notes);
+  三面壳 step 3 措辞收紧为「前置检查(先于 invocation,不可跳过)」。
+- **真机机制验证(本机 opencode 1.18.31 + 本地 OpenAI 兼容假网关)**:`opencode debug
+  paths` 在 `XDG_CONFIG_HOME`/`XDG_DATA_HOME` 下确认 data/log/repos/config 四路径全部
+  重定向进单元目录(**F7 Windows 侧从 C 级升级为已验证**;`state`/`cache`/`bin` 不随
+  变量,共享但低争用);子进程日志确认加载 `childcfg/<unit>/opencode/opencode.json`;
+  假网关收到真实子进程的 `POST /v1/chat/completions`,`authorization=Bearer <注入
+  token>` 与 `model=<模型>` 逐字命中——静态凭证从 cred.json → 子配置 → HTTP 头全链坐实,
+  全程零登录闭环。运行注意:自定义 openai-compatible provider 的配置节点 MUST 带
+  `models` 映射(缺则 opencode 报 Unexpected server error 且请求不出网)。
+- **诚实边界**:保留 plugin 下子进程不自登录、探测插件触发钩子、`opencode run -c` 语义
+  三项仍待企业真仓复核(交接清单在 change tasks 10.3);dsh host 同构注入未实现(拒识 +
+  special-auth 文档 follow-up 节);mgh-init/ut-init 的清单字段引导未接(advisory 已覆盖
+  其扇出)。
+
+### Changed — SDR 配额自适应扇出:估算式准入节流 + 窗口复位冷却 + 切片默认校准 (0.1.80)
+
+`fix-mgh-sdr-quota-adaptive-fanout`(openspec 变更,规格增量回写 `fanout-dispatch` 3 处
+requirement + `security-design-review` 2 处 requirement)。依据 2026-10-15 真仓实测:67 个
+评审单元 × 每单元 5~10 次模型调用 ≈ 350~670 次,在「每 10 分钟 100 次」限流网关下纯排队
+35~67 分钟;默认并发 5、固定 300 秒冷却、256KB 切片上限三个量都按「不限流大窗口环境」设的,
+组合起来在限流网关上自我放大(429 → 重派 → 再 429 → 重试烧配额)。
+
+- **派发器配额准入(可选模式,全部 tier 通用)**:`fanout_runner.py` 新增配额三 flag
+  `--quota-calls N` / `--quota-window-s W` / `--quota-calls-per-unit K`(默认 10 = 实测
+  保守上界,宁慢 NEVER 打穿配额)。N 与 W 成对传入才激活(半配启动校验退出码 2 + recipe,
+  与超时不变式违例同形);激活后 `_fill()` 维护本 run 派发时间戳滑动窗口,「窗口内已派发数 ×
+  K + K ≤ N」才派,余量不足暂停新派发、分片 sleep(≤1s)等窗口滑动、在飞照常收割,每段等待
+  stderr 披露估算口径与预计恢复时刻;stdout 摘要与 sidecar 增
+  `quota{calls,window_s,calls_per_unit,admission_waits}`(单一真相源,未配置时该键缺席)。
+  **未配置配额 flag 时全部 tier 派发/冷却/截断/stdout/sidecar 逐字节不变**(既有 178 测
+  全绿为闸门;零推进熔断只锚新派发,准入等待不误触)。
+- **配额窗口复位冷却**:配额模式下,触发快败冷却的 requeue 事件含限流特征 crash 时,冷却
+  终点改为 `max(常规终点, 最近特征事件时刻 + W)`——等满窗口复位而非固定 300 秒;仍受
+  「剩余时间预算 − 在飞收敛余量」封顶(截断如实披露,截断的等待不算「等满」);非限流事件
+  与熔断前退避的冷却时长不变。
+- **等满窗口才截断**:配额模式下限流 crash 风暴截断追加前提「至少一次 rate-limit crash
+  发生在一次已完整等到的窗口复位冷却之后」——窗口耗尽先自我恢复,等满一个完整窗口仍限流
+  才截断(说明配额参数配错),recipe 增「核对配额三 flag 与网关实际配额」一行;
+  `--no-rate-limit-stop` 禁用面不变;非配额模式截断条件零改动。
+- **切片默认校准 + resume 预算粘滞**:`diff_group.py` 的 `DEFAULT_MAX_INTERFACE_BYTES`
+  256KB → 96KB(98304;按 150K 窗口反算最坏上下文栈约 55~70K token,旧默认 95~120K 顶溢出
+  边缘);standalone 维持 64KB(最坏约 53K token 无溢出风险,调小只推高单元数反噬配额);
+  校准算术与「单元数代价」进 `--help`;run 目录已有 grouping.json 预算记录且未显式传
+  flag → 复用记录值(单元身份跨版本升级不漂移,done 单元零重派),显式传 flag 优先并更新
+  记录;256KB 旧默认仍是合法显式取值。
+- **单遍往返纪律**:`sdr-task.md` 任务模板增「全部输入第一批并行读入 → 一次判断 → 写
+  draft 与 touch marker 同批 → 单行 ack,NEVER 逐文件多轮往返」,明示只约束往返次数、
+  读/写路径闭集与刚性三元组逐字不变;三面 `sdr-review-fanout` agent 定义(opencode /
+  claude / dsh tier)增逐字一致的单行指针(测试锚定)。
+- **sdr 壳派发串行缺省 + 步骤清单外包(design D8 A 案)**:三面 `mgh-sdr` 壳规范派发行默认
+  `--wave 1`(内网串行最稳 + opencode 并行子进程数据库锁前科,双理由收敛;脚本级
+  `DEFAULT_WAVE=5` 不动);`list_sdr_steps.py --step fanout` invocation 携 `--wave 1` 与
+  配额三 flag 用法示例,`--step group` discipline 增切片预算校准口径,`--step fanout`
+  discipline 增限流窗口等待 recipe——步骤清单成为壳外包后的断言新家;launcher
+  `mgh_sdr_launch.py` resume 指引行同步;壳 token 预算经外包取得真实余量(dsh 面
+  4997 → 4372 / 5000,purity 基线净缩 12 条存量钉扎)。
+- **文档**:维护者 man 页 `/mgh-sdr` 补「配额模式」人话一节(参数 / 建议值 / 调用次数
+  算术 / 估算诚实边界);术语词典补「配额窗口」「准入节流」;README `/mgh-sdr` 诚实边界补
+  估算式披露;AGENTS.md 用户画像表频控行加配额 flag 指针。
+- **测试**:`test_fanout_runner` 增 25 测(准入算术纯函数 7 + 启动校验 8 + 准入闸端到端
+  6 + 窗口复位/等满窗口截断 4;harness 层 `--cooldown-s 0`,配额小窗口值控墙钟;红验 =
+  stash 实现后新测全红);`test_diff_group` 增 4 测(默认值锚 / ~160KB 接口在新默认下
+  重切 -partN 每份 ≤96KB 且对 262144 显式值不切 / 粘滞两向 / 无记录回退默认);
+  `test_human_face_vocab` 增单遍纪律三面文档对账 3 测;`test_list_sdr_steps` 增清单
+  invocation/discipline 断言新家 3 测。
+
 ### Added — 启动路径使用遥测:脚本内埋点 + 冷却窗口,17 个命令壳零改动 (0.1.79)
 
 - 新能力规格 `usage-telemetry`:五条已发布命令(mgh-init / mgh-sdr / mgh-sra / mgh-srr /

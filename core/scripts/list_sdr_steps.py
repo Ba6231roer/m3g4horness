@@ -13,7 +13,10 @@ installed, NEVER hardcoded or passed via prompt. Sister script of init's
 
 Zero disk preconditions: does NOT read `context.json`, does NOT scan
 `<repo>/.mgh-sdr/`, does NOT depend on any run-state artifact. Queryable pre-run, during
-compaction recovery, or for pure documentation review.
+compaction recovery, or for pure documentation review. The ONE allowed disk probe is the
+optional special-auth deployment doc (`<mgh-core>/mgh-special-auth.md`, maintainer-carried,
+absent in generic installs): its presence is reported in the top-level `special_auth`
+field so the orchestrator can consult it before the fan-out step; no other state is read.
 
 Complements `resume_sdr_state.py` (disk-derived "where am I / what's next"):
 resume_sdr_state gives the CURRENT step; list_sdr_steps gives the exact invocation line
@@ -32,20 +35,36 @@ CLI contract (`--help` is the contract surface, R5.1):
              Default: emit all steps.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
-  {"steps": [{step, kind, script, script_abs, invocation, input{}, output{}, discipline}]}
+  {"steps": [{step, kind, script, script_abs, invocation, input{}, output{}, discipline}],
+   "special_auth": {present, path}}
+  - special_auth = {present: bool, path: <abs>|null} — presence of the optional
+                   special-auth deployment doc in this install tree. present=true →
+                   the orchestrator reads it BEFORE the fan-out step and follows it
+                   for credential preparation and dispatch flags; present=false →
+                   the generic flow needs nothing else.
   - step        = step id (enum matching resume_sdr_state.py)
   - kind        = "bash" | "done"
   - script      = sibling script file name (None for the terminal step)
   - script_abs  = absolute path to the script (<mgh-core>/scripts/<name>.py,
                  derived from __file__; host-agnostic)
-  - invocation  = copy-pasteable Bash invocation line: "py <script_abs> <args>"
+  - invocation  = copy-pasteable Bash invocation line: "py <script_abs> <args>".
+                 The fanout line is the sdr-shell canonical dispatch form: `--wave 1`
+                 (intranet serial default; 1~2 advised when concurrent) + the quota
+                 flag triple (`--quota-calls/--quota-window-s/--quota-calls-per-unit`,
+                 estimate-based admission for calls-per-window gateways; optional,
+                 zero change when unset). The group step's discipline carries the
+                 slice-budget default caliber (interface 96KB / standalone 64KB,
+                 resume-sticky via grouping.json's budget record).
   - input{}     = {artifact: "<name>", shape: "<shape>"}
   - output{}    = {artifact: "<name>", shape: "<shape>", path_pattern: "<pattern>"}
   - discipline  = per-step discipline subset {gates[], path_recipes[], nevers[]}
                 (gate shapes / fan-out path recipes / applicable NEVER) — identical
                 to resume_sdr_state.py stdout `discipline_reminders` for the same step
                 (shared static table in discipline_core.py, domain="sdr";
-                `done`/`not-started` → EMPTY structure)
+                `done`/`not-started` → EMPTY structure). The fanout entry carries the
+                full fast-fail storm tri-layer recipe (stalled-provider congestion /
+                rate-limit window wait / retry-failed once) and the group entry the
+                slice-budget calibration.
 
 Exit codes (R5.3b): 0 ok · 1 target not a dir · 2 misuse (--step not found).
 Idempotent, no TTY, read-only.
@@ -88,16 +107,24 @@ _STEPS = [
         "cli_args": ("--repo <target> --base <ref> --branch <ref> "
                      "--checkpoints <run-dir>/markers --materialize <run-dir>/slices"),
         "input": {"artifact": "context.json", "shape": "{repo,base,branch}"},
-        "output": {"artifact": "grouping.json", "shape": "{repo,empty,total,units[],excluded,pending[]}",
+        "output": {"artifact": "grouping.json",
+                   "shape": "{repo,empty,total,units[],excluded,pending[],budget,"
+                            "slimmed}",
                    "path_pattern": "<run-dir>/grouping.json (+ <run-dir>/slices/*.slice.md)"},
     },
     {
         "step": "fanout",
         "kind": "bash",
         "script_name": "fanout_runner.py",
-        "cli_args": ("--tier sdr --repo <target> --base <ref> --branch <ref> "
+        # 规范行默认 --wave 1(内网串行最稳,opencode 并行子进程另有数据库锁前科;
+        # 要并发建议 1~2)。配额三 flag 供调用次数限流网关(如 100 次/10 分钟):
+        # 估算式准入按「窗口内已派发数×K」节流,K 默认 10=保守上界,未配置零变化。
+        "cli_args": ("--tier sdr --repo <target> --base <ref> [--branch <ref>] "
                      "--checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices "
-                     "--time-budget-ms <ms> --call-timeout-s <s> --stall-timeout-s <s>"),
+                     "--wave 1 --time-budget-ms <ms> --call-timeout-s <s> "
+                     "--stall-timeout-s <s> "
+                     "[--quota-calls <N> --quota-window-s <W> "
+                     "[--quota-calls-per-unit <K>]] [--resume]"),
         "input": {"artifact": "grouping.json::pending[]", "shape": "[unit work-list]"},
         "output": {"artifact": "drafts/*.json + markers/*.{done,failed}",
                    "shape": "[per-unit draft + terminal marker]",
@@ -124,6 +151,16 @@ _STEPS = [
                    "path_pattern": "<run-dir>/sdr_manifest.json"},
     },
 ]
+
+
+def _special_auth() -> dict:
+    """Presence probe for the optional special-auth deployment doc (the ONE
+    disk probe this manifest makes; see module docstring). present=false is
+    the generic-install shape and carries path=null."""
+    doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+    if doc.is_file():
+        return {"present": True, "path": str(doc)}
+    return {"present": False, "path": None}
 
 
 def _script_abs(script_name: str | None) -> str | None:
@@ -202,7 +239,8 @@ def main():
         print(f"[list_sdr_steps] emitting {len(steps)} steps (use --step <id> for "
               f"single step)", file=sys.stderr)
 
-    print(json.dumps({"steps": steps}, ensure_ascii=False, indent=2))
+    print(json.dumps({"steps": steps, "special_auth": _special_auth()},
+                     ensure_ascii=False, indent=2))
     return 0
 
 

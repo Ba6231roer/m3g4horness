@@ -124,6 +124,18 @@ this message today; judge the full closed set, skipping a dimension with no anch
 - On a unit you cannot judge (slice unreadable, baseline contradictory): touch NOTHING,
   reply `failed <reason>` only.
 
+## One-pass round discipline (单遍往返纪律 — on a calls-per-window rate-limited gateway every round trip is quota)
+
+Batch your tool calls: read ALL your inputs (the slice + the baseline projection + the
+sensitive catalog file when present + the external conclusions when present) in ONE
+first batch of parallel reads; make the full 6-dimension judgment in ONE pass; write the
+draft and touch the done marker in ONE same batch; then reply the single ack line.
+NEVER read your inputs one file per round (逐文件多轮往返 — that doubles the model-call
+count and the quota it burns), NEVER write in multiple batches. This discipline bounds
+ROUND TRIPS only: the read/write path closed set and the rigid I/O triple above are
+unchanged, word for word — which files to read, which draft to write, which marker to
+touch stay exactly as stated.
+
 ## Final reply (single bounded ack line)
 
 `ok <draft_path> <n findings>` / `oversize <draft_path>` / `failed <reason>`.

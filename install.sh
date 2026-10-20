@@ -103,6 +103,24 @@ case "$PLATFORM" in
 esac
 find "${_prune_dirs[@]}" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
+# 3b) Optional special-auth deployment doc (maintainer-carried, NOT in git;
+#     enterprise SSO/credential runbook consumed by fanout_runner /
+#     list_sdr_steps / resume_sdr_state). Convergence: the target copy exists
+#     IFF the repo-root source exists — a present source installs (revealed in
+#     the install output); an absent source REMOVES a stale target copy (stale
+#     enterprise guidance must never linger). Generic installs (no source, no
+#     target copy) are byte-identical to before; the co-location self-check
+#     below never warns about this file.
+AUTH_SRC="$HERE/mgh-special-auth.md"
+AUTH_DST="$DEST/mgh-core/mgh-special-auth.md"
+if [[ -f "$AUTH_SRC" ]]; then
+  cp "$AUTH_SRC" "$AUTH_DST"
+  echo "✓ installed special-auth deployment doc (enterprise credential/environment runbook)"
+elif [[ -f "$AUTH_DST" ]]; then
+  rm -f "$AUTH_DST"
+  echo "✓ removed stale special-auth deployment doc from target (source not present in this package)"
+fi
+
 # 4) Self-check (fail-soft per R5.8): the /mgh-init discover/scout/assemble pipeline
 #    needs these scripts co-located — discover_controls.py / chunk_sources.py do
 #    `from expand_scope import ...`, merge_scout.py does `from discover_controls import
@@ -121,14 +139,14 @@ for s in expand_scope discover_controls chunk_sources plan_scout merge_scout ass
          classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \
          resume_ut_init_state write_ut_runconfig list_ut_steps \
          diff_group sdr_context render_sdr_report human_face_vocab mgh_sdr_launch read_roots_config \
-         resume_sdr_state list_sdr_steps sdr_tier mgh_telemetry; do
+         resume_sdr_state list_sdr_steps sdr_tier mgh_telemetry mgh_credentials; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
 if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, /mgh-srr, /mgh-ut-init, or /mgh-sdr may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/scout-merge/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/human_face_vocab/mgh_sdr_launch/read_roots_config/resume_sdr_state/list_sdr_steps/sdr_tier/mgh_telemetry"
+  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/scout-merge/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/human_face_vocab/mgh_sdr_launch/read_roots_config/resume_sdr_state/list_sdr_steps/sdr_tier/mgh_telemetry/mgh_credentials"
 fi
 
 # 4a) Fan-out tier payload self-check (fail-soft per R5.8): the tier-aware

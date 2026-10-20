@@ -71,6 +71,39 @@ PATH (shutil.which; dsh appended at the chain end — dual-host machines keep
 their existing behavior); none present → exit 2 + fallback recipe (the
 orchestrator falls back to the existing manual dispatch, behavior unchanged).
 
+Child execution-environment isolation (OPTIONAL, default OFF — absent flags
+mean a byte-identical legacy spawn):
+  --cred-file <run>/cred.json  static credential injection (opencode host form
+            only; claude/dsh forms exit 2): per-unit child config
+            `<run>/childcfg/<unit>/opencode/opencode.json` (a copy of the
+            global config with the cred-declared provider overridden to the
+            static baseURL + apikey entry, id unchanged) + child env
+            `XDG_CONFIG_HOME` (per-unit child config dir) and
+            `XDG_DATA_HOME` (`<run>/ocdata/<unit>`) — the child sees ONLY its
+            own config (no login flow of its own; SSO gateways with one-time
+            tickets make per-child logins structurally fail) and its own data
+            dir (logs/sqlite/repos stop colliding across concurrent fat
+            clients). Schema of the cred file is validated by
+            `mgh_credentials.validate_cred_payload` (the SAME validator the
+            producer runs — one closed set); acquire the file via
+            `mgh_credentials.py`. The apikey is never echoed to stdout/stderr
+            or written anywhere except the child config file.
+  --isolate-data   per-unit `XDG_DATA_HOME` alone (no credentials) — for
+            deployments whose only problem is the concurrent data-dir
+            collision. Implied by --cred-file.
+Credential-expiry fast-stop: with --cred-file, non-ok terminals get their
+output tails scanned against the cred file's `expired_signatures[]`; the first
+hit stops NEW dispatch immediately (priority above the rate-limit storm and
+cooldowns), exit 2, stdout `credential_expired` + `credential_expired_units`,
+stderr recipe = re-acquire → update cred file → `--resume --retry-failed`.
+Disk marker semantics unchanged. Special-auth advisory: when the install tree
+carries `<mgh-core>/mgh-special-auth.md` (optional deployment doc,
+maintainer-carried, NOT in git) and no --cred-file was passed, one stderr
+note points at it — command-agnostic, all tiers.
+--dry-run (dispatch form) is a PURE PLAN: zero writes, zero spawns — the unit
+list, the would-write paths and the command form go to stdout; the
+--kill-stale/--purge-audit review guards are separate and unchanged.
+
 State machine (disk markers are the ONLY truth source): `ok`/`oversize` ack or
 `.done` marker → done; `failed` ack → this script writes the `.failed` marker
 (body {unit,reason,tier}; terminal, not retried, does not block other slots);
@@ -238,6 +271,32 @@ CLI contract (`--help` is the contract surface, R5.1):
   degenerate into the host hard-killing the tree first (observed 2026-09-14).
   Applies to all tiers identically (a t1/t3/sdr unit = one full LLM subagent
   run, same calibration as scout).
+
+  QUOTA ADMISSION MODE (optional, all tiers): `--quota-calls N` +
+  `--quota-window-s W` (BOTH required to activate) arm an ESTIMATED
+  sliding-window admission gate for calls-per-window-rate-limited gateways:
+  the dispatcher tracks this run's unit-dispatch timestamps, and a new unit is
+  only dispatched while `dispatches-in-window x K + K <= N` (K =
+  `--quota-calls-per-unit`, default 10 — a conservative upper bound of the
+  model calls one unit burns INSIDE its host-CLI child, which the dispatcher
+  cannot observe). Short on margin -> no dispatch; the loop sleeps in <=1s
+  shards until the earliest timestamps slide out of the window, in-flight
+  units keep running and harvesting throughout, and each wait episode is
+  disclosed on stderr with the arithmetic and the expected resume time. The
+  wait is bounded by the remaining time budget (exhausted -> the existing
+  soft-deadline partial exit; `--resume` starts a fresh window — the window is
+  in-process only, the gateway-side spend is never tracked across processes).
+  Quota mode also upgrades storm cooldowns whose requeue events include a
+  rate-limit-signature crash: the cooldown then waits out the quota window
+  reset (last signature event + W) instead of the fixed --cooldown-s, and the
+  crash-storm truncation fires only AFTER one full window-reset wait has
+  completed and rate-limit crashes still recur (before that, a window
+  exhaustion is treated as self-healing). HONEST BOUNDARY: admission is an
+  ESTIMATE (real per-unit call counts are gateway-side facts); an
+  underestimate can still eat a 429 — the window-reset cooldown and the
+  truncation layer backstop it. Without the quota flags every tier's
+  dispatch/cooldown/truncation/stdout/sidecar behavior is byte-identical to
+  the pre-quota runner (the stdout `quota` key is absent).
   --resume          re-derive pending from disk markers (same entry point as a
                     fresh call; kept for call-shape parity with the shell).
   --pending-file    TEST HOOK: consume the tier listing from a file instead of
@@ -341,7 +400,13 @@ stdout (structured JSON summary; stderr = diagnostics/progress only, R5.3b):
                      the narrow---budget recipe rides the unit's run.log and
                      stderr lines; outcome semantics unchanged)],
    "audit_purged": [names] (with --purge-audit),
-   "kill_stale": {killed, removed, none} (with --kill-stale)}
+   "kill_stale": {killed, removed, none} (with --kill-stale),
+   "quota": {calls, window_s, calls_per_unit, admission_waits}
+                     (quota admission mode only — the key is ABSENT without
+                     the quota flags; calls/window_s/calls_per_unit echo the
+                     configured quota, admission_waits counts this run's
+                     dispatch-pause episodes; the sidecar carries the same
+                     body, derived from the same snapshot)}
 (waves_run = cumulative units dispatched this run; the summary's `wave` stays
 the concurrency cap.)
 
@@ -407,7 +472,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -416,6 +481,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from init_tier import safe_unit_filename  # noqa: E402 — sibling import (below)
+from mgh_credentials import validate_cred_payload  # noqa: E402 — sibling import:
+# one closed-set cred schema shared with the producer script (the dispatcher
+# never redefines what "a valid cred file" means)
 
 DEFAULT_WAVE = 5
 # Calibrated for slow intranet LLM endpoints (one unit = one full LLM subagent
@@ -520,6 +588,14 @@ _OVERFLOW_RECIPE = ("context-overflow signature matched — the request exceeded
 REQUEUE_WINDOW_S = 120
 REQUEUE_THRESHOLD = 3
 DEFAULT_COOLDOWN_S = 300
+# Quota admission mode (optional): per-unit call ESTIMATE default. A unit's
+# real model-call count burns inside its host-CLI child and is structurally
+# invisible to the dispatcher (the gateway is the only true meter), so the
+# admission gate runs on this conservative UPPER bound: throttling too hard
+# costs wall time, busting the estimate busts the quota (429 storms + wasted
+# retries cost whole re-runs). Real-run data flows back via the gateway-side
+# counters; calibrate DOWNWARD from 10, never up past the observed worst.
+DEFAULT_QUOTA_CALLS_PER_UNIT = 10
 # Rate-limit crash-tail signatures (case-insensitive substrings over BOTH
 # output tails; crash terminal states only — ok/failed/timeout/stall are never
 # classified). A hit marks the crash detail with _RATELIMIT_MARK (same ride-
@@ -534,6 +610,141 @@ _RATELIMIT_RECIPE = (
     "floor(quota-calls-per-minute x 0.8 / per-unit calls-per-minute); a "
     "liveness/stall tree-kill is NOT a crash and never counts here; disable "
     "this truncation with --no-rate-limit-stop")
+
+# Static credential injection + per-unit execution-environment isolation
+# (optional; both flags default OFF = byte-identical legacy spawn env). The
+# cred schema validator is imported from mgh_credentials (single source).
+_CRED_EXPIRED_MARK = "reason:credential-expired"
+_CRED_EXPIRED_RECIPE = (
+    "credential-expired signature matched — the gateway rejected the static "
+    "token; recipe: re-acquire credentials (mgh_credentials.py, or per the "
+    "special-auth deployment doc when present), update the cred file, then "
+    "re-run with --resume --retry-failed (done units are never re-dispatched)")
+SPECIAL_AUTH_DOC = "mgh-special-auth.md"
+
+
+def _special_auth_doc_path() -> Path:
+    """Optional deployment doc in the install tree (`<mgh-core>/`): present =
+    the maintainer carries enterprise-specific auth/environment guidance and
+    the orchestrator/runner should point at it; absent = generic flows only.
+    Maintainer-carried, NOT in git; install converges the target copy."""
+    return Path(__file__).resolve().parent.parent / SPECIAL_AUTH_DOC
+
+
+# Per-unit extra spawn env (uid -> dict), the env twin of _UNIT_SINKS:
+# module-level because _run_unit's 9-arg signature is frozen (fixed-arity
+# direct callers and test fakes depend on it); register→claim is same-thread
+# sequential in the dispatch path. Unregistered uid (or an empty registry)
+# changes NOTHING — the legacy env construction is byte-identical.
+_UNIT_ENV: dict = {}
+
+
+def _load_cred_file(path_str: str) -> dict | None:
+    """Read + validate the cred payload (closed set, validator = the
+    producer's). Returns the normalized dict (global_config expanduser'd) or
+    None after printing the error + recipe; the caller exits 2 BEFORE any
+    spawn or enumerator side effect."""
+    p = Path(path_str).expanduser()
+    try:
+        body = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        _eprint(f"error: cred file unreadable: {p} ({e})")
+        _eprint("recipe: (re-)acquire via `mgh_credentials.py --source "
+                "<run>/cred_source.json --out <run>/cred.json`, or per the "
+                "special-auth deployment doc when present")
+        return None
+    problems = validate_cred_payload(body)
+    if problems:
+        _eprint(f"error: cred file failed schema validation: {p}")
+        for q in problems:
+            _eprint(f"  - {q}")
+        _eprint("recipe: re-acquire via `mgh_credentials.py --source "
+                "<run>/cred_source.json --out <run>/cred.json`, or per the "
+                "special-auth deployment doc when present")
+        return None
+    body["global_config"] = os.path.expanduser(body["global_config"])
+    return body
+
+
+def _cred_expired_tail(cred: dict, out_tail: str, err_tail: str) -> bool:
+    """True when either output tail carries a token-expiry signature
+    (case-insensitive substring). The signatures come from the cred file
+    (`expired_signatures[]`), so gateway-specific rejection wordings are
+    deployment data, never code. An empty signature list disables the scan
+    (classification behavior identical to running without a cred file)."""
+    sigs = cred.get("expired_signatures") or []
+    if not sigs:
+        return False
+    low_o, low_e = (out_tail or "").lower(), (err_tail or "").lower()
+    return any(sig.lower() in low_o or sig.lower() in low_e for sig in sigs)
+
+
+def _materialize_child_config(cred: dict, unit_cfg_dir: Path) -> Path:
+    """Write one unit's child config: a copy of the cred-declared global
+    host-CLI config with the cred-declared provider overridden to the static
+    entry (baseURL + apikey). Everything else (plugins/agents/model/…) is
+    preserved verbatim; the provider ID stays IDENTICAL (model ids are
+    `<provider>/<model>` — renaming the provider would break the prefix
+    coupling). Idempotent: the same inputs produce the same file, so re-
+    dispatch/`--resume` re-materialization is safe, and a re-acquired (rotated)
+    token flows into the next materialization. The apikey lands ONLY here —
+    never stdout/stderr/markers/run.log/telemetry. Raises ValueError/OSError;
+    the caller converts a failure into that unit's pre-spawn failure."""
+    gp = Path(cred["global_config"])
+    try:
+        cfg = json.loads(gp.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"global config unreadable: {gp} ({e})")
+    if not isinstance(cfg, dict):
+        raise ValueError(f"global config is not a JSON object: {gp}")
+    providers = cfg.get("provider")
+    if not isinstance(providers, dict) or cred["provider_id"] not in providers:
+        raise ValueError(
+            f"provider {cred['provider_id']!r} not found in global config {gp} "
+            f"— recipe: align the cred source's provider_id with the config's "
+            f"provider entry (see the special-auth deployment doc)")
+    if not cred["keep_plugins"]:
+        cfg.pop("plugin", None)
+    node = providers[cred["provider_id"]]
+    if not isinstance(node, dict):
+        raise ValueError(f"provider entry is not an object: {cred['provider_id']!r}")
+    options = node.setdefault("options", {})
+    if not isinstance(options, dict):
+        raise ValueError(f"provider options is not an object: "
+                         f"{cred['provider_id']!r}")
+    options["baseURL"] = cred["baseURL"]
+    options["apiKey"] = cred["apikey"]
+    target = unit_cfg_dir / "opencode" / "opencode.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                      encoding="utf-8")
+    return target
+
+
+def _orphan_advisory(init_dir: Path, tier: str) -> None:
+    """Startup advisory (non-blocking, exit-code neutral): a residual liveness
+    file for this tier means the previous run was hard-killed (the normal exit
+    path deletes it). A live, matching runner = another dispatch may be
+    running right now; a dead one = orphan children may exist. Either way the
+    recipe is the existing `--kill-stale` machinery — no new cleanup path."""
+    pid_file = init_dir / f"fanout_runner.{tier}.pid"
+    if not pid_file.is_file():
+        return
+    ins = _inspect_liveness(pid_file)
+    if ins is None:
+        return
+    if ins.get("runner_alive") and ins.get("runner_matches"):
+        _eprint(f"[fanout_runner] note: a runner for tier {tier} appears ALIVE "
+                f"(pid {ins['body'].get('pid')}, started "
+                f"{ins['body'].get('started_ts')}) — another dispatch may "
+                f"still be running; proceed only if intentional "
+                f"(`fanout_runner.py --kill-stale --dry-run` lists it)")
+    else:
+        _eprint(f"[fanout_runner] note: stale liveness file "
+                f"({pid_file.name}) — the previous run was hard-killed; "
+                f"orphan children may exist. Recipe: "
+                f"`fanout_runner.py --kill-stale --dry-run` lists them, "
+                f"review then re-run without --dry-run to clear")
 
 # ---------------------------------------------------------------------------
 # Tier mapping (single point of tier variation, design D1/D2). The wave loop,
@@ -979,6 +1190,37 @@ def _cooldown_cap_s(cooldown_s: float, deadline: float | None, now: float,
     return remaining - margin
 
 
+def _quota_admission(dispatch_times: list[float], window_s: int, calls: int,
+                     per_unit: int, now: float) -> tuple[bool, int, float]:
+    """Pure arithmetic behind the quota-mode admission gate (quota mode is an
+    ESTIMATE: the dispatcher sees only its own dispatch timestamps, never the
+    per-unit call counts that burn inside the host-CLI children).
+
+    Admissible iff `dispatches-in-window x K + K <= N` (the next unit's K
+    estimated calls must still fit). When inadmissible, returns the monotonic
+    ts at which admission re-opens: enough of the OLDEST timestamps must slide
+    out of the window for the in-window count to drop to `calls // per_unit -
+    1`; that is the (`in-window - max-in-window`)-th oldest timestamp plus the
+    window length. A window that can never admit (K > N even at zero
+    dispatches) reports `now` — the caller owns the wait cadence (it must
+    never busy-spin on a resume ts that is already in the past).
+
+    Returns `(admissible, used_calls, resume_ts)`; `resume_ts` is 0.0 when
+    admissible. No mutation of `dispatch_times` — the caller owns the list.
+    Pure; kept module-level so the arithmetic is micro-testable without a
+    run."""
+    recent = [t for t in dispatch_times if now - t <= window_s]
+    used = len(recent) * per_unit
+    if used + per_unit <= calls:
+        return True, used, 0.0
+    max_in_window = max(0, calls // per_unit - 1)
+    need_slide = len(recent) - max_in_window
+    if need_slide <= 0:
+        return False, used, float(now)
+    resume = sorted(recent)[need_slide - 1] + window_s
+    return False, used, resume
+
+
 def _widened_stall_window(current: int, call_timeout_s: int) -> int:
     """The effective silence window after ONE false-kill self-evidence event:
     double it, clamped to the `--call-timeout-s` convergence margin (design
@@ -1115,6 +1357,13 @@ def _run_unit(host: str, cmd: list[str], task: str, cwd: Path,
     stripping is side-effect-free for them. Stall detection/kill/cooldown are
     host-agnostic."""
     env = {k: v for k, v in os.environ.items() if k != "PWD"}
+    # Per-unit execution-environment injection (the env twin of the sink
+    # claim): _dispatch registers `_UNIT_ENV[uid]` (XDG_CONFIG_HOME /
+    # XDG_DATA_HOME for the static-credential + data-isolation modes) right
+    # before calling this; an unclaimed/unregistered uid changes NOTHING.
+    extra_env = _UNIT_ENV.pop(uid, None)
+    if extra_env:
+        env.update(extra_env)
     stdin_mode = subprocess.PIPE
     if host == "dsh":
         env["MGH_TASK_TEXT"] = task
@@ -2038,6 +2287,52 @@ def main() -> int:
                          f"more than once per call. 0 disables the cooldown AND "
                          f"the pre-breaker backoff. stdout summary carries "
                          f"cooldowns:<n>")
+    ap.add_argument("--quota-calls", type=int, default=None,
+                    help="quota admission mode: model-call budget per window "
+                         "(N) for calls-per-window-rate-limited gateways (e.g. "
+                         "100 calls / 10 min -> --quota-calls 100 "
+                         "--quota-window-s 600). MUST be passed together with "
+                         "--quota-window-s — passing only one, or passing "
+                         "--quota-calls-per-unit alone, is rejected with exit 2 "
+                         "+ recipe (same spawn-time fail-loud shape as the "
+                         "timeout invariant); value domain >= 1. The gate is an "
+                         "ESTIMATE: a unit's real call count burns inside its "
+                         "host-CLI child and is invisible to this dispatcher, "
+                         "so admission runs on dispatches-in-window x K + K <= "
+                         "N; an underestimate can still eat a 429 (the "
+                         "window-reset cooldown and the crash-storm truncation "
+                         "backstop it). Without both flags the runner is "
+                         "byte-identical to the pre-quota behavior")
+    ap.add_argument("--quota-window-s", type=int, default=None,
+                    help="quota admission mode: window length in seconds (W); "
+                         "MUST be passed together with --quota-calls (pairing "
+                         "enforced at startup, exit 2 otherwise); value domain "
+                         ">= 1. The dispatcher tracks its own unit-dispatch "
+                         "timestamps over this sliding window; a short-of-"
+                         "margin dispatch pauses in <=1s sleep shards until the "
+                         "earliest timestamps slide out (in-flight units keep "
+                         "running and harvesting; each wait episode discloses "
+                         "the arithmetic and the expected resume time on "
+                         "stderr; the wait is bounded by the remaining time "
+                         "budget). The window is in-process: --resume starts a "
+                         "fresh window and never tracks gateway-side spend "
+                         "across processes. In quota mode a storm cooldown "
+                         "carrying a rate-limit-signature crash waits out this "
+                         "window's reset (last signature event + W) instead of "
+                         "the fixed --cooldown-s, and the crash-storm "
+                         "truncation fires only after one full reset wait has "
+                         "completed and rate-limit crashes still recur")
+    ap.add_argument("--quota-calls-per-unit", type=int, default=None,
+                    help=f"quota admission mode: per-unit model-call ESTIMATE "
+                         f"(K, default {DEFAULT_QUOTA_CALLS_PER_UNIT}). The "
+                         f"default is the conservative upper bound of the "
+                         f"observed 5-10 calls per unit: throttle too hard and "
+                         f"a run goes slower than it must; bust the estimate "
+                         f"and the quota breaks (429 storm + wasted retries "
+                         f"cost whole re-runs) — calibrate DOWNWARD from real "
+                         f"gateway-side counters, never above the observed "
+                         f"worst. MUST NOT be passed without the "
+                         f"--quota-calls/--quota-window-s pair (exit 2)")
     ap.add_argument("--no-rate-limit-stop", dest="rate_limit_stop",
                     action="store_false",
                     help="disable the rate-limit crash-storm fast-path truncation "
@@ -2090,7 +2385,28 @@ def main() -> int:
                     help="delete <inputs-dir>/*.task.md audit copies (with --dry-run: "
                          "list only)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="with --purge-audit: list without deleting; alone: skip dispatch")
+                    help="with --purge-audit: list without deleting; alone: PURE PLAN "
+                         "— zero writes zero spawns, unit list + would-write paths + "
+                         "command form on stdout, exit 0")
+    ap.add_argument("--cred-file", metavar="<run>/cred.json",
+                    help="static credential injection (opencode host form only; "
+                         "claude/dsh exit 2): per-unit child config with the "
+                         "cred-declared provider overridden to baseURL+apiKey "
+                         "(id unchanged) + child env XDG_CONFIG_HOME/XDG_DATA_HOME "
+                         "per unit — children never run their own login flow; "
+                         "apikey reaches only the child config file, NEVER "
+                         "stdout/stderr/logs. Validated by the mgh_credentials "
+                         "validator (acquire the file there first; see the "
+                         "special-auth deployment doc when present). Bad/missing "
+                         "file exits 2 before any spawn. Absent flag = "
+                         "byte-identical legacy spawn")
+    ap.add_argument("--isolate-data", action="store_true",
+                    help="per-unit child data dir via XDG_DATA_HOME "
+                         "(<plan-dir>/ocdata/<unit>) WITHOUT credential "
+                         "injection — logs/sqlite/repos stop colliding across "
+                         "concurrent children (opencode host form; other hosts: "
+                         "noted and ignored). --cred-file implies it. Absent = "
+                         "legacy shared data dir")
     ap.add_argument("--template", metavar="<tier-task.md>",
                     help="override task-message template path (default: sibling "
                          "prompts/fragments/fanout/<tier>-task.md of this install)")
@@ -2149,6 +2465,55 @@ def main() -> int:
         _eprint("error: --cooldown-s must be >= 0 (0 disables the fast-fail "
                 "cooldown and the pre-breaker backoff)")
         return 2
+
+    # Quota-mode pairing + value domain, spawn-time fail-loud (same shape as
+    # the timeout invariant: reject BEFORE any spawn or enumerator side
+    # effect). Quota mode activates iff --quota-calls AND --quota-window-s are
+    # BOTH explicitly passed; anything else (--quota-calls-per-unit alone, or
+    # either half of the pair alone) is the shape of a truncated invocation —
+    # a half-armed gate that would neither throttle nor fail loudly is exactly
+    # the silent-misconfiguration shape the timeout invariant exists to kill.
+    quota_paired = args.quota_calls is not None and args.quota_window_s is not None
+    quota_half = (args.quota_calls is not None) != (args.quota_window_s is not None)
+    if quota_half or (args.quota_calls_per_unit is not None and not quota_paired):
+        _eprint("error: quota flags are not paired: quota admission mode "
+                "activates only when BOTH --quota-calls N and --quota-window-s "
+                "W are passed; --quota-calls-per-unit is an optional refinement "
+                "of that pair and is never legal alone")
+        _eprint("recipe: pass the pair, e.g. for a 100-calls-per-10-min "
+                "gateway --quota-calls 100 --quota-window-s 600 "
+                "[--quota-calls-per-unit 8]")
+        return 2
+    quota_mode = quota_paired
+    if quota_mode:
+        if args.quota_calls < 1 or args.quota_window_s < 1:
+            _eprint(f"error: --quota-calls {args.quota_calls} / "
+                    f"--quota-window-s {args.quota_window_s} must both be >= 1 "
+                    f"(value domain N >= 1, W >= 1)")
+            _eprint("recipe: e.g. --quota-calls 100 --quota-window-s 600 for a "
+                    "100-calls-per-10-min gateway")
+            return 2
+    if args.quota_calls_per_unit is not None and args.quota_calls_per_unit < 1:
+        _eprint("error: --quota-calls-per-unit must be >= 1 (a unit burns at "
+                "least one model call)")
+        return 2
+    if args.quota_calls_per_unit is None:
+        args.quota_calls_per_unit = DEFAULT_QUOTA_CALLS_PER_UNIT
+    if quota_mode and args.quota_calls_per_unit > args.quota_calls:
+        _eprint(f"hint: --quota-calls-per-unit {args.quota_calls_per_unit} > "
+                f"--quota-calls {args.quota_calls}: even the FIRST unit of a "
+                f"window cannot fit the estimate, so no unit will ever be "
+                f"dispatched (the run waits out its time budget and exits "
+                f"partial) — check the flags against the gateway quota")
+
+    # Cred payload validation BEFORE anything runs (zero enumerator side
+    # effects on a bad file — the fail-loud happens at startup, spawn-time
+    # never sees an invalid payload; the validator is the producer's own).
+    cred = None
+    if args.cred_file:
+        cred = _load_cred_file(args.cred_file)
+        if cred is None:
+            return 2
 
     tier = TIERS[args.tier]
 
@@ -2310,12 +2675,20 @@ def main() -> int:
         if listing.get("needs_reduce") is False:
             _eprint(f"[fanout_runner] {args.tier}: listing needs_reduce=false — nothing "
                     f"to dispatch (single-context aggregate)")
-            print(json.dumps({"runner": "fanout_runner", "tier": args.tier,
-                              "total": 0, "done": 0, "failed": 0, "pending": 0,
-                              "waves_run": 0, "partial": False, "stall_killed": [],
-                              "stalled": False,
-                              "note": "aggregate input <= budget — single-context path, "
-                                      "no shards dispatched"}, ensure_ascii=False))
+            summary = {"runner": "fanout_runner", "tier": args.tier,
+                       "total": 0, "done": 0, "failed": 0, "pending": 0,
+                       "waves_run": 0, "partial": False, "stall_killed": [],
+                       "stalled": False,
+                       "note": "aggregate input <= budget — single-context path, "
+                               "no shards dispatched"}
+            if quota_mode:
+                # nothing was dispatched, so the wait count is trivially 0 —
+                # but the configured quota still belongs in the summary
+                summary["quota"] = {"calls": args.quota_calls,
+                                    "window_s": args.quota_window_s,
+                                    "calls_per_unit": args.quota_calls_per_unit,
+                                    "admission_waits": 0}
+            print(json.dumps(summary, ensure_ascii=False))
             return 0
         host = _detect_host(args.host, tier)
         if host == "dsh":
@@ -2325,6 +2698,21 @@ def main() -> int:
             if problem:
                 _eprint(f"error: dsh dispatch precheck failed: {problem}")
                 return 2
+    # Static-injection host gate: the child-config mechanism is shaped by the
+    # opencode form (global config + XDG variables). Other host forms exit 2
+    # rather than silently degrading to a no-credential dispatch (the failure
+    # mode this flag exists to fix would come back as a stall storm). The
+    # in-process test hook ("test") is allowed for materialization-only
+    # verification — it never spawns.
+    if cred is not None and host not in ("opencode", "test"):
+        _eprint(f"error: --cred-file injection is implemented for the opencode "
+                f"host form only (resolved host: {host})")
+        _eprint("recipe: dispatch with --host opencode, or drop --cred-file "
+                "for hosts that carry their own authentication")
+        return 2
+    if args.isolate_data and host not in ("opencode", "test"):
+        _eprint(f"note: --isolate-data ignored for host {host} (XDG data "
+                f"isolation is an opencode-form mechanism)")
 
     repo_str = listing.get("repo") or ""
     if not repo_str:
@@ -2340,6 +2728,41 @@ def main() -> int:
     total = int(listing.get("total", 0))
     done0 = int(listing.get("done", 0))
     failed0 = int(listing.get("failed", 0))
+
+    # --dry-run dispatch form: PURE PLAN (short-circuit BEFORE the wave
+    # machine — no liveness write, no sidecar, no audit copies, no markers,
+    # no childcfg materialization, no spawn). The plan carries what a real
+    # run WOULD write per unit; the pre-spawn anchor check runs read-only so
+    # a path-drift unit shows up as would_fail_pre_spawn instead of writing a
+    # .failed marker. (--kill-stale/--purge-audit dry-run review guards are
+    # separate and returned earlier.) The tier's own enumerator ran above with
+    # its established idempotent contract — the dispatcher's own disk surface
+    # stays untouched.
+    if args.dry_run:
+        plan_entries = []
+        for unit in listing.get("pending", []):
+            uid = unit.get(tier["id_field"], "?")
+            entry = {
+                "unit": uid,
+                "audit_path": str((inputs_dir /
+                                   f"{_safe_name(str(uid))}.task.md").resolve()),
+                "done_marker": unit.get("done_marker"),
+                "failed_marker": unit.get("failed_marker"),
+                "command": " ".join(_spawn_cmd(tier, host)),
+            }
+            reason = _anchor_check(tier, unit, repo)
+            if reason:
+                entry["would_fail_pre_spawn"] = reason
+            plan_entries.append(entry)
+        result = {"runner": "fanout_runner", "tier": args.tier,
+                  "repo": repo_str, "host": host, "total": total,
+                  "plan_units": len(plan_entries), "dry_run": True,
+                  "note": "pure plan — nothing written, nothing spawned "
+                          "(audit copies, markers, liveness, sidecar, child "
+                          "configs and child processes are all skipped)",
+                  "plan": plan_entries}
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
 
     deadline = (time.monotonic() + args.time_budget_ms / 1000.0
                 if args.time_budget_ms is not None else None)
@@ -2377,10 +2800,34 @@ def main() -> int:
     storm_lock = threading.Lock()
     requeue_times: list[float] = []   # monotonic ts of crash/timeout/stall/spawn-error requeues
     storm_state = {"rate_limited": False, "crashes": [], "units": []}
+    # Credential-expiry fast-stop state (--cred-file only; guarded by the
+    # same lock — worker threads arm it, the main thread's gates read it).
+    cred_state = {"expired": False, "units": []}
+    # Per-unit child environment roots (--cred-file / --isolate-data): both
+    # live beside the tier's plan artifact (sdr: the run dir; init tiers: the
+    # init dir). Unused (plain Paths, never created) when no flag is active.
+    childcfg_root = plan_path.parent / "childcfg"
+    ocdata_root = plan_path.parent / "ocdata"
+    inject_active = cred is not None or args.isolate_data
     cooldown_until = 0.0     # monotonic ts until which new dispatch is paused
     cooldowns = 0            # cooldowns performed this run (stdout `cooldowns`)
     backoff_used = False     # pre-breaker backoff: at most once per call
     backoff_pending = False  # armed backoff awaiting its post-cooldown re-derivation
+    # Quota admission state (quota mode only; every var stays untouched and
+    # unread without the flag pair). quota_dispatch_times feeds the
+    # sliding-window estimate; last_rl_event_ts is the most recent
+    # rate-limit-signature CRASH ts (the window-reset cooldown's anchor);
+    # quota_reset_pending_ts tracks a cooldown that is waiting out a FULL
+    # window reset, and quota_window_completed_ts is the ts such a wait
+    # actually completed — the crash-storm truncation only counts rate-limit
+    # crashes at/after it (等满窗口才截断).
+    quota_dispatch_times: list[float] = []  # monotonic ts of THIS run's dispatches
+    quota_admission_waits = 0               # dispatch-pause episodes (stdout/sidecar)
+    quota_wait_active = False               # inside an admission-wait episode?
+    last_rl_event_ts: float | None = None
+    rl_crash_times: list[float] = []        # every rate-limit crash ts this run
+    quota_reset_pending_ts: float | None = None
+    quota_window_completed_ts: float | None = None
     retried_once: set[str] = set()   # --retry-failed: per-unit once-per-call bound
     retried_failed = 0       # markers deleted at claim this run (stdout `retried_failed`)
     # Zero-progress circuit breaker, dispatch-window anchored: every K =
@@ -2402,21 +2849,77 @@ def main() -> int:
         with storm_lock:
             return storm_state["rate_limited"]
 
+    def _cred_expired() -> bool:
+        with storm_lock:
+            return cred_state["expired"]
+
+    def _quota_state() -> tuple[bool, int, float]:
+        """(admissible, used_calls, resume_ts) for the quota gate at now;
+        arithmetic lives in the module-level pure `_quota_admission`."""
+        return _quota_admission(quota_dispatch_times, args.quota_window_s,
+                                args.quota_calls, args.quota_calls_per_unit,
+                                time.monotonic())
+
+    def _quota_body() -> dict:
+        """stdout/sidecar quota disclosure (single truth source: both the
+        terminal sidecar write and the exit summary spread THIS dict, so the
+        two can never disagree). Empty without the flag pair — the key is
+        absent, never null, matching the optional-key shape of
+        runtime_p50_s/stall_window_s."""
+        if not quota_mode:
+            return {}
+        return {"quota": {"calls": args.quota_calls,
+                          "window_s": args.quota_window_s,
+                          "calls_per_unit": args.quota_calls_per_unit,
+                          "admission_waits": quota_admission_waits}}
+
     def _cooldown_budget_cap() -> float:
         """Max cooldown seconds the remaining time budget allows (design D3);
         arithmetic lives in the module-level pure `_cooldown_cap_s`."""
         return _cooldown_cap_s(args.cooldown_s, deadline, time.monotonic(),
                                unit_durations, len(inflight))
 
-    def _start_cooldown(why: str) -> None:
+    def _start_cooldown(why: str, quota_reset: bool = True) -> None:
         """Arm one gate-based cooldown: pause NEW dispatch until
         cooldown_until (in-flight units keep running and harvesting); budget-
         capped, disclosed on stderr, and it consumes the requeue window (the
         next cooldown needs fresh events). NEVER sleeps here — the dispatch
-        loop's gates do the waiting so harvesting is never blocked."""
+        loop's gates do the waiting so harvesting is never blocked.
+
+        Quota mode (`quota_reset=True`, storm cooldowns only — the pre-breaker
+        backoff passes False and keeps the plain --cooldown-s semantics: zero
+        progress is not necessarily a quota shape, so its wait must never be
+        amplified to window scale): when the triggering requeue events include
+        a rate-limit-signature crash, the endpoint becomes
+        max(regular endpoint, last signature event + W) — wait out the quota
+        window reset rather than a fixed number of seconds. The reset wait is
+        capped by the same remaining-time-budget arithmetic; a truncated (not
+        fully waited) reset never marks the window as completed, so the
+        crash-storm truncation's "等满窗口才截断" precondition stays honest."""
         nonlocal cooldown_until, cooldowns
+        nonlocal quota_reset_pending_ts
         cap = _cooldown_budget_cap()
         dur = min(float(args.cooldown_s), cap)
+        reset_full = False
+        reset_note = ""
+        if quota_reset and quota_mode and args.quota_window_s:
+            with storm_lock:
+                rl_ts = last_rl_event_ts
+            if rl_ts is not None:
+                now = time.monotonic()
+                reset_end = rl_ts + args.quota_window_s
+                dur = max(float(args.cooldown_s), reset_end - now)
+                # Budget cap applies to deadline-driven runs only: with no
+                # --time-budget-ms there is no budget to cap with (the plain
+                # path's `min(cooldown_s, cap)` degenerates to cooldown_s for
+                # that same reason — clamping the reset with it would silently
+                # shrink every out-of-host window wait back to --cooldown-s).
+                if deadline is not None:
+                    dur = min(dur, cap)
+                reset_full = (now + dur) >= (reset_end - 1e-9)
+                reset_note = (" — waiting out the quota window reset "
+                              f"(last rate-limit signature event + "
+                              f"{args.quota_window_s}s)")
         if dur <= 0:
             _eprint(f"[fanout_runner] cooldown skipped ({why}): remaining time "
                     f"budget cannot cover it (cap {cap:.0f}s) — continuing "
@@ -2427,10 +2930,16 @@ def main() -> int:
             cooldown_until = time.monotonic() + dur
             cooldowns += 1
             nth = cooldowns
+        if reset_full:
+            quota_reset_pending_ts = cooldown_until
         _eprint(f"[fanout_runner] cooldown #{nth} ({why}): fast-fail requeue "
                 f"threshold hit — pausing NEW dispatch for {dur:.0f}s"
+                + reset_note
                 + (f" (capped from {args.cooldown_s}s by remaining time budget)"
-                   if dur < args.cooldown_s else "")
+                   if dur < args.cooldown_s and not reset_note else "")
+                + (" (window-reset wait truncated by remaining time budget — "
+                   "NOT a full window)"
+                   if reset_note and not reset_full else "")
                 + "; in-flight units keep running and harvesting")
 
     def _maybe_cooldown() -> None:
@@ -2438,7 +2947,7 @@ def main() -> int:
         events. Runs on the dispatch (main) thread only; the storm-truncation
         fast path takes priority over arming a new cooldown."""
         with storm_lock:
-            if storm_state["rate_limited"]:
+            if storm_state["rate_limited"] or cred_state["expired"]:
                 return
             now = time.monotonic()
             recent = [t for t in requeue_times if now - t <= REQUEUE_WINDOW_S]
@@ -2477,15 +2986,19 @@ def main() -> int:
         return body
 
     def _sidecar_payload(state: str, snap_dict: dict, pending_now: list,
-                         cost: dict | None = None) -> dict:
+                         cost: dict | None = None,
+                         quota: dict | None = None) -> dict:
         """Sidecar body — counts derive from the SAME snapshot as the stdout
         summary (single source; test asserts the two agree). `cost` lets the
         terminal caller pass the one `_cost_payload()` dict the stdout summary
         also uses: the slot-time percentage divides by a LIVE elapsed-time
         measurement, so two separate calls would not agree bit-for-bit and the
-        sidecar/stdout equality guarantee would be lost to rounding."""
+        sidecar/stdout equality guarantee would be lost to rounding. `quota`
+        is the same single-source story for the quota disclosure block."""
         if cost is None:
             cost = _cost_payload()
+        if quota is None:
+            quota = _quota_body()
         done_n = int(snap_dict.get("done", done0))
         # Same max-of-two-views as the exit summary (design D3): the snapshot
         # and the write ledger count the same markers — summing double-counts
@@ -2510,6 +3023,7 @@ def main() -> int:
             "eta_batches": pending_n,
             "state": state,
             **cost,
+            **quota,
         }
 
     def _snapshot() -> dict:
@@ -2529,6 +3043,18 @@ def main() -> int:
     _eprint(f"[fanout_runner] tier={args.tier} host={host} repo={repo} "
             f"total={total} pending={len(queue)} wave={args.wave} "
             f"codegraph={codegraph}")
+    # Special-auth advisory (command-agnostic, all tiers): the optional
+    # deployment doc is present but this run dispatches without static
+    # injection — one stderr note, exit code and behavior untouched.
+    _auth_doc = _special_auth_doc_path()
+    if cred is None and _auth_doc.is_file():
+        _eprint(f"[fanout_runner] note: special-auth deployment doc present "
+                f"({_auth_doc}) — credential preparation and --cred-file "
+                f"usage are described there; this run dispatches WITHOUT "
+                f"static injection")
+    # Orphan advisory (non-blocking): a residual liveness file means the
+    # previous run ended hard; read it BEFORE the write below replaces it.
+    _orphan_advisory(plan_path.parent, args.tier)
 
     # Liveness registration (orphan signal, NOT a lock): written for EVERY
     # dispatch exit path via try/finally below; a hard kill leaves it behind
@@ -2660,6 +3186,7 @@ def main() -> int:
                 f"from here on)")
 
     def _dispatch(unit: dict, seq: int) -> None:
+        nonlocal last_rl_event_ts
         uid = unit.get(id_field, "?")
         # Anchor-tree interception BEFORE spawn (path-drift never spawns).
         reason = _anchor_check(tier, unit, repo)
@@ -2674,19 +3201,48 @@ def main() -> int:
                 storm_state["crashes"].clear()
             return
         task = _fill_template(tier, template, unit, repo_str, codegraph)
+        if args.dry_run:
+            # Unreachable via main() (the pure-plan short-circuit returns
+            # before the wave machine); kept as a write-purity backstop so a
+            # future refactor cannot silently reintroduce dry-run writes.
+            _eprint(f"[fanout_runner] unit {uid}: dry-run — no write, no spawn")
+            return
         audit = inputs_dir / f"{_safe_name(uid)}.task.md"
         try:
             audit.parent.mkdir(parents=True, exist_ok=True)
             audit.write_text(task, encoding="utf-8")
         except OSError as e:
             _eprint(f"warn: audit copy unwritable for {uid}: {e}")
+        # Per-unit execution-environment injection (static credentials and/or
+        # data isolation; opencode form only, gated at startup — the in-
+        # process "test" host also materializes, for verification without a
+        # spawn). Materialize the child config FIRST (a failure is that
+        # unit's pre-spawn failure, never a half-configured spawn), then hand
+        # the XDG env to _run_unit via the _UNIT_ENV registry — its 9-arg
+        # signature is frozen.
+        if inject_active:
+            safe_uid = _safe_name(str(uid))
+            unit_cfg_dir = childcfg_root / safe_uid
+            unit_data_dir = ocdata_root / safe_uid
+            extra_env = {}
+            if cred is not None:
+                try:
+                    _materialize_child_config(cred, unit_cfg_dir)
+                    unit_data_dir.mkdir(parents=True, exist_ok=True)
+                except (OSError, ValueError) as e:
+                    reason = f"cred-materialize: {e}"
+                    if _write_failed_marker(tier, unit, reason, repo):
+                        failed_written.append(uid)
+                    _hb(t0, args.tier, seq, uid, "failed", _hb_count(), total)
+                    _eprint(f"[fanout_runner] unit {uid}: FAILED pre-spawn "
+                            f"({reason[:200]})")
+                    return
+                extra_env["XDG_CONFIG_HOME"] = str(unit_cfg_dir)
+            extra_env["XDG_DATA_HOME"] = str(unit_data_dir)
+            if host != "test":
+                _UNIT_ENV[uid] = extra_env
         if host == "test":
             _eprint(f"[fanout_runner] unit {uid}: test hook — no spawn")
-            return
-        if args.dry_run:
-            # --dry-run alone: fill audit copies, spawn nothing (R5.3b
-            # contract; also the no-LLM smoke path over the real list CLI).
-            _eprint(f"[fanout_runner] unit {uid}: dry-run — no spawn")
             return
         cmd = _spawn_cmd(tier, host)
         # Snapshot the run's effective silence window for THIS attempt (design
@@ -2715,6 +3271,24 @@ def main() -> int:
         # Defensive clear (a faked/direct _run_unit that never claims leaves
         # the entry behind; a real one already popped it).
         _UNIT_SINKS.pop(uid, None)
+        _UNIT_ENV.pop(uid, None)
+        # Credential-expiry classification (only with --cred-file): scan BOTH
+        # output tails on every non-ok terminal (crash/timeout/stall/spawn-
+        # error and failed acks) against the cred file's signatures. The first
+        # hit arms the fast-stop (gates read cred_state); the unit's own
+        # terminal branch below keeps its EXISTING disk semantics (failed ack
+        # → .failed marker; others stay pending for re-dispatch) — the
+        # classification is a stop-and-recipe layer, never a new marker shape.
+        if (cred is not None and cred["expired_signatures"]
+                and (status != "spawn-ok"
+                     or (ack is not None and ack.startswith("failed:")))):
+            if _cred_expired_tail(cred, out_sink["tail"], err_sink["tail"]):
+                with storm_lock:
+                    if uid not in cred_state["units"]:
+                        cred_state["units"].append(uid)
+                    cred_state["expired"] = True
+                _eprint(f"[fanout_runner] unit {uid}: {_CRED_EXPIRED_MARK}")
+                _eprint(f"[fanout_runner] {_CRED_EXPIRED_RECIPE}")
         elapsed = time.monotonic() - spawn_t0
         unit_durations.append(elapsed)
         if was_stalled:
@@ -2778,10 +3352,25 @@ def main() -> int:
                         f"{'rate-limit' if rl else 'unknown'}")
                 with storm_lock:
                     storm_state["crashes"].append((uid, rl))
+                    if rl:
+                        # quota mode anchors: the window-reset cooldown waits
+                        # from the LAST signature event; the truncation's
+                        # "等满窗口才截断" precondition counts signature
+                        # crashes at/after a fully-waited reset (main thread
+                        # sets quota_window_completed_ts; GIL-atomic float
+                        # read here inside the lock).
+                        last_rl_event_ts = time.monotonic()
+                        rl_crash_times.append(last_rl_event_ts)
+                    waited_full_reset = (
+                        not quota_mode
+                        or (quota_window_completed_ts is not None
+                            and any(t >= quota_window_completed_ts
+                                    for t in rl_crash_times)))
                     truncated = (args.rate_limit_stop
                                  and not storm_state["rate_limited"]
                                  and len(storm_state["crashes"]) >= args.wave
-                                 and all(r for _, r in storm_state["crashes"]))
+                                 and all(r for _, r in storm_state["crashes"])
+                                 and waited_full_reset)
                     if truncated:
                         storm_state["rate_limited"] = True
                         storm_state["units"] = list(dict.fromkeys(
@@ -2793,6 +3382,15 @@ def main() -> int:
                             f"storm ({args.wave} quota-signature crash(es) "
                             f"since the last disk advance) — stopping dispatch")
                     _eprint(f"[fanout_runner] {_RATELIMIT_RECIPE}")
+                    if quota_mode:
+                        _eprint(f"[fanout_runner] quota mode: a full window "
+                                f"reset was already waited and rate-limit "
+                                f"crashes still recur — verify --quota-calls "
+                                f"{args.quota_calls} / --quota-window-s "
+                                f"{args.quota_window_s} / "
+                                f"--quota-calls-per-unit "
+                                f"{args.quota_calls_per_unit} against the "
+                                f"gateway's actual quota")
             _terminal_children_rm(child_pid)
         else:
             _hb(t0, args.tier, seq, uid, "ok", _hb_count(1), total)
@@ -2810,12 +3408,26 @@ def main() -> int:
 
     def _fill() -> bool:
         """Top up in-flight slots from the queue (slot backfill). Returns True
-        when the soft deadline stopped new dispatches. A storm truncation or
-        an active cooldown also stops NEW dispatches but returns False — they
-        are not soft stops; the loop's gates own the wait."""
+        when the soft deadline stopped new dispatches. A storm truncation, an
+        active cooldown, or a short-of-margin quota window also stop NEW
+        dispatches but return False — they are not soft stops; the loop's
+        gates own the wait.
+
+        Quota admission gate (quota mode only) sits AFTER the cooldown gate
+        and BEFORE the unit pop (the mermaid order in the change design: the
+        two gates are orthogonal — `--wave` caps in-flight slots, the quota
+        window caps the dispatch RATE; effective concurrency =
+        min(wave, free quota margin / K)). Not admissible -> no pop, one
+        wait-episode disclosure, and the loop's gates wait: with in-flight
+        units the harvest poll (1s) re-enters here, with none the main loop's
+        quota gate sleeps in <=1s shards toward the resume ts — never a busy
+        spin."""
         nonlocal waves_run, dispatched_since_window
+        nonlocal quota_admission_waits, quota_wait_active
         stopped = False
         while len(inflight) < args.wave:
+            if _cred_expired():
+                break  # credential fast-stop: highest-priority dispatch stop
             if _rate_limited():
                 break  # storm fast path: no new dispatch, no cooldown arming
             if deadline is not None and time.monotonic() >= deadline:
@@ -2824,18 +3436,55 @@ def main() -> int:
             _maybe_cooldown()
             if time.monotonic() < cooldown_until:
                 break  # cooldown: pause new dispatch; in-flight keep harvesting
+            if quota_mode and queue:
+                # gated on a non-empty queue: with nothing left to dispatch
+                # an admission check would disclose (and count) a wait
+                # episode for work that does not exist (drain-time artifact)
+                admissible, used, resume_ts = _quota_state()
+                if not admissible:
+                    if not quota_wait_active:
+                        quota_admission_waits += 1
+                        quota_wait_active = True
+                        resume_wall = (datetime.now().astimezone()
+                                       + timedelta(seconds=max(0.0,
+                                                               resume_ts - time.monotonic())))
+                        _eprint(f"[fanout_runner] quota admission wait "
+                                f"#{quota_admission_waits}: estimated "
+                                f"{used} call(s) spent in the last "
+                                f"{args.quota_window_s}s "
+                                f"(dispatches x K={args.quota_calls_per_unit}) "
+                                f"+ next unit's {args.quota_calls_per_unit} > "
+                                f"budget {args.quota_calls} — pausing NEW "
+                                f"dispatch until the window slides "
+                                f"(~{resume_wall.strftime('%H:%M:%S')}); "
+                                f"in-flight units keep running and harvesting "
+                                f"(ESTIMATE: real per-unit call counts are "
+                                f"gateway-side facts)")
+                    break
+                quota_wait_active = False
             unit = _next_unit()
             if unit is None:
                 break
             # Re-check AFTER the pop, BEFORE the submit (design D1): the
-            # truncation flag is set by worker threads when a crash's
+            # truncation flags are set by worker threads when a crash's
             # bookkeeping lands, so the loop-top check can go stale across
             # the pop's marker stats. The popped unit is NOT put back — a
             # truncation terminates the whole run, so it stays disk-marker
             # pending for --resume exactly like its queue-mates behind it.
+            if _cred_expired():
+                break
             if _rate_limited():
                 break
             waves_run += 1
+            if quota_mode:
+                now = time.monotonic()
+                quota_dispatch_times.append(now)
+                # Bound the list: entries older than the window can never
+                # admit again (the pure helper filters, but the append-only
+                # list would otherwise grow for the whole run).
+                horizon = args.quota_window_s
+                quota_dispatch_times[:] = [t for t in quota_dispatch_times
+                                           if now - t <= horizon]
             inflight[pool.submit(_dispatch, unit, waves_run)] = unit
             dispatched_since_window += 1
         return stopped
@@ -2879,7 +3528,10 @@ def main() -> int:
                     and _cooldown_budget_cap() > 0):
                 backoff_used = True
                 backoff_pending = True
-                _start_cooldown("pre-breaker backoff")
+                # quota_reset=False: the backoff's cooldown keeps the plain
+                # --cooldown-s length (zero progress is not necessarily a
+                # quota shape — NEVER amplify it to window scale)
+                _start_cooldown("pre-breaker backoff", quota_reset=False)
                 _eprint("[fanout_runner] zero-progress breaker armed — one "
                         "bounded backoff before failing: cooldown, then a "
                         "full disk re-derivation decides (growth resumes "
@@ -2910,7 +3562,20 @@ def main() -> int:
         # in-flight both drain, the drain re-list (breaker observation point
         # b) decides: more pending on disk → one more in-run round; nothing →
         # clean exit.
-        while not (stalled or stopped or _rate_limited()):
+        while not (stalled or stopped or _rate_limited() or _cred_expired()):
+            # Quota window-reset completion (quota mode): the armed cooldown
+            # whose endpoint includes the FULL window reset has now been
+            # actually waited out — stamp the completion ts. The crash-storm
+            # truncation counts only rate-limit crashes at/after it (等满窗口
+            # 才截断); a budget-truncated reset never arms this (see
+            # _start_cooldown's reset_full).
+            if (quota_reset_pending_ts is not None
+                    and time.monotonic() >= quota_reset_pending_ts):
+                quota_window_completed_ts = quota_reset_pending_ts
+                quota_reset_pending_ts = None
+                _eprint("[fanout_runner] quota window reset fully waited — "
+                        "rate-limit crashes from here on are truncation-"
+                        "eligible (the window no longer explains them)")
             # Backoff resolution (design D3): the armed pre-breaker backoff's
             # deciding re-derivation, once its cooldown has expired and
             # nothing is in flight. Disk growth disarms the breaker; zero
@@ -2944,6 +3609,34 @@ def main() -> int:
                 time.sleep(min(1.0, max(0.001,
                                         cooldown_until - time.monotonic())))
                 continue
+            # Quota gate (quota mode, nothing in flight): idle-wait the
+            # window out in <=1s shards until admission re-opens — same
+            # intentional-pause discipline as the cooldown gate above (NEVER
+            # a busy spin, NEVER a breaker observation, NEVER a re-list
+            # subprocess). The wait is bounded by the soft deadline: past it,
+            # stop and surface the existing partial exit. With in-flight
+            # units the harvest loop's 1s poll keeps both harvesting and
+            # re-entering _fill (whose quota gate re-checks admission).
+            # Breaker isolation (design D2): BOTH breaker observation anchors
+            # key on NEW dispatches — point (a) fires only after
+            # `dispatched_since_window >= window_k` (increments at spawn
+            # only), and this gate `continue`s past the point-(b) drain
+            # re-list. Zero dispatches while quota-waiting therefore means
+            # zero observations: an admission pause can never be misread as
+            # zero PROGRESS.
+            if quota_mode and queue and not inflight:
+                admissible, _used, resume_ts = _quota_state()
+                if not admissible:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        stopped = True
+                        _soft_stop_msg()
+                        break
+                    delay = resume_ts - time.monotonic()
+                    # delay <= ~0 (never-admissible window, K > N): sleep a
+                    # full chunk — re-checking sooner cannot change the
+                    # verdict, and polling fast would be a busy spin.
+                    time.sleep(min(1.0, delay) if delay > 0.05 else 1.0)
+                    continue
             while inflight:
                 ready, _ = wait(list(inflight), timeout=1.0,
                                 return_when=FIRST_COMPLETED)
@@ -2965,7 +3658,10 @@ def main() -> int:
                 elif dispatched_since_window >= window_k:
                     # Observation point (a): K = --stall-waves x --wave units
                     # dispatched since the last check → re-derive the disk
-                    # terminal count once (markers = only truth).
+                    # terminal count once (markers = only truth). Anchored on
+                    # NEW dispatches BY DESIGN: a quota-mode admission wait
+                    # dispatches nothing, so it cannot burn observations or
+                    # trip the breaker (zero dispatch != zero progress).
                     if _breaker_observe(_snapshot()):
                         _stall_diag("dispatch window")
                         break
@@ -2985,7 +3681,7 @@ def main() -> int:
                         idle = max(0, int(now - max(o["ts"], e["ts"])))
                         _hb_inflight(t0, args.tier, len(live), uid, idle,
                                      _hb_count(), total, w)
-            if stalled or stopped or _rate_limited():
+            if stalled or stopped or _rate_limited() or _cred_expired():
                 break
             if backoff_pending:
                 # a backoff is armed: its deciding re-derivation at the top of
@@ -3047,14 +3743,16 @@ def main() -> int:
         partial = bool(pending_units)
         # Cost visibility (design D4) computed ONCE and shared by the terminal
         # sidecar write and the stdout summary below, so the two agree by
-        # construction rather than by rounding.
+        # construction rather than by rounding. Same single-source story for
+        # the quota disclosure block.
         cost = _cost_payload()
+        quota_body = _quota_body()
         # Terminal sidecar state (counts consistent with the stdout summary below
         # by construction — both derive from {snap, failed_written}).
         _write_sidecar(plan_path.parent, args.tier,
                        _sidecar_payload(
                            "exited-partial" if partial else "exited-clean",
-                           snap, pending_units, cost))
+                           snap, pending_units, cost, quota_body))
         result = {
             "runner": "fanout_runner",
             "tier": args.tier,
@@ -3073,6 +3771,7 @@ def main() -> int:
             # terminal sidecar was written from, so a second-terminal watcher
             # and the exit summary agree by construction.
             **cost,
+            **quota_body,
         }
         if stalled:
             # per-stuck-unit diagnosis: id + ACTUAL on-disk marker existence (the
@@ -3098,8 +3797,6 @@ def main() -> int:
             # survivor owns each named unit until a later --resume or
             # --kill-stale closes it out
             result["kill_failed"] = list(dict.fromkeys(kill_failed))
-        if args.dry_run:
-            result["dry_run"] = True
         # Fast-fail storm resilience disclosures (additive keys; existing
         # fields zero add/remove). rate_limited_crashes is present only when
         # the truncation fired (same conditional-disclosure shape as
@@ -3111,12 +3808,20 @@ def main() -> int:
         if rate_limited_trig:
             with storm_lock:
                 result["rate_limited_crashes"] = list(storm_state["units"])
+        # Credential-expiry fast-stop disclosure (additive keys; absent when
+        # no signature matched — same conditional shape as rate_limited).
+        cred_expired_trig = _cred_expired()
+        if cred_expired_trig:
+            result["credential_expired"] = True
+            with storm_lock:
+                result["credential_expired_units"] = list(cred_state["units"])
         _eprint(f"[fanout_runner] done ({args.tier}): {result['done']}/{total} done, "
                 f"{result['failed']} failed, {result['pending']} pending, partial={partial}"
                 + (", STALLED" if stalled else "")
-                + (", RATE-LIMIT STORM" if rate_limited_trig else ""))
+                + (", RATE-LIMIT STORM" if rate_limited_trig else "")
+                + (", CRED-EXPIRED" if cred_expired_trig else ""))
         print(json.dumps(result, ensure_ascii=False))
-        return 2 if (stalled or rate_limited_trig) else 0
+        return 2 if (stalled or rate_limited_trig or cred_expired_trig) else 0
     finally:
         pool.shutdown(wait=True)
         # Exit-path cleanup of STILL-REGISTERED children, BEFORE deregistering

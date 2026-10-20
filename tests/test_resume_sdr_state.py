@@ -572,5 +572,85 @@ class TelemetryMountTest(unittest.TestCase):
             self.assertEqual(json.loads(out)["step"], "group")
 
 
+
+class SpecialAuthFanoutNoteTest(unittest.TestCase):
+    """fanout-step resume note: when the special-auth deployment doc is
+    present in the install tree, the stdout notes carry one pointer line
+    (credential renewal follows that doc); doc absent → no note, notes
+    unchanged. The doc is transiently created at its real (gitignored)
+    location and removed afterwards."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.doc = SCRIPT.parent.parent / "mgh-special-auth.md"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _fanout_state(self):
+        run = self.tmp / "repo" / ".mgh-sdr" / "runs" / "20260101_000000"
+        run.mkdir(parents=True, exist_ok=True)
+        repo = self.tmp / "repo"
+        (run / "context.json").write_text(json.dumps({
+            "repo": str(repo), "run_dir": str(run), "base": "master",
+            "branch": "feat",
+            "baseline_path": str(run / "baseline.md"),
+            "external_repos": []}), encoding="utf-8")
+        (run / "grouping.json").write_text(json.dumps({
+            "repo": str(repo), "base": "master", "branch": "feat",
+            "empty": False, "total": 2,
+            "units": [{"unit_id": "u1", "kind": "standalone", "route": "",
+                       "chain": [], "status": "pending"},
+                      {"unit_id": "u2", "kind": "standalone", "route": "",
+                       "chain": [], "status": "pending"}],
+            "done": 0, "failed": 0,
+            "excluded": {"count": 0, "by_reason": {}}, "pending": [],
+        }, ensure_ascii=False), encoding="utf-8")
+        p = subprocess.run([sys.executable, str(SCRIPT), "--run-dir", str(run)],
+                           capture_output=True, text=True, encoding="utf-8")
+        assert p.returncode == 0, p.stderr
+        return json.loads(p.stdout)
+
+    def test_doc_present_note_and_absent_silent(self):
+        # absent (or pre-existing) baseline first
+        st = self._fanout_state()
+        self.assertEqual(st["step"], "fanout")
+        base_notes = list(st["notes"])
+        # generic install (doc absent this run): the executed path stays clean
+        if not self.doc.exists():
+            self.assertNotIn("special-auth", st["next_action"]["desc"])
+        has_note_without_doc = any("special-auth deployment doc present" in n
+                                   for n in base_notes)
+        created = False
+        try:
+            if not self.doc.exists():
+                self.doc.write_text("guide", encoding="utf-8")
+                created = True
+            st2 = self._fanout_state()
+            if created:
+                notes_with_doc = st2["notes"]
+                self.assertTrue(any("special-auth deployment doc present" in n
+                                    and "credential renewal" in n
+                                    for n in notes_with_doc))
+                # the pointer rides next_action.desc (the executed path), not
+                # just notes — a recovering orchestrator may never read notes
+                self.assertIn("special-auth deployment doc is PRESENT",
+                              st2["next_action"]["desc"])
+                self.assertIn("--cred-file <run-dir>/cred.json",
+                              st2["next_action"]["desc"])
+                self.assertIn("mgh_credentials.py",
+                              st2["next_action"]["desc"])
+            else:
+                # doc already exists on this machine: the note is expected in
+                # BOTH states — assert presence in the baseline instead
+                self.assertTrue(has_note_without_doc)
+        finally:
+            if created:
+                self.doc.unlink(missing_ok=True)
+        if not created and not has_note_without_doc:
+            self.fail("doc exists but the fanout note is missing")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

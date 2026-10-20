@@ -131,7 +131,11 @@ FANOUT_RUNNER_REQUIRED_FLAGS = ["--tier", "--scout-plan", "--clusters", "--candi
                                 "--stall-waves", "--resume",
                                 "--kill-stale", "--pending-file", "--purge-audit",
                                 "--dry-run", "--template",
-                                "--cooldown-s", "--no-rate-limit-stop", "--retry-failed"]
+                                "--cooldown-s", "--no-rate-limit-stop", "--retry-failed",
+                                # quota admission mode (fix-mgh-sdr-quota-adaptive-fanout):
+                                # the optional calls-per-window gate must stay discoverable
+                                # via --help even if a shell's fenced example is trimmed
+                                "--quota-calls", "--quota-window-s", "--quota-calls-per-unit"]
 # The --tier closed set MUST advertise the t2 + scout-merge tiers (map-stage adoption):
 # argparse prints the choices verbatim in --help's usage line — assert the expanded set
 # textually (a trimmed shell example / prose can't fake it; the usage line is

@@ -3496,7 +3496,833 @@ class TestRunConfigUnitBudgetForward(unittest.TestCase):
             {"target": "t", "budgets": {"max_unit_bytes": "big"}}), encoding="utf-8")
         self.assertNotIn("--max-unit-bytes", self._capture_cmd("t1"))
 
+class TestQuotaAdmissionArithmetic(unittest.TestCase):
+    """Pure arithmetic behind the quota-mode admission gate: admissible iff
+    dispatches-in-window x K + K <= N; when blocked, resume ts = the
+    (in-window - max-in-window)-th oldest timestamp + W."""
 
+    def setUp(self):
+        self.fr = _load("fanout_runner_quota_arith")
+
+    def _adm(self, times, n, w, k, now=1000.0):
+        return self.fr._quota_admission(times, w, n, k, now)
+
+    def test_empty_window_admissible(self):
+        admissible, used, resume = self._adm([], 100, 600, 10)
+        self.assertTrue(admissible)
+        self.assertEqual(used, 0)
+        self.assertEqual(resume, 0.0)
+
+    def test_exact_fit_boundary_admissible(self):
+        # 9 in-window x 10 + 10 = 100 <= 100: the LAST unit of the window
+        # still fits (the spec formula is `used + K <= N`, not `used < N`).
+        times = [1000.0 - i for i in range(9)]
+        admissible, used, _ = self._adm(times, 100, 600, 10)
+        self.assertTrue(admissible)
+        self.assertEqual(used, 90)
+
+    def test_one_over_blocked_resume_at_oldest_plus_window(self):
+        times = [1000.0 - i for i in range(10)]
+        admissible, used, resume = self._adm(times, 100, 600, 10)
+        self.assertFalse(admissible)
+        self.assertEqual(used, 100)
+        self.assertAlmostEqual(resume, min(times) + 600)
+
+    def test_aged_out_entries_do_not_count(self):
+        # entries older than W are outside the window: 10 dispatches but only
+        # 3 still in-window -> 30 + 10 <= 100 admissible
+        times = [1000.0 - 700, 1000.0 - 690] + [1000.0 - i for i in range(3)]
+        admissible, used, _ = self._adm(times, 100, 600, 10)
+        self.assertTrue(admissible)
+        self.assertEqual(used, 30)
+
+    def test_multiple_must_slide(self):
+        # N=30 K=10: max in-window = 2; 4 in-window -> the 2 OLDEST must
+        # slide first -> resume = 2nd-oldest + W
+        times = [1000.0 - i * 10 for i in range(4)]  # 970, 980, 990, 1000
+        admissible, _, resume = self._adm(times, 30, 600, 10, now=1000.0)
+        self.assertFalse(admissible)
+        self.assertAlmostEqual(resume, 980.0 + 600)
+
+    def test_never_admissible_reports_now(self):
+        # K > N: even zero dispatches cannot fit -> resume = now (the caller
+        # owns the wait cadence and must not busy-spin on it)
+        admissible, used, resume = self._adm([], 5, 600, 10, now=1000.0)
+        self.assertFalse(admissible)
+        self.assertEqual(used, 0)
+        self.assertEqual(resume, 1000.0)
+
+    def test_caller_list_not_mutated(self):
+        times = [900.0, 950.0]
+        self._adm(times, 5, 10, 10, now=1000.0)
+        self.assertEqual(times, [900.0, 950.0])
+
+
+class TestQuotaModeStartupValidation(_FakeDispatchBase):
+    """Quota flag pairing + value domain, spawn-time fail-loud: quota mode
+    activates iff --quota-calls AND --quota-window-s are BOTH passed; any
+    other shape is rejected with exit 2 + recipe BEFORE any spawn or
+    enumerator side effect (same shape as the timeout-invariant check)."""
+
+    def _ok(self, uid, nth):
+        return ("spawn-ok", "ok")
+
+    def _assert_rejected(self, code, err, needle):
+        self.assertEqual(code, 2)
+        self.assertIn(needle, err)
+        self.assertEqual(self.calls, [])  # zero spawn
+
+    def test_calls_without_window_rejected(self):
+        code, _, err = self._run_main(self._ok, "--quota-calls", "100")
+        self._assert_rejected(code, err, "not paired")
+
+    def test_window_without_calls_rejected(self):
+        code, _, err = self._run_main(self._ok, "--quota-window-s", "600")
+        self._assert_rejected(code, err, "not paired")
+
+    def test_per_unit_alone_rejected(self):
+        code, _, err = self._run_main(self._ok,
+                                      "--quota-calls-per-unit", "8")
+        self._assert_rejected(code, err, "not paired")
+
+    def test_zero_calls_rejected(self):
+        code, _, err = self._run_main(self._ok, "--quota-calls", "0",
+                                      "--quota-window-s", "600")
+        self._assert_rejected(code, err, "must both be >= 1")
+
+    def test_zero_window_rejected(self):
+        code, _, err = self._run_main(self._ok, "--quota-calls", "100",
+                                      "--quota-window-s", "0")
+        self._assert_rejected(code, err, "must both be >= 1")
+
+    def test_zero_per_unit_rejected(self):
+        code, _, err = self._run_main(self._ok, "--quota-calls", "100",
+                                      "--quota-window-s", "600",
+                                      "--quota-calls-per-unit", "0")
+        self._assert_rejected(code, err, "--quota-calls-per-unit must be >= 1")
+
+    def test_paired_run_dispatches_normally(self):
+        # the legal pair: admission opens (K defaults to 10, budget 1000
+        # comfortably above 1 unit), both units run, quota payload present
+        code, out, err = self._run_main(
+            self._ok, "--quota-calls", "1000", "--quota-window-s", "600")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["done"], 2)
+        self.assertEqual(data["quota"]["calls"], 1000)
+        self.assertEqual(data["quota"]["window_s"], 600)
+        self.assertEqual(data["quota"]["calls_per_unit"], 10)  # default K
+        self.assertEqual(data["quota"]["admission_waits"], 0)
+
+    def test_help_documents_quota_mode(self):
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        flat = " ".join(r.stdout.split())
+        for needle in ("--quota-calls", "--quota-window-s",
+                       "--quota-calls-per-unit", "ESTIMATE",
+                       "quota admission", "byte-identical"):
+            self.assertIn(needle, flat, needle)
+
+
+class TestQuotaAdmissionGate(_FakeDispatchBase):
+    """End-to-end quota admission (quota mode = an ESTIMATE over this run's
+    dispatch timestamps): margin-short pauses pause NEW dispatch only,
+    in-flight units keep harvesting, the window slide re-opens admission, the
+    wait never crosses the soft deadline, and the zero-progress breaker never
+    misreads an admission pause as zero progress."""
+
+    N_UNITS = 3
+
+    def test_margin_short_pauses_then_window_slide_resumes(self):
+        # N=2 K=1 W=2: units 1-2 dispatch immediately, unit 3 blocks until
+        # unit 1's timestamp slides out (~2s) — one wait episode, then all
+        # three done. The wave cap (3) is NOT the binding gate (orthogonal).
+        code, out, err = self._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"),
+            "--quota-calls", "2", "--quota-window-s", "2",
+            "--quota-calls-per-unit", "1", wave="3")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["done"], 3)
+        self.assertEqual(data["waves_run"], 3)
+        self.assertEqual(data["quota"], {"calls": 2, "window_s": 2,
+                                         "calls_per_unit": 1,
+                                         "admission_waits": 1})
+        self.assertIn("quota admission wait #1", err)
+        self.assertIn("pausing NEW dispatch", err)
+        self.assertIn("ESTIMATE", err)          # honest boundary on stderr
+
+    def test_in_flight_units_keep_harvesting_during_admission_wait(self):
+        # unit 2 sleeps past the wait: its ok ack must land while the
+        # admission-wait episode is still open (harvest never pauses)
+        def behavior(uid, nth):
+            if uid == "scout-002":
+                time.sleep(1.2)
+                return ("spawn-ok", "ok")
+            return ("spawn-ok", "ok")
+        code, out, err = self._run_main(
+            behavior, "--quota-calls", "2", "--quota-window-s", "2",
+            "--quota-calls-per-unit", "1", wave="3")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["done"], 3)
+        self.assertLess(err.index("quota admission wait #1"),
+                        err.index("unit scout-002: ok"))
+
+    def test_admission_wait_hits_soft_deadline_partial_exit(self):
+        # N=1 K=1 W=60: the second unit can NEVER fit this window; the wait
+        # runs into the 1.5s soft budget -> exit 0 + partial:true, the two
+        # other units stay pending (resumable), wait disclosed, exit clean
+        code, out, err = self._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"),
+            "--quota-calls", "1", "--quota-window-s", "60",
+            "--quota-calls-per-unit", "1",
+            "--time-budget-ms", "1500", "--call-timeout-s", "1",
+            "--stall-timeout-s", "0")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertTrue(data["partial"])
+        self.assertEqual(data["done"], 1)
+        self.assertEqual(data["pending"], 2)
+        self.assertEqual(data["waves_run"], 1)
+        self.assertGreaterEqual(data["quota"]["admission_waits"], 1)
+        self.assertIn("soft time budget reached", err)
+
+    def test_admission_pause_never_trips_zero_progress_breaker(self):
+        # ~4s of ZERO dispatch between the three units (N=1: strictly serial
+        # per window): the breaker's observations key on NEW dispatches only,
+        # so the pauses must NOT be misread as zero progress (a pre-isolation
+        # regression stalled here via the drain re-list observation point)
+        code, out, err = self._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"),
+            "--quota-calls", "1", "--quota-window-s", "2",
+            "--quota-calls-per-unit", "1",
+            "--time-budget-ms", "15000", "--call-timeout-s", "5",
+            "--stall-timeout-s", "0")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertFalse(data["stalled"])
+        self.assertNotIn("stalled_pending", data)
+        self.assertEqual(data["done"], 3)
+        self.assertEqual(data["quota"]["admission_waits"], 2)
+
+    def test_no_quota_flags_stdout_stderr_sidecar_free_of_quota(self):
+        # byte-identity anchor (zero-change leg): without the flags the
+        # stdout key set is EXACTLY the pre-quota set, the `quota` key is
+        # absent from stdout AND sidecar, and stderr carries no quota token
+        code, out, err = self._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"))
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertNotIn("quota", data)
+        self.assertEqual(set(data), {
+            "runner", "tier", "repo", "host", "total", "done", "failed",
+            "pending", "wave", "waves_run", "partial", "stall_killed",
+            "stalled", "stall_killed_slots_s", "stall_killed_slot_pct",
+            "runtime_p50_s", "runtime_p95_s", "runtime_max_s",
+            "cooldowns", "retried_failed", "rate_limited"})
+        self.assertNotIn("quota admission", err)
+        sidecars = list(self.init.glob("fanout_progress.*.json"))
+        self.assertEqual(len(sidecars), 1)
+        sidecar = json.loads(sidecars[0].read_text(encoding="utf-8"))
+        self.assertNotIn("quota", sidecar)
+
+    def test_sidecar_quota_matches_stdout_quota(self):
+        code, out, err = self._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"),
+            "--quota-calls", "1000", "--quota-window-s", "600")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        sidecar = json.loads(
+            next(self.init.glob("fanout_progress.*.json"))
+            .read_text(encoding="utf-8"))
+        self.assertEqual(sidecar.get("quota"), data["quota"])
+
+
+class TestQuotaWindowReset(_StormBase):
+    """Quota-mode cooldown/truncation upgrades: a storm cooldown carrying a
+    rate-limit-signature crash waits out the window reset (last signature
+    event + W) instead of the fixed --cooldown-s; the crash-storm truncation
+    fires only AFTER one full reset wait completed and signature crashes
+    still recur. Non-signature events and the pre-breaker backoff keep the
+    plain --cooldown-s length; without the quota flags the legacy truncation
+    is byte-identical (TestRateLimitStorm is the zero-change lock)."""
+
+    N_UNITS = 5
+
+    def _admission_headroom(self):
+        # quota pair big enough that admission never binds in these tests —
+        # they exercise the COOLDOWN/TRUNCATION layer, not the gate
+        return ("--quota-calls", "1000", "--quota-window-s", "3",
+                "--cooldown-s", "1")
+
+    def test_signature_cooldown_waits_out_window_reset_then_truncates(self):
+        # round 1: 5 signature crashes -> cooldown waits the FULL 3s reset
+        # (not --cooldown-s 1) -> "fully waited" stamp -> round 2 crashes
+        # again -> NOW the truncation fires, recipe carries the verify line.
+        # worker-side barrier: all five crash before either future is
+        # harvested, so no slot frees early enough to re-dispatch ahead of
+        # the cooldown arm (deterministic waves_run == 10).
+        barrier = threading.Barrier(5, timeout=30)
+
+        def behavior(uid, nth):
+            if nth == 1:
+                barrier.wait()
+            return self._rl_crash(uid)
+        code, out, err = self._run_main3(behavior,
+                                         *self._admission_headroom(),
+                                         wave="5")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertTrue(data["rate_limited"])
+        self.assertFalse(data["stalled"])            # fast path, not breaker
+        self.assertEqual(sorted(data["rate_limited_crashes"]),
+                         [f"scout-{i:03d}" for i in range(1, 6)])
+        self.assertEqual(data["cooldowns"], 1)
+        self.assertEqual(data["waves_run"], 10)      # 5 + 5 (one full reset between)
+        self.assertIn("waiting out the quota window reset", err)
+        self.assertIn("quota window reset fully waited", err)
+        self.assertIn("verify --quota-calls 1000", err)
+        self.assertIn("crash_cause=rate-limit", err)
+
+    def test_full_reset_then_recovery_never_truncates(self):
+        # every unit crashes once (signature) then succeeds: the reset wait
+        # self-heals the window exhaustion — no truncation, run completes
+        def behavior(uid, nth):
+            if nth == 1:
+                return self._rl_crash(uid)
+            return ("spawn-ok", "ok", "done")
+        code, out, err = self._run_main3(behavior, "--quota-calls", "1000",
+                                         "--quota-window-s", "2",
+                                         "--cooldown-s", "1", wave="5")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertNotIn("rate_limited_crashes", data)
+        self.assertEqual(data["done"], 5)
+        self.assertEqual(data["cooldowns"], 1)
+        self.assertIn("quota window reset fully waited", err)
+
+    def test_non_signature_cooldown_keeps_fixed_length(self):
+        # unknown-cause crashes under quota mode: cooldown stays at the
+        # fixed --cooldown-s (no window-reset note), drift path backstops
+        code, out, err = self._run_main3(lambda uid, nth: ("crash", None, "crash"),
+                                         *self._admission_headroom(),
+                                         wave="5")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertFalse(data["rate_limited"])
+        self.assertTrue(data["stalled"])
+        self.assertGreaterEqual(data["cooldowns"], 1)
+        self.assertNotIn("waiting out the quota window reset", err)
+        self.assertNotIn("crash_cause=rate-limit", err)
+
+    def test_no_quota_flags_truncates_on_wave_th_crash_zero_change(self):
+        # zero-change leg: without the flags the FIRST wave-th all-signature
+        # crash window truncates immediately — no reset-wait precondition
+        code, out, err = self._run_main3(lambda uid, nth: self._rl_crash(uid),
+                                         wave="1")
+        self.assertEqual(code, 2, err)
+        data = json.loads(out)
+        self.assertTrue(data["rate_limited"])
+        self.assertEqual(data["waves_run"], 1)
+        self.assertNotIn("quota window reset", err)
+        self.assertNotIn("--quota-calls", err)
+
+
+
+
+
+class TestMaterializeChildConfig(unittest.TestCase):
+    """Per-unit child config materialization (static credential injection):
+    global-config copy with ONLY the cred-declared provider overridden to the
+    static baseURL+apiKey entry; provider id UNCHANGED (model-id prefix
+    coupling); plugins/agents/model preserved verbatim; idempotent; apikey
+    lands only in the written file."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_mat")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_mat_"))
+        self.global_cfg = self.tmp / "opencode.json"
+        self.global_cfg.write_text(json.dumps({
+            "model": "wizard-local/glm-4",
+            "plugin": ["wizard-opencode-plugin"],
+            "provider": {"wizard": {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": "https://placeholder.example",
+                            "apiKey": "PLACEHOLDER"}},
+                "other": {"npm": "@ai-sdk/other"}}},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+        self.cred = {"v": 1, "baseURL": "https://gw.example/api",
+                     "apikey": "SECRET-TOK", "provider_id": "wizard",
+                     "global_config": str(self.global_cfg),
+                     "keep_plugins": True, "expired_signatures": ["401"]}
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_override_shape_id_unchanged_others_verbatim(self):
+        target = self.fr._materialize_child_config(self.cred, self.tmp / "u1")
+        body = json.loads(target.read_text(encoding="utf-8"))
+        self.assertIn("wizard", body["provider"])
+        node = body["provider"]["wizard"]
+        self.assertEqual(node["options"]["baseURL"], "https://gw.example/api")
+        self.assertEqual(node["options"]["apiKey"], "SECRET-TOK")
+        self.assertEqual(node["npm"], "@ai-sdk/openai-compatible")
+        # provider ID is the dict key — unchanged by construction; sibling
+        # provider, plugins, model preserved
+        self.assertIn("other", body["provider"])
+        self.assertEqual(body["plugin"], ["wizard-opencode-plugin"])
+        self.assertEqual(body["model"], "wizard-local/glm-4")
+
+    def test_idempotent_and_rotated_token_flows(self):
+        d = self.tmp / "u1"
+        self.fr._materialize_child_config(self.cred, d)
+        first = (d / "opencode" / "opencode.json").read_text(encoding="utf-8")
+        self.fr._materialize_child_config(self.cred, d)
+        self.assertEqual(first,
+                         (d / "opencode" / "opencode.json").read_text(
+                             encoding="utf-8"))
+        rotated = dict(self.cred, apikey="NEW-TOK")
+        self.fr._materialize_child_config(rotated, d)
+        body = json.loads((d / "opencode" / "opencode.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(body["provider"]["wizard"]["options"]["apiKey"],
+                         "NEW-TOK")
+
+    def test_keep_plugins_false_strips_plugin_list(self):
+        cred = dict(self.cred, keep_plugins=False)
+        target = self.fr._materialize_child_config(cred, self.tmp / "u2")
+        body = json.loads(target.read_text(encoding="utf-8"))
+        self.assertNotIn("plugin", body)
+
+    def test_unknown_provider_valueerror(self):
+        cred = dict(self.cred, provider_id="absent")
+        with self.assertRaises(ValueError):
+            self.fr._materialize_child_config(cred, self.tmp / "u3")
+
+    def test_missing_global_config_valueerror(self):
+        cred = dict(self.cred, global_config=str(self.tmp / "absent.json"))
+        with self.assertRaises(ValueError):
+            self.fr._materialize_child_config(cred, self.tmp / "u4")
+
+
+class TestCredExpiredTailClassify(unittest.TestCase):
+    """Pure signature scan: case-insensitive substring over BOTH tails;
+    empty signature set = scan disabled (classification identical to running
+    without a cred file)."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_credtail")
+
+    def _cred(self, sigs):
+        return {"expired_signatures": sigs}
+
+    def test_hit_either_stream_case_insensitive(self):
+        cred = self._cred(["401", "Login Required"])
+        self.assertTrue(self.fr._cred_expired_tail(cred, "", "HTTP 401 up"))
+        self.assertTrue(self.fr._cred_expired_tail(cred, "please LOGIN REQUIRED",
+                                                   ""))
+        self.assertFalse(self.fr._cred_expired_tail(cred, "ok", "fine"))
+
+    def test_empty_signatures_disabled(self):
+        self.assertFalse(self.fr._cred_expired_tail(self._cred([]), "401", "401"))
+
+
+class TestCredStartupValidation(unittest.TestCase):
+    """--cred-file startup fail-loud: unreadable / schema-invalid payload →
+    exit 2 BEFORE any enumerator side effect."""
+
+    def setUp(self):
+        self.base = _FakeDispatchBase.__new__(_FakeDispatchBase)
+        self.base.setUp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.base.tmp, ignore_errors=True)
+
+    def _cred_file(self, body) -> Path:
+        p = self.base.tmp / "cred.json"
+        p.write_text(json.dumps(body), encoding="utf-8")
+        return p
+
+    def test_missing_file_exit2(self):
+        code, out, err = self.base._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"),
+            "--cred-file", str(self.base.tmp / "nope.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("cred file unreadable", err)
+
+    def test_bad_schema_exit2(self):
+        p = self._cred_file({"v": 1})
+        code, out, err = self.base._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"), "--cred-file", str(p))
+        self.assertEqual(code, 2)
+        self.assertIn("schema validation", err)
+        self.assertIn("baseURL", err)
+
+    def test_valid_cred_never_blocks_dispatch(self):
+        gp = self.base.tmp / "opencode.json"
+        gp.write_text(json.dumps({"provider": {"wizard": {
+            "options": {"baseURL": "https://p", "apiKey": "P"}}}}),
+            encoding="utf-8")
+        p = self._cred_file({"v": 1, "baseURL": "https://gw", "apikey": "T",
+                             "provider_id": "wizard",
+                             "global_config": str(gp),
+                             "keep_plugins": True,
+                             "expired_signatures": []})
+        # host patched to the opencode form (the harness bakes --host claude
+        # into argv, which the cred gate would rightly refuse): materialization
+        # runs, the fake _run_unit converges, done = 2
+        saved = self.base.fr._detect_host
+        self.base.fr._detect_host = lambda explicit, tier: "opencode"
+        try:
+            code, out, err = self.base._run_main(
+                lambda uid, nth: ("spawn-ok", "ok"), "--cred-file", str(p))
+        finally:
+            self.base.fr._detect_host = saved
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["done"], 2)
+        # child config materialized for both dispatched units
+        self.assertTrue((self.base.init / "childcfg" / "scout-001" / "opencode"
+                         / "opencode.json").is_file())
+        self.assertTrue((self.base.init / "childcfg" / "scout-002" / "opencode"
+                         / "opencode.json").is_file())
+
+
+class TestCredHostGate(unittest.TestCase):
+    """--cred-file is opencode-form only: a resolved claude/dsh host exits 2
+    with a recipe (NEVER a silent no-credential dispatch). --isolate-data on
+    other hosts is a note + proceed (harmless redundancy, not a misuse)."""
+
+    def setUp(self):
+        self.base = _FakeDispatchBase.__new__(_FakeDispatchBase)
+        self.base.setUp()
+        self.fr = self.base.fr
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.base.tmp, ignore_errors=True)
+
+    def _cred_file(self) -> Path:
+        gp = self.base.tmp / "opencode.json"
+        gp.write_text(json.dumps({"provider": {"wizard": {
+            "options": {"baseURL": "https://p", "apiKey": "P"}}}}),
+            encoding="utf-8")
+        p = self.base.tmp / "cred.json"
+        p.write_text(json.dumps({"v": 1, "baseURL": "https://gw", "apikey": "T",
+                                 "provider_id": "wizard",
+                                 "global_config": str(gp),
+                                 "keep_plugins": True,
+                                 "expired_signatures": []}), encoding="utf-8")
+        return p
+
+    def test_claude_host_rejected_exit2_zero_dispatch(self):
+        p = self._cred_file()
+        saved = self.fr._detect_host
+        self.fr._detect_host = lambda explicit, tier: "claude"
+        try:
+            code, out, err = self.base._run_main(
+                lambda uid, nth: ("spawn-ok", "ok"), "--cred-file", str(p))
+        finally:
+            self.fr._detect_host = saved
+        self.assertEqual(code, 2)
+        self.assertIn("opencode host form only", err)
+        self.assertIn("recipe", err.lower())
+
+    def test_isolate_data_other_host_notes_and_proceeds(self):
+        saved = self.fr._detect_host
+        self.fr._detect_host = lambda explicit, tier: "claude"
+        try:
+            code, out, err = self.base._run_main(
+                lambda uid, nth: ("spawn-ok", "ok"), "--isolate-data")
+        finally:
+            self.fr._detect_host = saved
+        self.assertEqual(code, 0, err)
+        self.assertIn("--isolate-data ignored", err)
+
+
+class TestCredExpiredTruncation(unittest.TestCase):
+    """End-to-end credential-expiry fast-stop: a REAL _run_unit (spy Popen
+    swaps the host CLI for a python child that writes a 401 signature to
+    stderr and exits non-zero) → the output-tail scan hits → dispatch stops
+    immediately (wave=1: the second unit is never dispatched), exit 2, stdout
+    credential_expired + credential_expired_units, child config materialized
+    for the dispatched unit only."""
+
+    N_UNITS = 2
+
+    def setUp(self):
+        import tempfile
+        self.fr = _load("fanout_runner_credexp")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_credexp_"))
+        self.repo = self.tmp / "repo"
+        self.init = self.repo / ".mgh-init"
+        (self.init / "checkpoints" / "scout").mkdir(parents=True, exist_ok=True)
+        (self.init / "inputs" / "scout").mkdir(parents=True, exist_ok=True)
+        (self.init / "scout_plan.json").write_text("{}", encoding="utf-8")
+        self.units = [_unit(self.tmp, f"scout-{i:03d}")
+                      for i in range(1, self.N_UNITS + 1)]
+        for u in self.units:
+            Path(u["input_path"]).write_text("{}", encoding="utf-8")
+        self.global_cfg = self.tmp / "opencode.json"
+        self.global_cfg.write_text(json.dumps({"provider": {"wizard": {
+            "options": {"baseURL": "https://p", "apiKey": "P"}}}}),
+            encoding="utf-8")
+        self.cred_path = self.tmp / "cred.json"
+        self.cred_path.write_text(json.dumps(
+            {"v": 1, "baseURL": "https://gw", "apikey": "T",
+             "provider_id": "wizard", "global_config": str(self.global_cfg),
+             "keep_plugins": True, "expired_signatures": ["401"]}),
+            encoding="utf-8")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run_main(self, *extra):
+        stub = self.tmp / "stub_enum.py"
+        units_json = json.dumps(json.dumps(self.units))
+        body = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            f"UNITS = json.loads({units_json})\n"
+            "pending = [u for u in UNITS if not Path(u['done_marker']).is_file()]\n"
+            "print(json.dumps({'repo': " + json.dumps(str(self.repo)) +
+            ", 'total': len(UNITS), 'done': 0, 'failed': 0, "
+            "'pending': pending}))\n")
+        stub.write_text(body, encoding="utf-8")
+        saved_list = dict(self.fr.TIERS["scout"])
+        saved_detect = self.fr._detect_host
+        self.fr.TIERS["scout"]["list_script"] = str(stub)
+        self.fr._detect_host = lambda explicit, tier: "opencode"
+        real_popen = subprocess.Popen
+
+        def spy_popen(cmd, **kw):
+            # the tier enumerator (stub_enum.py) must run FOR REAL — only the
+            # host-CLI dispatch spawn is swapped for the 401 child
+            if any("stub_enum.py" in str(a) for a in cmd):
+                return real_popen(cmd, **kw)
+            kw = dict(kw)
+            child = [sys.executable, "-c",
+                     "import sys; sys.stderr.write('HTTP 401 unauthorized'); "
+                     "sys.exit(3)"]
+            return real_popen(child, **kw)
+
+        argv = ["fanout_runner.py",
+                "--scout-plan", str(self.init / "scout_plan.json"),
+                "--checkpoints", str(self.init / "checkpoints" / "scout"),
+                "--inputs-dir", str(self.init / "inputs" / "scout"),
+                "--cred-file", str(self.cred_path),
+                "--wave", "1", "--cooldown-s", "0",
+                "--stall-timeout-s", "0", "--call-timeout-s", "60", *extra]
+        old, sys.argv = sys.argv, argv
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with mock.patch.object(self.fr.subprocess, "Popen", spy_popen), \
+                    contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                code = self.fr.main()
+        finally:
+            sys.argv = old
+            self.fr.TIERS["scout"].update(saved_list)
+            self.fr._detect_host = saved_detect
+        return code, out.getvalue(), err.getvalue()
+
+    def test_first_401_stops_dispatch(self):
+        code, out, err = self._run_main()
+        self.assertEqual(code, 2, err[-600:])
+        data = json.loads(out)
+        self.assertTrue(data["credential_expired"])
+        self.assertEqual(data["credential_expired_units"], ["scout-001"])
+        # wave=1: the first hit stops the run — unit 2 never dispatched
+        self.assertEqual(data["waves_run"], 1)
+        self.assertIn("CRED-EXPIRED", err)
+        self.assertIn("credential-expired signature matched", err)
+        self.assertIn("--resume --retry-failed", err)
+        # child config materialized for the dispatched unit only
+        u1cfg = (self.init / "childcfg" / "scout-001" / "opencode"
+                 / "opencode.json")
+        self.assertTrue(u1cfg.is_file())
+        self.assertFalse((self.init / "childcfg" / "scout-002").exists())
+        # stdout/stderr never echo the apikey value or a key literal
+        self.assertNotIn('"apikey"', out)
+        self.assertNotIn('"apikey"', err)
+        # ocdata dir created for the dispatched unit (data isolation implied)
+        self.assertTrue((self.init / "ocdata" / "scout-001").is_dir())
+
+
+class TestDryRunPurePlan(unittest.TestCase):
+    """--dry-run dispatch form = pure plan: exit 0, plan on stdout, ZERO
+    disk writes (no liveness/sidecar/audit copies/markers/childcfg)."""
+
+    def setUp(self):
+        self.base = _FakeDispatchBase.__new__(_FakeDispatchBase)
+        self.base.setUp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.base.tmp, ignore_errors=True)
+
+    def _tree(self) -> set:
+        return {str(p.relative_to(self.base.tmp)) for p in
+                self.base.tmp.rglob("*") if p.is_file()}
+
+    def test_plan_zero_writes_exit0(self):
+        stub = self.base._disk_stub()   # stub file exists BEFORE the snapshot
+        before = self._tree()
+        code, out, err = self.base._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"), "--dry-run", stub=stub)
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertTrue(data["dry_run"])
+        self.assertEqual(data["plan_units"], 2)
+        self.assertEqual(len(data["plan"]), 2)
+        entry = data["plan"][0]
+        self.assertEqual(entry["unit"], "scout-001")
+        self.assertTrue(entry["audit_path"].endswith("scout-001.task.md"))
+        self.assertTrue(entry["done_marker"])
+        self.assertEqual(self._tree(), before, "dry-run must write NOTHING")
+
+    def test_dry_run_path_drift_reported_not_written(self):
+        # poison one unit's input path out of tree → the plan flags it as
+        # would_fail_pre_spawn instead of writing a .failed marker
+        self.base.units[0]["input_path"] = str(self.base.tmp / "evil.slice.md")
+        stub = self.base._disk_stub()
+        code, out, err = self.base._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"), "--dry-run", stub=stub)
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        flagged = [e for e in data["plan"] if "would_fail_pre_spawn" in e]
+        self.assertEqual(len(flagged), 1)
+        self.assertIn("path-drift", flagged[0]["would_fail_pre_spawn"])
+        markers = list((self.base.init / "checkpoints" / "scout").glob("*.failed"))
+        self.assertEqual(markers, [], "dry-run must not write markers")
+
+
+class TestSpecialAuthAndOrphanAdvisories(unittest.TestCase):
+    """stderr advisories (non-blocking, exit-neutral): the special-auth
+    deployment doc present + no --cred-file → one note; cred-file passed →
+    no note; doc absent → no note. A residual liveness file → orphan note."""
+
+    def setUp(self):
+        self.base = _FakeDispatchBase.__new__(_FakeDispatchBase)
+        self.base.setUp()
+        self.fr = self.base.fr
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.base.tmp, ignore_errors=True)
+
+    def test_doc_present_notes_absent_cred_dispatches(self):
+        doc = self.base.tmp / "doc" / "mgh-special-auth.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text("guide", encoding="utf-8")
+        saved = self.fr._special_auth_doc_path
+        self.fr._special_auth_doc_path = lambda: doc
+        try:
+            code, out, err = self.base._run_main(
+                lambda uid, nth: ("spawn-ok", "ok"))
+        finally:
+            self.fr._special_auth_doc_path = saved
+        self.assertEqual(code, 0, err)
+        self.assertIn("special-auth deployment doc present", err)
+        self.assertIn("WITHOUT static injection", err)
+
+    def test_doc_present_with_cred_file_no_note(self):
+        doc = self.base.tmp / "doc" / "mgh-special-auth.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text("guide", encoding="utf-8")
+        gp = self.base.tmp / "opencode.json"
+        gp.write_text(json.dumps({"provider": {"wizard": {
+            "options": {"baseURL": "https://p", "apiKey": "P"}}}}),
+            encoding="utf-8")
+        cred = self.base.tmp / "cred.json"
+        cred.write_text(json.dumps({"v": 1, "baseURL": "https://gw",
+                                    "apikey": "T", "provider_id": "wizard",
+                                    "global_config": str(gp),
+                                    "keep_plugins": True,
+                                    "expired_signatures": []}),
+                        encoding="utf-8")
+        saved_doc = self.fr._special_auth_doc_path
+        saved_host = self.fr._detect_host
+        self.fr._special_auth_doc_path = lambda: doc
+        self.fr._detect_host = lambda explicit, tier: "opencode"
+        try:
+            code, out, err = self.base._run_main(
+                lambda uid, nth: ("spawn-ok", "ok"), "--cred-file", str(cred))
+        finally:
+            self.fr._special_auth_doc_path = saved_doc
+            self.fr._detect_host = saved_host
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("special-auth deployment doc present", err)
+
+    def test_doc_absent_silent(self):
+        code, out, err = self.base._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("special-auth", err)
+
+    def test_stale_liveness_file_orphan_note(self):
+        pid_file = self.base.init / "fanout_runner.scout.pid"
+        pid_file.write_text(json.dumps({"pid": 999999999,
+                                        "started_ts": "2026-10-16T00:00:00",
+                                        "tier": "scout", "host": "opencode",
+                                        "cmdline": ["x"], "children": []}),
+                            encoding="utf-8")
+        code, out, err = self.base._run_main(
+            lambda uid, nth: ("spawn-ok", "ok"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("stale liveness file", err)
+        self.assertIn("--kill-stale --dry-run", err)
+
+
+class TestEnvInjectionClaim(unittest.TestCase):
+    """_run_unit claims the per-unit XDG env registered in _UNIT_ENV (the env
+    twin of _UNIT_SINKS): registered uid → child env carries the two vars;
+    unregistered uid → byte-identical legacy env (no XDG vars)."""
+
+    def setUp(self):
+        self.fr = _load("fanout_runner_envinj")
+        self.tmp = Path(tempfile.mkdtemp(prefix="fanout_envinj_"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        self.fr._UNIT_ENV.clear()
+
+    def test_registered_uid_env_merged_unregistered_clean(self):
+        captured = []
+        real_popen = subprocess.Popen
+
+        def spy_popen(cmd, **kw):
+            captured.append(dict(kw["env"]) if kw.get("env") is not None
+                            else None)
+            kw = dict(kw)
+            kw.pop("env", None)
+            return real_popen([sys.executable, "-c", "pass"], **kw)
+
+        self.fr._UNIT_ENV["scout-001"] = {
+            "XDG_CONFIG_HOME": str(self.tmp / "cfg"),
+            "XDG_DATA_HOME": str(self.tmp / "data")}
+        try:
+            with mock.patch.object(self.fr.subprocess, "Popen", spy_popen):
+                self.fr._run_unit("opencode", ["host-cli", "run"], "TASK",
+                                  self.tmp, 30, 0, uid="scout-001")
+                self.fr._run_unit("opencode", ["host-cli", "run"], "TASK",
+                                  self.tmp, 30, 0, uid="scout-002")
+        finally:
+            self.fr._UNIT_ENV.clear()
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0]["XDG_CONFIG_HOME"], str(self.tmp / "cfg"))
+        self.assertEqual(captured[0]["XDG_DATA_HOME"], str(self.tmp / "data"))
+        self.assertNotIn("XDG_CONFIG_HOME", captured[1])
+        self.assertNotIn("XDG_DATA_HOME", captured[1])
+        # claim semantics: the registry entry was consumed
+        self.assertNotIn("scout-001", self.fr._UNIT_ENV)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

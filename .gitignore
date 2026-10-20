@@ -14,6 +14,10 @@ nul
 .env
 .env.local
 
+# 维护者随包分发的企业定制内容(NEVER 提交;install 见到才复制安装)
+mgh-special-auth.md
+docs/enterprise-environment.md
+
 # 其他工具产物
 .obsidian/
 .claude/

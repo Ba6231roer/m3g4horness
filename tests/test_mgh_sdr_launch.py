@@ -379,6 +379,81 @@ class TestLauncherDryRun(unittest.TestCase):
                          "the object body is never read back for embedding")
 
 
+
+
+class TestSpecialAuthPromptFace(unittest.TestCase):
+    """The launcher is the PREFERRED zero-prompt entry: when the special-auth
+    deployment doc is present in the install tree, the orchestrator prompt MUST
+    carry the credential-preparation block and the step-3 invocation MUST carry
+    --cred-file (a host session that only sees this prompt would otherwise
+    dispatch per-child SSO logins). Doc absent => prompt bytes unchanged
+    (generic install, no --cred-file anywhere)."""
+
+    _created = False
+
+    def setUp(self):
+        self.m = _load()
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_launch_auth_"))
+        self.repo = self.tmp / "repo"
+        _init_repo(self.repo)
+        (self.repo / "AGENTS.md").write_text("# \u8bbe\u8ba1\n- \u8d8a\u6743\u914d\u7f6e\u3002\n",
+                                             encoding="utf-8")
+        _commit_all(self.repo, "init")
+        _git(self.repo, "checkout", "-qb", "feature-pay")
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "PayController.java").write_text(
+            "@RestController\npublic class PayController {}\n", encoding="utf-8")
+        _commit_all(self.repo, "feat")
+        self.doc = (Path(self.m.__file__).resolve().parent.parent /
+                    "mgh-special-auth.md")
+        self.removed_real = None
+        if self.doc.exists():  # park the maintainer's real copy for the test
+            self.removed_real = self.tmp / "parked-real-doc.md"
+            shutil.copy2(self.doc, self.removed_real)
+            self.doc.unlink()
+
+    def tearDown(self):
+        if self.removed_real is not None:
+            shutil.copy2(self.removed_real, self.doc)
+        else:
+            self.doc.unlink(missing_ok=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _launch(self, extra):
+        old = sys.argv
+        sys.argv = ["mgh_sdr_launch.py", *extra]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = self.m.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue(), err.getvalue()
+
+    def _prompt(self):
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        return (run_dir / "orchestrator_prompt.md").read_text(encoding="utf-8"), err
+
+    def test_doc_absent_generic_prompt_no_cred(self):
+        prompt, err = self._prompt()
+        self.assertNotIn("special-auth", prompt)
+        self.assertNotIn("--cred-file", prompt)
+        self.assertNotIn("special-auth", err)
+
+    def test_doc_present_prompt_carries_preparation_and_cred_flag(self):
+        self._created = True
+        self.doc.write_text("# guide\n", encoding="utf-8")
+        prompt, err = self._prompt()
+        self.assertIn("special-auth", prompt)
+        self.assertIn("mgh_credentials.py", prompt)
+        self.assertIn("cred_source.json", prompt)
+        self.assertIn("--cred-file <run>/cred.json", prompt)
+        self.assertIn("credential_expired", prompt)
+        self.assertIn("special-auth deployment doc present", err)
+
 import shutil  # noqa: E402  (tearDown uses it; placed here to keep the header import list stdlib-honest)
 
 

@@ -39,6 +39,10 @@ materialized sensitive catalog file the Check baseline section of the message po
   an anchor in the slice).
 - External conclusions are materialized files under `external_dir` — read those if
   present; NEVER read the external repo itself, even if design text names its path.
+- 单遍往返(调用次数收敛):全部输入(slice + 基线投影 + 敏感目录 + 外部结论)第一批并行
+  读入 → 一次判断 → 写 draft 与 touch marker 同批 → 单行 ack;NEVER 逐文件多轮往返
+  (调用次数限流网关下每次往返都烧配额)。本条只约束往返次数——读/写路径闭集与刚性
+  三元组逐字不变。
 - 人类面字段(risk/suggestion/repro/fix_diff)按任务模板「写作纪律」写:读者是一两年 Java
   Web 经验的工程师——`risk` 首句写现象、能落地调用给 `repro`、局部修复给 `fix_diff`、
   禁用本工具内部词。

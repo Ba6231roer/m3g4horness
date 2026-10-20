@@ -32,7 +32,7 @@ core/contracts/sast/controls-intake.md:73
 core/contracts/sast/controls-intake.md:8
 core/contracts/sast/fanout-enumeration.md:3
 core/contracts/sast/fanout-enumeration.md:85
-core/contracts/sdr/pipeline.md:135
+core/contracts/sdr/pipeline.md:139
 core/contracts/sdr/resume-state.md:3
 core/contracts/sensitive-catalog.md:74
 core/contracts/sra/augmentation.md:100
@@ -69,10 +69,6 @@ releases/claude-code/commands/mgh-sast.md:136
 releases/claude-code/commands/mgh-sast.md:16
 releases/claude-code/commands/mgh-sast.md:177
 releases/claude-code/commands/mgh-sast.md:83
-releases/claude-code/commands/mgh-sdr.md:179
-releases/claude-code/commands/mgh-sdr.md:180
-releases/claude-code/commands/mgh-sdr.md:181
-releases/claude-code/commands/mgh-sdr.md:182
 releases/claude-code/commands/mgh-sra.md:20
 releases/claude-code/commands/mgh-sra.md:86
 releases/claude-code/commands/mgh-sra.md:87
@@ -135,10 +131,6 @@ releases/dsh/agents/t2.md:3
 releases/dsh/agents/t3.md:3
 releases/dsh/skills/mgh-sast/SKILL.md:182
 releases/dsh/skills/mgh-sast/SKILL.md:20
-releases/dsh/skills/mgh-sdr/SKILL.md:196
-releases/dsh/skills/mgh-sdr/SKILL.md:197
-releases/dsh/skills/mgh-sdr/SKILL.md:198
-releases/dsh/skills/mgh-sdr/SKILL.md:199
 releases/dsh/skills/mgh-sra/SKILL.md:100
 releases/dsh/skills/mgh-sra/SKILL.md:102
 releases/dsh/skills/mgh-sra/SKILL.md:103
@@ -159,10 +151,6 @@ releases/opencode/agent/init-synthesis-rollup.md:38
 releases/opencode/agent/init-synthesis.md:31
 releases/opencode/command/mgh-sast.md:15
 releases/opencode/command/mgh-sast.md:165
-releases/opencode/command/mgh-sdr.md:179
-releases/opencode/command/mgh-sdr.md:180
-releases/opencode/command/mgh-sdr.md:181
-releases/opencode/command/mgh-sdr.md:182
 releases/opencode/command/mgh-sra.md:17
 releases/opencode/command/mgh-sra.md:83
 releases/opencode/command/mgh-sra.md:84

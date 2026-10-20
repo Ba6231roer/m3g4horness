@@ -48,6 +48,22 @@ if ($Platform -eq 'claude') {
   }
 }
 Copy-Dir $CoreSrc 'mgh-core'
+
+# 3b) Optional special-auth deployment doc (maintainer-carried, NOT in git;
+#     enterprise SSO/credential runbook consumed by fanout_runner /
+#     list_sdr_steps / resume_sdr_state). Convergence: the target copy exists
+#     IFF the repo-root source exists — a present source installs; an absent
+#     source REMOVES a stale target copy. Generic installs are byte-identical.
+$AuthSrc = Join-Path $Here 'mgh-special-auth.md'
+$AuthDst = Join-Path $Dest 'mgh-core\mgh-special-auth.md'
+if (Test-Path $AuthSrc) {
+  Copy-Item $AuthSrc $AuthDst -Force
+  Write-Host "v installed special-auth deployment doc (enterprise credential/environment runbook)"
+} elseif (Test-Path $AuthDst) {
+  Remove-Item $AuthDst -Force
+  Write-Host "v removed stale special-auth deployment doc from target (source not present in this package)"
+}
+
 Write-Host "v installed $Platform shell into $Dest"
 
 # 5c) dsh face placement + profile wiring (mirror of install.sh step 5c; add-mgh-dsh-host-

@@ -101,7 +101,8 @@ unit, whose slice carries a bounded upstream-route source snippet. Shared-chain 
 within the SAME controller file, routes whose downstream changed-symbol reach sets are
 equal or subsets merge into one interface unit (`route` = semicolon-joined). Across
 controller files routes stay split (hunks repeat per referencing slice; renderer dedups).
-An interface unit past --max-interface-bytes (default 256KB) is deterministically split
+An interface unit past --max-interface-bytes (default 96KB, calibrated for a
+~150K-token weak model window — see --help) is deterministically split
 into `-partN` units per route group. Chain materialization: every interface unit in
 codegraph mode carries `chain[]` — the deterministic node projection of its route
 anchor(s) down the ALREADY-RETURNED call edges (zero new codegraph queries; the
@@ -140,7 +141,18 @@ from sdr_tier import (codegraph_available, codegraph_bin,  # noqa: E402
                       forward_failed_ids, forward_marker_paths)
 
 DEFAULT_MAX_STANDALONE_BYTES = 64 * 1024  # 64KB merge cap for standalone clusters
-DEFAULT_MAX_INTERFACE_BYTES = 256 * 1024  # 256KB split cap for interface units
+# 96KB interface split cap, calibrated 2026-10-15 against the target runtime
+# (150K-token weak model behind a calls-per-window-rate-limited gateway): the
+# worst per-unit context stack is slice + baseline projection (32KB) + external
+# -repo conclusions (64KB/repo) + task message and output room, which at the old
+# 256KB default folded to ~95-120K tokens — the overflow edge where a weak model
+# gets slow/truncated/retried and every retry burns quota. 96KB folds to
+# ~55-70K tokens. Cost, disclosed on purpose: big interfaces split into more
+# -partN units (unit count = call count on such a gateway); overflow-retry
+# costs a whole quota window, deterministic extra parts cost one call each.
+# Users on roomier windows: pass --max-interface-bytes 262144 explicitly (the
+# old default stays a legal value). See the matching --help text.
+DEFAULT_MAX_INTERFACE_BYTES = 96 * 1024   # 96KB (98304) split cap for interface units
 
 # Level-2 (context slim) caps for an atomic residue that is still over budget. Module
 # constants on purpose: the real levers stay --max-standalone-bytes / --max-interface-bytes,
@@ -1772,6 +1784,53 @@ def _enumerate(args) -> dict:
     slices_dir = Path(args.materialize).resolve() if args.materialize else None
     grouping_path = checkpoints.parent / "grouping.json"
 
+    # Resume budget stickiness (2026-10-15): the dispatcher re-runs this
+    # enumerator on every fanout call, so a DEFAULT change between tool
+    # versions would re-split big interfaces into a different number of
+    # -partN units, shift unit ids, and re-dispatch already-done units —
+    # burning a whole quota window per affected unit on a rate-limited
+    # gateway. So: an explicit flag wins (operator override is a legal,
+    # re-splitting action); an unpassed flag falls back to THIS run dir's
+    # grouping.json budget record when it carries one; only with no record
+    # do the module defaults apply. A malformed/unreadable record degrades
+    # to the defaults (the fresh write replaces grouping.json wholesale).
+    recorded = None
+    if grouping_path.is_file():
+        try:
+            prev_budget = json.loads(
+                grouping_path.read_text(encoding="utf-8")).get("budget")
+            if (isinstance(prev_budget, dict)
+                    and isinstance(prev_budget.get("max_standalone_bytes"), int)
+                    and isinstance(prev_budget.get("max_interface_bytes"), int)):
+                recorded = (prev_budget["max_standalone_bytes"],
+                            prev_budget["max_interface_bytes"])
+        except (OSError, ValueError):
+            recorded = None
+    if args.max_standalone_bytes is None:
+        args.max_standalone_bytes = (recorded[0] if recorded is not None
+                                     else DEFAULT_MAX_STANDALONE_BYTES)
+        if recorded is not None:
+            _eprint(f"note: budget stickiness — standalone cap "
+                    f"{args.max_standalone_bytes} reused from this run's "
+                    f"grouping.json record (pass --max-standalone-bytes to "
+                    f"override)")
+    elif recorded is not None and args.max_standalone_bytes != recorded[0]:
+        _eprint(f"note: standalone cap {args.max_standalone_bytes} passed "
+                f"explicitly — overrides the grouping.json record "
+                f"({recorded[0]}); -partN re-splitting may shift unit ids")
+    if args.max_interface_bytes is None:
+        args.max_interface_bytes = (recorded[1] if recorded is not None
+                                    else DEFAULT_MAX_INTERFACE_BYTES)
+        if recorded is not None:
+            _eprint(f"note: budget stickiness — interface cap "
+                    f"{args.max_interface_bytes} reused from this run's "
+                    f"grouping.json record (pass --max-interface-bytes to "
+                    f"override)")
+    elif recorded is not None and args.max_interface_bytes != recorded[1]:
+        _eprint(f"note: interface cap {args.max_interface_bytes} passed "
+                f"explicitly — overrides the grouping.json record "
+                f"({recorded[1]}); -partN re-splitting may shift unit ids")
+
     gate = _SliceGate(repo, base, branch)
 
     probe_reason = _codegraph_probe_reason(repo) if not _codegraph_available(repo) else None
@@ -2128,21 +2187,39 @@ def main():
     ap.add_argument("--materialize", metavar="<slices-dir>",
                     help="write one read-only slice per pending unit into this dir "
                          "(+ draft_path/marker absolute paths in pending[])")
-    ap.add_argument("--max-standalone-bytes", type=int,
-                    default=DEFAULT_MAX_STANDALONE_BYTES,
+    ap.add_argument("--max-standalone-bytes", type=int, default=None,
                     help=f"standalone cluster merge cap in bytes (default "
-                         f"{DEFAULT_MAX_STANDALONE_BYTES}) — judged on the MEASURED "
-                         f"slice, not an estimate; a cluster over cap is re-split "
-                         f"losslessly, then context-slimmed, then refused (exit 2, no "
-                         f"slice written, no subagent dispatched)")
-    ap.add_argument("--max-interface-bytes", type=int,
-                    default=DEFAULT_MAX_INTERFACE_BYTES,
+                         f"{DEFAULT_MAX_STANDALONE_BYTES}, 64KB) — judged on the "
+                         f"MEASURED slice, not an estimate; a cluster over cap is "
+                         f"re-split losslessly, then context-slimmed, then refused "
+                         f"(exit 2, no slice written, no subagent dispatched). "
+                         f"Calibration: a standalone unit's worst context stack "
+                         f"(64KB slice + 32KB baseline + 64KB external) folds to "
+                         f"~53K tokens on a 150K window — no overflow risk, and "
+                         f"lowering this merge cap only fragments clusters into "
+                         f"more units (more calls on a rate-limited gateway), so "
+                         f"it stays at 64KB. Resume stickiness: a run dir with a "
+                         f"grouping.json budget record reuses the recorded caps "
+                         f"unless this flag is passed explicitly")
+    ap.add_argument("--max-interface-bytes", type=int, default=None,
                     help=f"interface unit split cap in bytes (default "
-                         f"{DEFAULT_MAX_INTERFACE_BYTES}; over-budget merged units "
-                         f"split into -partN units) — judged on the MEASURED slice; a "
-                         f"unit still over cap is re-split losslessly, then "
-                         f"context-slimmed, then refused (exit 2, no slice written, no "
-                         f"subagent dispatched)")
+                         f"{DEFAULT_MAX_INTERFACE_BYTES}, 96KB; over-budget merged "
+                         f"units split into -partN units) — judged on the MEASURED "
+                         f"slice; a unit still over cap is re-split losslessly, "
+                         f"then context-slimmed, then refused (exit 2, no slice "
+                         f"written, no subagent dispatched). Calibration (2026-10-15, "
+                         f"150K-token weak-model window): worst stack = 96KB slice + "
+                         f"32KB baseline projection + 64KB external-repo conclusion "
+                         f"+ task/output room folds to ~55-70K tokens; the old 256KB "
+                         f"default folded to ~95-120K — the overflow edge where retry "
+                         f"storms burn quota. Unit-count cost, on purpose: bigger "
+                         f"interfaces split into more -partN units (unit count = call "
+                         f"count on a rate-limited gateway); an overflow retry costs "
+                         f"a whole window, an extra part costs one call. Roomier "
+                         f"windows: pass 262144 explicitly (old default, still legal). "
+                         f"Resume stickiness: a run dir with a grouping.json budget "
+                         f"record reuses the recorded caps unless this flag is passed "
+                         f"explicitly")
     ap.add_argument("--include-excluded", action="store_true",
                     help="fallback: do NOT apply the closed exclusion filter (tests, "
                          "build outputs, static assets, lockfiles, build scripts "
@@ -2203,10 +2280,10 @@ def main():
         _eprint(f"error: --limit must be >= 0 (got {args.limit}); pass 0 for an "
                 f"empty page or omit --limit for all pending units")
         return 2
-    if args.max_standalone_bytes < 0:
+    if args.max_standalone_bytes is not None and args.max_standalone_bytes < 0:
         _eprint("error: --max-standalone-bytes must be >= 0")
         return 2
-    if args.max_interface_bytes < 0:
+    if args.max_interface_bytes is not None and args.max_interface_bytes < 0:
         _eprint("error: --max-interface-bytes must be >= 0")
         return 2
     if not args.materialize:

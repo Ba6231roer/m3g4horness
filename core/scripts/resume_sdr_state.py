@@ -293,6 +293,11 @@ def resolve(run_dir: Path, args) -> tuple:
     if step == "fanout":
         notes.append(f"{pending_n}/{total} unit(s) have no terminal marker yet "
                      f"(done={len(done_ids)} failed={len(failed_ids)}).")
+        auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+        if auth_doc.is_file():
+            notes.append(f"special-auth deployment doc present ({auth_doc}) — "
+                         f"credential renewal and the re-dispatch flags for this "
+                         f"step follow that doc when it covers them.")
     if failed_ids:
         notes.append(f"{len(failed_ids)}/{total} unit(s) terminated as FAILED (terminal — "
                      f"NOT retried on --resume); see the .failed markers and each unit's "
@@ -332,14 +337,29 @@ def resolve(run_dir: Path, args) -> tuple:
                     f"(exit 2 → fix and re-run; NEVER carry a broken work-list into fan-out)",
                     [repo, checkpoints, slices, grp_path])
     elif step == "fanout":
-        nxt = _next("bash",
-                    f"run `py {_script_abs('fanout_runner.py')} --tier sdr --repo {repo} "
-                    f"--base {base or 'master'} --branch {branch} "
-                    f"--checkpoints {checkpoints} --inputs-dir {slices} "
-                    f"--time-budget-ms 480000 --call-timeout-s 360 --stall-timeout-s 300` "
-                    f"(four-level timeout invariant; opencode hosts calibrated to 900s use "
-                    f"720000/540/300) — unit paths come from that command's own "
-                    f"`pending[]`, never hand-built",
+        fanout_desc = (f"run `py {_script_abs('fanout_runner.py')} --tier sdr --repo {repo} "
+                       f"--base {base or 'master'} --branch {branch} "
+                       f"--checkpoints {checkpoints} --inputs-dir {slices} "
+                       f"--time-budget-ms 480000 --call-timeout-s 360 --stall-timeout-s 300` "
+                       f"(four-level timeout invariant; opencode hosts calibrated to 900s use "
+                       f"720000/540/300) — unit paths come from that command's own "
+                       f"`pending[]`, never hand-built")
+        auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+        if auth_doc.is_file():
+            # Rides next_action.desc (NOT just notes): the recovering
+            # orchestrator executes desc verbatim and may never read notes —
+            # the doc pointer must be on the executed path itself.
+            fanout_desc = (
+                f"special-auth deployment doc is PRESENT ({auth_doc}): FIRST Read it "
+                f"and complete credential preparation per the doc (write "
+                f"<run-dir>/cred_source.json, run mgh_credentials.py to produce "
+                f"<run-dir>/cred.json — home-dir paths go INSIDE the parameter file, "
+                f"never on a command line), THEN run the command below with "
+                f"`--cred-file <run-dir>/cred.json` appended; on "
+                f"`credential_expired:true` (exit 2) re-acquire and re-run with "
+                f"`--resume --retry-failed` (done units never re-dispatched). — "
+                + fanout_desc)
+        nxt = _next("bash", fanout_desc,
                     [repo, checkpoints, slices, grp_path])
     elif step == "render":
         nxt = _next("bash",

@@ -148,5 +148,88 @@ class ListSdrStepsTest(unittest.TestCase):
         self.assertIn("sdr_manifest.json", pattern)
 
 
+class ShellOutsourcedInvocationAnchorTest(unittest.TestCase):
+    """fix-mgh-sdr-quota-adaptive-fanout 7.x: the shells outsourced the canonical
+    call lines to this manifest (D8 A案) — the manifest is now the assertion home
+    for (a) the `--wave 1` serial default + quota triple on the fanout invocation,
+    (b) the step-level recipes that left the shells (fast-fail storm tri-layer,
+    slice-budget calibration)."""
+
+    def test_fanout_invocation_wave1_and_quota_flags(self):
+        p = subprocess.run([sys.executable, str(SCRIPT), "--step", "fanout"],
+                           capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        inv = json.loads(p.stdout)["steps"][0]["invocation"]
+        for needle in ("--wave 1", "--quota-calls <N>", "--quota-window-s <W>",
+                       "--quota-calls-per-unit <K>", "--time-budget-ms",
+                       "--call-timeout-s", "--stall-timeout-s"):
+            self.assertIn(needle, inv, needle)
+
+    def test_fanout_discipline_carries_storm_trilayer_and_quota(self):
+        sys.path.insert(0, str(SCRIPTS))
+        from discipline_core import get_discipline
+        d = get_discipline("fanout", domain="sdr")
+        text = json.dumps(d, ensure_ascii=False)
+        # tri-layer: congestion re-dispatch / rate-limit window wait / retry-failed once
+        for needle in ("stalled:true", "rate_limited:true", "配额窗口", "--retry-failed",
+                       "--quota-calls", "--quota-window-s", "--quota-calls-per-unit",
+                       "--wave 1"):
+            self.assertIn(needle, text, needle)
+
+    def test_group_discipline_carries_budget_calibration(self):
+        sys.path.insert(0, str(SCRIPTS))
+        from discipline_core import get_discipline
+        d = get_discipline("group", domain="sdr")
+        text = json.dumps(d, ensure_ascii=False)
+        for needle in ("96KB", "98304", "65536", "150K", "-partN", "粘滞",
+                       "grouping.json"):
+            self.assertIn(needle, text, needle)
+
+
+
+class SpecialAuthFieldTest(unittest.TestCase):
+    """The top-level special_auth presence field (the manifest's ONE allowed
+    disk probe): absent doc → {present: false, path: null} with every other
+    field unchanged; present doc → {present: true, path: <abs>}. The doc is
+    transiently created at <mgh-core>/mgh-special-auth.md (its real,
+    gitignored location) and removed in the finally block."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.doc = SCRIPT.parent.parent / "mgh-special-auth.md"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self):
+        p = subprocess.run([sys.executable, str(SCRIPT)],
+                           capture_output=True, text=True, encoding="utf-8")
+        return p.returncode, p.stdout, p.stderr
+
+    def test_absent_doc_shape(self):
+        code, out, err = self._run()
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["special_auth"], {"present": False, "path": None})
+        # the steps surface is untouched by the new field
+        self.assertEqual({s["step"] for s in d["steps"]}, STEP_IDS)
+
+    def test_present_doc_shape(self):
+        created = False
+        try:
+            if not self.doc.exists():
+                self.doc.write_text("guide", encoding="utf-8")
+                created = True
+            code, out, err = self._run()
+            self.assertEqual(code, 0, err)
+            d = json.loads(out)
+            self.assertTrue(d["special_auth"]["present"])
+            self.assertTrue(Path(d["special_auth"]["path"]).is_absolute())
+        finally:
+            if created:
+                self.doc.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

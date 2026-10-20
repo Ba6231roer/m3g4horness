@@ -191,6 +191,11 @@ SDD_EXEMPT_CHANGES = frozenset({
     # the maintainer) and adds docs/glossary.md entries — both docs/ paths are the
     # change's own deliverables, not pointers to elsewhere
     "add-mgh-telemetry-seam",
+    # fanout auth isolation: delivers docs/enterprise-environment.md (the untracked
+    # maintainer-carried enterprise environment summary; writing it IS the task) and
+    # edits docs/glossary.md + docs/man/mgh-sdr.md — its artifacts legitimately name
+    # those docs/ paths as deliverables/edit targets
+    "fix-mgh-sdr-fanout-auth-isolation",
 })
 
 

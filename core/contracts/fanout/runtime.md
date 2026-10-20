@@ -29,6 +29,32 @@ Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)与三宿主 headl
 - 并发 session:dsh 每 run 自生成 `session-<uuid>`、每 session 目录独立锁,多进程并发
   零互踩(实测);`--session-id` 是接管既有会话的 debug 通道,NEVER 进产品派发形。
 
+## 子进程执行环境注入(可选;两 flag 全缺席 = 与上表逐字节一致)
+
+| flag | host 域 | 子进程 env 增设 | 磁盘物化(plan 工件同级的 run/init 目录下) |
+| --- | --- | --- | --- |
+| `--cred-file <run>/cred.json` | 仅 opencode 形(claude/dsh 退出码 2 拒识,NEVER 静默退化;in-process 测试钩子 `test` 形允许物化验证) | `XDG_CONFIG_HOME=<…>/childcfg/<unit>` + `XDG_DATA_HOME=<…>/ocdata/<unit>`(按单元) | `<…>/childcfg/<unit>/opencode/opencode.json` = 全局配置副本,仅 `provider_id` 定位的 provider 覆盖为静态 `options.baseURL`+`options.apiKey`(**provider id 不变**——model id 前缀耦合;`keep_plugins:false` 时摘 plugin 列表);幂等,重派/续期重物化结果一致 |
+| `--isolate-data` | opencode 形(其它形 stderr note 后忽略) | 仅 `XDG_DATA_HOME=<…>/ocdata/<unit>` | `<…>/ocdata/<unit>/`(log/sqlite/repos 随变量隔离,消除并发 fat client 互踩) |
+
+- cred 文件 schema 闭集 `{v, baseURL, apikey, provider_id, global_config, keep_plugins,
+  expired_signatures[]}`,校验器单源在 `mgh_credentials.py`(生产者与 dispatcher import
+  同一个);缺文件/坏 JSON/缺字段/空 apikey → 启动期退出码 2,零 spawn 零枚举副作用。
+  apikey 只落子配置文件一处,NEVER 出现在 stdout/stderr/marker/run.log/遥测。
+- env 注入经 `_UNIT_ENV` 注册表(派发线程登记、`_run_unit` 认领,其 9 参签名冻结);
+  物化失败 = 该单元 pre-spawn 失败(`.failed` marker,reason `cred-materialize: …`)。
+- **凭证过期快停**:非 ok 终态(crash/timeout/stall/failed ack)输出尾部按
+  `expired_signatures[]`(大小写不敏感子串)扫描;首个命中 → 停止新派发(优先级高于
+  限流风暴截断与快败冷却),在飞照常收割,退出码 2;stdout `credential_expired` +
+  `credential_expired_units[]`;stderr recipe = 重取证 → 更新 cred 文件 → 同参
+  `--resume --retry-failed`。marker 语义不变(命中单元按既有合同落盘);空特征集 =
+  扫描面不激活;签名漂移 → 退化到既有 stall/冷却兜底(签名层 NEVER 唯一防线)。
+- **special-auth advisory**:安装树存在 `<mgh-core>/mgh-special-auth.md`(维护者随包
+  分发,NEVER 提交 git;install 做「源在场才落盘」收敛复制)且未传 `--cred-file` →
+  派发前 stderr 一行提示(不阻塞、不改退出码,全 tier 一致)。
+- **`--dry-run` 纯计划**:零写盘零 spawn(审计副本/liveness/sidecar/marker/子配置全
+  跳过),单元清单 + 将写路径 + 命令形 + pre-spawn 锚检查预判只走 stdout,退出码 0;
+  `--kill-stale`/`--purge-audit` 的 dry-run 审视守卫是独立语义,不变。
+
 ## tier 装载文件(dsh 专属,a 档 = 配置装载)
 
 `<mgh-core>/dsh/tiers/<tier>.yml`(tier ∈ scout|scout-merge|t1|t2|t3|sdr)由 `install.sh --dsh` 从

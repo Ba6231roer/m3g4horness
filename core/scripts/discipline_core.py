@@ -281,19 +281,34 @@ _SDR_STALLED_PROVIDER_RECIPE = (
     "stalled:true 且 `diff_group.py --check <run-dir>` 退出码 0(分组产物完好:grouping.json + "
     "slices + markers;该检查校验**产物完整性**、**非**运行进度自洽性)→ provider 拥塞形态:直接"
     "同参重派(runner 已内建快败冷却与熔断前一次退避);NEVER 据此改写单元输入/删 marker/写微脚本")
+_SDR_RATELIMIT_WAIT_RECIPE = (
+    "stdout `rate_limited:true` + `rate_limited_crashes[]` → 等满一个配额窗口(时长以网关配置为"
+    "准,如 10 分钟)再同参重派;配额模式下 runner 已先做「等满窗口复位冷却自我恢复」,截断说明"
+    "窗口复位后仍限流 = 配额参数与网关实际配额不符 → 核对 --quota-calls/--quota-window-s/"
+    "--quota-calls-per-unit 后重派;非配额模式(未传配额三 flag)语义不变")
 _SDR_RETRY_FAILED_RECIPE = (
     "收尾 failed>0 且该单元 run.log(<checkpoints>/sdr/<unit>.run.log)呈 provider 瞬断形态"
     "(429/rate limit/quota 特征)→ **至多一次** `fanout_runner.py --tier sdr --retry-failed` 重派"
     "(runner 自动携枚举器 --include-failed,认领时先删 .failed marker);再失败接受缺口并在报告 "
     "degraded 披露")
 _SDR_FANOUT_DISPATCHER_RECIPE = (
-    "主路径 = 一次 Bash 跑 fanout_runner.py --tier sdr(带 --time-budget-ms < 宿主 per-call "
+    "主路径 = 一次 Bash 跑 fanout_runner.py --tier sdr,规范行默认 `--wave 1`(内网串行最稳,"
+    "opencode 并行子进程另有数据库锁前科;要并发建议 1~2)(带 --time-budget-ms < 宿主 per-call "
     "timeout × 0.8,且 MUST 显式传 --call-timeout-s < budget×0.8、--stall-timeout-s < "
     "--call-timeout-s,四级不变式违反 spawn 前退出码 2;合规 480000/360/300(claude)或 "
-    "720000/540/300(opencode));partial:true 重派同一命令,重派传 per-call timeout > "
-    "--time-budget-ms(软时限先于宿主硬杀,重派 NEVER 退化为硬杀循环);单元输出静默 ≥ "
-    "--stall-timeout-s → 树杀重派(不增磁盘终态计数);退出码 2(宿主 CLI 不可用)→ 回退手派路径;"
-    "NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息")
+    "720000/540/300(opencode));调用次数限流网关(如 100 次/10 分钟)加配额三 flag "
+    "`--quota-calls <N> --quota-window-s <W> [--quota-calls-per-unit <K>,默认 10=保守上界]`"
+    "(估算式准入:按窗口内已派发数×K 节流,配额参数是估算口径、未配置零变化);"
+    "partial:true 重派同一命令,重派传 per-call timeout > --time-budget-ms(软时限先于宿主硬杀,"
+    "重派 NEVER 退化为硬杀循环);单元输出静默 ≥ --stall-timeout-s → 树杀重派(不增磁盘终态计数);"
+    "退出码 2(宿主 CLI 不可用)→ 回退手派路径;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息")
+_SDR_GROUP_BUDGET_RECIPE = (
+    "切片预算默认口径(2026-10-15 校准,判据=切片渲染后实测字节):interface 单元 96KB(98304,"
+    "按 150K 窗口反算:96KB 切片+32KB 基线+64KB 外部结论折算约 55~70K token)+ standalone 簇 "
+    "64KB(65536,最坏约 53K token 无溢出风险);interface 上限调小会让大接口多切 -partN 续单元"
+    "(单元数=调用数),溢出重试比确定性多切贵;大窗口宽松环境显式传 flag 调大(256KB 旧默认仍合法);"
+    "run 目录已有 grouping.json 预算记录且未显式传 flag → 复用记录值(resume 单元身份粘滞,"
+    "显式传 flag 才覆盖)")
 _SDR_FANOUT_PATH_RECIPE = (
     "单元输入切片 / 草稿 / 完成标记 / 失败标记 = `diff_group.py` stdout "
     "`pending[].input_path|draft_path|done_marker|failed_marker`(**绝对**、逐字透传给 dispatcher,"
@@ -325,6 +340,7 @@ _DISCIPLINE_SDR = {
         ],
         "path_recipes": [
             _pr("sdr-fanout-path", _SDR_FANOUT_PATH_RECIPE, "diff_group --step 契约"),
+            _pr("sdr-group-budget", _SDR_GROUP_BUDGET_RECIPE, "diff_group --help 校准口径"),
         ],
         "nevers": [
             "NEVER 自拼 <run-dir>/<unit_id> 路径",
@@ -345,6 +361,8 @@ _DISCIPLINE_SDR = {
             _pr("sdr-fanout-path", _SDR_FANOUT_PATH_RECIPE, "diff_group --step 契约"),
             _pr("sdr-fanout-stalled-provider", _SDR_STALLED_PROVIDER_RECIPE,
                 "fanout_runner 快败冷却契约"),
+            _pr("sdr-fanout-ratelimit-wait", _SDR_RATELIMIT_WAIT_RECIPE,
+                "fanout_runner 限流截断契约"),
             _pr("sdr-fanout-retry-failed", _SDR_RETRY_FAILED_RECIPE,
                 "fanout_runner --retry-failed 契约"),
             _pr("sdr-fanout-run-log", _SDR_RUN_LOG_RECIPE, "fanout_runner run.log 契约"),

@@ -21,6 +21,10 @@ JSON / stderr=诊断严格分流、退出码 `0` 成功 · `1` 输入错误(文�
     ├── sensitive_catalog.json       # sdr_context 物化的解析后敏感目录对象(subagent 只读路径的指向)
     ├── readability_text_bundle.json # render 每次渲染写出;全部问题记录人类面文本的单束(读者模拟评审唯一输入)
     ├── readability_advisories.json  # 读者模拟评审建议(编排器在首次渲染后派发一次评审产出;可选)
+    ├── cred_source.json             # 凭证取证参数文件(编排器 Write;企业值见 mgh-special-auth.md;可选——仅 special-auth 部署面激活时)
+    ├── cred.json                    # 凭证载荷(mgh_credentials.py 产出,fanout_runner --cred-file 消费;权限收紧,用完随 run 目录清理)
+    ├── childcfg/<unit>/opencode/    # 每单元子配置(--cred-file 注入;全局配置副本 + provider 静态覆盖)
+    ├── ocdata/<unit>/               # 每单元独立数据目录(--cred-file/--isolate-data;log/sqlite/repos 随 XDG_DATA_HOME 隔离)
     ├── markers/                     # <unit_id>.done / <unit_id>.failed(磁盘真相,resume 锚)
     └── sdr_manifest.json            # render 产出 counts + boundaries + failed_units[];整条 run 的终止凭证
 ```

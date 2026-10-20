@@ -15,14 +15,19 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 
 ### 用户画像与设计目标
 
+> **必读(维护者环境,文件缺席时跳过)**:企业定制运行环境约束(模型窗口/限频/CAS 认证
+> 闭环/共享数据目录危害/宿主上限)的完整最新清单汇总在 `docs/enterprise-environment.md`
+> (不入 git,维护者随包分发;认证操作细则同为其私档 `mgh-special-auth.md`)。本仓工作
+> 时若该文件存在以其为准;公开 clone 缺席时按下面通用约束理解即可——研发铁律自身自足。
+
 本工具族为以下运行环境量身设计;读研发铁律时,把每条规则都理解成对这张表中某个约束的
-应对,规则就不是任性好恶而是必然推论:
+应对,规则就不是任性好恶而是必然推论(企业定制的认证/限频细节见上面的必读文件):
 
 | 运行环境约束 | 工具族的设计应对 |
 | --- | --- |
 | 企业内网,不能联网装依赖 | 确定性脚本零 pip 依赖(R2),install 时自检 |
 | 内网部署的大模型服务:上下文窗口仅 ~150K,模型较旧较弱 | 机械重活下沉确定性脚本,LLM 只做判断类工作;命令壳 token 硬预算(R5.6);大任务拆成带独立上下文的 subagent 隔离扇出,单请求只见切片 |
-| 速度慢、有并发限制、每 10 分钟 100 次调用的频控 | fan-out 派发器内置槽位补位 / 失活检测 / 快败冷却 / 限流风暴截断;归纳阶段打包(pack)摊薄调用开销;软时限干净早退代替硬超时丢任务 |
+| 速度慢、有并发限制、每 10 分钟 100 次调用的频控 | fan-out 派发器内置槽位补位 / 失活检测 / 快败冷却 / 限流风暴截断;配额模式(`--quota-calls/--quota-window-s/--quota-calls-per-unit`,估算式准入主动节流,mgh-sdr 壳规范行默认 `--wave 1`)按网关配额主动减速;归纳阶段打包(pack)摊薄调用开销;软时限干净早退代替硬超时丢任务 |
 | 大代码仓:数百万行、十年迭代历史,Java Web 项目为主 | `--scope` 按模块切片 + `--merge` 合并;callgraph 缓存 + scan 续点;`--resume` 磁盘化断点续跑(R5.4) |
 | 高安全要求(银行项目为主) | 产物一律是「候选 + 证据」并声明诚实边界,人工复核;每步产物 `--check` fail-loud 不带病前进(R5.9);运行时守卫拦越权操作(R5.7) |
 | 目标:稳定、全面、准确地做安全工作 | 稳定 = 确定性脚本 + 哨兵 + resume 全磁盘化;全面 = 闭集维度 + 启发式兜底(漏分组退独立单元,覆盖不丢);准确 = 证据锚点 + 三信号匹配 + codegraph 结构确认 + 披露不夸大 |
@@ -276,6 +281,7 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
   当前覆盖:`discover_controls`/`plan_scout`/`merge_scout`/`classify_tests` `--check` + `validate_inventory.py`(init)
   + `prefilter`/`dedup`/`emit_sarif`/`load_controls` `--check`(/mgh-sast 确定性阶段)+ `prepare_augment`/`merge_augment`/`merge_memory` `--check`(/mgh-sra)
   + `ingest_requirements`/`render_report` `--check`(/mgh-srr)+ `diff_group`/`sdr_context`/`render_sdr_report`/`resume_sdr_state` `--check`(/mgh-sdr)
++ `mgh_credentials --check`(mgh-* 凭证载荷 schema 校验,零联网)
   + `assemble_test_rules` `--check` 与独立 validator `validate_test_rules.py`(/mgh-ut-init)。
 - **R5.10 分发产物纯净性**:经 `install.sh` 装入目标项目的 md(命令壳 / agent 定义 / stage
   提示词 / I/O 契约 / skills)MUST 仅含对目标 agent 有用的操作性内容,NEVER 携带只在本仓研发语境
@@ -396,6 +402,8 @@ helper)或发布前才跑全量。
 | sdr 面(`diff_group` / `sdr_context` / `sdr_tier` / 报告 / launcher / 步骤与 resume / 读根 / 敏感目录) | `test_diff_group` `test_sdr_context` `test_sdr_tier` `test_render_sdr_report` `test_mgh_sdr_launch` `test_list_sdr_steps` `test_resume_sdr_state` `test_read_roots_config` `test_sensitive_catalog` `test_sdr_failure_chain` |
 | sra / srr 面 | `test_sra_prepare` `test_sra_merge` `test_sra_memory` `test_srr_ingest` `test_srr_report` |
 | `mgh_telemetry.py`(遥测模块)+ 七个挂载脚本的遥测面 | `test_mgh_telemetry` + 挂载点各归其位:`test_write_runconfig` `test_resume_state` `test_write_ut_runconfig` `test_resume_ut_init_state` `test_sdr_context` `test_resume_sdr_state` `test_sra_prepare` `test_srr_ingest`(各文件 `TestTelemetryMount`/`TelemetryMount*` 类) |
+| `mgh_credentials.py`(凭证中心)+ fanout 注入/隔离/过期分类/dry-run 面 | `test_mgh_credentials` `test_fanout_runner` |
+| special-auth 部署面(`list_sdr_steps` 字段/resume 提示/install 复制收敛/壳引导) | `test_list_sdr_steps` `test_resume_sdr_state` `test_install_special_auth` |
 | ut-init 面 | `test_ut_init_runtime` `test_ut_init_ack_contract` `test_resume_ut_init_state` `test_write_ut_runconfig` `test_classify_tests` `test_test_rules_purity` |
 | sast 确定性阶段 | `test_deterministic` `test_sast_runtime` `test_chunk_sources` `test_list_chunks` `test_list_verify_jobs` `test_stage_check` `test_load_controls` `test_focus_scope` |
 | 命令壳 / 提示词 / 分发产物 | `test_distributed_md_purity` `test_plain_language` `test_recipe_visibility` `test_dsh_command_surface` `test_mgh_init_codegraph_parity` `test_mgh_sra_codegraph_parity` `test_mgh_srr_codegraph_parity` + `python tools/check_contracts.py` |
@@ -444,6 +452,11 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   不删除**,也不被当作项目约定;opencode/claude 两面结构不混。
 - `/mgh-sdr` 的发现是 **LLM 候选,非确认漏洞**;接口分组是**注解启发式**(Spring/JAX-RS/Servlet 常用注解),漏分组接口退入独立变更单元(粒度粗、覆盖不丢),非 java web 项目整体退化为 standalone 模式;外部仓结论是**检索时点快照**(不保证前端分支同步);基线经字节预算投影(低优先级细节可能未全量投影);敏感目录来源为 project 或 default-template 回退(目录外字段仅按回退规则识别);报告为**自包含单文件 HTML**(数据同步落 `<run-dir>/sdr_report_data.json`,人读 HTML 与机器读 JSON 同源),源文件链接为仓内相对路径(部分浏览器对 `.java` 等扩展名可能下载而非打开),历史 `.md` 报告不迁移不回写。
 - 守卫 Bash 面路径净网是 **regex-over-string 提取、非 shell 解析器**(与全部 Bash 规则同立场),已知残余:① **未知写动词把数据写进已声明只读根**——token 在读允许集内放行、变异规则又不认得该动词 → 漏(sdr 审批流 change 落地后声明根全部经用户拍板,风险受控);② **别名/变量间接**(`$p='D:\out'; cp x $p`)提取不到裸路径 → 漏;③ 接受的新拦截(原放行→现拦,救济=配置声明或非运行会话):`> /tmp/x` 单写、`--flag=<树外路径>` 取值、`git -C <树外>`、无害提及树外路径;④ **通配按去通配前缀判属**——引号闭合路径后紧邻 glob 段先拼为单 token、含 `*`/`?` 的 token 按首个元字符前的前缀 resolve 判定(治「树内路径+通配」被拆成越树碎片误拦),glob 的**展开结果**不判定、别名/变量间接照旧不可见(同 ②)。
+- fan-out 的**静态凭证注入与数据目录隔离是 opencode host 形专属**(`--cred-file` 对
+  claude/dsh 形退出码拒识;`--isolate-data` 对其它形提示后忽略);凭证过期特征扫描是
+  **签名快停层**,漂移时优雅退化到既有 stall/冷却兜底;企业认证/环境细节只住在不入 git
+  的 `mgh-special-auth.md` 与 `docs/enterprise-environment.md`(install 对前者做源在场
+  收敛复制,通用分发面零企业内容)。
 - 工具族带**尽力而为的启动遥测**(埋点在各命令启动路径的确定性脚本内部,17 个命令壳零改动):未配置遥测端点(env `MGH_TELEMETRY_URL` 与模块内置默认皆空)时**零网络行为**;发送失败/超时静默丢弃,挂载脚本的 stdout/退出码/产物永不因遥测改变;resume 与过程查询的计数是 **30 分钟冷却窗口近似**(「活动窗口开始次数」,不是精确会话数——超 30 分钟的长任务中途查询会多计、30 分钟内快速重启会漏计);params 字段原样透传、可能含项目路径等内网信息(服务端在内网,端点置空即整体停报)。
 
 ## 可参考项目

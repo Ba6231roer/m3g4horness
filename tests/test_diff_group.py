@@ -1720,7 +1720,7 @@ class SliceByteGateTest(unittest.TestCase):
         self.assertIn("+    // pad line 0:", text)
         self.assertNotIn("(截断", text.split("## Diff hunks", 1)[1])   # never the diff
         self.assertEqual(d["budget"], {"max_standalone_bytes": 2200,
-                                       "max_interface_bytes": 262144})
+                                       "max_interface_bytes": 98304})
 
     def test_oversize_atomic_residue_refuses_with_zero_side_effects(self):
         # Scenario: the file's own diff body is over the cap — no context block can give
@@ -1770,7 +1770,7 @@ class SliceByteGateTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         d = json.loads(out)
         self.assertEqual(d["budget"], {"max_standalone_bytes": 65536,
-                                       "max_interface_bytes": 262144})
+                                       "max_interface_bytes": 98304})
         for u in d["pending"]:
             self.assertEqual(u["slimmed"], {})
             self.assertNotRegex(self._slice_text(u), r"截断")
@@ -1841,6 +1841,182 @@ class SliceByteGateTest(unittest.TestCase):
         code, _, cerr = self._run("--check", str(run_dir))
         self.assertEqual(code, 2)
         self.assertIn("budget malformed", cerr)
+
+
+class TestBudgetCalibrationAndStickiness(unittest.TestCase):
+    """fix-mgh-sdr-quota-adaptive-fanout (2026-10-15): the interface default cap is
+    calibrated to the 150K-token weak-model window (96KB = 98304), and a run dir's
+    grouping.json budget record is STICKY — an unpassed flag reuses the record so a
+    tool upgrade never re-splits big interfaces mid-run and shifts -partN unit ids
+    (a re-dispatched done unit burns a whole quota window on a rate-limited gateway);
+    an explicit flag always wins and updates the record."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_diffcal_"))
+        self._env_backup = {k: v for k, v in os.environ.items()}
+
+    def tearDown(self):
+        import shutil
+        for k in ("MGH_CODEGRAPH_BIN", "CG_STUB_MAP"):
+            os.environ.pop(k, None)
+        for k, v in self._env_backup.items():
+            os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    _build = DiffGroupTest._build
+    _run = DiffGroupTest._run
+    _run_cap = SliceByteGateTest._run_cap
+    _slice_text = DiffGroupTest._slice_text
+    _hunk_locators = DiffGroupTest._hunk_locators
+
+    # one controller, four routes (~20KB changed literal each -> ~40KB diff hunk
+    # per route counting both - and + lines), all calling the same service method
+    # -> merged into ONE ~160KB interface unit: over the 96KB default (must split
+    # into parts of ~80KB), under the old 256KB (must NOT split when passed
+    # explicitly), each single constituent well under both caps (re-split stays
+    # lossless; no route body alone can trip slim/refuse)
+    def _four_route_fixture(self):
+        # unchanged filler between methods: keeps each route in its OWN diff hunk
+        # (adjacent methods merge into one hunk, and hunks are the atomic unit of
+        # every re-split path)
+        pad = "\n".join(f"    private int pad{i} = {i};" for i in range(8))
+
+        def ctrl(marker):
+            routes = []
+            for r in ("a", "b", "c", "d"):
+                routes.append(f"""    @GetMapping("/{r}")
+    public Object {r}(String id) {{
+        return svc.s(id) + "{marker}";
+    }}
+
+{pad}
+""")
+            return ("@RestController\n@RequestMapping(\"/big\")\n"
+                    "public class BigController {\n"
+                    + "\n".join(routes) + "}\n")
+        # base carries an equally big literal per route so every route hunk has a
+        # ~40KB "-line + +line" pair (whole unit ~160KB; each constituent ~40KB)
+        big = "x" * 20000
+        old = "y" * 20000
+        base = {
+            "src/BigController.java": ctrl(old),
+            "src/BigService.java": "public class BigService {\n"
+                                   "    public Object s(String id) {\n"
+                                   "        return null;\n    }\n}\n",
+        }
+        feat = {
+            "src/BigController.java": ctrl(big),
+            "src/BigService.java": "public class BigService {\n"
+                                   "    public Object s(String id) {\n"
+                                   "        return \"changed\";\n    }\n}\n",
+        }
+        edges = {"callees": {
+            "a": [{"name": "s", "kind": "method",
+                   "filePath": "src/BigService.java", "startLine": 2}],
+            "b": [{"name": "s", "kind": "method",
+                   "filePath": "src/BigService.java", "startLine": 2}],
+            "c": [{"name": "s", "kind": "method",
+                   "filePath": "src/BigService.java", "startLine": 2}],
+            "d": [{"name": "s", "kind": "method",
+                   "filePath": "src/BigService.java", "startLine": 2}],
+            "s": [],
+        }}
+        return base, feat, edges
+
+    def test_default_caps_anchored_in_constants_and_help(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("diff_group_cal", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.DEFAULT_MAX_INTERFACE_BYTES, 98304)
+        self.assertEqual(mod.DEFAULT_MAX_STANDALONE_BYTES, 65536)
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        flat = " ".join(r.stdout.split())
+        for needle in ("98304", "65536", "262144", "150K", "96KB slice",
+                       "-partN"):
+            self.assertIn(needle, flat, needle)
+
+    def test_200kb_interface_resplits_under_new_default(self):
+        base, feat, edges = self._four_route_fixture()
+        repo = self._build(base, feat, cg_on=True, edges=edges)
+        code, out, err, run_dir = self._run_cap(repo, "newdef")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        # the merged unit (~180KB) is over the NEW default and under the old:
+        # default run MUST split, budget record carries the new defaults
+        self.assertEqual(d["budget"], {"max_standalone_bytes": 65536,
+                                       "max_interface_bytes": 98304})
+        parts = [u for u in d["pending"] if "-part" in u["unit_id"]]
+        self.assertGreaterEqual(len(parts), 2, d["pending"])
+        for u in d["pending"]:
+            self.assertLessEqual(u["unit_bytes"], 98304)
+            self.assertEqual(u["slimmed"], {})   # lossless re-split, never slimmed
+        # explicit OLD default (262144) is still legal: the same merged unit
+        # now fits under the cap -> NO split, single interface unit
+        code, wout, werr, _ = self._run_cap(repo, "olddef",
+                                            "--max-interface-bytes", "262144")
+        self.assertEqual(code, 0, werr)
+        wd = json.loads(wout)
+        self.assertEqual(wd["budget"]["max_interface_bytes"], 262144)
+        self.assertFalse([u for u in wd["pending"] if "-part" in u["unit_id"]],
+                         wd["pending"])
+        # lossless: the parts' hunk locators equal the un-split run's set
+        self.assertEqual(self._hunk_locators(d), self._hunk_locators(wd))
+
+    def test_budget_stickiness_reuses_record_and_explicit_wins(self):
+        base, feat, edges = self._four_route_fixture()
+        repo = self._build(base, feat, cg_on=True, edges=edges)
+        # run 1: explicit old default -> recorded
+        code, out1, err1, _ = self._run_cap(repo, "sticky",
+                                            "--max-interface-bytes", "262144")
+        self.assertEqual(code, 0, err1)
+        d1 = json.loads(out1)
+        self.assertEqual(d1["budget"]["max_interface_bytes"], 262144)
+        ids1 = {u["unit_id"] for u in d1["pending"]}
+        self.assertFalse([u for u in d1["pending"] if "-part" in u["unit_id"]])
+        # run 2 (SAME run dir, NO flags): the record is reused — unit ids
+        # stable, stderr discloses the reuse
+        code, out2, err2, _ = self._run_cap(repo, "sticky")
+        self.assertEqual(code, 0, err2)
+        d2 = json.loads(out2)
+        self.assertEqual(d2["budget"]["max_interface_bytes"], 262144)
+        self.assertIn("budget stickiness", err2)
+        self.assertEqual({u["unit_id"] for u in d2["pending"]}, ids1)
+        self.assertFalse([u for u in d2["pending"] if "-part" in u["unit_id"]])
+        # run 3: explicit NEW default overrides the record -> re-split happens
+        # and the record updates
+        code, out3, err3, _ = self._run_cap(repo, "sticky",
+                                            "--max-interface-bytes", "98304")
+        self.assertEqual(code, 0, err3)
+        d3 = json.loads(out3)
+        self.assertEqual(d3["budget"]["max_interface_bytes"], 98304)
+        self.assertIn("overrides the grouping.json record", err3)
+        self.assertTrue([u for u in d3["pending"] if "-part" in u["unit_id"]],
+                        d3["pending"])
+        for u in d3["pending"]:
+            self.assertLessEqual(u["unit_bytes"], 98304)
+
+    def test_sticky_fallback_only_when_record_carrying(self):
+        # a run dir WITHOUT a grouping.json budget record (or with none at all)
+        # falls back to the module defaults — never to a guess
+        base, feat, edges = self._four_route_fixture()
+        repo = self._build(base, feat, cg_on=True, edges=edges)
+        code, out, err, run_dir = self._run_cap(repo, "fresh")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["budget"], {"max_standalone_bytes": 65536,
+                                       "max_interface_bytes": 98304})
+        self.assertNotIn("budget stickiness", err)
+        self.assertTrue((run_dir / "grouping.json").is_file())
+        # a malformed budget record degrades to the defaults too
+        (run_dir / "grouping.json").write_text(json.dumps(
+            {"budget": {"max_standalone_bytes": "big"}}), encoding="utf-8")
+        code, out, err, _ = self._run_cap(repo, "fresh")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["budget"]["max_interface_bytes"], 98304)
+        self.assertNotIn("budget stickiness", err)
 
 
 if __name__ == "__main__":

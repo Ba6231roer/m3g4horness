@@ -222,5 +222,50 @@ class HumanFaceDocsTest(unittest.TestCase):
                 self.assertIn(marker, text, f"{p} missing readability-step marker {marker!r}")
 
 
+class OnePassDisciplineDocsTest(unittest.TestCase):
+    """fix-mgh-sdr-quota-adaptive-fanout 6.x 对账:任务模板携单遍往返纪律段
+    (全部输入第一批并行读入 → 一次判断 → 写 draft 与 touch marker 同批 → 单行 ack,
+    NEVER 逐文件多轮往返),且与刚性三元组共存(路径闭集措辞逐字保留);三面 agent
+    定义各含与模板一致的单行指针(逐字对账)。"""
+
+    def setUp(self):
+        self.task_md = (ROOT / "core" / "prompts" / "fragments" / "fanout"
+                        / "sdr-task.md").read_text(encoding="utf-8")
+        self.agent_files = [
+            ROOT / "releases" / "opencode" / "agent" / "sdr-review-fanout.md",
+            ROOT / "releases" / "claude-code" / "agents" / "sdr-review-fanout.md",
+            ROOT / "releases" / "dsh" / "agents" / "sdr.md",
+        ]
+
+    def test_task_template_carries_one_pass_discipline(self):
+        for marker in ("单遍往返纪律", "first batch of parallel reads",
+                       "ONE same batch", "single ack line",
+                       "NEVER read your inputs one file per round",
+                       "逐文件多轮往返"):
+            self.assertIn(marker, self.task_md, marker)
+
+    def test_one_pass_discipline_coexists_with_rigid_triple(self):
+        # the discipline bounds ROUND TRIPS only — the rigid I/O triple's
+        # path-closed-set wording must survive verbatim
+        self.assertIn("## Rigid I/O triple", self.task_md)
+        self.assertIn("Read ONLY `input_path`", self.task_md)
+        self.assertIn("Write EXACTLY `draft_path`", self.task_md)
+        self.assertIn("unchanged, word for word", self.task_md)
+
+    def test_three_agent_pointers_identical_and_match_template(self):
+        pointer = ("- 单遍往返(调用次数收敛):全部输入(slice + 基线投影 + 敏感目录 + 外部结论)第一批并行\n"
+                   "  读入 → 一次判断 → 写 draft 与 touch marker 同批 → 单行 ack;NEVER 逐文件多轮往返\n"
+                   "  (调用次数限流网关下每次往返都烧配额)。本条只约束往返次数——读/写路径闭集与刚性\n"
+                   "  三元组逐字不变。")
+        for p in self.agent_files:
+            text = p.read_text(encoding="utf-8")
+            self.assertIn(pointer, text,
+                          f"{p} missing the verbatim one-pass pointer line")
+        # template and pointer agree on the canonical sequence
+        for marker in ("first batch of parallel reads", "ONE same batch",
+                       "逐文件多轮往返"):
+            self.assertIn(marker, self.task_md, marker)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2,10 +2,6 @@
 
 ## Purpose
 
-lemetry Specification
-
-## Purpose
-
 五个已发布的 `mgh-*` 命令（mgh-init / mgh-sdr / mgh-sra / mgh-srr / mgh-ut-init）在启动路径的确定性脚本内部向内网遥测服务上报一条使用记录：谁（本机用户名）、哪台机器（本机 IP）、用了什么（命令中文名与原名）、带了什么参数。字段采集走最低权限路径，取不到降级填 `unknown`；发送遵循 fire-and-forget，任何失败静默跳过；**命令编排壳零改动**，挂载脚本的既有行为与退出码永不因遥测改变。mgh-sast 无启动期脚本，暂不接入（独立占位提案记录）。服务端按随本 change 交付的接口文档独立实现。
 
 ## Requirements

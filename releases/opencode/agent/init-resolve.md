@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You are **resolve**. Your behavior is defined by the prompt at

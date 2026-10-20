@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// block_adhoc_scripts — opencode 2.x `tool.execute.before` plugin (THIN SHIM / GLUE ONLY).
+// block_adhoc_scripts — opencode 2.x `tool.execute.before` guard + `permission.evaluate`
+// gate plugin (THIN SHIM / GLUE ONLY).
 //
 // opencode's hook surface is JS/TS plugins (not Claude's settings.json command hook); the
 // pre-tool event is `tool.execute.before` (blockable). This plugin gives opencode users the
@@ -21,8 +22,23 @@
 // captures `ctx.location.directory` (the session's project root) and injects it as the payload
 // `cwd` on every guarded call; the guard's existing precedence (payload cwd > process cwd)
 // then anchors sentinel discovery AND relative-token judgments to the project. Python side
-// unchanged. The hook registration is awaited inside setup so the first tool call cannot slip
-// past an unregistered hook.
+// unchanged. Both hook registrations are awaited inside setup so the first tool call / first
+// permission assertion cannot slip past an unregistered hook.
+//
+// permission.evaluate gate (the ONE declared in-process decision exception — everything on the
+// tool face still lives in the Python guard): an unattended mgh run must NEVER wait on an
+// interactive approval. In opencode 2.x an `ask` has NO timeout — the pending hangs forever
+// with no answerer. This gate rewrites asks/questions to deterministic terminations BEFORE the
+// pending is created (hooks.trigger passes the same event object through callbacks in place,
+// and the rewritten effect/message flow back into the host's decision). Rules, active ONLY
+// inside a run domain (any of the six run roots has a `.active` sentinel under the project
+// root): ask -> deny + alternative-path hint, with the single exception of
+// `external_directory` asks whose EVERY resource falls inside the sentinel's user-approved
+// read-only `read_roots[]` -> allow; `question` (non-deny) -> deny + batch-clarify hint; deny
+// is unreachable here (rule-level deny short-circuits before hooks); out-of-domain -> the
+// event passes through untouched (daily non-mgh usage is unaffected). Corrupt sentinel JSON =
+// no read_roots (asks deny, fail-closed); ANY error inside the callback is swallowed to an
+// out-of-domain pass — a gate bug must never corrupt the host's permission decisions.
 //
 // What lives HERE (glue only): tool scoping + event normalization + anchor injection + pipe +
 // block-on-exit-2. What NEVER lives here: run-domain env gating, introspection regexes, the
@@ -38,7 +54,7 @@
 // error), we log and PASS — never break the user's session. The shell bright-lines + per-stage
 // `--check` boundary validation remain the real backstop either way.
 
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
 // opencode tool ids are lowercase; these mirror Claude's Bash|Write|Edit|Read|Glob|Grep
@@ -183,12 +199,116 @@ async function runGuard(payload: unknown): Promise<{ code: number; stderr: strin
   return { code: 0, stderr: "[block_adhoc_scripts] no python interpreter found (py/python3/python); passing (fail-soft)" }
 }
 
+// ---------------------------------------------------------------------------
+// permission.evaluate gate — glue helpers. The THREE rewrite rules below are
+// the one declared in-process exception to "decisions live in the Python
+// guard" (fixed two-and-a-half rules, no regex, no path-policy reasoning;
+// shape-pinned by CI in tests/test_opencode_hook_parity.py). Everything on the
+// tool face is still the Python guard's job.
+// ---------------------------------------------------------------------------
+
+// The six run roots, always DIRECT children of the project root. A `.active`
+// sentinel under any of them marks an in-flight mgh run domain. NO ancestor
+// walk (the Python guard's 16-level chain is intentionally NOT replicated): a
+// sentinel in an ancestor directory marks a DIFFERENT project's run, and this
+// plugin rewriting that project's asks would be out of scope. The mgh run
+// roots are pinned to the project root by contract, so the narrow check loses
+// nothing.
+const RUN_ROOTS = [".mgh-init", "security-scan", ".mgh-sra", ".mgh-srr", ".mgh-ut-init", ".mgh-sdr"]
+
+// Normalize a host path for membership checks: backslashes -> forward slashes,
+// trailing slashes trimmed, case-folded (Windows drives/dirs are
+// case-insensitive). Pure function.
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+}
+
+// Does one permission resource fall inside one declared read-only root? The
+// resource face for `external_directory` is forward-slash absolute with a glob
+// tail (`C:/ext/dir/*` — opencode's file-access slash()es paths and appends
+// `/*` for the directory boundary); a sentinel read_roots[] entry is a
+// host-native absolute directory (`C:\ext\dir`). Strip the glob tail, then
+// plain prefix membership on normalized forms. Pure function.
+function inDeclaredRoot(resource: string, root: string): boolean {
+  const res = normPath(String(resource).replace(/\/\*$/, ""))
+  const r = normPath(root)
+  if (!res || !r) return false
+  return res === r || res.startsWith(r + "/")
+}
+
+// Discover the run domain from disk: whether any of the six run roots has a
+// `.active` sentinel, and the UNION of their read_roots[] (absolute read-only
+// roots the user approved when the run was armed). Stateless by design — the
+// sentinel is written at step 0, so a fresh stat+parse per evaluation is
+// correct and trivially cheap next to the per-call Python spawn. A present but
+// unparsable sentinel still marks the domain ACTIVE with zero read_roots
+// (asks deny — fail-closed); a parse failure of one sentinel never deactivates
+// a domain another sentinel marks.
+function declaredReadRoots(projectRoot: string): { active: boolean; roots: string[] } {
+  let active = false
+  const roots: string[] = []
+  for (const runRoot of RUN_ROOTS) {
+    const sentinelPath = projectRoot + "/" + runRoot + "/.active"
+    if (!existsSync(sentinelPath)) continue
+    active = true
+    try {
+      const sentinel = JSON.parse(readFileSync(sentinelPath, "utf8"))
+      if (Array.isArray(sentinel?.read_roots)) {
+        for (const root of sentinel.read_roots) {
+          if (typeof root === "string" && root) roots.push(root)
+        }
+      }
+    } catch (e) {
+      console.warn(`[block_adhoc_scripts] unreadable sentinel ${sentinelPath} (read_roots ignored, asks deny): ${e instanceof Error ? e.message : e}`)
+    }
+  }
+  return { active, roots }
+}
+
+// The gate callback's fixed rewrite rules. Returns having MUTATED
+// `event.effect` / `event.message` in place (opencode's hooks.trigger passes
+// the same event object through callbacks and reuses it for the decision).
+// deny effects never reach here (rule-level deny short-circuits before hooks);
+// they would be left untouched anyway.
+function applyGate(event: { action?: string; resources?: ReadonlyArray<string>; effect?: string; message?: string }, roots: string[]) {
+  // (2) question -> deny: a subagent asking the user anything is an
+  // unattended-hang face; the tool family's substitute path is batch
+  // clarification + checkpoint resume, not a live answer.
+  if (event.action === "question") {
+    if (event.effect !== "deny") {
+      event.effect = "deny"
+      event.message = "无人值守运行不向用户发问:把待澄清项写入本步骤产物/续跑记录,由编排流程统一走批量澄清与断点续跑。"
+    }
+    return
+  }
+  // (1) ask -> deny, with the single read_roots exception. allow passes
+  // untouched (nothing to close).
+  if (event.effect !== "ask") return
+  if (
+    event.action === "external_directory" &&
+    roots.length > 0 &&
+    (event.resources?.length ?? 0) > 0 &&
+    event.resources!.every((resource) => roots.some((root) => inDeclaredRoot(resource, root)))
+  ) {
+    // User-approved read-only roots: the approval already happened at run
+    // arming; keeping the ask would just preserve the hang face.
+    event.effect = "allow"
+    return
+  }
+  event.effect = "deny"
+  event.message = "无人值守运行不接受交互式授权等待:改用运行域受信路径(目标树内或哨兵 read_roots 已声明的只读根);确需的外部资源请经受控方式物化进运行域后重试。"
+}
+
 // opencode 2.x plugin module contract: a default export { id, setup }. setup is async and
 // AWAITS the hook registration before returning — a fire-and-forget registration lets the
 // first tool call slip past an unregistered hook (probe-reproduced during the 2.x migration).
 export default {
   id: "block-adhoc-scripts",
-  async setup(ctx: { location?: { directory?: string }; tool: { hook: (event: string, cb: (event: { tool?: string; input?: Record<string, unknown> }) => Promise<void>) => Promise<unknown> } }) {
+  async setup(ctx: {
+    location?: { directory?: string }
+    tool: { hook: (event: string, cb: (event: { tool?: string; input?: Record<string, unknown> }) => Promise<void>) => Promise<unknown> }
+    permission: { hook: (event: string, cb: (event: { action?: string; resources?: ReadonlyArray<string>; effect?: string; message?: string }) => Promise<void>) => Promise<unknown> }
+  }) {
     // The 2.x resident service process's cwd is unrelated to the analyzed project;
     // ctx.location.directory is the ONE authoritative "where is this project" signal the
     // plugin gets. Capture it once; inject per call (never via env — multiple locations must
@@ -213,6 +333,21 @@ export default {
         // in the service log when the service log is visible at all. Logging NEVER blocks
         // the call.
         console.warn(stderr.trim())
+      }
+    })
+    // Permission gate registration: SAME awaited-inside-setup contract as the tool face (a
+    // fire-and-forget registration would let the first permission assertion slip past).
+    // Anything thrown inside applyGate is caught at THIS level and downgraded to an
+    // out-of-domain pass — the callback NEVER rejects toward the host (a rejection would
+    // defect the host's permission evaluation itself, a bigger blast radius than the hang
+    // face this gate removes).
+    await ctx.permission.hook("evaluate", async (event) => {
+      try {
+        const gate = declaredReadRoots(projectRoot)
+        if (!gate.active) return
+        applyGate(event, gate.roots)
+      } catch (e) {
+        console.warn(`[block_adhoc_scripts] permission gate error (passing untouched): ${e instanceof Error ? e.message : e}`)
       }
     })
   },

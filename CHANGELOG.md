@@ -16,6 +16,46 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — opencode 权限询问闸门:无人值守运行零挂起(ask/question 询问在产生前确定性关闭)(0.1.83)
+
+`add-mgh-native-permission-gate`(openspec 变更,规格增量 `runtime-hook-enforcement`
+1 ADDED + 1 MODIFIED)。opencode 2.x 的权限询问(`ask`)无超时,无应答者(TUI 无人值守、
+纯服务形会话)时工具纤程永久挂起——无人值守长跑的结构性挂死面;工具族守卫此前只管
+「工具调用该不该放行」,不管「该不该问」。
+
+- **权限闸门**(releases/opencode/plugins/block_adhoc_scripts.ts,同一插件同一 `setup`
+  增注册第二钩子 `await ctx.permission.hook("evaluate", cb)`,防首调用竞态契约与工具面
+  一致):运行域内(六运行根 `.mgh-init`/`security-scan`/`.mgh-sra`/`.mgh-srr`/
+  `.mgh-ut-init`/`.mgh-sdr` 直查 `<项目根>/<运行根>/.active`,**不向上走链**——祖先目录
+  哨兵属别的项目,越权改写)三条固定改写:①`ask` → `deny` + 替代提示,唯一例外
+  `external_directory` 且**全部**资源落在哨兵 `read_roots[]`(用户事先批准的只读外部根)
+  → `allow`(部分在外一律 deny,NEVER 保留 ask);②`question` 非 deny → `deny` + 批量
+  澄清/断点续跑提示;③allow/域外一律不动。哨兵 JSON 损坏按域激活 + 空 read_roots 处理
+  (fail-closed 于询问);钩子内任何异常按域外原样返回 + best-effort 诊断(fail-open 于
+  宿主)。此为「判定单一来源在 Python」的**显式声明例外**(固定两条半规则、无正则、无
+  路径策略推理,CI 形状锚覆盖),工具调用拦截判定仍单一住在 Python 守卫。
+- **agent 定义兜底层**(releases/opencode/agent/*.md 全 32 个):全量补 `question: deny`
+  (2.x 默认 Build agent 显式 question allow;实机验证 pin 生效形态为工具对 agent 工具集
+  直接不可见);5 个非 fanout 孪生兄弟(init-induct/rulewriter/scout/scout-merge/synthesis)
+  补漏 `external_directory: deny`(以既有孪生为准)。规则级 deny 短路在钩子前,插件缺席
+  时该层独立兜底。
+- **测试与契约**:`tests/test_opencode_hook_parity.py` 新增 `TestPermissionGateShape`
+  (evaluate 注册被 await/三分支标记/六运行根常量/直查无走链/fail-closed/归一化纯函数
+  Python 镜像往返样例:反斜杠/正斜杠/大小写/尾 `/*` 通缀/边界不误配)+
+  `TestAgentQuestionDenyPinned`(32 agent 全量 question pin + 11 agent external_directory
+  pin,删任一即红;变异证明四组全红);`assert_shim_v2_shape` 扩展双钩子注册均被 await
+  (安装副本检查共享);`core/contracts/hooks/runtime-enforcement.md` 增权限闸门节(改写
+  规则表/窄激活声明/fail-closed·fail-open 双向/兜底层/四类残余披露/版本矩阵)。
+- **实机闸门**(2.1.0,scratch `C:\DEV\_mgh_oc2_gate` 热重载加载零拒载):声明根读放行、
+  `.env` 读与 `question` 调用被闸门改写(提示逐字可见、pending 恒为零、会话正常收尾)、
+  损坏哨兵 fail-closed、拆哨兵后宿主询问机制原样接管、普通项目零介入;新事实回填:
+  2.1.0 默认 agent `external_directory` 为 allow(经 `*` 兜底),ask 面现实入口 =
+  显式 ask 配置/`.env` 内置 ask/`question` 工具。企业 2.0.32 闸门待内网执行(复现清单
+  随 change 实机笔记)。
+- **诚实边界(残余挂死面,本 change 只披露)**:Form/MCP elicitation(另一套问询机制)、
+  provider-executed 工具(不过本地权限层)、不做权限断言的自定义工具、宿主拒载插件的
+  fail-soft —— 由后续看门狗 change 兜底;根 AGENTS.md 诚实边界同步。
+
 ### Fixed — opencode 守卫插件迁移 2.x 模块契约:拒载断代修复 + 锚点显式注入 + 两代工具 id 收敛 (0.1.82)
 
 `fix-mgh-opencode2-plugin-compat`(openspec 变更,规格增量 `runtime-hook-enforcement`

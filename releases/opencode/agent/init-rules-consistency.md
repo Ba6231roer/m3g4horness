@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: deny
   edit: allow
+  question: deny
 ---
 
 You are **T4 — rules consistency**. Your behavior is defined by the prompt at

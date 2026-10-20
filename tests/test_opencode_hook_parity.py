@@ -141,16 +141,23 @@ def normalize(tool: str, args: dict):
 # the only fail-loud position (no opencode/Bun runtime here). Source facts this encodes:
 # default export { id, setup } (packages/core/src/plugin/module.ts Module schema); hooks via
 # ctx.tool.hook("execute.before", cb) with a SINGLE event object {tool, input, ...}
-# (packages/plugin/src/effect/tool.ts ToolHooks); ctx.location.directory = session project
-# root (packages/schema/src/location.ts Location.Info).
+# (packages/plugin/src/effect/tool.ts ToolHooks) and the permission gate via
+# ctx.permission.hook("evaluate", cb) with the mutable evaluation event
+# {action, resources, effect, message} (packages/plugin/src/effect/permission.ts
+# PermissionEvaluation); ctx.location.directory = session project root
+# (packages/schema/src/location.ts Location.Info).
 _V2_REQUIRED_RX = [
     (re.compile(r"export default \{\s*id:"),
      "default export carrying an id field (2.x module contract; a named export is REJECTED "
      "by the 2.x loader — fail-soft WARN, guard silently absent)"),
     (re.compile(r"async setup\("), "async setup(ctx) entry"),
     (re.compile(r"await ctx\.tool\.hook\("),
-     "hook registration awaited inside setup (a fire-and-forget registration lets the first "
+     "tool hook registration awaited inside setup (a fire-and-forget registration lets the first "
      "tool call slip past an unregistered hook)"),
+    (re.compile(r"await ctx\.permission\.hook\("),
+     "permission gate registration awaited inside setup (add-mgh-native-permission-gate: the "
+     "same anti-race contract covers BOTH hook faces — a fire-and-forget registration lets the "
+     "first permission assertion slip past an unregistered gate)"),
     (re.compile(r"ctx\.location\.directory"), "project-root anchor captured in setup"),
     (re.compile(r"cwd:\s*projectRoot"),
      "payload cwd injection (2.x service-process cwd is unrelated to the project)"),
@@ -647,7 +654,172 @@ class TestShimV2ModuleShape(unittest.TestCase):
         self.assertIn('tool === "apply_patch" || tool === "patch"', shim)
 
 
-class TestWiringCoverage(unittest.TestCase):
+class TestPermissionGateShape(unittest.TestCase):
+    """add-mgh-native-permission-gate: the shim's permission.evaluate gate is source-form
+    asserted (no opencode/Bun runtime in CI). The gate is the ONE declared in-process decision
+    exception (its fixed rewrite rules live in TS, not the Python guard) — so its branches are
+    pinned here: removing any branch, un-awaiting the registration, or dropping the six-run-root
+    check turns CI red. The path-membership glue is exercised as round-trip samples against a
+    Python MIRROR of the shim's pure functions (same posture as normalize() above); source
+    tokens pin the mirror to the shim so they cannot drift apart silently."""
+
+    def _shim(self):
+        return SHIM.read_text(encoding="utf-8")
+
+    # --- Python mirror of the shim's normPath/inDeclaredRoot glue (contract under test) ---
+    @staticmethod
+    def _norm_path(p):
+        p = re.sub(r"\\", "/", p)
+        return re.sub(r"/+$", "", p).lower()
+
+    @classmethod
+    def _in_declared_root(cls, resource, root):
+        res = cls._norm_path(re.sub(r"/\*$", "", resource))
+        r = cls._norm_path(root)
+        if not res or not r:
+            return False
+        return res == r or res.startswith(r + "/")
+
+    def test_evaluate_registration_awaited_in_setup(self):
+        shim = self._shim()
+        self.assertIn('await ctx.permission.hook("evaluate"', shim,
+                      "permission.evaluate registration missing or fire-and-forget — the first "
+                      "permission assertion would slip past an unregistered gate")
+
+    def test_rewrite_branches_present(self):
+        shim = self._shim()
+        # question branch: rewrite to deny only when not already deny.
+        self.assertIn('event.action === "question"', shim, "question-reject branch missing")
+        self.assertIn('event.effect !== "deny"', shim,
+                      "question branch must leave a rule-level deny untouched")
+        # ask branch: entry gated on effect === "ask", rewritten to deny with a substitute hint.
+        self.assertIn('event.effect !== "ask"', shim,
+                      "ask branch entry missing — the gate must only close asks")
+        self.assertGreaterEqual(shim.count('event.effect = "deny"'), 2,
+                                "ask->deny and question->deny rewrites both required")
+        self.assertIn('event.message = "', shim, "deny rewrite carries no substitute hint")
+        # read_roots exception: external_directory + EVERY resource inside a declared root -> allow.
+        self.assertIn('event.action === "external_directory"', shim,
+                      "external_directory exception branch missing")
+        self.assertIn('event.effect = "allow"', shim,
+                      "read_roots-allow rewrite missing — approved external repos would regress "
+                      "to deny")
+        self.assertIn(".every(", shim,
+                      "allow exception must require EVERY resource inside read_roots (never "
+                      "partial)")
+
+    def test_six_run_roots_direct_child_check_no_ancestor_walk(self):
+        shim = self._shim()
+        m = re.search(r"const RUN_ROOTS = \[(.*?)\]", shim, re.DOTALL)
+        self.assertIsNotNone(m, "RUN_ROOTS constant missing — run-domain identification drifted")
+        roots = {t.strip().strip('"') for t in m.group(1).split(",") if t.strip()}
+        self.assertEqual(
+            roots,
+            {".mgh-init", "security-scan", ".mgh-sra", ".mgh-srr", ".mgh-ut-init", ".mgh-sdr"},
+            "six run roots drifted from the mgh contract")
+        # direct-child sentinel check: the path is a plain concatenation, no upward walk.
+        self.assertIn('runRoot + "/.active"', shim,
+                      "sentinel path must be the direct child <projectRoot>/<runRoot>/.active")
+        for walk_token in ("dirname(", '"/.."', "'..'", "parent"):
+            self.assertNotIn(walk_token, shim[m.start():],
+                             f"gate must NOT walk ancestors (out-of-project sentinel would be "
+                             f"claimed): found {walk_token!r} in the gate section")
+
+    def test_sentinel_fail_closed_and_exception_face(self):
+        shim = self._shim()
+        # present-but-unparsable sentinel: domain stays active, read_roots empty (asks deny).
+        self.assertIn("read_roots", shim, "sentinel read_roots field not read")
+        self.assertIn("Array.isArray(", shim,
+                      "read_roots must be type-checked — a wrong-typed field grants nothing")
+        # any error inside the callback passes the event untouched (never defects the host's
+        # permission evaluation) with a best-effort diagnostic.
+        self.assertIn("try {", shim, "gate callback has no exception face")
+        self.assertIn("passing untouched", shim,
+                      "gate error diagnostic missing (fail-open toward the host)")
+        self.assertIn("unreadable sentinel", shim,
+                      "unparsable-sentinel diagnostic missing (fail-closed toward asks)")
+
+    def test_normalization_glue_roundtrip_samples(self):
+        # round-trip samples over the mirrored glue: backslash/slash, case, trailing slash,
+        # glob tail — the Windows faces the real host produces.
+        cases = [
+            # (resource, root, expected)
+            (r"C:/ext/repo/*", r"C:\ext\repo", True),          # canonical external_directory ask
+            (r"C:/ext/repo/sub/x.java", r"C:\Ext\Repo", True),  # case-insensitive + nested
+            (r"c:/ext/repo/*", r"C:\EXT\REPO", True),           # drive + segment case folding
+            (r"C:/ext/repo", "C:\\ext\\repo\\", True),          # no glob tail, trailing-slash root
+            (r"C:/ext/repo2/*", r"C:\ext\repo", False),         # sibling dir: prefix must NOT match
+            (r"C:/ext/other/*", r"C:\ext\repo", False),         # different tree
+            (r"C:\ext\repo\*", r"C:/ext/repo", True),           # backslash resource face
+            ("", r"C:\ext\repo", False),                        # empty resource grants nothing
+            (r"C:/x/*", "", False),                             # empty root grants nothing
+        ]
+        for resource, root, expected in cases:
+            self.assertEqual(self._in_declared_root(resource, root), expected,
+                             f"inDeclaredRoot({resource!r}, {root!r}) != {expected}")
+
+    def test_mirror_pinned_to_shim_source(self):
+        # the Python mirror above must not drift from the shim's glue: the three normalization
+        # behaviors are pinned as source tokens.
+        shim = self._shim()
+        self.assertIn(r'replace(/\\', shim, "backslash normalization missing in shim")
+        self.assertIn("toLowerCase()", shim, "case folding missing in shim")
+        self.assertIn(r'replace(/\/\*$', shim,
+                      "glob-tail strip missing in shim (membership would never match the "
+                      "external_directory resource face)")
+
+
+class TestAgentQuestionDenyPinned(unittest.TestCase):
+    """add-mgh-native-permission-gate fallback layer: EVERY opencode mgh agent definition pins
+    `question: deny` (opencode defaults question to allow on the default agent — an unattended
+    hang face that survives even with the plugin gate in place for non-mgh agent shapes), and
+    every agent that needs external-directory isolation carries `external_directory: deny`
+    (the fanout twins had it from the headless-dispatch pinning; their non-fanout siblings were
+    the gap). The rule-level deny short-circuits BEFORE any hook, so this layer stands alone
+    when the plugin is absent — deleting any pin turns CI red."""
+
+    AGENT_DIR = ROOT / "releases" / "opencode" / "agent"
+    # fanout twins (pinned historically for headless dispatch) + their non-fanout siblings
+    # (same job, same isolation, previously unpinned).
+    EXT_DENY_REQUIRED = {
+        "init-induct", "init-induct-fanout",
+        "init-rulewriter", "init-rulewriter-fanout",
+        "init-scout", "init-scout-fanout",
+        "init-scout-merge", "init-scout-merge-fanout",
+        "init-synthesis", "init-synthesis-fanout",
+        "sdr-review-fanout",
+    }
+
+    def _frontmatter(self, name):
+        text = (self.AGENT_DIR / f"{name}.md").read_text(encoding="utf-8")
+        m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        self.assertIsNotNone(m, f"{name}: frontmatter block missing")
+        return m.group(1)
+
+    def test_every_opencode_agent_pins_question_deny(self):
+        agents = sorted(p.stem for p in self.AGENT_DIR.glob("*.md"))
+        self.assertGreaterEqual(len(agents), 30, "agent inventory unexpectedly small — "
+                                                   "the pin check may be scanning the wrong dir")
+        for name in agents:
+            self.assertIn("  question: deny", self._frontmatter(name),
+                          f"{name}: `question: deny` pin missing — an unattended run can hang "
+                          f"on a user question via this agent")
+
+    def test_isolation_agents_pin_external_directory_deny(self):
+        for name in sorted(self.EXT_DENY_REQUIRED):
+            self.assertTrue((self.AGENT_DIR / f"{name}.md").is_file(),
+                            f"{name}.md missing — inventory drifted, update EXT_DENY_REQUIRED")
+            self.assertIn("  external_directory: deny", self._frontmatter(name),
+                          f"{name}: `external_directory: deny` pin missing — an unattended run "
+                          f"can hang on an out-of-project read via this agent")
+
+    def test_removing_a_pin_trips_the_assertion(self):
+        # self-check: a frontmatter without the pin fails the same predicate used above.
+        self.assertNotIn("  question: deny", "permission:\n  read: allow\n  edit: deny")
+        self.assertNotIn("  external_directory: deny", "permission:\n  read: allow")
+
+
+
     """Guard tool-surface wiring coverage (harden-mgh-init-scout-path-binding, consultation
     layer D2) — ONE invariant across both hosts: every tool name the guard's main()
     dispatches on MUST be covered by BOTH wiring faces:

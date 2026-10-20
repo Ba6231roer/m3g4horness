@@ -138,7 +138,7 @@ packages/core/src/tool/plugin/{shell,patch,write,edit,read,glob,grep}.ts).
 | Aspect | Contract |
 |---|---|
 | Module shape | **default export only**: `{ id: <string>, setup: <async fn> }` (or `{ id, effect }`). A 1.x-style named export (`export const …` returning the hook map) is REJECTED at load — and the rejection is **fail-soft** (a WARN in the service log, sessions continue), so shape drift silently disables the guard. CI asserts the shape statically (`tests/test_opencode_hook_parity.py::TestShimV2ModuleShape`, shared with the installed-copy check in `tests/test_install_opencode_plugin.py`) — the runtime cannot fail loud by design. |
-| Hook registration | `await ctx.tool.hook("execute.before", cb)` **inside `setup`, awaited before it returns** — a fire-and-forget registration lets the first tool call slip past an unregistered hook. |
+| Hook registration | **both** hook faces registered **inside `setup`, each awaited before it returns**: `await ctx.tool.hook("execute.before", cb)` (tool guard) and `await ctx.permission.hook("evaluate", cb)` (permission gate) — a fire-and-forget registration lets the first tool call / first permission assertion slip past an unregistered hook. |
 | Event shape | the callback reads a **single event object**: tool id from `event.tool`, args from `event.input` (plus `sessionID`/`agent`/`messageID`/`id`). The 1.x two-parameter `(input, output)` form does not exist in 2.x. |
 | Blocking contract | rejecting the callback (throw) surfaces a `Tool.Error` and aborts the tool call; the guard's exit-2 stderr is rethrown verbatim as the recipe. Unchanged from 1.x. |
 | Anchor injection | `setup` captures `ctx.location.directory` (the session's project root) and injects it as the payload `cwd` on EVERY guarded call (omitted when unresolvable). The 2.x plugin runs inside the **resident service process** whose cwd is unrelated to the project — without the injection the guard's process-cwd fallback anchors to the wrong place and sentinel discovery is dead for the whole run. Guard-side precedence (payload `cwd` > process cwd) is pre-existing; Python unchanged. |
@@ -158,6 +158,85 @@ revert-drift are both CI-guarded, see `TestShimV2ModuleShape`):
 | `Glob` | `glob` | unchanged | `{ pattern, path }` |
 | `Grep` | `grep` | unchanged | `{ pattern, path, include→glob }` |
 
+
+## opencode permission gate (`permission.evaluate`, unattended ask/question closure)
+
+The same plugin (same file, same `setup`, second awaited registration) rewrites permission
+assertions in a run domain so an unattended run NEVER waits on an interactive approval:
+opencode 2.x asks have **no timeout** — a pending with no answerer (unattended TUI, pure
+service-form session) hangs the tool fiber forever (real-machine reproduced; `Permission.assert`
+has no deadline and nothing auto-replies). The gate runs at `permission.evaluate`, which the
+host triggers AFTER rule evaluation but BEFORE any pending/question is created
+(`packages/core/src/permission.ts::evaluateInput`); the callback mutates `event.effect` /
+`event.message` in place and the host consumes the rewritten event. Facts pinned against the
+opencode source (packages/plugin/src/effect/permission.ts `PermissionEvaluation`, the
+promise-mode adapter wiring `ctx.permission.hook`, and the trigger loop in
+packages/core/src/plugin/hooks.ts — same event object passed through callbacks in place).
+
+**Activation — six run roots, direct children only (narrower than the tool guard's anchor
+chain, deliberately)**: the gate reads `<projectRoot>/<run-root>/.active` for
+`.mgh-init` / `security-scan` / `.mgh-sra` / `.mgh-srr` / `.mgh-ut-init` / `.mgh-sdr` (project
+root = the `ctx.location.directory` captured in `setup`). NO upward walk: a sentinel in an
+ancestor directory marks a DIFFERENT project's run, and rewriting that project's asks from
+this project's plugin would be out of scope (the mgh run roots are pinned to the project root
+by contract, so the narrow check loses nothing). Out-of-domain (no sentinel under any of the
+six roots) → the event passes through **untouched**: day-to-day non-mgh ask/question behavior
+is exactly what it would be without the plugin. Env activation (`MGH_*_ACTIVE`) is NOT
+consulted here — the 2.x plugin process inherits the resident service's env, which mid-session
+exports never reach; the disk sentinel is the only reliable signal (same conclusion as the
+tool guard's opencode activation).
+
+**Rewrite rules (in-domain only; this is the ONE declared in-process exception to "decisions
+live in the Python guard" — fixed two-and-a-half rules, no regex, no path-policy reasoning;
+shape-pinned by CI in `tests/test_opencode_hook_parity.py::TestPermissionGateShape`)**:
+
+| # | Condition (in-domain) | Rewrite | Rationale |
+|---|---|---|---|
+| 1 | `effect === "ask"` | `deny` + substitute-path hint | an ask with no answerer is the hang face; deny + hint lets the model finish the turn |
+| 1a | …except `action === "external_directory"` and **every** resource falls inside the sentinel's `read_roots[]` | `allow` | those roots are the user's pre-approved read-only external dirs (armed at run start); keeping the ask would preserve the hang face, denying would regress the external-repo workflow |
+| 2 | `action === "question"` and `effect !== "deny"` | `deny` + batch-clarify/resume hint | `question` (ask-the-user-anything) defaults to allow on the default agent; the tool family's unattended discipline is batch clarification + checkpoint resume, never a live answer |
+| 3 | anything else (`allow` effects; `deny`) | untouched | `deny` never reaches the hook (rule-level deny short-circuits before it); `allow` has nothing to close |
+
+Partial membership (some resources inside `read_roots[]`, some outside) = rule 1 (deny) —
+never a partial allow, which would have no user-consent basis. Path membership is glue:
+resources arrive forward-slash absolute with a glob tail (`C:/ext/dir/*` — opencode's
+file-access slash()es paths), sentinel roots are host-native (`C:\ext\dir`); both sides are
+normalized (backslash→slash, trailing slash trimmed, case-folded) and prefix-matched — pure
+functions, round-trip-sample pinned.
+
+**Failure posture — fail-closed toward asks, fail-open toward the host**: a present but
+unparsable sentinel still marks the domain ACTIVE with zero read_roots (asks deny; a corrupt
+sentinel never deactivates a domain another sentinel marks); read_roots entries are
+type-checked (non-string grants nothing); ANY error inside the callback is caught, logged
+best-effort (`console.warn`), and downgraded to an out-of-domain pass — a gate bug must never
+defect the host's permission evaluation (a callback rejection is a host-side defect in the
+promise adapter, a bigger blast radius than the hang face the gate removes). The gate is
+stateless (fresh stat + small JSON parse per evaluation — trivially cheap next to the
+per-call Python spawn).
+
+**Fallback layer (rule-level, plugin-independent)**: every opencode mgh agent definition pins
+`question: deny`, and every agent needing external-directory isolation (the fanout twins +
+their non-fanout siblings) pins `external_directory: deny`. Rule-level deny short-circuits
+BEFORE the hook, so the two layers never conflict: with the plugin absent the rule pins still
+terminate the ask/question faces for mgh agents; with the plugin present the gate additionally
+covers non-mgh agent shapes (user sessions, default agent) inside the run domain. CI asserts
+the pins (`TestAgentQuestionDenyPinned` — deleting any pin is red).
+
+**Residual hang faces this gate does NOT cover (disclosed, watchdog change TBD)**: ① Form /
+MCP elicitation (a separate elicitation mechanism that does not route through
+`permission.evaluate`); ② provider-executed tools (server-side tools that bypass the local
+permission layer); ③ custom tools that make no permission assertion; ④ opencode hosts that
+fail to LOAD the plugin (load failure is fail-soft — a WARN — so the gate is silently absent;
+covered by install self-check + the two-version real-machine gate, not by runtime symptoms).
+
+**Gate version matrix**: implemented against **2.1.0** (local, real-machine gated: in-domain
+ask/question pending count stays 0, read_roots resources pass, out-of-domain asks unchanged);
+**2.0.32** (enterprise) gated on the intranet with the same sample set — the open questions
+recorded there are (a) whether `question`'s default effect on the default agent matches 2.1.0
+(allow) and (b) whether the `external_directory` resource glob tail (`/*`) has the same shape
+on both versions; the implementation defends on both (non-deny question rewrite is harmless if
+the default is already deny; glob-tail-stripped prefix matching tolerates either resource
+shape).
 
 ### Lifecycle
 

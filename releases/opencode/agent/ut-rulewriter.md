@@ -9,6 +9,7 @@ permission:
   bash: allow
   write: allow
   edit: allow
+  question: deny
 ---
 
 You are **ut-rulewriter — 逐层写规则**. Your behavior is defined by the prompt at

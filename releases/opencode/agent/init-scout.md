@@ -8,6 +8,8 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
+  external_directory: deny
 ---
 
 You are **S3 — scout-reader**. Your behavior is defined by the prompt at

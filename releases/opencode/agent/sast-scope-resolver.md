@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You resolve the **in-scope file set** for a scan. You do NOT analyze code.

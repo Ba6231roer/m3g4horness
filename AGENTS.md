@@ -457,6 +457,18 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   **签名快停层**,漂移时优雅退化到既有 stall/冷却兜底;企业认证/环境细节只住在不入 git
   的 `mgh-special-auth.md` 与 `docs/enterprise-environment.md`(install 对前者做源在场
   收敛复制,通用分发面零企业内容)。
+- opencode 的**权限询问闸门只做「无人值守关询问」、不做授权策略**:运行域内(六运行根
+  直查哨兵,不向上走链)`ask` → deny(+唯一例外:哨兵 `read_roots[]` 全属的
+  `external_directory` → allow)、`question` 非 deny → deny,域外/allow 效果零介入;
+  四类残余挂死面管不到——Form/MCP elicitation(另一套问询机制,不经
+  `permission.evaluate`)、provider-executed 工具(不过本地权限层)、不做权限断言的
+  自定义工具、宿主拒载插件的 fail-soft(拒载仅 WARN,守卫/闸门整 run 静默缺席)——
+  由后续看门狗 change 兜底。闸门判定是 Python 守卫单一真相源的显式声明例外(固定两条
+  半规则,CI 形状锚覆盖);规则级兜底(mgh 自带 agent 的 `question`/`external_directory`
+  deny)在插件缺席时独立生效。2.1.0 实测:默认 Build agent 的 `external_directory` 经
+  `*` 兜底为 allow(越目录读默认不询问,ask 面现实入口 = 显式 ask 配置/`.env` 内置
+  ask/`question` 工具);`run` 非交互形对产生的询问立即 auto-reject,无应答挂起是
+  TUI/服务形的形态。
 - 工具族带**尽力而为的启动遥测**(埋点在各命令启动路径的确定性脚本内部,17 个命令壳零改动):未配置遥测端点(env `MGH_TELEMETRY_URL` 与模块内置默认皆空)时**零网络行为**;发送失败/超时静默丢弃,挂载脚本的 stdout/退出码/产物永不因遥测改变;resume 与过程查询的计数是 **30 分钟冷却窗口近似**(「活动窗口开始次数」,不是精确会话数——超 30 分钟的长任务中途查询会多计、30 分钟内快速重启会漏计);params 字段原样透传、可能含项目路径等内网信息(服务端在内网,端点置空即整体停报)。
 
 ## 可参考项目

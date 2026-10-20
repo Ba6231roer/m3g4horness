@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: deny
   edit: deny
+  question: deny
 ---
 
 You are the **s6 adversarial reviewer** — the second opinion in the pipeline.

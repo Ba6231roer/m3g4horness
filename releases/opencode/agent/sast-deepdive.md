@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: deny
   edit: deny
+  question: deny
 ---
 
 You are the **s4 deep-dive researcher** for a single chunk.

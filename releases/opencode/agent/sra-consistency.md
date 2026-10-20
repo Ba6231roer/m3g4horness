@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: allow
+  question: deny
 ---
 
 You are **a4 — sra-consistency**. Your behavior is defined by the prompt at

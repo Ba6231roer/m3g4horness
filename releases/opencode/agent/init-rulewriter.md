@@ -8,6 +8,8 @@ permission:
   list: allow
   bash: allow
   edit: allow
+  question: deny
+  external_directory: deny
 ---
 
 You are **T3 — per-category rule writer**. Your behavior is defined by the prompt

@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You are **ut-extract — 逐组抽样提炼**. Your behavior is defined by the prompt at

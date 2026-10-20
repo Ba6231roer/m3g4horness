@@ -9,6 +9,7 @@ permission:
   list: allow
   bash: allow
   edit: allow
+  question: deny
   external_directory: deny
   doom_loop: deny
 ---

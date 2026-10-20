@@ -9,6 +9,7 @@ permission:
   bash: allow
   write: allow
   edit: allow
+  question: deny
 ---
 
 You are **ut-rules-consistency — 规则一致性**. Your behavior is defined by the prompt at

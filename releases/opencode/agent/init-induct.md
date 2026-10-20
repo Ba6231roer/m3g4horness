@@ -8,6 +8,8 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
+  external_directory: deny
 ---
 
 You are **T1 — per-cluster inductor**. Your behavior is defined by the prompt at

@@ -9,6 +9,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You are **T2-rollup — cross-shard merge**. Your behavior is defined by the

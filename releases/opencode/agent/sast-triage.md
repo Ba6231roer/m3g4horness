@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: deny
   edit: allow
+  question: deny
 ---
 
 You are the **s8/s9 report assembler** (the "triage" voice).

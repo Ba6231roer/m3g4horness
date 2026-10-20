@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You are **ut-synthesize — 跨组汇总去重**. Your behavior is defined by the prompt at

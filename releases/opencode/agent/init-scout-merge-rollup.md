@@ -9,6 +9,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You are **S4-rollup — cross-shard scout merge**. Your behavior is defined by

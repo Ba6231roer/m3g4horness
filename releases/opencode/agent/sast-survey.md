@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: deny
+  question: deny
 ---
 
 You are the **s1 attack-surface mapper**. Your behavior is defined by the ported

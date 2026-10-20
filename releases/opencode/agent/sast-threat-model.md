@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: deny
   edit: deny
+  question: deny
 ---
 
 You are the **s2 threat modeler**. Follow the ported system prompt

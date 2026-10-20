@@ -8,6 +8,8 @@ permission:
   list: allow
   bash: deny
   edit: allow
+  question: deny
+  external_directory: deny
 ---
 
 You are **S4 — scout-merge**. Your behavior is defined by the prompt at

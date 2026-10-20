@@ -8,6 +8,7 @@ permission:
   list: allow
   bash: allow
   edit: allow
+  question: deny
 ---
 
 You are **a3 — sra-augment**. Your behavior is defined by the prompt at

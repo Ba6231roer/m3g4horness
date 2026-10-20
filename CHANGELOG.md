@@ -16,6 +16,57 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — 原生派发确定性计划基座:单元任务消息/波次/短号物化为磁盘工件 + 项目环境画像(0.1.84)
+
+`add-mgh-native-dispatch-core`(openspec 变更,新能力规格 `native-dispatch-core`)。原生
+(编排会话直接派同宿主 subagent,零 headless 子进程)派发路线的第 3 个变更(前两个——
+插件 2.x 迁移、权限询问闸门——已归档):此前的任务消息构造资产(六 tier 模板表、模板
+逐字填充、路径锚树校验、配额算术)全部住在子进程派发器脚本里,原生派发没有独立的确定性
+供给面;任务消息若重新交给弱模型手写,历史实锤(盘符根漂移、下划线幻觉、单路径转述漂移)
+必然复发。本变更只产「计划工件 + 环境画像」,不接入任何命令壳(sdr 接入是下一个变更)、
+不做看门狗、不做插件派发工具。
+
+- **计划物化入口** `core/scripts/emit_native_plan.py`(薄入口,兄弟导入复用派发器
+  `fanout_runner.py` 的模块级资产——tier 表/枚举器调用与 run 目录锚定/模板加载与逐字
+  填充/锚树校验/安全文件名;**派发器源码零改动、行为零变化**,由构造保证):读指定
+  tier 枚举器 `pending[]`(与派发器同一来源),按模板把每单元完整任务消息物化到
+  `<inputs-dir>/<unit>.task.md`(与派发器审计副本同路径同内容),产 `<run>/native_plan.json`
+  (波次表 + 每单元短号/规范 id/任务文件与产物标记绝对路径/agent 名,枚举器字段逐字
+  透传)。确定性:无时间戳、规范 id 稳定排序、固定序列化——同输入两次物化逐字节一致
+  (纯函数产物,`--check` 的「重物化即修复」前提)。
+- **短单元号**:`<tier>-<4 字符>`(如 `sdr-k3f7`),sha1(规范 id) 基 32 去易混字符
+  (`0/1/i/l/o`);同计划内任意两号编辑距离 ≥2(单字符错抄不命中另一合法号),冲突按
+  `sha1(unit_id+":"+salt)` 确定性加盐重派生;派生自规范 id 而非序号——断点续跑后存活
+  单元短号不漂(加盐解冲突单元的跨集理论漂移为已披露诚实边界)。短号只作模型转述与
+  人对账,NEVER 参与路径构造。
+- **波次尺寸**:`min(并发, max(1, quota.calls // quota.calls_per_unit))`,来源记入
+  `wave_size_source`;静态算术,运行期准入仍属派发器/看门狗层。
+- **环境画像** `core/scripts/env_profile.py`(模块导入 + CLI 双形态):项目级
+  `<项目>/.mgh/env-profile.json`,schema `{v, dispatch_mode: auto|runner|native,
+  native_concurrency: 1..5, quota{calls,window_s,calls_per_unit}}`;缺文件 = 现状缺省
+  (`auto` 解析钉死为现状派发形态,任何既有命令行为零变化);坏 JSON/未知 v/域外值/
+  并发越界/quota 残缺 = fail-closed(退出码 2 + recipe,导入抛 `EnvProfileError`)。
+- **`--check` 零修复校验**(两脚本均有):重物化与磁盘工件逐字节比对 + 单元集与当前
+  pending 一致(stale 如实报)+ 路径绝对且过锚树 + 无残留占位符 + 短号映射闭合与距离
+  不变量;失败退出码 2 + 差异清单 + 重物化 recipe,零自动修复。
+- **零派发副作用**:物化与 `--check` 全程不 spawn 模型宿主、不读写凭证、不建隔离目录、
+  不写任何标记(唯一子进程 = tier 枚举器)。
+- **契约** `core/contracts/fanout/runtime.md` 增「native plan」节(工件布局/短号规则/
+  环境画像 schema 与缺省钉死/`--check` 契约/零副作用声明)。
+- **测试**:新增 `tests/test_env_profile.py` 27 测 + `tests/test_emit_native_plan.py`
+  37 测(逐字节往返/排序稳定/短号防撞含构造冲突集/锚树拒绝零残留写/波次算术含来源字段/
+  零副作用 spy/--check 五红绿形态/sdr+scout 冒烟/真 git 仓端到端),先红后绿;定向回归
+  `test_fanout_runner` 仅 2 失败且为 HEAD 存量计时器断言(11≠10/3≠2,与 0.1.82 归档
+  记录一致,与本变更零交集)+ `test_fanout_stale`/`test_zero_deps`/
+  `test_no_compile_warnings` 全绿;lint 四件套过(contracts 504 flags/purity 336 扫描
+  0 违例 174 白名单/budget 17 壳/plain_language exit 0)+ `openspec validate --strict` 过。
+- **实机闸门**(零 token 成本):scratch 真仓(3 变更文件,2 interface + 1 standalone
+  单元)两次 `--emit` 全工件 sha256 逐字节一致 + `--check` 绿 + 全仓零标记/凭证/sidecar
+  残留;缺省零变化抽查 = 无 env-profile 项目跑既有 sdr 步骤面行为不变。复现场保留在
+  `C:\DEV\_mgh_native_plan_gate`;实机笔记随变更目录归档。
+- **后续消费指引**:看门狗与 sdr 原生接入(路线第 4/5 个变更)消费本计划工件——每波
+  派发前重物化/`--check`,短号作转述句柄,环境画像 `dispatch_mode` 作形态选择单一来源。
+
 ### Added — opencode 权限询问闸门:无人值守运行零挂起(ask/question 询问在产生前确定性关闭)(0.1.83)
 
 `add-mgh-native-permission-gate`(openspec 变更,规格增量 `runtime-hook-enforcement`

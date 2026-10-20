@@ -1,6 +1,7 @@
 # Contract: fan-out 运行契约(host spawn / tier 装载 / 超时调平)
 
-Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)与三宿主 headless 派发形的**单一
+Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)、`emit_native_plan.py` +
+`env_profile.py`(原生派发计划面,见下「native plan」节)与三宿主 headless 派发形的**单一
 登记处**;装载资产由 install 生成(见下「tier 装载文件」),消费方 = dispatcher、三面命令壳
 的扇出段、回归测(`tests/test_fanout_runner.py` 命令形快照)。任何宿主派发形的改动 MUST
 同步本契约 + 对应快照测,NEVER 只改代码不改本文件。
@@ -54,6 +55,77 @@ Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)与三宿主 headl
 - **`--dry-run` 纯计划**:零写盘零 spawn(审计副本/liveness/sidecar/marker/子配置全
   跳过),单元清单 + 将写路径 + 命令形 + pre-spawn 锚检查预判只走 stdout,退出码 0;
   `--kill-stale`/`--purge-audit` 的 dry-run 审视守卫是独立语义,不变。
+
+## native plan(原生派发的确定性计划工件)
+
+Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画像读取);消费方
+= 后续接入原生派发的命令壳/步骤清单(编排会话直接派同宿主 subagent,零 headless 子进程)。
+两脚本与子进程派发器的关系 = **旁路供给面**:`emit_native_plan.py` 以兄弟导入复用派发器
+的 tier 表、枚举器调用与 run 目录锚定、模板加载与逐字填充、锚树校验、安全文件名(**派发器
+源码零改动、其行为零变化**),使原生形态与子进程形态的单元输入构造零漂移。
+
+### 工件布局
+
+| 工件 | 内容 |
+| --- | --- |
+| `<run>/native_plan.json` | 计划本体 `{v, tier, agent, repo, wave_size, wave_size_source, units_total, waves[]}`;每波 `{wave, units[]}`,每单元 = 枚举器 pending 字段**逐字透传** + `{id, unit_id, task_file}`,路径全绝对。`<run>` = 计划工件的锚定目录(与派发器 sidecar 同锚:sdr = grouping.json 所在 run 目录,t2/scout-merge = init 目录,其余 tier = 计划工件父目录) |
+| `<inputs-dir>/<unit>.task.md` | 每单元完整任务消息,模板逐字填充(填后断言无残留 `{{`),与派发器执行时写的审计副本**同路径同内容**——派发器后跑 = 幂等重写同内容 |
+
+- **确定性**:内容无时间戳、单元按规范 id 稳定排序、序列化固定(`ensure_ascii=False,
+  indent=2, sort_keys` + 换行结尾)——同输入两次物化**逐字节一致**(计划 = 磁盘状态与
+  flag 的纯函数,是 `--check`「重物化即修复」的前提)。
+- **波次尺寸** = `min(并发, max(1, quota.calls // quota.calls_per_unit))`;并发 =
+  `--wave-size` > 环境画像 `native_concurrency`(缺省 3);配额只来自环境画像;
+  `wave_size_source` 记录取小者来源(`concurrency|quota`,平局记 concurrency)。**静态
+  算术**:运行期准入(配额滑窗/冷却/风暴截断)仍属派发器与看门狗层,计划只定形状。
+- stdout 摘要(单行 JSON):tool/tier/agent/units_total/waves/wave_size/
+  wave_size_source/plan_path/inputs_dir。
+
+### 短号规则(防错抄)
+
+- 形如 `<tier>-<4 字符>`(如 `sdr-k3f7`):sha1(规范单元 id)基 32 小写、剔除易混字符
+  (`0/1/i/l/o`)取 4 字符。
+- **防错抄不变量**:同一次产出的计划内任意两短号编辑距离 ≥2(单字符错抄不命中另一合法
+  号);冲突按 `sha1(unit_id + ":" + salt)`(salt = 1,2,…)确定性重派生,同输入同结果。
+- **稳定**:短号派生自规范 id 而非序号——pending 集缩小(断点续跑、部分完成)后存活单元
+  短号不变。诚实边界:经加盐解冲突的单元,短号依赖当次全集的冲突解(同集确定性、跨集理论
+  可漂);消费方引用走计划内三方映射,`--check` 按当次磁盘状态重派生校验。
+- 短号**只作模型转述与人对账**,NEVER 参与文件系统路径构造(路径永远来自枚举器透传);
+  计划保存「短号 ↔ 规范 id ↔ 任务文件/产物/标记绝对路径」三方映射。
+
+### 环境画像(`<项目>/.mgh/env-profile.json`)
+
+schema(全键可选、未知字段忽略;quota 在场时三键齐全):
+
+```
+{"v":1, "dispatch_mode":"auto|runner|native",
+ "native_concurrency":<int 1..5>,
+ "quota":{"calls":<int>0>, "window_s":<int>0>, "calls_per_unit":<int>0>}}
+```
+
+- **缺文件 = 现状缺省**(`auto` → 解析为现状派发形态;缺省并发 3、无配额)——画像落地后
+  任何既有命令的行为零变化。`auto` 的缺省解析**钉死为「现状派发形态」**;任何细化(如按
+  认证形态切 native)须另立变更,NEVER 实现层暗改。
+- **fail-closed**:坏 JSON/非对象/未知或非整数 `v`/枚举域外取值/并发越界(含非整数与
+  布尔)/quota 残缺或非正 → CLI 退出码 2 + recipe(文件路径 + 违规字段),导入形态抛
+  `EnvProfileError`(ValueError 子类);NEVER 静默回退缺省(静默回退会让「以为配了
+  native 实际跑 runner」的错配不可见)。
+- `env_profile.py --check` 零副作用校验并报告实际解析结果(缺文件 = 合法缺省态,exit 0)。
+
+### `emit_native_plan.py --check`(零修复校验,失败退出码 2 + 差异清单 + recipe)
+
+①内存重物化与磁盘 `native_plan.json` 及全部 task 文件**逐字节比对**;②计划单元集与枚举
+器当前 pending 一致(已完成单元使计划过时 → 如实报 stale,NEVER 当有效计划通过);③全部
+路径绝对且过锚树检查(锚树违规在重物化阶段即以退出码 2 + reason 拒绝);④模板无残留占位
+符;⑤短号映射闭合且两两编辑距离 ≥2。零自动修复——重跑同参物化即修复;派发器遗留的旧
+`*.task.md` 审计副本(已完成单元)**不算**违规(派发器从不删除它们)。
+
+### 零副作用声明
+
+物化与 `--check` 全程:不 spawn 任何模型宿主进程、不读写凭证、不建子进程隔离目录
+(childcfg/ocdata)、不写/touch 任何完成或失败标记、不写 sidecar/liveness——唯一子进程 =
+tier 枚举器(pending 的确定性来源,既有幂等契约)。「派发器行为零变化」由其源码零改动
+构造保证。
 
 ## tier 装载文件(dsh 专属,a 档 = 配置装载)
 

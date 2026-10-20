@@ -341,8 +341,12 @@ m3g4horness/
   `@Autowired`）；`--controls` 注入的控制断言存在、不断言有效。
 
 **运行时守卫的已知边界（opencode / dsh）**
+- opencode 面的守卫插件面向 **opencode 2.x**（模块契约为 default 导出；2.0.32 与 2.1.0
+  实机验证过加载与拦截）。仍在用 opencode 1.x 的项目请保留旧版随包插件，升级 opencode 后
+  重跑安装即可；1.x 下装入新版插件只会静默不生效（宿主对插件加载失败仅记日志）。
 - 守卫靠环境变量或磁盘哨兵文件激活；opencode/dsh 的插件进程**不继承**会话中途 `export`
-  的环境变量——因此随包脚本同时写磁盘哨兵兜底，保证整轮可靠激活。
+  的环境变量——因此随包脚本同时写磁盘哨兵兜底，保证整轮可靠激活。opencode 2.x 下插件随
+  常驻服务进程运行，锚点改由插件显式注入（项目根），与从哪个目录启动无关。
 - 长跑确定性脚本可能超过宿主 shell 默认超时：编排器按次传毫秒级 `timeout`（两宿主都
   支持、会话内生效）；opencode 全局默认可用 `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS`
   调高（须在 opencode 启动前设置，会话中途 export 无效）。

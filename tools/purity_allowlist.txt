@@ -6,8 +6,8 @@
 # The baseline ONLY shrinks: fixed lines must be removed (stale pins are flagged by
 # tests/test_distributed_md_purity.py, which also caps the entry count).
 core/contracts/hooks/runtime-enforcement.md:11
-core/contracts/hooks/runtime-enforcement.md:342
-core/contracts/hooks/runtime-enforcement.md:350
+core/contracts/hooks/runtime-enforcement.md:379
+core/contracts/hooks/runtime-enforcement.md:387
 core/contracts/init/aggregate-sharding.md:3
 core/contracts/init/candidates.md:3
 core/contracts/init/candidates.md:51

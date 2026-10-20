@@ -16,6 +16,47 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — opencode 守卫插件迁移 2.x 模块契约:拒载断代修复 + 锚点显式注入 + 两代工具 id 收敛 (0.1.82)
+
+`fix-mgh-opencode2-plugin-compat`(openspec 变更,规格增量 `runtime-hook-enforcement`
+1 ADDED + 5 MODIFIED)。opencode 2.x 把插件模块契约改为「default 导出 `{id, setup}`」,
+mgh 原守卫插件是 1.x 具名导出,实测被 2.x 拒载且**拒载只是日志一行 WARN、会话照常**——
+升级当天起 opencode 面整条运行域防线(越树读写拦截/微脚本阻断/叶脚本只读)静默消失。
+同时 2.x 把插件搬进常驻服务进程(进程 cwd 与项目无关,哨兵锚点链断裂),并把 `bash`
+工具更名为 `shell`。
+
+- **插件壳迁移**(releases/opencode/plugins/block_adhoc_scripts.ts,判定逻辑零改动,
+  仍全部在 Python 守卫):default 导出 `{ id: "block-adhoc-scripts", async setup(ctx) }`,
+  钩子经 `await ctx.tool.hook("execute.before", cb)` 注册(setup 内 await 完成防首调用
+  竞态);回调改读单事件对象(`event.tool`/`event.input`);1.x 双参形态移除。不做双形状
+  文件(1.x 面企业已无部署,装错版本的静默面会翻倍;1.x 用户保留旧版随包文件,升级后
+  重装即换新)。
+- **锚点显式注入**:`setup` 捕获 `ctx.location.directory`(会话项目根)逐调用写入
+  payload `cwd` 字段;守卫侧「payload cwd > 守卫进程 cwd」优先级链既有,Python 零改动。
+  服务进程 cwd 在哪都不再影响哨兵发现与 `..` 相对 token 判定(迁移前从别处启动宿主 =
+  守卫整 run 休眠)。
+- **两代工具 id 收敛**:`shell`(2.x)与 `bash`(1.x)同映射 Bash 面;`patch`(2.x)与
+  `apply_patch`(1.x)同走 `patchText` 标记提取(源码钉扎:同参数名同标记语法,同一
+  解析器)。同一份安装文件被 2.0.x/2.1.x 任一版本加载都全量受管;「升级断代/回退断代」
+  两种静默漏收由 CI 强制。
+- **诊断通道降级**:1.x 的 app-log 诊断通道 2.x 不存在,非阻断诊断改 `console.warn`
+  best-effort;阻断契约(守卫退出码 2 → reject 回调、stderr 作 recipe 面向模型)逐字不变,
+  fail-soft(守卫缺席 → 放行)不变。
+- **CI 静态形状断言**:`test_opencode_hook_parity` 新增 2.x 形状组(default 导出 + await
+  注册 + 锚点捕获/注入 + 单事件取参在场;1.x 具名导出/双参回调/旧诊断通道缺席),安装
+  副本同源断言(防「装了旧形状文件被静默拒载」复发);守卫新增 payload cwd 锚点场景
+  (项目根锚激活 + 判定同源)。
+- **agent frontmatter**:2.x 自动迁移 `bash→shell` 等权限键,`permission:` map 原样保留
+  (惰性键 `doom_loop`/`list` 不动);实机抽查两个 fanout agent:shell 可用、edit 拒
+  (工具面直接收走)、越权写被守卫二次拦截。
+- **实机闸门**(记录在本 change 目录实机笔记):本机 2.1.0 全样例过(加载无拒载/越树
+  write·edit 拦/shell 内省拦/叶脚本写拦/`..` token 拦/越树读拦/sanctioned 放行);2.x
+  `patch` 工具未暴露给默认模型工具集(映射由源码 + CI + 单测承担,边界已披露);企业
+  2.0.32 闸门复现清单就绪,归档前须内网执行并回执。
+- 契约同步:`core/contracts/hooks/runtime-enforcement.md` 新增「opencode 2.x plugin
+  module contract」节(模块契约/事件形状/锚点注入/诊断降级/双代工具表/版本矩阵
+  2.0.32+2.1.0);README 已知边界补 opencode 1.x 断代说明。
+
 ### Fixed — SDR fan-out 凭证注入与执行环境隔离:CAS 网关下子进程零登录 + 共享目录去互踩 (0.1.81)
 
 `fix-mgh-sdr-fanout-auth-isolation`(openspec 变更,规格增量 `fanout-dispatch` 4 处

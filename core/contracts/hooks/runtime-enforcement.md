@@ -20,21 +20,25 @@ lives in the Python guard — NEVER in either `.ts`). Spec:
 > (a) env `MGH_<DOM>_ACTIVE=1` 已设,**或** (b) 锚到盘根链上任一级 `<dir>/<run-root>/.active`
 > 哨兵存在。锚 = **最优可用 cwd 信号**:hook stdin payload 的 `cwd` 字段优先——claude PreToolUse
 > 携带会话/工具 cwd(发起工具调用的那个上下文);dsh 由 shim 从会话头 `exec.agent.session.header.cwd`
-> 取同一语义的目录填入 payload `cwd`;缺省回退守卫进程 cwd(opencode 插件进程 / dsh 无会话头时)。
+> 取同一语义的目录填入 payload `cwd`;opencode 2.x 插件在 `setup` 时捕获
+> `ctx.location.directory`(会话项目根)逐调用注入 payload `cwd`(见下「opencode 2.x plugin
+> module contract」节)。缺省回退守卫进程 cwd 仅作**最后兜底**(opencode 2.x 的守卫进程 =
+> 常驻服务进程,cwd 与项目无关;claude/dsh 的进程 cwd 则通常是发起调用的同一上下文)。
 > 哨兵发现从锚自身起**向上 walk**(锚 → 逐祖先,至盘根或 16 级有界,先到者止),每级
-> 查 `<dir>/<run-root>/.active`。向上 walk 闭合锚错配缺口:reader subagent(或从别处启动的
-> 宿主)锚 cwd 是 target 子目录任意深度,仍能在 `<target>/<run-root>/.active` 命中哨兵——旧
+> 查 `<dir>/<run-root>/.active`。向上 walk 闭合锚错配缺口:reader subagent(或锚是 target
+> 子目录任意深度的宿主)仍能在 `<target>/<run-root>/.active` 命中哨兵——旧
 > cwd-only 单点发现在该锚下找不到哨兵 → 守卫休眠 → 读/写侧全部静默降级放行。哨兵绕开
 > opencode「插件进程不继承 mid-session bash 导出的 env」的可靠性边界(该边界同样存在于 dsh:
 > 插件/shim 进程 env 不随会话导出而变,磁盘哨兵对三端同源可见)。运行域外(锚起向上
 > walk 全链有界皆无哨兵且无 env):退出码 0 放行(零日常噪声)。
 >
-> **opencode / dsh 残余边界(显式运行要求,非缺陷)**:opencode 插件进程 cwd = opencode
-> 服务器启动目录,env 又不继承——若从 target 树**外**启动 opencode,锚不在 target 链上,守卫
-> 整 run 休眠。dsh 的锚来自会话头 cwd(每工具调用随 payload 传入),休眠面更小;仅剩
-> 「会话头缺失 → 回退 shim 进程 cwd」这一退化形状。守卫
-> **NEVER 整盘扫描补偿**(性能 + 越权)。运行要求:**在 target 根或其子目录启动宿主**。
-> 这优于现状(现状连从 target 子目录启动都休眠)。
+> **opencode / dsh 残余边界(显式运行要求,非缺陷)**:opencode 2.x 的锚由插件从
+> `ctx.location.directory` 注入,与「从哪个目录启动宿主/服务」解耦——从 target 树**外**启动
+> opencode 不再使守卫休眠(锚始终是会话项目根)。残余退化形状:插件拿不到
+> `ctx.location.directory`(缺席/不可解析)→ payload 无 `cwd` → 回退服务进程 cwd,锚不在
+> target 链上时守卫整 run 休眠。dsh 的锚来自会话头 cwd(每工具调用随 payload 传入),休眠面
+> 仅剩「会话头缺失 → 回退 shim 进程 cwd」;env 不继承边界两端同在(磁盘哨兵补偿)。守卫
+> **NEVER 整盘扫描补偿**(性能 + 越权)。
 >
 > **dsh fail-soft 条款**:shim 找不到可用 Python 解释器(回退链 `py`→`python3`→`python` 全
 > 缺)、守卫 spawn 自身崩溃、或 payload 无法归一化 → **一律放行 + 日志一条**(失败绝不
@@ -100,8 +104,9 @@ readable, never writable.
 | `mgh-ut-init` | `MGH_UT_INIT_ACTIVE` | `.mgh-ut-init` | `<dir>/.mgh-ut-init/.active` |
 
 `<dir>` runs over the anchor-to-drive-root chain (anchor itself first, then each ancestor,
-bounded to 16 levels / the filesystem root). The anchor = payload `cwd` (claude / dsh —
-the dsh shim fills it from the session header cwd) ?? guard process cwd (opencode).
+bounded to 16 levels / the filesystem root). The anchor = payload `cwd` (claude / dsh — the
+dsh shim fills it from the session header cwd; opencode 2.x — the plugin injects
+`ctx.location.directory`, see the section below) ?? guard process cwd (last-resort only).
 
 ## dsh tool-name normalization (shim `TOOL_MAP`, glue only)
 
@@ -121,6 +126,38 @@ guard NEVER sees a dsh-native id, and fields are renamed to the snake_case tool_
 | `terminal_open/send/read/signal/close/list` | `TerminalIO` | interactive terminal bypasses foreground confinement → domain-active deny |
 | `job_output/list/kill` | `JobCtl` | background-job bypass likewise → domain-active deny |
 | anything else (e.g. `web_fetch`) | *unmapped* | shim returns `next()` untouched (pass-through; observed-and-adjudicated during first-run acceptance) |
+
+## opencode 2.x plugin module contract (shim shape, glue only)
+
+The opencode `.ts` shim targets the **opencode 2.x plugin module contract**; 1.x opencode
+installations keep the previously released shim file (accepted discontinuation — the
+enterprise deployment is 2.x; see the version matrix below). Facts below are pinned against
+the opencode source (packages/core/src/plugin/module.ts, packages/plugin/src/effect/tool.ts,
+packages/core/src/tool/plugin/{shell,patch,write,edit,read,glob,grep}.ts).
+
+| Aspect | Contract |
+|---|---|
+| Module shape | **default export only**: `{ id: <string>, setup: <async fn> }` (or `{ id, effect }`). A 1.x-style named export (`export const …` returning the hook map) is REJECTED at load — and the rejection is **fail-soft** (a WARN in the service log, sessions continue), so shape drift silently disables the guard. CI asserts the shape statically (`tests/test_opencode_hook_parity.py::TestShimV2ModuleShape`, shared with the installed-copy check in `tests/test_install_opencode_plugin.py`) — the runtime cannot fail loud by design. |
+| Hook registration | `await ctx.tool.hook("execute.before", cb)` **inside `setup`, awaited before it returns** — a fire-and-forget registration lets the first tool call slip past an unregistered hook. |
+| Event shape | the callback reads a **single event object**: tool id from `event.tool`, args from `event.input` (plus `sessionID`/`agent`/`messageID`/`id`). The 1.x two-parameter `(input, output)` form does not exist in 2.x. |
+| Blocking contract | rejecting the callback (throw) surfaces a `Tool.Error` and aborts the tool call; the guard's exit-2 stderr is rethrown verbatim as the recipe. Unchanged from 1.x. |
+| Anchor injection | `setup` captures `ctx.location.directory` (the session's project root) and injects it as the payload `cwd` on EVERY guarded call (omitted when unresolvable). The 2.x plugin runs inside the **resident service process** whose cwd is unrelated to the project — without the injection the guard's process-cwd fallback anchors to the wrong place and sentinel discovery is dead for the whole run. Guard-side precedence (payload `cwd` > process cwd) is pre-existing; Python unchanged. |
+| Diagnostics | the 1.x app-log diagnostic channel does not exist in 2.x; non-blocking diagnostics go to `console.warn` (best-effort, service log). Blocking contract unchanged. |
+| Version matrix | implemented against **2.1.0** (local, real-machine gated) and **2.0.32** (enterprise shared-service form, gated on the intranet before archive); the module contract + hook/event shapes above are the common surface both accept per the 2.0.32 gate checklist in the change's real-machine notes. |
+| Loader notes | `.opencode/plugins/*.ts` auto-discovery unchanged; plugin runtime imports are limited to `effect` / `@opencode/plugin` / node builtins (the shim uses `node:fs`/`node:url`/`Bun.spawn` only — no npm dependency). |
+
+**Two-generation tool-id convergence** (the same install file may be loaded by a 2.0.x or a
+2.1.x host; dropping either generation silently un-guards that host — upgrade-drift AND
+revert-drift are both CI-guarded, see `TestShimV2ModuleShape`):
+
+| Guard face | 1.x tool id | 2.x tool id | args → tool_input |
+|---|---|---|---|
+| `Bash` | `bash` | `shell` | `{ command }` (2.x adds `workdir`/`timeout`/`background` — ignored by the shim, the command string is the judged surface) |
+| `ApplyPatch` | `apply_patch` | `patch` | identical `patchText` field + `*** Add/Update/Delete File:` / `*** Move to:` marker syntax (same upstream parser serves both) |
+| `Read`/`Write`/`Edit` | `read`/`write`/`edit` | unchanged | `filePath ?? file_path ?? path` fallback chain — load-bearing in 2.x, whose Input schemas are schema-validated `path` |
+| `Glob` | `glob` | unchanged | `{ pattern, path }` |
+| `Grep` | `grep` | unchanged | `{ pattern, path, include→glob }` |
+
 
 ### Lifecycle
 
@@ -221,7 +258,7 @@ over-blocking when no target was pinned).
    | In-tree Bash write (P1) | write verb / redirect destination INSIDE `MGH_TARGET` | the destination | `mgh-init`/`mgh-ut-init`: outside a sanctioned subtree (root pollution `Set-Content <target>\evil.txt`) — mirrors the Write/Edit tool-layer allowlist. sast/sra/srr: pass (no allowlist) |
    | Rule-a relabel (L1) | `py -c` WRITE/DELETE shape (`write(`/`makedirs`/`shutil.copy`/`shutil.move`/`shutil.rmtree`/`os.replace`/`os.rename`/`os.remove`/`os.unlink`/`write_text`/`write_bytes`) | any out-of-tree absolute path | outside `MGH_TARGET` tree → write/delete recipe (NOT introspection); pure in-tree `py -c` writes governed by the tool layer |
    | Tool face | claude `MultiEdit`/`NotebookEdit` (`file_path` / `notebook_path`) enter the write-confinement branch like `Write`/`Edit` | the path | outside tree / blocked script-ext / (init/ut-init) non-sanctioned subtree. `.ipynb` is NOT a script-ext (artifact) |
-   | Tool face | opencode `apply_patch` (`paths[]` extracted from `patchText` `*** (Add\|Update\|Delete) File:` / `*** Move to:` markers by the `.ts` shim; delete op → delete wording) | each path | ANY path outside tree / blocked script-ext / non-sanctioned subtree |
+   | Tool face | opencode `apply_patch` (1.x) / `patch` (2.x) — same `patchText` marker syntax (`*** (Add\|Update\|Delete) File:` / `*** Move to:` markers extracted into `paths[]` by the `.ts` shim; delete op → delete wording) | each path | ANY path outside tree / blocked script-ext / non-sanctioned subtree |
 
    A hit → exit 2 + stderr **write-side recipe** (points at producer stdout `checkpoint_path` /
    `rule_path` / `draft_path` absolute paths; NEVER Bash `Set-Content`/`New-Item`/`tee`/`>` /
@@ -321,7 +358,7 @@ faces, enforced by regression tests:
 | Face | What must cover every guard tool name | Where |
 |---|---|---|
 | claude install face | the default PreToolUse matcher `_DEFAULT_MATCHER` (`\|`-split) | `tools/install_hook.py` |
-| opencode plugin face | the `.ts` shim `HANDLED` set + its lowercase `normalize` mapping | `releases/opencode/plugins/block_adhoc_scripts.ts` |
+| opencode plugin face | the `.ts` shim `HANDLED` set + its lowercase `normalize` mapping — **both tool generations converge**: `bash`/`shell` → `Bash`, `apply_patch`/`patch` → `ApplyPatch` (2.x renamed ids must never drop the 1.x ids or vice versa) | `releases/opencode/plugins/block_adhoc_scripts.ts` |
 | dsh shim face | the `.ts` shim static `TOOL_MAP` constant's value range | `releases/dsh/plugins/mgh-guard.ts` |
 
 `RunCode`/`TerminalIO`/`JobCtl` are dsh-only ids that claude/opencode NEVER emit; they are

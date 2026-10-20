@@ -1273,6 +1273,22 @@ class TestSentinelUpwardWalk(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("describe_artifact", err)
 
+    def test_opencode2_injected_root_anchor_activates(self):
+        # opencode 2.x shape (fix-mgh-opencode2-plugin-compat): the plugin injects the
+        # PROJECT ROOT (ctx.location.directory) as the payload cwd, while the guard process
+        # runs inside the resident SERVICE process (cwd unrelated to the project). The
+        # injected root anchor must arm the guard AND anchor the judgment: an out-of-tree
+        # write is blocked with the init-allowlist recipe (pre-migration, the fallback to
+        # the service-process cwd left the sentinel undiscoverable -> guard dormant for the
+        # whole run -> this same write silently passed).
+        target, _deep = self.setUp_target_tree()
+        code, err = self._run_at_anchor(
+            {"tool_name": "Write", "tool_input": {"file_path": r"D:\out\x.json"}},
+            target, target / ".mgh-init",
+            {"domain": "mgh-init", "target": str(target), "out_roots": [], "v": 1})
+        self.assertEqual(code, 2)
+        self.assertIn("sanctioned init subtrees", err)
+
     def test_subdir_anchor_in_tree_read_passes(self):
         # anchor inside the tree, Read inside the SAME target tree -> pass (the walk arms
         # the guard without over-blocking legitimate batch reads).

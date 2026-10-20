@@ -79,8 +79,12 @@ def _load_guard(path: Path):
 # out-of-tree confinement decides on both platforms) PLUS apply_patch (opencode's multi-file
 # mutating tool, whose patchText markers normalize extracts into paths[]). A direct `rg`/`grep`/
 # … in Bash routes through the `bash` tool + the guard's Bash file-search rule (no separate
-# HANDLED entry).
-HANDLED = {"bash", "write", "edit", "read", "glob", "grep", "apply_patch"}
+# HANDLED entry). TWO GENERATIONS converge on the same guard faces (fix-mgh-opencode2-plugin-
+# compat): opencode 2.x renamed `bash` -> `shell` and ships a `patch` tool (same patchText
+# field + marker syntax as 1.x `apply_patch`; confirmed packages/core/src/tool/plugin/{shell,
+# patch}.ts) — the same install may be loaded by a 2.0.x or 2.1.x host, so both generations
+# must stay handled. read/write/edit/glob/grep kept their names across both generations.
+HANDLED = {"bash", "shell", "write", "edit", "read", "glob", "grep", "apply_patch", "patch"}
 # apply_patch marker lines (opencode packages/core/src/patch.ts:35-51). GLUE ONLY — the test
 # mirror extracts paths[]/operations[] exactly as the shim does (no confinement decision here).
 _PATCH_MARKER_RX = re.compile(
@@ -107,7 +111,8 @@ def _normalize_apply_patch(patch_text: str):
 
 def normalize(tool: str, args: dict):
     a = args or {}
-    if tool == "bash":
+    # two generations, one Bash face: 1.x `bash` and 2.x `shell` both carry {command}.
+    if tool in ("bash", "shell"):
         return {"tool_name": "Bash", "tool_input": {"command": a.get("command", "")}}
     if tool == "glob":
         return {"tool_name": "Glob", "tool_input": {"pattern": a.get("pattern", ""),
@@ -117,12 +122,60 @@ def normalize(tool: str, args: dict):
         return {"tool_name": "Grep", "tool_input": {"pattern": a.get("pattern", ""),
                                                     "path": a.get("path", ""),
                                                     "glob": a.get("include") or a.get("glob", "")}}
-    if tool == "apply_patch":
+    # two generations, one ApplyPatch face: 1.x `apply_patch` and 2.x `patch` both carry the
+    # SAME patchText field + marker syntax (opencode packages/core/src/tool/plugin/patch.ts).
+    if tool in ("apply_patch", "patch"):
         return _normalize_apply_patch(a.get("patchText", ""))
     # write/edit/read: filePath ?? file_path ?? path (path is the opencode schema field).
     fp = a.get("filePath") or a.get("file_path") or a.get("path") or ""
     name = "Read" if tool == "read" else "Write" if tool == "write" else "Edit"
     return {"tool_name": name, "tool_input": {"file_path": fp}}
+
+
+# --- opencode 2.x plugin module-contract shape (fix-mgh-opencode2-plugin-compat) ---
+# Shared source-form assertions, applied to the repo shim AND to the INSTALLED copy (imported
+# by tests/test_install_opencode_plugin.py). Anchors STRUCTURAL features (default export +
+# awaited hook registration + anchor capture/injection), never verbatim prose — a refactor
+# that keeps the structure passes. The 2.x loader rejects a 1.x-shaped file with only a WARN
+# (fail-soft; sessions continue) so shape drift is undetectable at runtime by design — CI is
+# the only fail-loud position (no opencode/Bun runtime here). Source facts this encodes:
+# default export { id, setup } (packages/core/src/plugin/module.ts Module schema); hooks via
+# ctx.tool.hook("execute.before", cb) with a SINGLE event object {tool, input, ...}
+# (packages/plugin/src/effect/tool.ts ToolHooks); ctx.location.directory = session project
+# root (packages/schema/src/location.ts Location.Info).
+_V2_REQUIRED_RX = [
+    (re.compile(r"export default \{\s*id:"),
+     "default export carrying an id field (2.x module contract; a named export is REJECTED "
+     "by the 2.x loader — fail-soft WARN, guard silently absent)"),
+    (re.compile(r"async setup\("), "async setup(ctx) entry"),
+    (re.compile(r"await ctx\.tool\.hook\("),
+     "hook registration awaited inside setup (a fire-and-forget registration lets the first "
+     "tool call slip past an unregistered hook)"),
+    (re.compile(r"ctx\.location\.directory"), "project-root anchor captured in setup"),
+    (re.compile(r"cwd:\s*projectRoot"),
+     "payload cwd injection (2.x service-process cwd is unrelated to the project)"),
+    (re.compile(r"event\??\.tool"), "2.x single event object: tool id read from event.tool"),
+    (re.compile(r"event\??\.input"), "2.x single event object: args read from event.input"),
+    (re.compile(r"new Blob\(\[stdin\]\)"), "stdin delivered as Blob (the D7 root cause)"),
+    (re.compile(r"existsSync"), "guard-file existence pre-check (fail-soft)"),
+    (re.compile(r"can't open file"), "can't-open-file exit-2 fallback (fail-soft)"),
+    (re.compile(r"console\.warn"),
+     "non-blocking diagnostics downgraded to best-effort output (no ctx.client.app.log in 2.x)"),
+]
+_V2_FORBIDDEN = [
+    ("export const BlockAdhocScripts", "1.x named-export hook-map form (rejected by the 2.x loader)"),
+    ("output: { args", "1.x two-parameter (input, output) callback form"),
+    ("ctx.client", "1.x client.app.log diagnostic channel (absent in 2.x)"),
+]
+
+
+def assert_shim_v2_shape(text: str):
+    for rx, why in _V2_REQUIRED_RX:
+        if rx.search(text) is None:
+            raise AssertionError(f"opencode shim misses 2.x shape token ({why}): /{rx.pattern}/")
+    for token, why in _V2_FORBIDDEN:
+        if token in text:
+            raise AssertionError(f"opencode shim carries 1.x shape token ({why}): {token!r}")
 
 
 def _run_guard(mod, payload, domain_env, target=None):
@@ -199,9 +252,10 @@ class TestNormalizationParity(unittest.TestCase):
         code, _ = self._oc("write", {"filePath": f"{target}/.mgh-init/checkpoints/x.json"}, target=target)
         self.assertEqual(code, 0)
 
-    # --- tool-scope: bash/write/edit/read/glob/grep/apply_patch are handled ---
+    # --- tool-scope: bash/shell/write/edit/read/glob/grep/apply_patch/patch are handled ---
     def test_bash_write_edit_read_glob_grep_handled(self):
-        self.assertEqual(HANDLED, {"bash", "write", "edit", "read", "glob", "grep", "apply_patch"})
+        self.assertEqual(HANDLED, {"bash", "shell", "write", "edit", "read", "glob", "grep",
+                                   "apply_patch", "patch"})
         # normalize covers the read-side tools (camelCase -> snake_case the guard expects).
         self.assertEqual(
             normalize("read", {"filePath": "D:/x.java"}),
@@ -224,6 +278,36 @@ class TestNormalizationParity(unittest.TestCase):
             {"tool_name": "ApplyPatch", "tool_input": {
                 "paths": ["D:/out/evil.ps1", "D:/parent/sonB/y.java", "D:/a/z.md"],
                 "operations": ["add", "delete", "move"]}})
+
+    # --- two-generation tool-id convergence (fix-mgh-opencode2-plugin-compat): both
+    #     generations normalize IDENTICALLY onto the same guard face; dropping either
+    #     generation silently un-guards that host (upgrade-drift AND revert-drift). ---
+    def test_shell_introspection_blocked(self):
+        # the 2.x renamed id reaches the SAME Bash-face decision (convergence, not a listing).
+        code, err = self._oc("shell", {"command": 'py -c "import json; json.load(open(\'x.json\'))"'})
+        self.assertEqual(code, 2)
+        self.assertIn("describe_artifact", err)
+
+    def test_bash_and_shell_normalize_identically(self):
+        for tool in ("bash", "shell"):
+            self.assertEqual(
+                normalize(tool, {"command": 'py -c "import json"'}),
+                {"tool_name": "Bash", "tool_input": {"command": 'py -c "import json"'}})
+
+    def test_apply_patch_and_patch_normalize_identically(self):
+        self.assertIn("patch", HANDLED)
+        text = "*** Add File: D:/out/evil.ps1\ncontent"
+        for tool in ("apply_patch", "patch"):
+            self.assertEqual(
+                normalize(tool, {"patchText": text}),
+                {"tool_name": "ApplyPatch",
+                 "tool_input": {"paths": ["D:/out/evil.ps1"], "operations": ["add"]}})
+        # a missing patchText field => empty extraction (the guard passes on empty paths[];
+        # the 2.x `patch` tool actually carries patchText — confirmed from source).
+        for tool in ("apply_patch", "patch"):
+            self.assertEqual(
+                normalize(tool, {}),
+                {"tool_name": "ApplyPatch", "tool_input": {"paths": [], "operations": []}})
 
     # --- read-side confinement parity: normalized opencode read/glob/grep/bash-rg reach the
     #     SAME guard decision the claude side gets (harden-mgh-read-confinement) ---
@@ -516,6 +600,51 @@ class TestGuardByteParity(unittest.TestCase):
         # arg-name fallback chains (path for write/edit/read; include for grep)
         self.assertIn("args?.path", text)
         self.assertIn("args?.include", text)
+
+
+class TestShimV2ModuleShape(unittest.TestCase):
+    """opencode 2.x plugin module contract (fix-mgh-opencode2-plugin-compat). The shim MUST
+    be a default export { id, setup } with the hook registered via an AWAITED ctx.tool.hook
+    call, reading the single event object (event.tool / event.input) and injecting the
+    captured project root (ctx.location.directory) as the payload cwd. A 1.x-shaped file is
+    rejected by the 2.x loader with only a WARN — the guard would be silently absent for the
+    whole run — so the shape is asserted statically here (and on the installed copy by
+    tests/test_install_opencode_plugin.py); manual opencode verification covers the runtime."""
+
+    def test_shim_satisfies_v2_module_shape(self):
+        assert_shim_v2_shape(SHIM.read_text(encoding="utf-8"))
+
+    def test_reverting_to_1x_shape_trips_the_assertion(self):
+        # a minimal 1.x-shaped file (named export + (input, output) callback + client.app.log)
+        # must FAIL the shared assertion — proving it actually detects the rejected shape.
+        one_x = (
+            'import { existsSync } from "node:fs"\n'
+            'export const BlockAdhocScripts = async (ctx: { client?: any }) => ({\n'
+            '  "tool.execute.before": async (input: { tool: string }, output: { args: any }) => {\n'
+            '    await ctx.client?.app?.log?.({ body: {} })\n'
+            '  },\n'
+            '})\n'
+        )
+        with self.assertRaises(AssertionError):
+            assert_shim_v2_shape(one_x)
+
+    def test_handled_converges_both_tool_generations(self):
+        # 2.x renamed tool ids (bash -> shell; the patch-shaped tool id `patch`) — BOTH
+        # generations must stay in HANDLED and normalize: the same install file may be loaded
+        # by a 2.0.x or 2.1.x host, and dropping either generation silently un-guards that
+        # host. Deleting either id from the shim turns this test red.
+        shim = SHIM.read_text(encoding="utf-8")
+        handled = re.search(r'const HANDLED = new Set\(\[(.*?)\]\)', shim, re.DOTALL)
+        self.assertIsNotNone(handled, "shim HANDLED set not found — shim drifted")
+        handled_set = {t.strip().strip('"\'') for t in handled.group(1).split(",") if t.strip()}
+        for gen1, gen2 in (("bash", "shell"), ("apply_patch", "patch")):
+            self.assertIn(gen1, handled_set,
+                          f"1.x id {gen1} dropped — revert-drift un-guards older hosts")
+            self.assertIn(gen2, handled_set,
+                          f"2.x id {gen2} missing — upgrade-drift un-guards 2.x hosts")
+        # normalize maps both generations onto the SAME guard face (source form).
+        self.assertIn('tool === "bash" || tool === "shell"', shim)
+        self.assertIn('tool === "apply_patch" || tool === "patch"', shim)
 
 
 class TestWiringCoverage(unittest.TestCase):

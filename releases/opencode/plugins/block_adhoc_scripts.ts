@@ -1,21 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// block_adhoc_scripts — opencode `tool.execute.before` plugin (THIN SHIM / GLUE ONLY).
+// block_adhoc_scripts — opencode 2.x `tool.execute.before` plugin (THIN SHIM / GLUE ONLY).
 //
 // opencode's hook surface is JS/TS plugins (not Claude's settings.json command hook); the
 // pre-tool event is `tool.execute.before` (blockable). This plugin gives opencode users the
 // same runtime orchestrator-discipline enforcement Claude Code gets, by reusing the ONE
 // decision source: the platform-neutral Python guard at ../hooks/block_adhoc_scripts.py.
 //
-// What lives HERE (glue only): tool scoping + event normalization + pipe + block-on-exit-2.
-// What NEVER lives here: run-domain env gating, introspection regexes, the .py whitelist, the
-// MGH_TARGET subtree guard — ALL of that is the Python guard's job. This file MUST NOT
-// reimplement any of it (single decision source, zero drift). The guard reads the run-domain
-// from its inherited process env (MGH_{INIT,SAST,SRA,SRR}_ACTIVE); outside a run it exits 0 silently.
+// Module contract (opencode 2.x, packages/core/src/plugin/module.ts): ONLY a default export
+// `{ id, setup }` (or `{ id, effect }`) is accepted. The 1.x named-export hook-map form is
+// REJECTED at load — and the rejection is fail-soft (a WARN in the service log, sessions
+// continue), so a shape drift silently disables the guard. This file targets 2.x only; 1.x
+// opencode installations keep the previously released shim (no dual-shape file — a file
+// satisfying both contracts is not expressible, and carrying two files would double the
+// wiring surface). The shape is regression-guarded in CI (tests/test_opencode_hook_parity.py
+// :: TestShimV2ModuleShape) precisely because the runtime cannot fail loud.
 //
-// Blocking contract: throw inside `tool.execute.before` aborts the tool call (the error message
-// surfaces to the model). The guard writes a remediation "recipe" to stderr on a hit and exits
-// with code 2; we rethrow that stderr so the model sees the sanctioned-primitive recipe.
+// 2.x execution model: plugins run inside the RESIDENT SERVICE process — its cwd is unrelated
+// to the analyzed project, so the guard's cwd fallback would anchor to the wrong place. setup()
+// captures `ctx.location.directory` (the session's project root) and injects it as the payload
+// `cwd` on every guarded call; the guard's existing precedence (payload cwd > process cwd)
+// then anchors sentinel discovery AND relative-token judgments to the project. Python side
+// unchanged. The hook registration is awaited inside setup so the first tool call cannot slip
+// past an unregistered hook.
+//
+// What lives HERE (glue only): tool scoping + event normalization + anchor injection + pipe +
+// block-on-exit-2. What NEVER lives here: run-domain env gating, introspection regexes, the
+// .py whitelist, the MGH_TARGET subtree guard — ALL of that is the Python guard's job. This
+// file MUST NOT reimplement any of it (single decision source, zero drift).
+//
+// Blocking contract: rejecting the `tool.execute.before` callback surfaces a Tool.Error and
+// aborts the tool call (the error message surfaces to the model). The guard writes a
+// remediation "recipe" to stderr on a hit and exits with code 2; we rethrow that stderr so
+// the model sees the sanctioned-primitive recipe.
 //
 // Failure mode (fail-soft): if the guard can't be reached (python missing, file moved, spawn
 // error), we log and PASS — never break the user's session. The shell bright-lines + per-stage
@@ -25,41 +42,47 @@ import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
 // opencode tool ids are lowercase; these mirror Claude's Bash|Write|Edit|Read|Glob|Grep
-// matcher. read/glob/grep are now handled so the guard's read-side out-of-tree confinement
-// (peer of the write side) decides on both platforms. apply_patch is opencode's multi-file
-// mutating tool (add/update/delete/move); its file paths live inside a `patchText` blob, which
-// normalize() extracts into paths[] (glue-only field extraction — the guard decides). A DIRECT
-// `rg`/`grep`/… in Bash routes through the `bash` tool (handled above) and the guard's Bash
-// file-search rule — it does NOT need a HANDLED entry here (only the native read/glob/grep
-// TOOLS do). multiedit/notebookedit are CLAUDE-native tool ids with no opencode counterpart —
-// they are listed (and routed through the generic filePath fallback) ONLY to keep the wiring
-// invariant "shim HANDLED ⊇ guard dispatch set" machine-checkable; opencode never emits them.
-// runcode/terminalio/jobctl are the same convention for the dsh-dialect guard branches (rule
-// (n)) — listed only for the wiring invariant; opencode never emits these ids either.
-const HANDLED = new Set(["bash", "write", "edit", "read", "glob", "grep", "apply_patch",
-  "multiedit", "notebookedit", "runcode", "terminalio", "jobctl"])
+// matcher. TWO GENERATIONS converge on the same guard faces (2.x renamed ids without changing
+// the guard; the same install file may be loaded by a 2.0.x or a 2.1.x host — dropping either
+// generation silently un-guards it):
+//   bash (1.x) / shell (2.x)  -> Bash face   (both carry { command })
+//   apply_patch (1.x) / patch (2.x) -> ApplyPatch face (SAME patchText field + marker
+//     syntax: packages/core/src/tool/plugin/patch.ts Input = { patchText })
+// read/glob/grep/write/edit kept their names across both generations (2.x write/edit/read
+// args are schema-validated `path` — the fallback chain in normalize covers it).
+// read/glob/grep are handled so the guard's read-side out-of-tree confinement (peer of the
+// write side) decides on both platforms. A DIRECT `rg`/`grep`/… in Bash/shell routes through
+// the Bash face (handled above) and the guard's Bash file-search rule — it does NOT need a
+// HANDLED entry here (only the native read/glob/grep TOOLS do).
+// multiedit/notebookedit are CLAUDE-native tool ids with no opencode counterpart; patch is
+// 2.x-native; runcode/terminalio/jobctl are dsh-dialect guard branches (rule (n)) — these are
+// listed (routed through their guard names / the generic filePath fallback) ONLY to keep the
+// wiring invariant "shim HANDLED ⊇ guard dispatch set" machine-checkable; opencode never
+// emits the claude/dsh-native ids.
+const HANDLED = new Set(["bash", "shell", "write", "edit", "read", "glob", "grep",
+  "apply_patch", "patch", "multiedit", "notebookedit", "runcode", "terminalio", "jobctl"])
 
-// apply_patch `patchText` marker lines (opencode packages/core/src/patch.ts:35-51):
+// patch/apply_patch `patchText` marker lines (opencode packages/util/src/patch.ts — the SAME
+// parser serves 1.x `apply_patch` and 2.x `patch`):
 //   *** Add File: <path>      *** Update File: <path>      *** Delete File: <path>
 //   *** Move to: <path>
 // Captures every path; the operation (add/update/delete/move) rides in a parallel operations[]
 // so the guard can surface the delete wording. GLUE ONLY — no confinement decision here.
 const PATCH_MARKER_RX = /\*\*\* (?:Add|Update|Delete) File: (.+?)$|\*\*\* Move to: (.+?)$/gm
 
-// opencode args (camelCase) -> Claude tool_input (snake_case) the guard expects:
-//   bash        -> { command }                 (guard reads tool_input.command)
-//   write/edit  -> { filePath -> file_path }   (guard reads tool_input.file_path)
-//   read        -> { filePath -> file_path }
+// opencode args -> Claude tool_input (snake_case) the guard expects:
+//   bash/shell  -> { command }                 (guard reads tool_input.command)
+//   write/edit/read -> { filePath -> file_path } (guard reads tool_input.file_path)
 //   glob        -> { pattern, path }
 //   grep        -> { pattern, path, glob/include }
-//   apply_patch -> { paths[], operations[] }   (extracted from args.patchText markers)
-// Defense-in-depth (D9): opencode's tool schema field for the path is `path`, not `filePath`
-// (packages/core/src/tool/{edit,write,read}.ts); relying solely on camelCase `filePath` would
-// yield an empty path if opencode ever passes schema-validated args. The fallback chain reads
-// `filePath ?? file_path ?? path` (zero behavior change for the current camelCase-emitting LLM).
-// grep's source field is schema-validated `include`; fall back to `glob` for the current shape.
+//   apply_patch/patch -> { paths[], operations[] }  (extracted from args.patchText markers)
+// Defense-in-depth (D9): the tool schema field for the path is `path` (2.x write/edit/read
+// Input schemas are schema-validated `path`); relying solely on camelCase `filePath` would
+// yield an empty path whenever the host passes schema-validated args. The fallback chain reads
+// `filePath ?? file_path ?? path` (zero behavior change for camelCase-emitting models).
+// grep's source field is schema-validated `include`; fall back to `glob` for other shapes.
 function normalize(tool: string, args: Record<string, unknown> | undefined) {
-  if (tool === "bash") return { tool_name: "Bash", tool_input: { command: args?.command ?? "" } }
+  if (tool === "bash" || tool === "shell") return { tool_name: "Bash", tool_input: { command: args?.command ?? "" } }
   if (tool === "glob") return {
     tool_name: "Glob",
     tool_input: { pattern: (args?.pattern as string) ?? "", path: (args?.path as string) ?? "" },
@@ -72,7 +95,7 @@ function normalize(tool: string, args: Record<string, unknown> | undefined) {
       glob: (args?.include as string) ?? (args?.glob as string) ?? "",
     },
   }
-  if (tool === "apply_patch") {
+  if (tool === "apply_patch" || tool === "patch") {
     // Extract every marker path from the patchText blob into paths[] (parallel operations[]).
     // GLUE ONLY: no out-of-tree / extension / sanctioned-subtree decision — that is the guard's.
     const patchText = (args?.patchText as string) ?? ""
@@ -134,9 +157,9 @@ async function runGuard(payload: unknown): Promise<{ code: number; stderr: strin
         env: process.env, // inherit — carries MGH_*_ACTIVE if set at opencode launch
         // Bun.spawn in opencode's bundled Bun rejects a STRING stdin (TypeError: stdio must
         // be 'inherit'|'pipe'|'ignore'|Bun.file|number|null); a Blob is accepted and delivers
-        // the JSON payload. (Confirmed opencode 1.18.3: a bare `stdin: stdin` threw inside
-        // runGuard -> caught -> fail-soft-pass -> the guard NEVER blocked. Probe-reproduced;
-        // this was the real D7 root cause, not plugin loading / tool-id / cwd.)
+        // the JSON payload. (A bare `stdin: stdin` throws inside runGuard -> caught ->
+        // fail-soft-pass -> the guard NEVER blocks. Probe-reproduced on 1.x; the same
+        // constraint holds on 2.x's bundled Bun.)
         stdin: new Blob([stdin]),
         stdout: "ignore",
         stderr: "pipe",
@@ -160,26 +183,37 @@ async function runGuard(payload: unknown): Promise<{ code: number; stderr: strin
   return { code: 0, stderr: "[block_adhoc_scripts] no python interpreter found (py/python3/python); passing (fail-soft)" }
 }
 
-export const BlockAdhocScripts = async (ctx: { client?: any }) => {
-  return {
-    "tool.execute.before": async (input: { tool: string }, output: { args: any }) => {
-      // Tool-scope parity with Claude's Bash|Write|Edit matcher (D7). Other tools: pass, no gate.
-      if (!HANDLED.has(input.tool)) return
-      const { code, stderr } = await runGuard(normalize(input.tool, output.args))
+// opencode 2.x plugin module contract: a default export { id, setup }. setup is async and
+// AWAITS the hook registration before returning — a fire-and-forget registration lets the
+// first tool call slip past an unregistered hook (probe-reproduced during the 2.x migration).
+export default {
+  id: "block-adhoc-scripts",
+  async setup(ctx: { location?: { directory?: string }; tool: { hook: (event: string, cb: (event: { tool?: string; input?: Record<string, unknown> }) => Promise<void>) => Promise<unknown> } }) {
+    // The 2.x resident service process's cwd is unrelated to the analyzed project;
+    // ctx.location.directory is the ONE authoritative "where is this project" signal the
+    // plugin gets. Capture it once; inject per call (never via env — multiple locations must
+    // not step on each other). Empty/absent -> omit the field; the guard then falls back to
+    // its process cwd (the same last-resort it had before).
+    const projectRoot: string = ctx?.location?.directory ?? ""
+    await ctx.tool.hook("execute.before", async (event) => {
+      const tool = event?.tool ?? ""
+      // Tool-scope parity with Claude's Bash|Write|Edit matcher. Other tools: pass, no gate.
+      if (!HANDLED.has(tool)) return
+      const base = normalize(tool, event?.input)
+      const payload = projectRoot ? { ...base, cwd: projectRoot } : base
+      const { code, stderr } = await runGuard(payload)
       if (code === 2) {
-        // Throwing aborts the opencode tool call; stderr is the guard's remediation recipe.
+        // Rejecting the callback aborts the opencode tool call (a Tool.Error surfaces to
+        // the model); stderr is the guard's remediation recipe.
         throw new Error(stderr.trim() || "blocked by block_adhoc_scripts guard")
       }
       if (stderr) {
-        // Non-blocking diagnostic from the guard/shim (e.g. fail-soft notice). Best-effort log.
-        try {
-          await ctx.client?.app?.log?.({
-            body: { service: "block_adhoc_scripts", level: "warn", message: stderr.trim() },
-          })
-        } catch {
-          /* logging is best-effort */
-        }
+        // Non-blocking diagnostic from the guard/shim (e.g. fail-soft notice). The 1.x
+        // app-log diagnostic channel is gone in 2.x; console.warn is best-effort — visible
+        // in the service log when the service log is visible at all. Logging NEVER blocks
+        // the call.
+        console.warn(stderr.trim())
       }
-    },
-  }
+    })
+  },
 }

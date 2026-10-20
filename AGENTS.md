@@ -77,8 +77,9 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 
 - **确定性脚本 / 工具脚本实现优先使用 Python 标准库**。当前 `core/scripts/` 与 `tools/`
   全部只用标准库(`argparse/ast/collections/datetime/json/math/pathlib/re/subprocess/sys`;
-  另有 `urllib/socket/getpass`,**仅遥测模块 `mgh_telemetry.py` 使用**——启动时向内网
-  遥测端点发一条使用记录,未配端点时零网络行为),
+  另有 `base64/urllib`,**仅 `native_watchdog.py` 使用**——本机回环 HTTP 客户端,只连
+  127.0.0.1/localhost/::1 的宿主服务,零外网;`socket/getpass` **仅遥测模块
+  `mgh_telemetry.py` 使用**——启动时向内网遥测端点发一条使用记录,未配端点时零网络行为),
   经 AST 扫描与单测双重验证**无需 `pip install`**,内网可零联网运行。
 - **需要引入/安装任何 pip 依赖时,必须先主动向维护者确认**(给出依赖名、用途、是否影响
   内网零联网分发)。未经确认不得新增 `requirements.txt` 或 import 第三方包。

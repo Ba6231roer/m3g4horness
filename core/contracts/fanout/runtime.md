@@ -127,6 +127,93 @@ schema(全键可选、未知字段忽略;quota 在场时三键齐全):
 tier 枚举器(pending 的确定性来源,既有幂等契约)。「派发器行为零变化」由其源码零改动
 构造保证。
 
+## native watchdog(原生派发运行树的进程外安全网)
+
+`native_watchdog.py`(零依赖叶脚本,`--help` 即契约):独立于编排会话的常驻
+观察者,经本机宿主服务的 HTTP 面观测「根会话 + 全部后代」,对卡住形态确定性处置。启动形态
+(谁在何时拉起、参数怎么接线)属编排纪律,不在本节。
+
+### 服务发现与回环限定
+
+- 发现依序:`--service-json <path>` > `[XDG_STATE_HOME 或 ~/.local/state]/opencode/
+  service.json`(内容 `{url, password, …}`,HTTP Basic,固定用户名);鉴权失败或连接丢失
+  → 重读注册文件再试一次(服务重启会换密码),仍失败计入不可达。密码只存内存,NEVER 进
+  events/state/stdout/stderr。
+- **回环限定**:注册文件 url 主机 ∉ {127.0.0.1, localhost, ::1} → 退出码 2 + recipe,
+  不发起任何连接(工具携带本机凭证,NEVER 可被指向上非本机服务);HTTP 重定向一律拒绝
+  (3xx 不得携带凭证离机)。
+
+### 作用域与树外零触碰
+
+- 根会话 id = `--root` > `OPENCODE_SESSION_ID` 环境变量;后代按父 id 递归枚举(BFS,
+  分页跟随 cursor,规模上限 500)。
+- **每次动作前重走目标祖先链**(对服务实时 GET,NEVER 信任枚举快照),不收敛到根 → 放弃
+  动作 + `abandoned_out_of_tree` 事件;树外会话只被列表枚举(只读)涉及,NEVER 成为处置
+  目标。根不存在 → 退出码 2 + recipe,不进入空巡检;中途从树上消失的会话,其中止/未收口
+  状态随之清除。
+
+### 巡检判定(阈值 = 收敛上界,非健康诊断)
+
+每 `--poll-s` 周期(缺省 15)对树内每会话采集:活跃态(`/api/session/active`)、等待授权、
+等待表单、最近持久进展(会话 `time.updated` 与最新消息时间的最大值;工具边界由宿主折叠进
+updated;字段缺失 = 无该项,NEVER 猜)。授权与表单请求自身无时间戳 → 看门狗维护「首见」
+时刻。判定阈值(全可配,缺省如下):
+
+| 形态 | 判定 | 缺省 |
+| --- | --- | --- |
+| 等待授权 | 首见起超 `--ask-grace-s` | 90 秒(0 = 首见即拒,纯无人值守) |
+| 等待表单/问询 | 首见起超 `--form-grace-s` | 90 秒 |
+| 后代静默 | 活跃中且无持久进展超 `--silence-s` | 1200 秒(> 宿主响应头+流超时+重试余量) |
+| 后代超总时长 | 创建起超 `--unit-deadline-s` | 3600 秒 |
+| 中止未落定 | 中止后仍活跃超 `--interrupt-settle-s` | 45 秒 |
+
+终态会话(outcome succeeded/failed/interrupted)NEVER 是中止候选。根会话适用授权/表单
+宽限,但静默/超时默认只记录(见动作阶梯)。落定 = 树内无任何会话「活跃或有等待项」,
+持续一个确认周期(连续两周期)。
+
+### 动作阶梯(全受 `--dry-run` 约束:dry-run 只报告拟动作,零写请求)
+
+1. 等待授权超宽限 → 回复 `decision=reject + message`(一句「无人值守,继续完成本回合」
+   提示);**NEVER 回复批准**(源码级锚:唯一 decision 字面量为 reject);
+2. 等待表单超宽限 → 取消(DELETE)并附提示;
+3. 后代静默或超总时长 → 中止该会话(`interrupt?resume=false`;该端点响应**不带** `{"data":…}`
+   信封、直接返回 `{interrupted,…}`——2.1.0 实机钉扎,其余端点均带信封;宿主作用域机制连带
+   收口其挂起工具与 shell,本工具**不**直接管理 shell API);单元因无标记自然回待办重派;
+4. 复核窗后仍活跃 → 再中止一次;仍活跃 → 记「未收口」(unresolved),NEVER 无限重试;
+   写请求落空(目标已在两动作间消失)= 他人已解决,记 skip 事件、NEVER 计入动作数;
+5. 根静默/超时 → 默认仅记录(`root_stall` 事件);`--interrupt-root` 显式开启才可中止根
+   (中止根连带取消整波在飞子代理,最后手段)。
+
+动作与事件种类(闭集):`pending_seen` / `action_reject_permission` /
+`action_cancel_form` / `action_abort` / `unresolved` / `settled_after_abort` /
+`abandoned_out_of_tree` / `action_skipped_gone` / `root_stall` / `cycle_unreachable` /
+`exit`。
+
+### 工件与退出
+
+- `--run-dir <dir>` 时:`<dir>/watchdog/events.jsonl` 逐事件追加 + `<dir>/watchdog/
+  state.json` 原子写(tmp+rename,每周期至多一次,末次含退出结论);缺 `--run-dir` 零
+  落盘仅摘要;工件目录不可写 = stderr 告警 + 继续执法(审计降级,不停摆)。
+- stdout 恰好一行 JSON 摘要(模式/周期数/树内会话数/各类动作计数/未收口清单/dry-run
+  标记/退出原因);stderr 心跳与 recipe;严格分流。
+- 退出码:0 = 单扫完成 / 树落定 / `--deadline-s` 预算耗尽且无未收口;2 = 需要人(存在
+  未收口挂死、服务持续不可达(常驻连续 3 周期)、根缺失、注册文件缺失或非回环);1 = 误用
+  (缺根、非法阈值)。`--once` 单扫即退;常驻自退 = 落定或预算到点,NEVER 孤儿常驻。
+
+### 非目标
+
+零单元标记写入(`.done`/`.failed` 的唯一写者是单元执行纪律);NEVER 自动重启宿主服务
+(共享服务,重启是人的决定,只记录建议);不直接管理 shell API(会话中止已连带收口);
+不做限流/配额判定(决策留在计划器与编排纪律);不消费事件流(SSE 易失,轮询+持久时间戳
+已够判定);不接入命令壳(接入是后续 change)。
+
+### 版本矩阵
+
+| 宿主版本 | 状态 |
+| --- | --- |
+| opencode 2.1.0 | 实机验证(API 面经本机服务探测 + 源码 openapi 钉扎) |
+| opencode 2.0.32 | 待探测(`--once --dry-run` 只读面;差异回填本表) |
+
 ## tier 装载文件(dsh 专属,a 档 = 配置装载)
 
 `<mgh-core>/dsh/tiers/<tier>.yml`(tier ∈ scout|scout-merge|t1|t2|t3|sdr)由 `install.sh --dsh` 从

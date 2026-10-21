@@ -209,10 +209,18 @@ from list_rule_jobs import rule_unit_ids  # noqa: E402
 from discipline_core import get_discipline  # noqa: E402
 import env_profile  # noqa: E402 — sibling; profile read + fail-closed semantics
 
-# Native-dispatch face (scout layer, consumer=init): the plan artifact inside
-# the init dir and the installed wave-discipline fragment (same <mgh-core>
-# root as this script's install layout).
+# Native-dispatch face (scout + aggregate layers, consumer=init): the plan
+# artifacts inside the init dir and the installed wave-discipline fragments
+# (same <mgh-core> root as this script's install layout). The scout plan keeps
+# the un-suffixed name; the four aggregate tiers carry tier-suffixed names so
+# layers sharing one init dir never overwrite each other's plan evidence.
 NATIVE_PLAN_NAME = "native_plan.json"
+AGGREGATE_PLAN_NAMES = {
+    "t1": "native_plan_t1.json",
+    "t2": "native_plan_t2.json",
+    "t3": "native_plan_t3.json",
+    "scout-merge": "native_plan_scout-merge.json",
+}
 
 
 def _load_json(path: Path):
@@ -444,6 +452,13 @@ def _native_fragment_abs() -> str:
                / "init-scout-native-dispatch.md")
 
 
+def _aggregate_fragment_abs() -> str:
+    """Absolute path of the installed aggregate-layer native dispatch
+    discipline fragment (t1/t2/t3/scout-merge map stages)."""
+    return str(_mgh_core_root() / "prompts" / "fragments"
+               / "init-aggregate-native-dispatch.md")
+
+
 def _dispatch_form(target, init_dir: Path):
     """Native-form detection for the scout layer through the ONE shared resolver
     (`consumer=init`). An explicit `dispatch_mode` wins; otherwise the init
@@ -490,6 +505,17 @@ def _dispatch_form(target, init_dir: Path):
         "plan_present": (init_dir / NATIVE_PLAN_NAME).is_file(),
         "native_agent": env_profile.INIT_NATIVE_AGENT,
         "discipline_fragment": _native_fragment_abs(),
+        "aggregate_fragment": _aggregate_fragment_abs(),
+        "aggregate_agents": {
+            "t1": "init-induct-native",
+            "t2": "init-synthesis-native",
+            "t3": "init-rulewriter-native",
+            "scout-merge": "init-scout-merge-native",
+        },
+        "aggregate_plan_present": {
+            tier: (init_dir / name).is_file()
+            for tier, name in AGGREGATE_PLAN_NAMES.items()
+        },
     }, None
 
 
@@ -578,6 +604,79 @@ def _stage_flow_files(step: str) -> list:
     if step not in _FRAGMENT_STEPS:
         return []
     return [str((_STAGE_FLOW_DIR / f"{step}.md").resolve())]
+
+
+def _native_aggregate_next(init_dir: Path, dispatch: dict, tier: str,
+                           paths, budget=None) -> dict:
+    """The t1/t2/t3 step's NATIVE next_action (aggregate layers):
+    channel B (the mgh_dispatch tool, one call per
+    materialized page) is the DEFAULT, channel A (orchestrator same-message
+    waves) the fallback when the tool is absent; the per-tier plan presence
+    picks the sub-phase (materialize-first vs dispatch), mirroring the scout
+    face. Progress derivation stays purely on-disk (markers + plan files)."""
+    frag = dispatch["aggregate_fragment"]
+    agent = dispatch["aggregate_agents"][tier]
+    plan_name = AGGREGATE_PLAN_NAMES[tier]
+    plan_path = init_dir / plan_name
+    emit_abs = str(Path(__file__).resolve().parent / "emit_native_plan.py")
+    cli = {
+        "t1": (f"--tier t1 --clusters {init_dir / 'clusters.json'} "
+               f"--candidates {init_dir / 'controls_candidates.json'} "
+               f"--checkpoints {init_dir / 'checkpoints' / 't1'} "
+               f"--inputs-dir {init_dir / 'inputs' / 't1'} "
+               f"--profile {init_dir.parent}"),
+        "t2": (f"--tier t2 --init-dir {init_dir}"
+               + (f" --budget {budget}" if budget else "")
+               + f" --checkpoints {init_dir / 'checkpoints' / 't2'} "
+                 f"--inputs-dir {init_dir / 'inputs' / 't2'} "
+                 f"--profile {init_dir.parent}"),
+        "t3": (f"--tier t3 --inventory {init_dir / 'controls_inventory.json'} "
+               f"--format <fmt> --rules-dir <rules-dir> --target {init_dir.parent} "
+               f"--checkpoints {init_dir / 'checkpoints' / 't3'} "
+               f"--inputs-dir {init_dir / 'inputs' / 't3'} "
+               f"--profile {init_dir.parent}"),
+    }[tier]
+    emit = f"py {emit_abs} {cli}"
+    gate_note = ""
+    if tier == "t2":
+        gate_note = (
+            f"t2 GATE FIRST: `py {Path(__file__).resolve().parent / 'plan_aggregate.py'} "
+            f"--node t2 --init-dir {init_dir}"
+            + (f" --budget {budget}" if budget else "")
+            + "` — needs_reduce=false → ZERO dispatch (the materializer writes "
+              "NO plan for it; single-context init-synthesis runs as-is); "
+              "needs_reduce=true → continue below")
+    channel = (
+        f"DEFAULT channel B: ONE `mgh_dispatch` tool call with the fresh "
+        f"plan_path ({{\"plan\": \"<plan_path>\"}} — the whole page's waves in "
+        f"one call, zero LLM wave turns; summary = counts + short ids); tool "
+        f"absent → channel A: same-message waves (agent {agent}; description = "
+        f"the plan's short id, task body = the single token line "
+        f"`mgh-dispatch: plan=<plan_path> unit=<short id>`)")
+    if dispatch["aggregate_plan_present"].get(tier):
+        desc = (
+            f"{tier} native round (aggregate): FIRST re-materialize `{plan_name}` "
+            f"(`{emit}`, "
+            f"then the same args with `--check`; exit 2 → re-materialize per "
+            f"stderr recipe — a completed unit makes the plan stale by design, "
+            f"that exit code is the repair path, NEVER a fault; one "
+            f"materialization covers only the enumerator's CURRENT pending "
+            f"page, so after each page you re-materialize until "
+            f"`units_total == 0`). {gate_note} THEN {channel}. Full discipline "
+            f"(watchdog-first, marker truth source, at-most-one retry round, "
+            f"rate-limit wait): Read {frag} and follow it")
+        return _next("subagent", desc, list(paths) + [plan_path])
+    desc = (
+        f"native form is active but this layer has no plan artifact yet. "
+        f"{gate_note} Run `{emit}`, then the same args with `--check` (exit 2 "
+        f"→ re-materialize per stderr recipe) — that materializes {plan_name} "
+        f"+ the per-unit task files. BEFORE the first wave, ensure the "
+        f"watchdog is running in the background (`py "
+        f"{Path(__file__).resolve().parent / 'native_watchdog.py'} "
+        f"--run-dir {init_dir}`; same instance as the scout layer, default "
+        f"thresholds). THEN {channel}. Full wave discipline: Read {frag} "
+        f"and follow it")
+    return _next("bash", desc, list(paths) + [plan_path])
 
 
 def resolve(init_dir: Path):
@@ -752,9 +851,14 @@ def resolve(init_dir: Path):
                                 notes, dispatch)
     elif t1_total and (t1_done_count + t1_failed_count) < t1_total:
         step = "t1"
-        nxt = _next("bash",
-                    "fan out init-induct per pending cluster via list_clusters.py --materialize",
-                    [clusters_p, candidates, t1_cp])
+        if dispatch is not None:
+            nxt = _native_aggregate_next(
+                init_dir, dispatch, "t1",
+                [clusters_p, candidates, t1_cp])
+        else:
+            nxt = _next("bash",
+                        "fan out init-induct per pending cluster via list_clusters.py --materialize",
+                        [clusters_p, candidates, t1_cp])
     elif not _t2_done(init_dir) or not inventory.is_file():
         step = "t2"
         budget = ((cfg.get("budgets") or {}).get("max_aggregate_bytes"))
@@ -766,14 +870,24 @@ def resolve(init_dir: Path):
         sub = _t2_map_substate(init_dir)
         if sub:
             notes.append(sub)
-        nxt = _next("subagent",
-                    "spawn init-synthesis (all T1 records, no raw code) -> controls_inventory.json",
-                    [t1_cp, inventory, init_dir / "checkpoints" / "t2"])
+        if dispatch is not None:
+            nxt = _native_aggregate_next(
+                init_dir, dispatch, "t2",
+                [t1_cp, inventory, init_dir / "checkpoints" / "t2"],
+                budget=budget)
+        else:
+            nxt = _next("subagent",
+                        "spawn init-synthesis (all T1 records, no raw code) -> controls_inventory.json",
+                        [t1_cp, inventory, init_dir / "checkpoints" / "t2"])
     elif t3_total and (t3_done_count + t3_failed_count) < t3_total:
         step = "t3"
-        nxt = _next("bash",
-                    "fan out init-rulewriter per pending category via list_rule_jobs.py --materialize",
-                    [inventory, t3_cp])
+        if dispatch is not None:
+            nxt = _native_aggregate_next(
+                init_dir, dispatch, "t3", [inventory, t3_cp])
+        else:
+            nxt = _next("bash",
+                        "fan out init-rulewriter per pending category via list_rule_jobs.py --materialize",
+                        [inventory, t3_cp])
     elif (not skip_consistency) and not _t4_done(init_dir):
         step = "assemble"
         nxt = _next("bash",
@@ -788,8 +902,9 @@ def resolve(init_dir: Path):
                     f"all stages complete{tail}; finalize: write init_manifest.json + report.md.",
                     [manifest, init_dir / "report.md"])
 
-    # native scout face: watchdog wiring + bounded-retry disclosures (advisory;
-    # after step resolution so the scout-fanout activity state is known).
+    # native face notes (scout + aggregate layers): watchdog wiring + bounded-
+    # retry disclosures (advisory; after step resolution so the fan-out
+    # activity state is known).
     if dispatch is not None and step == "scout" and scout_total > 0 \
             and scout_terminal_count < scout_total \
             and not (init_dir / "watchdog" / "state.json").is_file():
@@ -797,13 +912,23 @@ def resolve(init_dir: Path):
                      "dispatching waves, start the watchdog in the background per the "
                      "wave-discipline fragment (root session = host-injected "
                      "OPENCODE_SESSION_ID; it self-exits when the run settles).")
-    if dispatch is not None and tiers["scout"]["failed"] > 0:
-        notes.append("native form: a failed batch may be re-dispatched AT MOST ONE more "
-                     "round (delete its stale .failed marker, re-materialize with "
-                     "--retry-failed, dispatch once); a second failure closes it as a "
-                     "disclosed gap before scout-merge. A rate-limit-featured failure "
-                     "reason waits one profile quota window before any re-dispatch "
-                     "(wave-discipline fragment §2).")
+    if dispatch is not None and step in ("t1", "t2", "t3") \
+            and not (init_dir / "watchdog" / "state.json").is_file():
+        notes.append("watchdog artifacts absent (<init-dir>/watchdog/) — before "
+                     "dispatching this layer's waves (map-reduce path), ensure the "
+                     "watchdog is running in the background (same instance as the "
+                     "scout layer; it self-exits when the run settles).")
+    for tier_name, tail in (("scout", "before scout-merge"),
+                            ("t1", "(gap disclosed in manifest failures)"),
+                            ("t3", "(gap disclosed in manifest failures)")):
+        if dispatch is not None and tiers[tier_name]["failed"] > 0:
+            notes.append(f"native form: a failed {tier_name} unit may be "
+                         f"re-dispatched AT MOST ONE more round (delete its stale "
+                         f".failed marker, re-materialize with --retry-failed, "
+                         f"dispatch once); a second failure closes it as a "
+                         f"disclosed gap {tail}. A rate-limit-featured failure "
+                         "reason waits one profile quota window before any "
+                         "re-dispatch (wave-discipline fragment §2).")
 
     resumable = not (step == "done" and manifest.is_file())
     state = {
@@ -812,7 +937,8 @@ def resolve(init_dir: Path):
         "stale_fanout": _stale_fanout(init_dir),
         "discipline_reminders": get_discipline(
             step,
-            form="native" if (dispatch is not None and step == "scout")
+            form="native" if (dispatch is not None
+                              and step in ("scout", "t1", "t2", "t3"))
             else "subprocess"),
         "stage_flow_files": _stage_flow_files(step),
     }

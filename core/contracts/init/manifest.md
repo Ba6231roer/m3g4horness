@@ -55,6 +55,37 @@ consumer:"init", plan_path, plan_present, native_agent:"init-scout-native"}`,值
 展开落地后只剩短号错抄,防线 = 越树守卫 + 重枚举回待派 + 至多一轮重派〕、一次物化只
 覆盖当前 pending 页)。
 
+`aggregate_dispatch` = **可选字段,仅原生形态在场**(t1/t2/t3/scout-merge 四个聚合层
+map 段的派发披露;与 `scout.dispatch` 同源同缺席语义):
+
+```json
+"aggregate_dispatch": {
+  "form": "native", "source": "host-default|profile", "host_face": "opencode",
+  "consumer": "init",
+  "channel": "tool|waves",
+  "layers": {
+    "t1":  {"plan": "native_plan_t1.json", "plan_present": true, "agent": "init-induct-native"},
+    "t2":  {"plan": "native_plan_t2.json", "plan_present": true, "agent": "init-synthesis-native"}
+            | {"zero_dispatch": true, "note": "needs_reduce=false → single-context"},
+    "scout-merge": {"plan": "native_plan_scout-merge.json", "plan_present": true, "agent": "init-scout-merge-native"}
+            | {"single_context": true}
+            | {"skipped": true, "note": "--no-scout"},
+    "t3":  {"plan": "native_plan_t3.json", "plan_present": true, "agent": "init-rulewriter-native"}
+  },
+  "fallback_events": ["<通道 A 回退 / 零派发 / 缺口等事实,如实记录>"]
+}
+```
+
+- `channel` = 实际执行的通道(`"tool"` = 通道 B 派发工具一次调用跑完本页波次 /
+  `"waves"` = 通道 A 编排器波次纪律;工具缺席回退通道 A 时如实记 `"waves"` 并把回退
+  事实写进 `fallback_events[]`,**NEVER** 声称未发生的通道)。
+- 每层 `plan_present` = 该层 `native_plan_<tier>.json` 在场证据;`t2`/`scout-merge` 的
+  `needs_reduce=false` 支路记 `zero_dispatch`/`single_context`(零派发不变量的落账)。
+- 值取自 `resume_state.py` stdout `dispatch`(聚合扩展键)+ 本 run 过程记录;
+  **NEVER** 靠模型记忆重写。子进程形态(显式 runner / claude/dsh 面)整字段缺席。
+- 失败缺口披露沿用既有面:`failures.{t1,t3}` 计数 + `boundaries[]` 行;t2/scout-merge
+  缺片不 rollup 的事实进 `fallback_events[]` + `report.md`。
+
 ### Checkpoint units (`<target>/.mgh-init/checkpoints/<unit>.json`)
 
 Work-unit granularity = isolation unit = resume unit:

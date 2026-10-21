@@ -29,16 +29,21 @@ ESTABLISHED subprocess manifest, byte-identical output (no new stdout fields).
 Resolved `native` → the scout step entry switches to the native plan
 materializer (`emit_native_plan.py --tier scout`) and gains a `native_arc`
 field (materialize → same-message wave dispatch → the unchanged scout-merge
-segment), and the top-level `dispatch` field appears with
-`source`/`profile_exists`/`host_face`/`consumer=init`. A malformed profile is
+segment), the t1/t2/t3 step entries switch to their aggregate native faces
+(materializer entry + native_arc: gate/materialize/dispatch[/rollup/gate]),
+and the top-level `dispatch` field appears with
+`source`/`profile_exists`/`host_face`/`consumer=init` (+ the aggregate
+fragment/agents/plan-presence keys). A malformed profile is
 fail-closed: exit 2 + recipe (NEVER silently treated as defaults). A resolved
 native on a non-opencode face is fail-closed too: exit 2 + recipe (native
 dispatch exists only on the opencode face — NEVER silently run as subprocess).
-On the opencode face the scout native assets (the `init-scout-native` agent +
-the wave-discipline fragment) are checked before emitting the manifest; absent
-→ exit 2 + reinstall/runner recipe (NEVER a silent fallback). Only the scout
-step is native today: t1/t2/t3/scout-merge stay subprocess in this change (the
-later aggregate change inherits the same consumer default).
+On the opencode face the init native assets (the five `init-*-native` twins +
+the scout and aggregate wave-discipline fragments) are checked before
+emitting the manifest; absent → exit 2 + reinstall/runner recipe (NEVER a
+silent fallback). The scout step AND the aggregate steps (t1/t2/t3) switch to
+their native faces (plan materializer entry + `native_arc` + the native
+discipline variant; each aggregate layer's plan file is tier-suffixed
+`native_plan_<tier>.json`); the runner form keeps every step byte-identical.
 
 Complements `resume_state.py` (disk-derived "where am I / what's next"):
 resume_state gives current step; list_steps gives the exact invocation line
@@ -105,8 +110,17 @@ import env_profile  # noqa: E402 — sibling; profile read + fail-closed semanti
 # The native scout plan lands next to the plan artifact it materializes from
 # (`emit_native_plan.py` anchors the plan beside `scout_plan.json` = the init
 # dir). Corroboration probe only — the resolved form is the binding decision.
+# The four AGGREGATE tiers carry per-tier suffixed plan names
+# (`native_plan_<tier>.json`) so the layers sharing one init dir never
+# overwrite each other's plan evidence (scout keeps the un-suffixed name).
 _INIT_RUN_ROOT = ".mgh-init"
 NATIVE_PLAN_NAME = "native_plan.json"
+AGGREGATE_PLAN_NAMES = {
+    "t1": "native_plan_t1.json",
+    "t2": "native_plan_t2.json",
+    "t3": "native_plan_t3.json",
+    "scout-merge": "native_plan_scout-merge.json",
+}
 
 
 # Static step→IO table (D2: data-driven, defined once). Step id set matches
@@ -292,6 +306,10 @@ def _dispatch_form(target: Path):
         print(recipe, file=sys.stderr)
         sys.exit(2)
     plan_present = (target / _INIT_RUN_ROOT / NATIVE_PLAN_NAME).is_file()
+    aggregate_plans = {
+        tier: (target / _INIT_RUN_ROOT / name).is_file()
+        for tier, name in AGGREGATE_PLAN_NAMES.items()
+    }
     return {
         "form": "native",
         "source": res.source,
@@ -303,6 +321,15 @@ def _dispatch_form(target: Path):
         "native_agent": env_profile.INIT_NATIVE_AGENT,
         "discipline_fragment": str(_mgh_core_root() / "prompts" / "fragments"
                                    / "init-scout-native-dispatch.md"),
+        "aggregate_fragment": str(_mgh_core_root() / "prompts" / "fragments"
+                                  / "init-aggregate-native-dispatch.md"),
+        "aggregate_agents": {
+            "t1": "init-induct-native",
+            "t2": "init-synthesis-native",
+            "t3": "init-rulewriter-native",
+            "scout-merge": "init-scout-merge-native",
+        },
+        "aggregate_plan_present": aggregate_plans,
     }
 
 
@@ -344,10 +371,120 @@ def _native_scout_step(base: dict, dispatch: dict) -> dict:
                       "才进 merge")},
             {"phase": "merge", "kind": "bash", "step_ref": "scout-merge",
              "note": ("units_total==0(失败缺口已按至多一轮重派纪律接受或为零)→ 回本步既有 "
-                      "scout-merge 段(extra_invocations;聚合预算闸门 / map-reduce / audit "
-                      "/ fold-in 形态不变,仍子进程承载)")},
+                      "scout-merge 段:聚合预算闸门(plan_aggregate --node scout-merge)不变;"
+                      "needs_reduce=false 单上下文不变;needs_reduce=true 的 map 分片段按"
+                      "聚合层原生纪律执行(emit_native_plan --tier scout-merge + 通道 B "
+                      "默认/通道 A 回退,计划文件 native_plan_scout-merge.json),"
+                      "rollup / audit / fold-in 不变(见 extra_invocations 与聚合 fragment)")},
         ],
         "discipline": get_discipline("scout", domain="init", form="native"),
+    })
+    # the scout-merge map drive companion switches to the plan materializer in
+    # the native face (channel B/A per the aggregate fragment); the subprocess
+    # drive stays the extra for the runner form untouched.
+    emit_merge_abs = _script_abs("emit_native_plan.py")
+    step["extra_invocations"] = [{
+        "script": "emit_native_plan.py", "script_abs": emit_merge_abs,
+        "invocation": _invocation(
+            emit_merge_abs,
+            "--tier scout-merge --init-dir <init-dir> --budget "
+            "<max-aggregate-bytes> --checkpoints <init-dir>/checkpoints/scout "
+            "--inputs-dir <init-dir>/inputs/scout-merge --profile <target>"),
+    }]
+    return step
+
+
+def _native_aggregate_step(base: dict, dispatch: dict, tier: str) -> dict:
+    """A t1/t2/t3 step's NATIVE face (aggregate layers):
+    the deterministic entry point is the plan materializer (re-materialize =
+    re-enumerate; page loop until units_total == 0); the dispatch itself is
+    channel B (the mgh_dispatch tool, one call per materialized page — the
+    DEFAULT) with channel A (orchestrator same-message waves) as the fallback,
+    carried by the `native_arc` phases + the native discipline variant (same
+    table resume_state reports). Each layer's own invariants (t1 pack/gates,
+    t2 zero-dispatch + rollup manifest, t3 positive marker judgment) live in
+    the aggregate fragment + the discipline table — the subprocess entries'
+    semantics, unchanged."""
+    emit_abs = _script_abs("emit_native_plan.py")
+    cli = {
+        "t1": ("--tier t1 --clusters <init-dir>/clusters.json --candidates "
+               "<init-dir>/controls_candidates.json --checkpoints "
+               "<init-dir>/checkpoints/t1 --inputs-dir <init-dir>/inputs/t1 "
+               "--profile <target> [--pack-bytes 16384 --pack-max 8]"),
+        "t2": ("--tier t2 --init-dir <init-dir> --budget <max-aggregate-bytes> "
+               "--checkpoints <init-dir>/checkpoints/t2 --inputs-dir "
+               "<init-dir>/inputs/t2 --profile <target>"),
+        "t3": ("--tier t3 --inventory <init-dir>/controls_inventory.json "
+               "--format <fmt> --rules-dir <rules-dir> --target <target> "
+               "--checkpoints <init-dir>/checkpoints/t3 --inputs-dir "
+               "<init-dir>/inputs/t3 --profile <target>"),
+    }[tier]
+    agent = dispatch["aggregate_agents"][tier]
+    plan_name = AGGREGATE_PLAN_NAMES[tier]
+    arc = [
+        {"phase": "materialize", "kind": "bash", "script": "emit_native_plan.py",
+         "invocation": _invocation(emit_abs, cli),
+         "note": ("每轮重跑 = 重枚举(pending 由磁盘标记重派生;一次物化只覆盖枚举器当前 "
+                  "pending 页);物化后同参跑 --check;任一单元完成后计划按设计变 stale,"
+                  "波次收尾以重物化修复")},
+        {"phase": "dispatch", "kind": "tool", "agent": agent,
+         "tool": "mgh_dispatch",
+         "discipline_fragment": dispatch["aggregate_fragment"],
+         "note": ("默认通道 B:工具 mgh_dispatch 输入只带计划引用 {\"plan\": <物化 "
+                  "stdout plan_path 逐字>}(整份计划 = 本页全部波次,零 LLM 波次回合);"
+                  "工具缺席回退通道 A:同一条 assistant 消息并发派当前波全部单元"
+                  "(description=计划短号,任务体=单行令牌 mgh-dispatch: plan=<plan_path> "
+                  "unit=<短号>);看门狗先行(与 scout 读者层同一实例);至多一轮重派 + "
+                  "限流等窗见 fragment")},
+    ]
+    if tier == "t2":
+        arc.insert(0, {
+            "phase": "gate", "kind": "bash", "script": "plan_aggregate.py",
+            "invocation": _invocation(
+                _script_abs("plan_aggregate.py"),
+                "--node t2 --init-dir <init-dir> --budget <max-aggregate-bytes>"),
+            "note": ("聚合预算闸门先行且不变:needs_reduce=false → 零派发(物化器不产计划、"
+                     "不建会话,stdout note 即此信号;single-context init-synthesis 照既有"
+                     "段执行);needs_reduce=true 才进 materialize 相位(--budget 与闸门"
+                     "同值)")})
+        arc.append({
+            "phase": "rollup", "kind": "subagent", "agent": "init-synthesis-rollup",
+            "note": ("map 全终态(units_total==0)后单一 rollup 仅吞 rollup.summary_paths "
+                     "清单路径(manifest 文件先行,不变);任一分片 .failed → 不 rollup,"
+                     "缺口披露")})
+    elif tier == "t1":
+        arc.append({
+            "phase": "gate", "kind": "bash", "script": "validate_t1_records.py",
+            "invocation": _invocation(
+                _script_abs("validate_t1_records.py"),
+                "--strip-bom --checkpoints <init-dir>/checkpoints/t1 "
+                "(then --check, same args)"),
+            "note": ("T1→T2 形状闸门两形态共用,波次收敛后照常必跑:先 --strip-bom 再 "
+                     "--check;退出码 2 → 对 stdout violations[] 外科式重派(删该簇 "
+                     ".done → 重物化重派该簇),NEVER 带破损 T1 记录进 T2(t1 层不变量)")})
+    else:
+        arc.append({
+            "phase": "gate", "kind": "bash", "script": "assemble_rules.py",
+            "invocation": _invocation(
+                _script_abs("assemble_rules.py"),
+                "--check --target <target> --format <fmt>"),
+            "note": ("规则纯净 lint 对原生形态产出同样把关(t3 层不变量,收口在 assemble "
+                     "步);done/failed 判定 = 正向 marker 路径计算,孤儿 marker 清单告警"
+                     "照常;agent = init-rulewriter-native,原生评审孪生中唯一带写权限者"
+                     "(写面只开规则产物,越树写被守卫拦)"),
+        })
+    step = dict(base)
+    step.update({
+        "script": "emit_native_plan.py",
+        "script_abs": emit_abs,
+        "invocation": _invocation(emit_abs, cli),
+        "output": {"artifact": f"{plan_name} + <unit>.task.md + checkpoints/markers",
+                   "shape": "[page-bounded wave split + per-unit task file; terminal "
+                            "markers written by the subagents themselves]",
+                   "path_pattern": f"<init-dir>/{plan_name} "
+                                   f"(+ <init-dir>/inputs/{tier}/<unit>.task.md)"},
+        "native_arc": arc,
+        "discipline": get_discipline(tier, domain="init", form="native"),
     })
     return step
 
@@ -411,7 +548,9 @@ def main():
     steps = [_build_step(e) for e in _STEPS]
     dispatch = _dispatch_form(target)
     if dispatch is not None:
-        steps = [_native_scout_step(s, dispatch) if s["step"] == "scout" else s
+        steps = [_native_scout_step(s, dispatch) if s["step"] == "scout"
+                 else _native_aggregate_step(s, dispatch, s["step"])
+                 if s["step"] in ("t1", "t2", "t3") else s
                  for s in steps]
     step_ids = {s["step"] for s in steps}
 

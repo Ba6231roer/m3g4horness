@@ -61,7 +61,11 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
     "profile_path": "<abs>/.mgh/env-profile.json",
     "plan_present": true,
     "native_agent": "init-scout-native",
-    "discipline_fragment": "<abs mgh-core>/prompts/fragments/init-scout-native-dispatch.md"
+    "discipline_fragment": "<abs mgh-core>/prompts/fragments/init-scout-native-dispatch.md",
+    "aggregate_fragment": "<abs mgh-core>/prompts/fragments/init-aggregate-native-dispatch.md",
+    "aggregate_agents": {"t1": "init-induct-native", "t2": "init-synthesis-native",
+                          "t3": "init-rulewriter-native", "scout-merge": "init-scout-merge-native"},
+    "aggregate_plan_present": {"t1": false, "t2": false, "t3": false, "scout-merge": false}
   }
 }
 ```
@@ -96,18 +100,21 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
   **`done` → `init-stage/done.md`**(收尾纪律——manifest 收尾 + 失败落账 + 移除哨兵——经既有
   「Read stage_flow_files[0]」壳配方可达,长跑压缩后恢复到收尾态不再失联)。resume 衍生量,
   不持久化。
-- `dispatch` = **仅原生形态在场**(scout 读者批派发形态;经 `env_profile.resolve(<target>,
-  consumer="init")` 单源解析,与 sdr 同形字段):`form:"native"`、`source`
-  (`profile` = 画像显式选择 / `host-default` = opencode 面缺省,**无画像的 opencode init
+- `dispatch` = **仅原生形态在场**(scout 读者批 + 聚合四层 map 段的派发形态;经
+  `env_profile.resolve(<target>, consumer="init")` 单源解析,与 sdr 同形字段):`form:"native"`、
+  `source`(`profile` = 画像显式选择 / `host-default` = opencode 面缺省,**无画像的 opencode init
   即 `host-default`**)、`profile_exists`、`host_face`(`"opencode"`——native 仅此面)、
   `consumer:"init"`、`profile_path`、`plan_present`(`<init-dir>/native_plan.json` 在场,
   佐证信号非绑定决策)、`native_agent:"init-scout-native"`、`discipline_fragment`(安装树内
-  绝对路径)。子进程形态(显式 `dispatch_mode:"runner"`、`consumer=generic`、claude/dsh/other
-  面)该字段**缺席**,stdout 逐字节回到既有形状。原生形态下 scout 步(仅该步)的
-  `next_action` 指向原生弧(见下),`discipline_reminders` 解析 `get_discipline("scout",
-  domain="init", form="native")` 原生变体(与 `list_steps.py --step scout` 的
-  `discipline` 同表逐字一致);其余 step 的 discipline 与既有表逐字一致。进度仍纯磁盘重派生
-  (`plan_present` 只是佐证探针,进度判定仍走 marker)。
+  绝对路径);**聚合扩展键**(additive):`aggregate_fragment`(聚合纪律 fragment 绝对路径)、
+  `aggregate_agents`(t1/t2/t3/scout-merge 四层原生孪生名)、`aggregate_plan_present`(各层
+  `native_plan_<tier>.json` 在场佐证——计划文件按 tier 命名,层间互不覆写)。子进程形态
+  (显式 `dispatch_mode:"runner"`、`consumer=generic`、claude/dsh/other 面)该字段**缺席**,
+  stdout 逐字节回到既有形状。原生形态下 scout/t1/t2/t3 四步的 `next_action` 指向各自原生弧
+  (见下),`discipline_reminders` 解析 `get_discipline(<step>, domain="init", form="native")`
+  原生变体(与 `list_steps.py --step <id>` 的 `discipline` 同表逐字一致);其余 step 的
+  discipline 与既有表逐字一致。进度仍纯磁盘重派生(`plan_present`/`aggregate_plan_present`
+  只是佐证探针,进度判定仍走 marker)。
 
 ## step 判定真值表(阻塞序列;由产物 + `.done` + `run_config` 解析)
 
@@ -166,6 +173,29 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
    merge 仅吞**成功**批记录,`.failed` 批跳过(scout 覆盖本就 partial)。
 4. `scout_candidates.json` + merge 完但 fold-in 未跑(`controls_candidates.json` 无
    `provenance.scout_merged`)→ bash `merge_scout.py` fold-in。
+
+### 聚合层(t1/t2/t3)原生 next_action(`dispatch` 在场时;子进程行零变化)
+
+`dispatch` 缺席 → t1/t2/t3 的 next_action 与既有子进程行逐字一致。`dispatch` 在场 →
+三步的 next_action 换为各自原生弧(进度判定不变,仍纯 marker;`aggregate_plan_present[<tier>]`
+按 `native_plan_<tier>.json` 在场分**物化相位**(kind:bash:先跑物化器 + 同参 `--check` +
+确保看门狗在跑)与**派发相位**(kind:subagent:先重物化修复 stale,再派发本页)):
+- **通道 B(默认)**:一次 `mgh_dispatch` 工具调用,输入只带计划引用
+  `{"plan": "<plan_path>"}`(整份计划 = 本页全部波次,零 LLM 波次回合;摘要 = 计数 +
+  短号清单 + 会话 id,与磁盘标记对账);**NEVER** 在工具外自建波次循环、**NEVER** 把
+  单元任务路径写进工具输入。
+- **通道 A(回退,工具缺席)**:同一条 assistant 消息并发派当前波全部单元
+  (agent = 该层原生孪生;`description`=计划短号,任务体=单行令牌
+  `mgh-dispatch: plan=<plan_path> unit=<短号>`);回退事实入过程记录并披露,
+  **NEVER** 因工具缺席静默换子进程形态。
+- **t2 特有:闸门先行**——next_action desc 先指 `plan_aggregate --node t2` 预算闸门;
+  `needs_reduce=false` → **零派发**(物化器不产计划、不建会话,single-context
+  `init-synthesis` 照既有段执行);`needs_reduce=true` 才进物化/派发相位(`--budget`
+  与闸门同值)。rollup 段(manifest 消费)不变。
+- 两种子相位的 desc 末尾都指向聚合纪律 fragment(`dispatch.aggregate_fragment`)——
+  看门狗 / 页循环 / 标记真相源 / 至多一轮重派 / 限流等窗的完整纪律住 fragment。
+- 原生形态下 t1/t3 的失败单元照进 `notes[]`(「AT MOST ONE more」原生重派提示,
+  与 scout 同形;t2/scout-merge 缺片由 map 子状态 note 披露、不得 rollup)。
 
 fold-in 检测:`merge_scout.py` 设 `provenance.scout_merged`(即便 0 scout 候选也设);
 `scout_merged` 在 ⟺ fold-in 已跑。**重跑非幂等**——同文件重跑把 `scout_merged` 覆盖为 0(触发虚假召回

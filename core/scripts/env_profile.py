@@ -49,10 +49,12 @@ Native asset gate: `require_native_assets()` is the ONE presence check for the
 installed opencode native assets, parameterized by SURFACE (which command's
 native form is activating): `surface="sdr"` checks the `sdr-review-native`
 agent beside the mgh-core tree + the sdr wave-discipline fragment inside it;
-`surface="init"` checks the `init-scout-native` agent + the init scout
-wave-discipline fragment. The orchestration surfaces call it when the resolved
-form is native on the opencode face; a missing asset is a fail-loud recipe
-(reinstall or explicit runner), NEVER a silent fall-back to the subprocess form.
+`surface="init"` checks the FIVE init native twins (init-scout-native + the
+four aggregate-layer twins init-induct/synthesis/scout-merge/rulewriter-native)
++ the two init wave-discipline fragments (scout layer; aggregate layers). The
+orchestration surfaces call it when the resolved form is native on the
+opencode face; a missing asset is a fail-loud recipe (reinstall or explicit
+runner), NEVER a silent fall-back to the subprocess form.
 
 Contract: stdout = one structured JSON line {target, config_path, exists,
 profile{dispatch_mode, native_concurrency, quota}, host_face, consumer, form,
@@ -101,13 +103,25 @@ SOURCE_HOST_DEFAULT = "host-default"
 NATIVE_AGENT = "sdr-review-native"
 NATIVE_AGENT_REL = Path("agent") / f"{NATIVE_AGENT}.md"
 NATIVE_FRAGMENT_REL = Path("prompts") / "fragments" / "sdr-native-dispatch.md"
+# init surface: the scout reader twin + the FOUR aggregate-layer twins
+# (t1/t2/t3/scout-merge map stages) + the two wave-discipline fragments
+# (scout layer; aggregate layers). The full set is ONE surface — the init
+# native form activates for the whole pipeline, so a partial twin set is a
+# version-skewed install and blocks startup (NEVER a silent layer fallback).
 INIT_NATIVE_AGENT = "init-scout-native"
-INIT_NATIVE_AGENT_REL = Path("agent") / f"{INIT_NATIVE_AGENT}.md"
+INIT_NATIVE_AGENTS = (INIT_NATIVE_AGENT, "init-induct-native",
+                      "init-synthesis-native", "init-scout-merge-native",
+                      "init-rulewriter-native")
+INIT_NATIVE_AGENT_RELS = tuple(Path("agent") / f"{a}.md"
+                               for a in INIT_NATIVE_AGENTS)
 INIT_NATIVE_FRAGMENT_REL = (Path("prompts") / "fragments"
                             / "init-scout-native-dispatch.md")
+INIT_AGGREGATE_FRAGMENT_REL = (Path("prompts") / "fragments"
+                               / "init-aggregate-native-dispatch.md")
 NATIVE_SURFACES = {
     "sdr": (NATIVE_AGENT_REL, NATIVE_FRAGMENT_REL),
-    "init": (INIT_NATIVE_AGENT_REL, INIT_NATIVE_FRAGMENT_REL),
+    "init": INIT_NATIVE_AGENT_RELS + (INIT_NATIVE_FRAGMENT_REL,
+                                      INIT_AGGREGATE_FRAGMENT_REL),
 }
 DEFAULT_SURFACE = "sdr"
 
@@ -225,13 +239,14 @@ def resolve(target, consumer: str = DEFAULT_CONSUMER,
 def missing_native_assets(mgh_core_root, surface: str = DEFAULT_SURFACE) -> list[str]:
     """Absolute paths of the native-dispatch assets absent from this install
     tree for the given surface (`sdr` = the `sdr-review-native` agent + its
-    wave-discipline fragment; `init` = the `init-scout-native` agent + its
-    fragment). The agent lives in the host `agent/` dir (sibling of mgh-core),
-    the fragment inside mgh-core. Empty list = complete. Presence only — never
-    parses their content."""
-    agent_rel, fragment_rel = NATIVE_SURFACES[surface]
+    wave-discipline fragment; `init` = the five init native twin agents + the
+    scout and aggregate wave-discipline fragments). The agents live in the
+    host `agent/` dir (sibling of mgh-core), the fragments inside mgh-core.
+    Empty list = complete. Presence only — never parses their content."""
+    rels = NATIVE_SURFACES[surface]
     root = Path(mgh_core_root).resolve()
-    candidates = (root.parent / agent_rel, root / fragment_rel)
+    candidates = [root.parent / rel if str(rel).startswith("agent")
+                  else root / rel for rel in rels]
     return [str(p) for p in candidates if not p.is_file()]
 
 

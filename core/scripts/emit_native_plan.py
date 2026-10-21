@@ -24,6 +24,7 @@ forwarded to the same tier enumerator):
      --checkpoints <ck> --inputs-dir <in> [common flags]
   py emit_native_plan.py --tier t1 --clusters <clusters.json>
      --candidates <controls_candidates.json> --checkpoints <ck> --inputs-dir <in>
+     [--pack-bytes B [--pack-max N]]
   py emit_native_plan.py --tier t2 --init-dir <.mgh-init> [--budget N]
      --checkpoints <ck> --inputs-dir <in>
   py emit_native_plan.py --tier scout-merge --init-dir <.mgh-init> [--budget N]
@@ -36,13 +37,32 @@ Artifacts (run dir = the plan artifact's directory, the same anchor the
 dispatcher uses for its progress sidecar; for sdr that is the grouping.json
 dir, for t2/scout-merge the init dir):
 
-  <run>/native_plan.json   {v, tier, agent, repo, wave_size, wave_size_source,
-                            units_total, waves[{wave, units[]}]} — every unit
-                            entry = the enumerator's pending fields verbatim
-                            plus {id, unit_id, task_file}; all paths absolute.
+  <run>/native_plan.json          tier scout + tier sdr (the two single-tier
+                                  consumers of the un-suffixed name).
+  <run>/native_plan_<tier>.json   the four aggregate tiers (t1 / t2 / t3 /
+                                  scout-merge) — one plan file PER TIER so the
+                                  layers sharing one init dir never overwrite
+                                  each other's plan evidence.
+                                  {v, tier, agent, repo, wave_size, wave_size_source,
+                                  units_total, waves[{wave, units[]}]} — every unit
+                                  entry = the enumerator's pending fields verbatim
+                                  plus {id, unit_id, task_file}; all paths absolute.
   <inputs-dir>/<unit>.task.md  the complete task message, verbatim template
                             fill (same path AND same content as the audit copy
                             the dispatcher writes when it dispatches).
+
+The plan body's `agent` field carries the tier's NATIVE subagent twin (e.g.
+init-induct-native), NOT the subprocess primary twin the dispatcher's tier
+table names — the dispatch tool (`mgh_dispatch`) refuses primary-mode agents
+before any spawn, and the orchestrator's channel-A wave loop spawns the
+subagent twin by name. The tier table itself is untouched; the mapping lives
+here with the other native-only semantics.
+
+Zero-dispatch invariant (t2 / scout-merge): when the tier enumerator reports
+`needs_reduce=false` (aggregate input fits one request), the plan is NEVER
+written — no plan artifact, no sessions. The single-context stage runs as the
+orchestrator's ordinary subagent call, byte-identical to the subprocess form;
+this emit exits 0 with the note and touches nothing.
 
 Determinism: no timestamps anywhere; units sorted by canonical id; fixed
 serialization (ensure_ascii=False, indent=2, sort_keys, trailing newline);
@@ -110,6 +130,30 @@ PLAN_NAME = "native_plan.json"
 PLAN_V = 1
 TOOL_NAME = "emit_native_plan"
 SHORT_LEN = 4
+# Per-tier plan filename: the two incumbent single-tier consumers (scout, sdr)
+# keep the un-suffixed `native_plan.json`; the four aggregate tiers share one
+# init dir, so each gets its own suffixed file (native_plan_t1.json etc.) —
+# layers never overwrite each other's plan evidence.
+AGGREGATE_TIERS = ("t1", "t2", "t3", "scout-merge")
+# The plan body's agent = the tier's NATIVE subagent twin (the dispatcher's
+# tier table names the subprocess primary twin for ITS face; the native plan
+# must carry the subagent-mode twin the host spawns — the dispatch tool
+# refuses primary-mode agents before any spawn).
+NATIVE_AGENTS = {
+    "scout": "init-scout-native",
+    "t1": "init-induct-native",
+    "t2": "init-synthesis-native",
+    "scout-merge": "init-scout-merge-native",
+    "t3": "init-rulewriter-native",
+    "sdr": "sdr-review-native",
+}
+
+
+def plan_filename(tier_id: str) -> str:
+    """The tier's plan filename inside the run dir (see AGGREGATE_TIERS)."""
+    if tier_id in AGGREGATE_TIERS:
+        return f"native_plan_{tier_id}.json"
+    return PLAN_NAME
 # confusable chars removed from the base32-lowercase alphabet (digits 2-7 keep;
 # 0/1 never occur in base32 but stay listed so the exclusion set is explicit)
 SHORT_EXCLUDE = frozenset("01ilo")
@@ -277,7 +321,7 @@ def _compute(tier, tier_id, args, listing, inputs_dir, plan_path):
     ws, src = _resolve_wave(args)
     chunks = [entries[i:i + ws] for i in range(0, len(entries), ws)]
     waves = [{"wave": n, "units": chunk} for n, chunk in enumerate(chunks, 1)]
-    body = {"v": PLAN_V, "tier": tier_id, "agent": tier["agent"],
+    body = {"v": PLAN_V, "tier": tier_id, "agent": NATIVE_AGENTS[tier_id],
             "repo": repo_str, "wave_size": ws, "wave_size_source": src,
             "units_total": len(entries), "waves": waves}
     return body, tasks
@@ -387,7 +431,7 @@ def _check_mode(tier, tier_id, args, listing, inputs_dir, plan_path) -> int:
         elif task_path.read_text(encoding="utf-8") != task:
             violations.append(f"task file drifted: {task_path}")
 
-    summary = {"tool": TOOL_NAME, "tier": tier_id, "agent": tier["agent"],
+    summary = {"tool": TOOL_NAME, "tier": tier_id, "agent": NATIVE_AGENTS[tier_id],
                "units_total": body["units_total"],
                "waves": len(body["waves"]), "wave_size": body["wave_size"],
                "wave_size_source": body["wave_size_source"],
@@ -465,6 +509,15 @@ def main() -> int:
                     help="task template override (default: the sibling "
                          "prompts/fragments/fanout/<tier>-task.md of this "
                          "install)")
+    ap.add_argument("--pack-bytes", type=int, default=None, metavar="B",
+                    help="t1 ONLY: forward list_clusters --pack-bytes "
+                         "(small-cluster packing, opt-in quota amortization; "
+                         "pack pending units carry the same path fields, so "
+                         "everything downstream is pack-transparent). Refused "
+                         "on every other tier (exit 2)")
+    ap.add_argument("--pack-max", type=int, default=None, metavar="N",
+                    help="t1 ONLY: forward list_clusters --pack-max (per-pack "
+                         "member cap, default 8; requires --pack-bytes)")
     ap.add_argument("--wave-size", type=int, metavar="N",
                     help="concurrency override for the wave split (default: "
                          "env-profile native_concurrency, else 3; still capped "
@@ -488,6 +541,33 @@ def main() -> int:
             pass
 
     tier = fr.TIERS[args.tier]
+
+    # t1-only pack passthrough (closed set: any pack flag on another tier, or
+    # --pack-max without --pack-bytes, is a misuse). Forwarded to the tier's
+    # own enumerator flags via a LOCAL list_args wrapper — the dispatcher's
+    # tier table stays byte-identical.
+    pack_flags: list[str] = []
+    if args.pack_bytes is not None or args.pack_max is not None:
+        if args.tier != "t1":
+            _eprint(f"error: --pack-bytes/--pack-max are t1-only flags "
+                    f"(got --tier {args.tier})")
+            return 2
+        if args.pack_bytes is None or args.pack_bytes <= 0:
+            _eprint("error: --pack-bytes must be a positive integer (and is "
+                    "required when any pack flag is passed)")
+            return 2
+        pack_flags = ["--pack-bytes", str(args.pack_bytes)]
+        if args.pack_max is not None:
+            if args.pack_max <= 0:
+                _eprint(f"error: --pack-max must be a positive integer "
+                        f"(got {args.pack_max})")
+                return 2
+            pack_flags += ["--pack-max", str(args.pack_max)]
+    if pack_flags:
+        base_list_args = tier["list_args"]
+        tier = dict(tier)
+        tier["list_args"] = lambda a, _base=base_list_args, _pf=list(pack_flags): \
+            _base(a) + _pf
 
     # closed-set validation: every required tier artifact flag MUST be present
     missing = [f"--{a.replace('_', '-')}" for a in tier["required_args"]
@@ -518,10 +598,30 @@ def main() -> int:
         return 1
     plan_path = plan_path.resolve()
     inputs_dir = (inputs_dir.resolve() if inputs_dir is not None else None)
-    # the plan lands NEXT TO the (re-anchored) plan artifact — never on it
-    plan_out = plan_path.parent / PLAN_NAME
+    # the plan lands NEXT TO the (re-anchored) plan artifact — never on it;
+    # aggregate tiers carry their tier-suffixed filename (never overwrite a
+    # sibling layer's plan)
+    plan_out = plan_path.parent / plan_filename(args.tier)
 
     listing = fr._list_pending(tier, args)
+
+    # Zero-dispatch invariant (t2 / scout-merge): needs_reduce=false means the
+    # aggregate fits one request — the single-context stage is the
+    # orchestrator's ordinary subagent call and NO plan artifact is written
+    # ("fits => do not dispatch" outranks "switch form"). Zero writes, exit 0.
+    if args.tier in ("t2", "scout-merge") and listing.get("needs_reduce") is False:
+        summary = {"tool": TOOL_NAME, "tier": args.tier,
+                   "agent": NATIVE_AGENTS[args.tier],
+                   "repo": listing.get("repo") or "",
+                   "units_total": 0, "waves": 0, "wave_size": 0,
+                   "wave_size_source": "concurrency",
+                   "plan_path": str(plan_out), "inputs_dir": str(inputs_dir),
+                   "note": ("aggregate input <= budget — single-context path, "
+                            "zero units to dispatch; no plan artifact is "
+                            "written (the single-context stage runs as the "
+                            "orchestrator's ordinary subagent call)")}
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
 
     if args.check:
         return _check_mode(tier, args.tier, args, listing, inputs_dir,
@@ -530,7 +630,8 @@ def main() -> int:
     body, tasks = _compute(tier, args.tier, args, listing, inputs_dir,
                            plan_path)
     _materialize(plan_out, body, tasks)
-    summary = {"tool": TOOL_NAME, "tier": args.tier, "agent": tier["agent"],
+    summary = {"tool": TOOL_NAME, "tier": args.tier,
+               "agent": NATIVE_AGENTS[args.tier],
                "repo": body["repo"], "units_total": body["units_total"],
                "waves": len(body["waves"]), "wave_size": body["wave_size"],
                "wave_size_source": body["wave_size_source"],

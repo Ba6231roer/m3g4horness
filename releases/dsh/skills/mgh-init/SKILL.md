@@ -96,7 +96,7 @@ at `mgh-core/` (mirrored from `core/`).
 ## Always disclose
 - LLM-induced candidates — human review required.
 - **Existence ≠ effectiveness** (CVE-2025-41248).
-- **派发形态(三面分歧,如实披露)**:本命令的 scout 读者批在 dsh 面仅子进程形态(`fanout_runner`);原生派发(opencode 面 `consumer=init` 的缺省形态,或环境画像 `dispatch_mode:"native"`)仅 opencode 面支持,本面行为与该画像无关(配了 native 也不改变本面)——宿主机制差异,非镜像断裂。
+- **派发形态(三面分歧,如实披露)**:本命令的全部扇出段(scout 读者批 + t1/t2/t3/scout-merge 四个聚合层 map 段)在 dsh 面仅子进程形态(`fanout_runner`);原生派发(opencode 面 `consumer=init` 的缺省形态,含聚合层默认通道 B 派发工具,或环境画像 `dispatch_mode:"native"`)仅 opencode 面支持,本面行为与该画像无关(配了 native 也不改变本面)——宿主机制差异,非镜像断裂。
 - Call-graph textual/AST — misses AOP/reflection/DI/framework-routing; surface `unresolved[]`.
 - **Scout coverage is partial, not whole-repo**;scout 非确定(簇数 run-to-run 可能变化);残留盲区见 `report.md`。
 - **Windows `.py` 文件关联风险**:win32 下 opencode 经 PowerShell 执行每条 Bash 命令;脚本侧 leaf(如切片)`MUST` 用显式 `py "<abs>.py"` launcher 调用,**NEVER** `& "<abs>.py"` 或裸 `"<abs>.py"` 命令体(会按 `.py` 文件关联解析为编辑器/弹窗 → 死锁整个 run)。

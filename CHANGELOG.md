@@ -16,6 +16,46 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — /mgh-init 聚合四层(t1/t2/t3/scout-merge)接入原生派发,聚合层默认通道 B(0.1.90)
+
+- **四层接入原生派发(opencode 面 `consumer=init` 缺省原生,收尾原生派发路线第 8 个
+  change)**:t1(按簇归纳)/t2(综合 map 分片)/scout-merge(分片合并 map 段)/t3
+  (按类别出规则)在解析形态 native 时改走「`emit_native_plan.py --tier <tier>` 页循环
+  物化 + 派发 + 子代理自写终态标记」;各层既有语义逐项保持——t1 pack 打包摊薄与成员级
+  marker、scout 完成闸门透传、T1→T2 形状闸门;t2 `needs_reduce=false` **零派发不变**
+  (不产计划、不建会话,单上下文照旧)+ rollup manifest 消费面;scout-merge 分片预算与
+  **缺片不 rollup**;t3 done/failed 正向判定、孤儿审计、`assemble_rules --check` 同一
+  校验器收口。
+- **通道 B 默认(派发工具首批大规模消费者)**:聚合层默认一次 `mgh_dispatch` 工具调用
+  按计划跑完本页全部波次(零 LLM 波次回合;摘要与磁盘标记对账),工具缺席按 fragment
+  回退通道 A(编排器同消息波次,与探查层同构),两层回退如实披露、NEVER 静默换子进程。
+- **四只原生孪生 agent**:`init-induct-native` / `init-synthesis-native` /
+  `init-scout-merge-native`(零写权限)+ `init-rulewriter-native`(**唯一带写权限**,
+  写面只开规则产物、越树写被守卫拦)——均 `mode: subagent`、权限镜像各自子进程孪生、
+  标记自写指令;共享任务模板零改动;计划 `agent` 字段承载原生孪生名(派发工具拒绝
+  primary 形态)。
+- **计划文件按 tier 命名**:`native_plan.json`(scout/sdr 既有名)之外,聚合四层各用
+  `native_plan_<tier>.json`,共享 init 目录的层间互不覆写;`emit_native_plan.py` 增
+  t1 专属 `--pack-bytes/--pack-max` 转发(打包透传,零派发守卫仅对 t2/scout-merge)。
+- **跨层接线**:`list_steps.py` / `resume_state.py` 聚合层原生分支(arc/gate 先行/派发
+  相位/进度纯磁盘)、`dispatch` 字段聚合扩展键(`aggregate_fragment/agents/
+  plan_present`);`init_manifest` 增 `aggregate_dispatch` 披露(实际通道 tool|waves、
+  回退与缺口 `fallback_events[]`);init 资产门扩为 5 孪生 + 2 fragment(缺一 fail-closed
+  退出码 2);opencode 壳聚合步换原生骨架,claude/dsh 面披露行更新;install.sh 自检清单
+  扩四孪生 + 聚合 fragment。
+- **契约与测试**:step-manifest / resume-state / manifest / fanout runtime 四契约同步;
+  `test_init_native_dispatch` 33→62(聚合 fragment/孪生对账/stage 指针/契约/脚本接线
+  五类锚)、`test_emit_native_plan` 41→45(按 tier 命名/agent 映射/pack 透传/零派发)、
+  `test_env_profile` 56(7 资产门)、`test_resume_state` 97→105 + `test_list_steps`
+  29(聚合原生分支与 list==resume 逐字相等);lint 四件套 + 预算 lint +
+  `openspec validate --strict` 过。
+- **实机闸门(本机 2.1.0)**:小仓真会话全链 t1(通道 B)→t2(零派发单上下文)→t3
+  (通道 B)→assemble 全过,限额中断后 resume 零重做接上;中规模 120 簇 pack 通道 B
+  逐页跑完;240 簇确定性对照:30 包 3 页 = 通道 B 3 次工具调用 vs 通道 A ~10 波次 vs
+  不打包 80 回合;故障面四项(失败重派/缺片不 rollup/中断零重做/越树写守卫拒绝)与
+  缺省/回退/资产门六形态抽查过。企业 2.0.32 交接清单见 change 实机笔记(不阻塞)。
+
+
 ### Changed — /mgh-init scout 层 opencode 面缺省原生派发(0.1.89)
 
 - **opencode init 缺省原生(有意的行为变更)**:`env_profile.py` 消费者闭集增

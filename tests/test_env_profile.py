@@ -536,32 +536,50 @@ class InitConsumerDefaultTest(unittest.TestCase):
             "x", encoding="utf-8")
         return root
 
+    def _write_init_assets(self, root, skip=()):
+        """Write the FULL init native asset set (5 twins + 2 fragments),
+        skipping the names in `skip` — fix-mgh-init-native-aggregate-dispatch
+        widened the init surface from 2 assets to 7."""
+        agent_dir = root.parent / "agent"
+        frag_dir = root / "prompts" / "fragments"
+        names = [f"{a}.md" for a in self.m.INIT_NATIVE_AGENTS]
+        names += ["init-scout-native-dispatch.md",
+                  "init-aggregate-native-dispatch.md"]
+        for i, name in enumerate(names):
+            if name in skip:
+                continue
+            target = agent_dir / name if i < len(self.m.INIT_NATIVE_AGENTS)                 else frag_dir / name
+            target.write_text("x", encoding="utf-8")
+
     def test_init_surface_missing_agent(self):
         root = self._gate_root()
         missing = self.m.missing_native_assets(root, surface="init")
-        self.assertEqual(len(missing), 2)
+        self.assertEqual(len(missing), 7)
         self.assertIn("init-scout-native.md", missing[0])
-        self.assertIn("init-scout-native-dispatch.md", missing[1])
+        self.assertIn("init-scout-native-dispatch.md", missing[5])
+        self.assertIn("init-aggregate-native-dispatch.md", missing[6])
         recipe = self.m.require_native_assets(root, surface="init")
         self.assertIsNotNone(recipe)
         self.assertIn("install.sh --opencode", recipe)
         # the sdr gate on the SAME tree stays green (surface isolation)
         self.assertEqual(self.m.missing_native_assets(root), [])
 
-    def test_init_surface_missing_fragment_only(self):
+    def test_init_surface_missing_one_aggregate_twin(self):
+        # a PARTIAL twin set (e.g. only the aggregate fragment missing) is a
+        # version-skewed install: the gate blocks startup, NEVER a silent
+        # layer-by-layer fallback.
         root = self._gate_root()
-        (root.parent / "agent" / "init-scout-native.md").write_text(
-            "x", encoding="utf-8")
+        self._write_init_assets(
+            root, skip=("init-aggregate-native-dispatch.md",))
         missing = self.m.missing_native_assets(root, surface="init")
         self.assertEqual(len(missing), 1)
-        self.assertIn("init-scout-native-dispatch.md", missing[0])
+        self.assertIn("init-aggregate-native-dispatch.md", missing[0])
+        self._write_init_assets(root)
+        self.assertEqual(self.m.missing_native_assets(root, surface="init"), [])
 
     def test_init_surface_gate_opens_when_complete(self):
         root = self._gate_root()
-        (root.parent / "agent" / "init-scout-native.md").write_text(
-            "x", encoding="utf-8")
-        (root / "prompts" / "fragments"
-         / "init-scout-native-dispatch.md").write_text("x", encoding="utf-8")
+        self._write_init_assets(root)
         self.assertEqual(self.m.missing_native_assets(root, surface="init"), [])
         self.assertIsNone(self.m.require_native_assets(root, surface="init"))
 

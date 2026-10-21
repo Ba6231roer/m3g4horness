@@ -1684,5 +1684,199 @@ class NativeScoutBranchTest(unittest.TestCase):
         self.assertEqual(step["discipline"], reminders)
 
 
+class NativeAggregateBranchTest(unittest.TestCase):
+    """fix-mgh-init-native-aggregate-dispatch: the t1/t2/t3 steps' native
+    next_action (channel-B default via the mgh_dispatch tool, gate-first for
+    t2, per-tier plan sub-phase picked by `native_plan_<tier>.json`
+    presence), the dispatch field's aggregate keys, watchdog/retry notes, the
+    native discipline variants, and the runner form's byte-identical
+    subprocess output. Progress derivation stays purely on-disk."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.target = self.tmp / "proj"
+        self.target.mkdir()
+        from _sdr_install_mirror import build_opencode_mirror
+        self._build_opencode = build_opencode_mirror
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, script, *args):
+        p = subprocess.run([sys.executable, str(script), *args],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        return p.returncode, p.stdout, p.stderr
+
+    def _fixture(self, stage, plan=False):
+        """Disk state parked exactly at `stage` ∈ {t1, t2, t3} with
+        no_scout=True (scout tier skipped: the earliest aggregate stage)."""
+        init_dir = self.target / ".mgh-init"
+        init_dir.mkdir(parents=True, exist_ok=True)
+        (init_dir / "run_config.json").write_text(json.dumps(
+            {"target": str(self.target), "format": "opencode", "no_scout": True,
+             "budgets": {"max_aggregate_bytes": 98304}}), encoding="utf-8")
+        (init_dir / "controls_candidates.json").write_text(json.dumps(
+            {"repo": str(self.target), "candidates": [], "truncated": False,
+             "unresolved": []}), encoding="utf-8")
+        (init_dir / "clusters.json").write_text(json.dumps(
+            {"repo": str(self.target), "clusters": [
+                {"cluster_id": "auth::X::aa", "category": "authorization",
+                 "kind": "auth"}], "truncated": False}), encoding="utf-8")
+        t1_cp = init_dir / "checkpoints" / "t1"
+        t1_cp.mkdir(parents=True, exist_ok=True)
+        if stage in ("t2", "t3"):
+            (t1_cp / f"{_enc('auth::X::aa')}.json").write_text(
+                json.dumps({"unit": "auth::X::aa"}), encoding="utf-8")
+            (t1_cp / f"{_enc('auth::X::aa')}.json.done").write_text(
+                "", encoding="utf-8")
+        if stage == "t3":
+            (init_dir / "controls_inventory.json").write_text(json.dumps(
+                {"controls": [
+                    {"category": "authorization", "kind": "auth",
+                     "name": "x", "evidence": ["a.java:1:A.b"]}],
+                    "version": 1}), encoding="utf-8")
+            (init_dir / "checkpoints" / "t2").mkdir(parents=True, exist_ok=True)
+            (init_dir / "checkpoints" / "t2" / "synthesis.json.done").write_text(
+                "", encoding="utf-8")
+        if plan:
+            (init_dir / f"native_plan_{stage}.json").write_text(
+                "{}", encoding="utf-8")
+        return init_dir
+
+    def _mirror(self, **assets):
+        return self._build_opencode(self.tmp / "mirror", **assets) / "resume_state.py"
+
+    def _state(self, script):
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_t1_native_materialize_phase_and_dispatch_keys(self):
+        self._fixture("t1", plan=False)
+        st = self._state(self._mirror())
+        self.assertEqual(st["step"], "t1")
+        d = st["dispatch"]
+        # the dispatch field carries the aggregate face (additive keys)
+        self.assertEqual(d["aggregate_agents"]["t1"], "init-induct-native")
+        self.assertEqual(d["aggregate_plan_present"]["t1"], False)
+        self.assertTrue(Path(d["aggregate_fragment"]).is_absolute())
+        self.assertIn("init-aggregate-native-dispatch.md", d["aggregate_fragment"])
+        desc = st["next_action"]["desc"]
+        self.assertIn("--tier t1", desc)
+        self.assertIn("emit_native_plan.py", desc)
+        self.assertIn("native_plan_t1.json", desc)
+        self.assertIn("native_watchdog.py", desc)
+        self.assertIn("mgh_dispatch", desc)
+        self.assertIn("no plan artifact yet", desc)
+        self.assertTrue(any("watchdog artifacts absent" in n for n in st["notes"]))
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("t1-native-wave", pr)
+        self.assertIn("t1-native-marker", pr)
+        self.assertIn("t1-native-watchdog", pr)
+        self.assertIn("t1-pack", pr)
+
+    def test_t1_native_dispatch_phase_when_plan_present(self):
+        self._fixture("t1", plan=True)
+        st = self._state(self._mirror())
+        self.assertEqual(st["step"], "t1")
+        self.assertTrue(st["dispatch"]["aggregate_plan_present"]["t1"])
+        desc = st["next_action"]["desc"]
+        self.assertIn("native round", desc)
+        self.assertIn("mgh_dispatch", desc)
+        self.assertIn("units_total == 0", desc)
+        self.assertIn("init-induct-native", desc)
+        self.assertTrue(any(p.endswith("native_plan_t1.json")
+                            for p in st["next_action"]["absolute_paths"]))
+
+    def test_t2_native_gate_first_and_zero_dispatch_wording(self):
+        self._fixture("t2", plan=False)
+        st = self._state(self._mirror())
+        self.assertEqual(st["step"], "t2")
+        desc = st["next_action"]["desc"]
+        self.assertIn("GATE FIRST", desc)
+        self.assertIn("plan_aggregate.py", desc)
+        self.assertIn("needs_reduce=false", desc)
+        self.assertIn("ZERO dispatch", desc)
+        self.assertIn("--tier t2", desc)
+        self.assertIn("native_plan_t2.json", desc)
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("t2-aggregate-budget", pr)
+        self.assertIn("t2-native-wave", pr)
+
+    def test_t3_native_phase_and_rulewriter_agent(self):
+        self._fixture("t3", plan=True)
+        st = self._state(self._mirror())
+        self.assertEqual(st["step"], "t3")
+        desc = st["next_action"]["desc"]
+        self.assertIn("--tier t3", desc)
+        self.assertIn("init-rulewriter-native", desc)
+        self.assertIn("native_plan_t3.json", desc)
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("t3-native-wave", pr)
+        self.assertIn("t3-fanout-path", pr)
+
+    def test_aggregate_failed_units_native_retry_note(self):
+        # TWO categories with ONE terminal .failed: the failed unit is
+        # terminal (does not gate) but the tier still has a pending category,
+        # so the step stays t3 and the native retry note fires.
+        init_dir = self._fixture("t3", plan=False)
+        (init_dir / "controls_inventory.json").write_text(json.dumps(
+            {"controls": [
+                {"category": "authorization", "kind": "auth", "name": "x",
+                 "evidence": ["a.java:1:A.b"]},
+                {"category": "crypto", "kind": "crypto", "name": "y",
+                 "evidence": ["b.java:1:B.c"]}], "version": 1}), encoding="utf-8")
+        t3_cp = init_dir / "checkpoints" / "t3"
+        t3_cp.mkdir(parents=True, exist_ok=True)
+        (t3_cp / "authorization.opencode.json.failed").write_text(
+            json.dumps({"unit_id": "authorization.opencode",
+                        "reason": "provider 瞬断"}), encoding="utf-8")
+        st = self._state(self._mirror())
+        self.assertEqual(st["step"], "t3")
+        self.assertEqual(st["tiers"]["t3"]["failed"], 1)
+        self.assertTrue(any("AT MOST ONE more" in n and "t3" in n
+                            for n in st["notes"]))
+
+    def test_runner_form_aggregate_steps_unchanged(self):
+        self._fixture("t1")
+        (self.target / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.target / ".mgh" / "env-profile.json").write_text(
+            json.dumps({"v": 1, "dispatch_mode": "runner"}), encoding="utf-8")
+        st = self._state(self._mirror())
+        self.assertNotIn("dispatch", st)
+        self.assertIn("list_clusters.py", st["next_action"]["desc"])
+        self.assertNotIn("emit_native_plan", st["next_action"]["desc"])
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("t1-fanout-dispatcher", pr)
+        self.assertNotIn("t1-native-wave", pr)
+
+    def test_missing_aggregate_twin_fail_closed(self):
+        self._fixture("t1")
+        code, out, err = self._run(self._mirror(agg_agents=False),
+                                   "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertIn("init-induct-native.md", err)
+        self.assertIn("install.sh --opencode", err)
+
+    def test_native_discipline_matches_list_steps_for_aggregate_steps(self):
+        # the D5 byte-verbatim list==resume equality holds for the aggregate
+        # native variants too (both scripts select the same table).
+        for stage in ("t1", "t2", "t3"):
+            with self.subTest(stage=stage):
+                self._fixture(stage, plan=True)
+                script = self._mirror()
+                st = self._state(script)
+                reminders = st["discipline_reminders"]
+                listed = subprocess.run(
+                    [sys.executable, str(script.parent / "list_steps.py"),
+                     "--target", str(self.target), "--step", stage],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace")
+                step = json.loads(listed.stdout)["steps"][0]
+                self.assertEqual(step["discipline"], reminders)
+
+
 if __name__ == "__main__":
     unittest.main()

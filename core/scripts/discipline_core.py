@@ -18,9 +18,9 @@ One table per domain, selected by `get_discipline(step, domain=...)`:
   * `init` — the /mgh-init step graph (default; existing callers unchanged).
   * `sdr`  — the /mgh-sdr step graph (`not-started|group|fanout|render|done`).
 
-The sdr fanout step and the init scout step additionally carry a
+The sdr fanout step and the init scout/t1/t2/t3 steps additionally carry a
 NATIVE-dispatch variant (opencode face, resolved form `native` — the sdr one
-via profile/consumer default, the init one via the `consumer=init ∧
+via profile/consumer default, the init ones via the `consumer=init ∧
 host=opencode` default), selected by
 `get_discipline(step, domain=..., form="native")`; "subprocess" (the default)
 resolves the base table, so every pre-existing caller is unchanged.
@@ -463,20 +463,23 @@ _DISCIPLINE_INIT_NATIVE_SCOUT = {
             "plan_aggregate.py --node scout-merge;needs_reduce=false → single-context "
             "init-scout-merge(逐字不变);needs_reduce=true(> 预算)→ map-reduce,每个请求 ≤ 预算"
             "(候选粒度装箱;病态单候选瘦身投影留痕,瘦后仍超 → 退出码 2 零物化零派发)——"
-            "scout-merge 在本形态仍走子进程派发器,不原生化",
+            "needs_reduce=true 的 map 分片段在本形态走原生(聚合层纪律:物化 "
+            "emit_native_plan --tier scout-merge + 通道 B 默认 / 通道 A 回退,计划文件 "
+            "native_plan_scout-merge.json),rollup / audit / fold-in 不变",
             "plan_aggregate.py --node scout-merge"),
-        _pr("scout-merge-fanout-dispatcher",
-            "map 主路径(needs_reduce=true 且 pending 非空)= 一次 Bash 跑 fanout_runner.py "
-            "--tier scout-merge --init-dir <init-dir> --budget <max-aggregate-bytes>(budget 与 "
-            "gate 同值;带四级超时不变式,合规 720000/540/300 或 480000/360/300);partial:true "
-            "重派同一命令;map 全 .done 后单一 rollup init-scout-merge-rollup 吞 "
-            "rollup.summary_paths;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
-            "fanout_runner --step 契约"),
+        _pr("scout-merge-native-dispatch",
+            "scout-merge map 主路径(needs_reduce=true 且 pending 非空,原生形态)= 聚合层纪律:"
+            "每轮物化+自检 → 一次 mgh_dispatch 工具调用跑完本页全部波次(输入只带计划引用;"
+            "工具缺席回退通道 A 同消息波次派 init-scout-merge-native)→ 波收尾重物化,计划 "
+            "native_plan_scout-merge.json 的 units_total==0 才进 rollup;单一 rollup "
+            "init-scout-merge-rollup 吞 rollup.summary_paths;NEVER 手动翻页、NEVER 逐次撰写 "
+            "subagent 任务消息",
+            "init-aggregate-native-dispatch fragment"),
         _pr("scout-merge-fanout-path",
-            "scout-merge shard 输出路径 = plan_aggregate --node scout-merge stdout "
-            "pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path(结构化 shard "
-            "摘要)+ touch done_marker;失败 ack → 编排器写 failed_marker(终态);任一 shard "
-            ".failed → 不得 rollup(缺摘要),披露后修复再 --resume",
+            "scout-merge shard 输出路径 = 计划物化(枚举器)stdout/任务文件的 checkpoint_path,"
+            "绝对逐字透传;成功恰好写 checkpoint_path(结构化 shard 摘要)+ touch done_marker;"
+            "原生形态下 .failed 由子代理自写({unit_id, reason});任一 shard .failed → 不得 "
+            "rollup(缺摘要),披露后修复再 --resume",
             "plan_aggregate --node scout-merge --step 契约"),
     ],
     "nevers": [
@@ -492,6 +495,204 @@ _DISCIPLINE_INIT_NATIVE_SCOUT = {
         "NEVER 重跑 `merge_scout.py` fold-in(`controls_candidates.json::provenance.scout_merged` 已设时;重跑非幂等——同文件重跑把 `scout_merged` 归零,漂移文件重跑重复追加候选/簇)",
         "NEVER Read 叶子脚本源码(报错看 stderr)",
     ],
+}
+
+
+# ---------------------------------------------------------------------
+# init domain — native-dispatch variants of the AGGREGATE steps
+# (t1/t2/t3). Same resolver
+# conditions as the scout variant (opencode face, consumer=init resolved
+# native); the scout-merge map segment rides the scout step (its recipes
+# above) and the same aggregate fragment. Channel B (the mgh_dispatch tool,
+# one call per materialized page) is the DEFAULT; channel A (the orchestrator
+# same-message wave loop) is the fallback when the tool is absent. Both step
+# scripts select these via get_discipline(step, domain="init", form="native")
+# so the byte-verbatim list==resume equality holds in the native form too.
+# ---------------------------------------------------------------------
+_INIT_AGG_NATIVE = {
+    # tier -> (emit cli args, agent, plan filename)
+    "t1": ("--tier t1 --clusters <init-dir>/clusters.json --candidates "
+           "<init-dir>/controls_candidates.json --checkpoints "
+           "<init-dir>/checkpoints/t1 --inputs-dir <init-dir>/inputs/t1 "
+           "[--pack-bytes 16384 --pack-max 8]",
+           "init-induct-native", "native_plan_t1.json"),
+    "t2": ("--tier t2 --init-dir <init-dir> --budget <max-aggregate-bytes> "
+           "--checkpoints <init-dir>/checkpoints/t2 --inputs-dir "
+           "<init-dir>/inputs/t2",
+           "init-synthesis-native", "native_plan_t2.json"),
+    "t3": ("--tier t3 --inventory <init-dir>/controls_inventory.json "
+           "--format <fmt> --rules-dir <rules-dir> --target <target> "
+           "--checkpoints <init-dir>/checkpoints/t3 --inputs-dir "
+           "<init-dir>/inputs/t3",
+           "init-rulewriter-native", "native_plan_t3.json"),
+}
+_INIT_AGG_SCOUT_MERGE_CLI = (
+    "--tier scout-merge --init-dir <init-dir> --budget <max-aggregate-bytes> "
+    "--checkpoints <init-dir>/checkpoints/scout --inputs-dir "
+    "<init-dir>/inputs/scout-merge")
+
+
+def _init_agg_native_wave_recipe(tier: str) -> str:
+    cli, agent, plan = _INIT_AGG_NATIVE[tier]
+    return (
+        f"每轮 = 物化+自检 → 一次派发工具调用跑完本页全部波次(通道 B 默认)→ 波收尾重物化:"
+        f"①`emit_native_plan.py {cli} --profile <target>` + 同参 `--check`(退出码 2 → 重跑同参"
+        f"物化即修复;任一单元完成后计划按设计变 stale——波次收尾以重物化修复,NEVER 把该退出码"
+        f"2 当故障);②工具 mgh_dispatch 输入只带计划引用 {{\"plan\": \"<物化 stdout plan_path "
+        f"逐字>\"}}(整份计划=本页全部波次,波内并发=计划波次尺寸、波间顺序,零 LLM 波次回合;"
+        f"摘要=计数+短号清单+会话 id,与磁盘标记对账);工具缺席(未安装/加载失败/未知工具)→ "
+        f"通道 A 回退:当前波全部单元在**同一条 assistant 消息**派发(agent={agent};"
+        f"description=计划短号逐字,任务体=单行令牌 `mgh-dispatch: plan=<plan_path> unit=<短号>`,"
+        f"展开钩子缺席的旧版安装回退=固定句+task_file 绝对路径逐字透传),回退事实入过程记录"
+        f"并披露,NEVER 因工具缺席静默换子进程形态;③派完当前页回①——页语义:一次物化只覆盖"
+        f"枚举器当前 pending 页,计划 {plan} 的 `units_total==0` 才离开本层;NEVER 自记账"
+        f"「哪些派过了」、NEVER 在工具外自建波次循环")
+
+
+_INIT_AGG_NATIVE_MARKER_RECIPE = (
+    "标记真相源:`.done`/`.failed` 唯一写者是子代理自身(成功 touch done_marker;失败自写 "
+    "failed_marker,内容 {unit_id, reason}——该指令住各 init-*-native agent 定义;共享任务模板"
+    "的「reference only; the dispatcher writes it」行描述的是子进程形态,原生形态不适用);"
+    "计划物化、派发工具、看门狗、编排器 NEVER 写任何单元标记(唯一例外 = 重派认领时删除该"
+    "单元旧 `.failed`,与派发器 --retry-failed 的认领即删语义同形,是删除不是写入);被中止/"
+    "未落标记的单元经重枚举自然回待派——中止 ≠ 失败终态")
+_INIT_AGG_NATIVE_RETRY_RECIPE = (
+    "`.failed` 单元至多重派一轮:删旧 .failed → 重物化加 --retry-failed(该单元回 pending)→ "
+    "走通道 B/A 派发一次;再失败接受缺口(t1/t3 入 manifest failures 既有披露;t2/scout-merge "
+    "缺片不得 rollup、缺口如实披露),后续轮次不再派它,NEVER 无限重派;恢复会话无法判定是否"
+    "已重派过时允许再一轮(代价有界=一轮配额);上一波失败原因含限流特征(429/rate limit/"
+    "quota)→ 按环境画像配额窗口(`quota.window_s`,未配置按网关公开口径,如 10 分钟)等满一窗"
+    "再重物化/重派,等待事实入 run 过程记录;NEVER 在限流窗口内连续重派烧配额")
+_INIT_AGG_NATIVE_WATCHDOG_RECIPE = (
+    "看门狗先行:第一波派发前以**脱离工具调用的独立进程**启动 `native_watchdog.py --run-dir "
+    "<init-dir>`(根会话取宿主注入的 OPENCODE_SESSION_ID,零手工传参;阈值缺省;Windows 宿主 "
+    "shell 工具是 PowerShell,用 `Start-Process … -WindowStyle Hidden -PassThru` 并记录回写 "
+    "pid,NEVER 用 `cmd &` 形态——PowerShell 解析器直接拒绝;POSIX 宿主用 `> log 2>&1 &` 记 "
+    "$!;路径全树内绝对——守卫对裸相对重定向目标保守拦截);与 scout 读者层同一看门狗实例"
+    "(已在运行则每层波次边界只确认 <init-dir>/watchdog/state.json 仍在近两周期内更新,缺席"
+    "则同命令再拉起,幂等);run 落定自退;NEVER 前台跑看门狗、NEVER 代替看门狗做会话中止")
+_INIT_AGG_NATIVE_NEVERS = [
+    "NEVER 在派发工具外自建波次循环(通道 B 一次调用跑完本页全部波次)",
+    "NEVER 因工具缺席静默换子进程形态(通道 A 回退须披露;子进程回退只经画像显式 runner)",
+    "NEVER 跨波合并派发 / 自增并发(波次尺寸来自计划:并发与配额算术的较小者)",
+    "NEVER 自撰任务文本 / 拼接改写任务文件路径(短号与计划引用只从计划逐字复制)",
+    "NEVER 写任何单元标记(.done/.failed 唯一写者是子代理自身)",
+    "NEVER 假设一次物化覆盖全部单元(units_total==0 才是页循环终止)",
+    "NEVER Read 叶子脚本源码(报错看 stderr)",
+]
+
+_DISCIPLINE_INIT_NATIVE_T1 = {
+    "gates": [
+        _g("scout-incomplete-gate",
+           "scout 启用而 scout 层未完成时枚举器退出码 2(先完成 scout 层,NEVER 以纯 regex 簇"
+           "继续 T1;--no-scout 显式绕行则跳过)——两形态共用的发现本体闸门,经物化器透传",
+           "emit_native_plan.py --tier t1(透传 list_clusters scout-incomplete-gate)"),
+        _g("t1-native-plan-check",
+           "每轮计划自检(计划与全部任务文件 vs 重物化逐字节 + 单元集 vs 当前 pending + 短号"
+           "映射闭合):退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划",
+           "emit_native_plan.py --tier t1 … --check(与物化同参)"),
+        _g("t1-shape-gate",
+           "T1→T2 边界形状校验(BOM 剥离 + 根级 cluster_id/name/category/kind/evidence 等形状;"
+           "退出码 2 → 对 stdout violations[] 外科式重派,NEVER 带破损 T1 记录进 T2)——两形态"
+           "共用,波次收敛后照常必跑",
+           "validate_t1_records.py --strip-bom + --check --checkpoints <init-dir>/checkpoints/t1"),
+    ],
+    "path_recipes": [
+        _pr("t1-native-wave", _init_agg_native_wave_recipe("t1"),
+            "emit_native_plan --step 契约"),
+        _pr("t1-native-marker", _INIT_AGG_NATIVE_MARKER_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t1-native-retry", _INIT_AGG_NATIVE_RETRY_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t1-native-watchdog", _INIT_AGG_NATIVE_WATCHDOG_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t1-pack",
+            "配额受限(网关按调用数限流)时物化调用行加 --pack-bytes 16384 --pack-max 8 启用小簇"
+            "打包(经物化器转发枚举器,枚举单元 = 包;成员级 .done marker 仍是唯一真相源与恢复"
+            "粒度,重派轮已完成成员被任务模板跳过);包级 .failed 恢复 recipe:删除该包的 "
+            ".failed marker → 重物化(可加 --retry-failed)→ 包回 pending 仅缺失成员重归纳",
+            "list_clusters --pack-bytes 契约(经 emit_native_plan 透传)"),
+        _pr("t1-fanout-path",
+            "T1 单元输出路径 = 计划物化任务文件的 checkpoint_path,绝对逐字;成功恰好写 "
+            "checkpoint_path + touch done_marker;原生形态下 .failed 由子代理自写"
+            "({unit_id, reason})",
+            "emit_native_plan --tier t1 --step 契约"),
+    ],
+    "nevers": [
+        "NEVER 整份 Read clusters.json",
+        "NEVER 用 `py -c` 内省集群",
+    ] + _INIT_AGG_NATIVE_NEVERS,
+}
+
+_DISCIPLINE_INIT_NATIVE_T2 = {
+    "gates": [
+        _g("t2-inventory-check",
+           "controls_inventory.json 校验(design_controls 兼容字段 + 每条 evidence 锚点 + "
+           "category→kind 归一;退出码 2 → 回退重跑)——两形态共用",
+           "validate_inventory.py --inventory <init-dir>/controls_inventory.json"),
+        _g("t2-native-plan-check",
+           "每轮计划自检(计划与全部任务文件 vs 重物化逐字节 + 单元集 vs 当前 pending + 短号"
+           "映射闭合):退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划",
+           "emit_native_plan.py --tier t2 … --check(与物化同参)"),
+    ],
+    "path_recipes": [
+        _pr("t2-aggregate-budget",
+            "先判聚合预算:plan_aggregate.py --node t2 --budget <max-aggregate-bytes>;"
+            "needs_reduce=false → **零派发不变**(物化器不产计划、不建会话,stdout note 即此"
+            "信号;single-context init-synthesis 逐字不变);needs_reduce=true(> 预算)→ "
+            "map-reduce,每个请求 ≤ 预算,才进原生波次循环(--budget 与闸门同值)",
+            "plan_aggregate.py --node t2"),
+        _pr("t2-native-wave", _init_agg_native_wave_recipe("t2"),
+            "emit_native_plan --step 契约"),
+        _pr("t2-native-marker", _INIT_AGG_NATIVE_MARKER_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t2-native-retry", _INIT_AGG_NATIVE_RETRY_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t2-native-watchdog", _INIT_AGG_NATIVE_WATCHDOG_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t2-fanout-path",
+            "t2 shard 输出路径 = 计划物化任务文件的 checkpoint_path,绝对逐字;成功恰好写 "
+            "checkpoint_path(结构化 shard 摘要)+ touch done_marker;原生形态下 .failed 由"
+            "子代理自写({unit_id, reason});任一 shard .failed → 不得 rollup(缺摘要),"
+            "披露后修复再 --resume;rollup 段消费 rollup.summary_paths 清单路径(manifest "
+            "文件先行,NEVER 直接展开全量路径数组进上下文)",
+            "emit_native_plan --tier t2 --step 契约"),
+    ],
+    "nevers": list(_INIT_AGG_NATIVE_NEVERS),
+}
+
+_DISCIPLINE_INIT_NATIVE_T3 = {
+    "gates": [
+        _g("t3-native-plan-check",
+           "每轮计划自检(计划与全部任务文件 vs 重物化逐字节 + 单元集 vs 当前 pending + 短号"
+           "映射闭合):退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划",
+           "emit_native_plan.py --tier t3 … --check(与物化同参)"),
+        _g("assemble-lint",
+           "规则纯净性 lint(禁 front matter / inventory schema 字段 / 过程散文泄漏;退出码 2 → "
+           "回 T3 修正后重跑)——两形态同一校验器收口",
+           "assemble_rules.py --check --target <target> --format <fmt>"),
+    ],
+    "path_recipes": [
+        _pr("t3-native-wave", _init_agg_native_wave_recipe("t3"),
+            "emit_native_plan --step 契约"),
+        _pr("t3-native-marker", _INIT_AGG_NATIVE_MARKER_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t3-native-retry", _INIT_AGG_NATIVE_RETRY_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t3-native-watchdog", _INIT_AGG_NATIVE_WATCHDOG_RECIPE,
+            "init-aggregate-native-dispatch fragment"),
+        _pr("t3-fanout-path",
+            "T3 category 输出路径 = 计划物化任务文件的 rule_path,绝对逐字;成功恰好写 "
+            "rule_path + touch done_marker;原生形态下 .failed 由子代理自写({unit_id, "
+            "reason});done/failed 判定 = 正向 marker 路径计算(NEVER 从文件名反推),孤儿 "
+            "marker 清单告警照常;agent = init-rulewriter-native(原生评审孪生中唯一带写权限"
+            "者,写面只开规则产物,越树写被守卫拦)",
+            "emit_native_plan --tier t3 --step 契约"),
+    ],
+    "nevers": [
+        "NEVER 整份 Read controls_inventory.json",
+        "NEVER 手挖 controls_inventory.json",
+    ] + _INIT_AGG_NATIVE_NEVERS,
 }
 
 
@@ -581,8 +782,8 @@ def get_discipline(step: str, domain: str = "init", form: str = "subprocess") ->
     `domain` selects the run domain's table (default `init` — the pre-existing
     callers are unchanged by this parameter's arrival). `form` selects the
     dispatch-form variant of a step where one exists (today: sdr `fanout` and
-    init `scout`; "subprocess" = the default and the permanent fallback — every
-    pre-existing caller resolves through it unchanged). Unknown domain, unknown
+    init `scout`/`t1`/`t2`/`t3`; "subprocess" = the default and the permanent
+    fallback — every pre-existing caller resolves through it unchanged). Unknown domain, unknown
     step, unknown form, and no-discipline steps (`done`, `not-started`) all →
     EMPTY structure (all three keys present, empty lists) so the stdout field
     shape is stable everywhere. The return value is a DEFENSIVE DEEP COPY: a
@@ -597,4 +798,10 @@ def get_discipline(step: str, domain: str = "init", form: str = "subprocess") ->
         return copy.deepcopy(_DISCIPLINE_SDR_NATIVE_FANOUT)
     if domain == "init" and step == "scout" and form == "native":
         return copy.deepcopy(_DISCIPLINE_INIT_NATIVE_SCOUT)
+    if domain == "init" and step == "t1" and form == "native":
+        return copy.deepcopy(_DISCIPLINE_INIT_NATIVE_T1)
+    if domain == "init" and step == "t2" and form == "native":
+        return copy.deepcopy(_DISCIPLINE_INIT_NATIVE_T2)
+    if domain == "init" and step == "t3" and form == "native":
+        return copy.deepcopy(_DISCIPLINE_INIT_NATIVE_T3)
     return copy.deepcopy(table.get(step, _EMPTY))

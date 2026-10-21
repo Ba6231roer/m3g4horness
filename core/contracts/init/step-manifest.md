@@ -78,12 +78,15 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 - `discipline` = 该步纪律子集(gate 闸门形状 `--check` 命令 + 退出码 2 / fan-out 路径配方 /
   适用 NEVER),与 `resume_state.py` stdout 同 step 的 `discipline_reminders[]` **逐字一致**
   (共享静态表 `core/scripts/discipline_core.py`,单一真相;`done`/`not-started`/未知 → 空结构)
-- `dispatch` = **仅原生形态在场**(解析形态 native ∧ `host_face=="opencode"`;scout 读者批
-  的派发形态,经 `env_profile.resolve(<target>, consumer="init")` 单源解析)。子进程形态
-  (显式 `dispatch_mode:"runner"`、`consumer=generic`、claude/dsh/other 面)**不出现该字段**,
-  stdout 逐字节回到既有形状——读者以「字段缺席 = 子进程」解释。fail-closed 面:坏画像 /
-  native+非 opencode 面 / 缺 scout 原生资产(`agent/init-scout-native.md` 或
-  `prompts/fragments/init-scout-native-dispatch.md` 缺一)→ 退出码 2 + recipe,NEVER 静默回退。
+- `dispatch` = **仅原生形态在场**(解析形态 native ∧ `host_face=="opencode"`;scout 读者批 +
+  聚合四层 map 段的派发形态,经 `env_profile.resolve(<target>, consumer="init")` 单源解析)。
+  除既有八键外,**聚合扩展键**(additive):`aggregate_fragment`(聚合纪律 fragment 绝对路径)、
+  `aggregate_agents`({t1: init-induct-native, t2: init-synthesis-native, t3:
+  init-rulewriter-native, scout-merge: init-scout-merge-native})、`aggregate_plan_present`
+  (各层 `native_plan_<tier>.json` 在场佐证)。子进程形态(显式 `dispatch_mode:"runner"`、
+  `consumer=generic`、claude/dsh/other 面)**不出现该字段**,stdout 逐字节回到既有形状——读者以
+  「字段缺席 = 子进程」解释。fail-closed 面:坏画像 / native+非 opencode 面 / 缺 init 原生资产
+  (五只 `init-*-native` 孪生或两个纪律 fragment 任一缺席)→ 退出码 2 + recipe,NEVER 静默回退。
 
 ## Step→IO 表
 
@@ -122,7 +125,7 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 | `input` | `scout_plan.json` {batches[]}(发现本体不变:批规划仍由 `plan_scout.py` 产出 + `--check` 校验) |
 | `output` | `<init-dir>/native_plan.json` + `<init-dir>/inputs/scout/<batch_id>.task.md`(页界波次拆分 + 每批任务文件;终态标记由子代理自写) |
 | `native_arc` | `[{phase:"materialize", kind:"bash", script, invocation, note}, {phase:"waves", kind:"subagent", agent:"init-scout-native", discipline_fragment, note}, {phase:"merge", kind:"bash", step_ref:"scout-merge", note}]` |
-| `extra_invocations` | **保留** scout-merge map 段驱动行(scout-merge 在原生形态仍子进程承载) |
+| `extra_invocations` | **换为** scout-merge map 段的原生驱动行(`emit_native_plan.py --tier scout-merge`,聚合步形见下;子进程形态仍为 `fanout_runner.py`) |
 | `discipline` | `get_discipline("scout", domain="init", form="native")`(与 `resume_state.py` 同 step 同 form 逐字一致) |
 
 - **页语义**:一次物化只覆盖枚举器当前 pending 页(编排预算收紧页,stdout `units_total`
@@ -137,8 +140,33 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
   一轮重派,限流特征按画像配额等窗;看门狗先行(`native_watchdog.py --run-dir <init-dir>`,
   阈值缺省,run 落定自退)。
 - **plan 工件探针**:`dispatch.plan_present` = `<target>/.mgh-init/native_plan.json`
-  在场(佐证信号,解析形态才是绑定决策)。未来 aggregate 层原生共用该文件名时须先引入
-  按 tier 的计划命名/子目录(主规格已记为约束),本形态当前无冲突。
+  在场(佐证信号,解析形态才是绑定决策)。**计划文件按 tier 命名**:scout 与 sdr 用未带
+  后缀的 `native_plan.json`(既有约定);四个聚合 tier 各用 `native_plan_<tier>.json`
+  (`native_plan_t1.json` / `native_plan_t2.json` / `native_plan_t3.json` /
+  `native_plan_scout-merge.json`)——共享同一 init 目录的各层互不覆写对方的计划工件
+  (`dispatch.aggregate_plan_present` 逐层佐证)。
+
+### 聚合层原生步形(t1/t2/t3;`dispatch` 字段在场时;子进程表不受影响)
+
+解析形态为 native 时,t1/t2/t3 三行**整体替换**为各自的原生面(确定性入口 = 计划物化器;
+各层既有语义一个不动,细则住 `init-aggregate-native-dispatch.md` 纪律 fragment):
+
+| 字段 | t1 | t2 | t3 |
+|---|---|---|---|
+| `script` 字段 | `emit_native_plan.py --tier t1`(可透传 `--pack-bytes/--pack-max` 打包) | `emit_native_plan.py --tier t2` | `emit_native_plan.py --tier t3` |
+| `native_arc` 相位 | `materialize → dispatch → gate` | `gate → materialize → dispatch → rollup` | `materialize → dispatch → gate` |
+| `dispatch` 相位 | `kind:"tool", tool:"mgh_dispatch", agent:"init-induct-native"`(**默认通道 B**:一次工具调用跑完本页全部波次,输入只带计划引用;工具缺席回退通道 A 同消息波次) | 同形,`agent:"init-synthesis-native"` | 同形,`agent:"init-rulewriter-native"` |
+| 收口相位 | T1→T2 形状闸门(`validate_t1_records --strip-bom + --check`,两形态共用) | `gate` 相位 = 聚合预算闸门先行(`plan_aggregate --node t2`;`needs_reduce=false` **零派发**:物化器不产计划、不建会话,single-context `init-synthesis` 照旧);`rollup` 相位 = manifest 消费(`rollup.summary_paths` 清单路径)不变 | 规则纯净 lint(`assemble_rules.py --check`,两形态同一校验器);done/failed 正向判定 / 孤儿审计不变 |
+| 计划文件 | `native_plan_t1.json` | `native_plan_t2.json`(仅 `needs_reduce=true` 才产) | `native_plan_t3.json` |
+| `discipline` 字段 | `get_discipline("t1", domain="init", form="native")` | `get_discipline("t2", …, form="native")` | `get_discipline("t3", …, form="native")` |
+
+- **页语义与 scout 同构**:一次物化只覆盖枚举器当前 pending 页;通道 B 一次调用跑完的是
+  **本页**的全部波次;`units_total == 0` 才离开该层循环。
+- **各层不变量**(逐项保持):t1 pack 打包摊薄(成员级 `.done` 唯一真相源)+ scout 完成
+  闸门透传;t2 `needs_reduce=false` 零派发 + rollup manifest 消费面;t3 唯一带写权限孪生
+  `init-rulewriter-native`(写面只开规则产物,越树写被运行域守卫拦)。
+- scout-merge 的 map 分片派发在原生形态经 scout 步的 `extra_invocations`(物化驱动行)+
+  聚合纪律 fragment 承载;其单上下文 / rollup / audit / fold-in 段不变。
 
 ## Pattern portability
 

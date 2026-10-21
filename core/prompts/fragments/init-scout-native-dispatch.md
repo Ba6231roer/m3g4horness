@@ -19,7 +19,8 @@
 配置文件即缺省原生;项目画像显式 `dispatch_mode:"native"` 同样启用。项目画像显式
 `dispatch_mode:"runner"` → 本 fragment 不适用,按步骤清单的 scout invocation 执行子进程
 回退形态(fanout_runner 承载);claude/dsh 安装面仍只有子进程形态。**本形态只覆盖 scout
-读者层**:scout-merge / rollup / audit / fold-in 仍按既有子进程段执行。
+读者层**的批派发;scout-merge 的 map 段同形态下经
+`init-aggregate-native-dispatch.md`(聚合层纪律)承载,rollup / audit / fold-in 仍按既有段执行。
 
 ## 0. 看门狗先行(第一波派发前完成,不可跳过)
 
@@ -111,13 +112,16 @@
 `fanout/scout-task.md` 的「reference only; the dispatcher writes it」行描述的是子进程
 形态,原生形态不适用且该模板零改动。
 
-## 4. 收敛 → 既有 scout-merge / audit / fold-in(形态不变)
+## 4. 收敛 → scout-merge / audit / fold-in(map 段转聚合原生纪律)
 
 `units_total == 0`(失败缺口已按第 2 节接受或为零)→ 回到命令壳 scout 步的既有
-scout-merge 段:聚合预算闸门(`plan_aggregate.py --node scout-merge`)→ single-context
-或 map-reduce(仍由子进程派发器承载)→ `init-scout-audit` → `merge_scout.py` fold-in。
-这一段的行为、调用行与纪律**零改动**——本形态只换「读者批怎么派」,不换「查了什么、
-怎么记、怎么并」。报告与 manifest 的失败披露沿用既有产物;派发形态与计划工件在场证据
+scout-merge 段:聚合预算闸门(`plan_aggregate.py --node scout-merge`)→ `needs_reduce=false`
+时 single-context `init-scout-merge` / `true` 时 map 分片派发(本形态下经
+`init-aggregate-native-dispatch.md` 聚合层纪律:物化 `--tier scout-merge` + 通道 B 默认 /
+通道 A 回退,计划文件 `native_plan_scout-merge.json`)→ `init-scout-merge-rollup` →
+`init-scout-audit` → `merge_scout.py` fold-in。rollup / audit / fold-in 的行为、调用行与
+纪律**零改动**——本 fragment 只换「读者批怎么派」;map 段的换形规则与聚合各层同源
+(见聚合 fragment)。报告与 manifest 的失败披露沿用既有产物;派发形态与计划工件在场证据
 按命令壳的披露要求写入收尾总结。
 
 ## 5. 诚实边界(收尾总结必带)

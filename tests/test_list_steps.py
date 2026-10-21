@@ -352,6 +352,9 @@ class NativeScoutBranchTest(unittest.TestCase):
     def _scout(self, data):
         return [s for s in data["steps"] if s["step"] == "scout"][0]
 
+    def _step(self, data, step_id):
+        return [s for s in data["steps"] if s["step"] == step_id][0]
+
     # --- dev tree (`other` face): subprocess unchanged + fail-closed native ---
     def test_dev_tree_no_profile_stays_subprocess(self):
         code, out, err = self._run(SCRIPTS / "list_steps.py",
@@ -410,6 +413,17 @@ class NativeScoutBranchTest(unittest.TestCase):
         self.assertEqual(d["dispatch"]["native_agent"], "init-scout-native")
         self.assertTrue(Path(d["dispatch"]["profile_path"]).is_absolute())
         self.assertTrue(Path(d["dispatch"]["discipline_fragment"]).is_absolute())
+        # fix-mgh-init-native-aggregate-dispatch: the dispatch field also
+        # carries the aggregate face (fragment + per-tier agents + per-tier
+        # plan-presence corroboration)
+        self.assertTrue(Path(d["dispatch"]["aggregate_fragment"]).is_absolute())
+        self.assertEqual(d["dispatch"]["aggregate_agents"], {
+            "t1": "init-induct-native", "t2": "init-synthesis-native",
+            "t3": "init-rulewriter-native",
+            "scout-merge": "init-scout-merge-native"})
+        self.assertEqual(d["dispatch"]["aggregate_plan_present"],
+                         {"t1": False, "t2": False, "t3": False,
+                          "scout-merge": False})
         scout = self._scout(d)
         self.assertEqual(scout["script"], "emit_native_plan.py")
         self.assertTrue(scout["invocation"].startswith("py "))
@@ -424,17 +438,45 @@ class NativeScoutBranchTest(unittest.TestCase):
         self.assertEqual(waves["agent"], "init-scout-native")
         self.assertEqual(waves["discipline_fragment"],
                          d["dispatch"]["discipline_fragment"])
-        # scout-merge stays subprocess: extra_invocations preserved + merge phase
+        # the scout-merge map companion switches to the materializer in the
+        # native face (channel B/A per the aggregate fragment)
         self.assertEqual(len(scout["extra_invocations"]), 1)
         self.assertEqual(scout["extra_invocations"][0]["script"],
-                         "fanout_runner.py")
+                         "emit_native_plan.py")
         self.assertIn("--tier scout-merge",
                       scout["extra_invocations"][0]["invocation"])
+        # the aggregate steps (t1/t2/t3) switch to their native faces too
+        # (second call: the first was --step scout, single-step mode)
+        code_f, out_f, err_f = self._run(script, "--target", str(self.target))
+        self.assertEqual(code_f, 0, err_f)
+        d = json.loads(out_f)
+        t1 = self._step(d, "t1")
+        self.assertEqual(t1["script"], "emit_native_plan.py")
+        self.assertIn("--tier t1", t1["invocation"])
+        self.assertIn("native_plan_t1.json", t1["output"]["path_pattern"])
+        self.assertEqual([p["phase"] for p in t1["native_arc"]],
+                         ["materialize", "dispatch", "gate"])
+        self.assertEqual(t1["native_arc"][1]["agent"], "init-induct-native")
+        self.assertEqual(t1["native_arc"][1]["tool"], "mgh_dispatch")
+        t2 = self._step(d, "t2")
+        self.assertEqual([p["phase"] for p in t2["native_arc"]],
+                         ["gate", "materialize", "dispatch", "rollup"])
+        self.assertIn("plan_aggregate.py", t2["native_arc"][0]["invocation"])
+        t3 = self._step(d, "t3")
+        self.assertEqual([p["phase"] for p in t3["native_arc"]],
+                         ["materialize", "dispatch", "gate"])
+        self.assertEqual(t3["native_arc"][1]["agent"], "init-rulewriter-native")
         # the native discipline variant rides the step
         text = json.dumps(scout["discipline"], ensure_ascii=False)
         for needle in ("init-native-wave", "emit_native_plan.py", "--retry-failed",
                        "同一条 assistant 消息", "唯一写者是子代理自身", "units_total"):
             self.assertIn(needle, text, needle)
+        for step_id in ("t1", "t2", "t3"):
+            dtext = json.dumps(self._step(d, step_id)["discipline"],
+                               ensure_ascii=False)
+            for needle in ("mgh_dispatch", "init-aggregate-native-dispatch",
+                           "units_total"):
+                self.assertIn(needle, dtext, f"{step_id}: {needle}")
 
     def test_opencode_auto_profile_is_native(self):
         self._profile({"v": 1, "dispatch_mode": "auto"})

@@ -70,23 +70,34 @@ Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画�
 披露的编排契约见 [`sdr/pipeline.md`](../sdr/pipeline.md)「原生派发形态」节;子进程派发器形态
 (`fanout_runner.py --tier sdr`)是 claude/dsh 面的缺省,也是 opencode 面在画像显式
 `dispatch_mode:"runner"` 时的唯一回退——runner 形态的行为逐字节不变,两形态的单元输入构造
-同源零漂移。**第二个消费方 = `/mgh-init` 的 scout 读者批**(opencode 面 `consumer=init`
-缺省原生;页循环语义见下):步骤清单/恢复的原生步形见
-[`init/step-manifest.md`](../init/step-manifest.md)「scout 原生步形」与
-[`init/resume-state.md`](../init/resume-state.md)「`dispatch` 字段」;波次纪律 fragment =
-`init-scout-native-dispatch.md`,原生孪生 agent = `init-scout-native`(标记自写),scout-merge
-及 T1/T2/T3 在 init 原生化第二层之前仍走子进程派发器(aggregate 接入后继承同一
-`consumer=init` 缺省)。其它命令以 `consumer=generic` 调用解析器,缺省仍为 runner。
+同源零漂移。**第二个消费方 = `/mgh-init`(opencode 面 `consumer=init` 缺省原生;页循环语义
+见下)**,覆盖 scout 读者批与四个聚合层(t1/t2/t3/scout-merge)的 map 派发段:步骤清单/恢复
+的原生步形见 [`init/step-manifest.md`](../init/step-manifest.md)「scout 原生步形」+
+「聚合层原生步形」与 [`init/resume-state.md`](../init/resume-state.md)「`dispatch` 字段」;
+波次纪律 fragment = `init-scout-native-dispatch.md`(scout 读者批)与
+`init-aggregate-native-dispatch.md`(聚合四层:通道 B 派发工具默认 + 通道 A 编排器波次回退),
+原生孪生 agent = `init-scout-native` / `init-induct-native` / `init-synthesis-native` /
+`init-scout-merge-native` / `init-rulewriter-native`(标记自写;rulewriter 是唯一带写权限者)。
+各层的单上下文段(t2/scout-merge `needs_reduce=false`)、rollup、audit、fold-in、assemble
+不原生化。其它命令以 `consumer=generic` 调用解析器,缺省仍为 runner。
 两脚本与子进程派发器的关系 = **旁路供给面**:`emit_native_plan.py` 以兄弟导入复用派发器
 的 tier 表、枚举器调用与 run 目录锚定、模板加载与逐字填充、锚树校验、安全文件名(**派发器
-源码零改动、其行为零变化**),使原生形态与子进程形态的单元输入构造零漂移。
+源码零改动、其行为零变化**),使原生形态与子进程形态的单元输入构造零漂移。t1 的
+`--pack-bytes/--pack-max` 打包 flag 经物化器本地包装 `list_args` 转发枚举器(tier 表本体
+不动)。**计划 `agent` 字段承载该 tier 的原生 subagent 孪生名**(如 `init-induct-native`),
+不承载派发器 tier 表里的 primary 孪生名——派发工具(`mgh_dispatch`)在 spawn 前拒绝
+primary 形态 agent,通道 A 的编排器也按孪生名派发。
 
 ### 工件布局
 
 | 工件 | 内容 |
 | --- | --- |
-| `<run>/native_plan.json` | 计划本体 `{v, tier, agent, repo, wave_size, wave_size_source, units_total, waves[]}`;每波 `{wave, units[]}`,每单元 = 枚举器 pending 字段**逐字透传** + `{id, unit_id, task_file}`,路径全绝对。`<run>` = 计划工件的锚定目录(与派发器 sidecar 同锚:sdr = grouping.json 所在 run 目录,t2/scout-merge = init 目录,其余 tier = 计划工件父目录) |
+| `<run>/native_plan.json` | 计划本体 `{v, tier, agent, repo, wave_size, wave_size_source, units_total, waves[]}`;每波 `{wave, units[]}`,每单元 = 枚举器 pending 字段**逐字透传** + `{id, unit_id, task_file}`,路径全绝对。`<run>` = 计划工件的锚定目录(与派发器 sidecar 同锚:sdr = grouping.json 所在 run 目录,t2/scout-merge = init 目录,其余 tier = 计划工件父目录)。**init 聚合 tier(t1/t2/t3/scout-merge)按 tier 命名**:`native_plan_<tier>.json`(层间互不覆写;scout 与 sdr 用未带后缀的既有名) |
 | `<inputs-dir>/<unit>.task.md` | 每单元完整任务消息,模板逐字填充(填后断言无残留 `{{`),与派发器执行时写的审计副本**同路径同内容**——派发器后跑 = 幂等重写同内容 |
+
+- **零派发不变量(t2/scout-merge)**:枚举器报 `needs_reduce=false`(聚合输入 ≤ 预算,
+  单上下文装得下)时物化器**不写任何计划工件**(exit 0 + stdout note)——「装得下不派」
+  优先于「换形态」,单上下文段照既有子进程形态执行。
 
 - **确定性**:内容无时间戳、单元按规范 id 稳定排序、序列化固定(`ensure_ascii=False,
   indent=2, sort_keys` + 换行结尾)——同输入两次物化**逐字节一致**(计划 = 磁盘状态与
@@ -95,11 +106,13 @@ Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画�
   `--wave-size` > 环境画像 `native_concurrency`(缺省 3);配额只来自环境画像;
   `wave_size_source` 记录取小者来源(`concurrency|quota`,平局记 concurrency)。**静态
   算术**:运行期准入(配额滑窗/冷却/风暴截断)仍属派发器与看门狗层,计划只定形状。
-- **页语义(init scout 消费方)**:一次物化只覆盖枚举器当前 pending 页——枚举器
-  (`list_scout_batches.py`)的编排预算 flag 会把 `pending[]` 收紧成一页(超预算
+- **页语义(init 消费方,scout 与聚合四层同构)**:一次物化只覆盖枚举器当前 pending
+  页——枚举器(`list_scout_batches.py`/`list_clusters.py`/`plan_aggregate.py`/
+  `list_rule_jobs.py`)的编排预算 flag 会把 `pending[]` 收紧成一页(超预算
   `shrunk:true`),故物化产物的 `units_total` 是**本页**单元数,不是全量批数。消费方
-  (init scout 波次纪律)在派完当前页后**重物化**取下一页,循环直到一次物化给出
-  `units_total == 0`(pending 清零)才进入聚合段;**NEVER** 假设一次计划覆盖全部批、
+  (scout 波次纪律 / 聚合纪律 fragment)在派完当前页后**重物化**取下一页,循环直到
+  一次物化给出 `units_total == 0`(pending 清零)才进入下一层/聚合段;聚合层通道 B
+  一次工具调用跑完的是**本页**的全部波次。**NEVER** 假设一次计划覆盖全部批、
   **NEVER** 手工翻枚举器工件记账「哪些派过了」(重物化即重枚举,pending 由磁盘标记
   重派生)。sdr 消费方的 pending 页语义同源(枚举器 `diff_group.py` 同一收紧机制)。
 - stdout 摘要(单行 JSON):tool/tier/agent/units_total/waves/wave_size/
@@ -141,11 +154,12 @@ schema(全键可选、未知字段忽略;quota 在场时三键齐全):
     `--consumer <sdr|init|generic>`。sdr/init 编排面(命令壳 step 0、步骤清单、恢复、
     报告、launcher)全部消费该单一解析结果,NEVER 各自比较原始 `dispatch_mode`。
   - opencode 面解析为 native 但安装树缺该 consumer 的原生资产(sdr =
-    `sdr-review-native` agent + sdr 波次纪律 fragment;init = `init-scout-native` agent +
-    scout 波次纪律 fragment;资产门 `env_profile.require_native_assets` 按 surface
-    参数化,每面查自己的资产)时,编排面退出码 2 + 重装/显式 runner recipe,
-    NEVER 静默回退子进程。解析为 native 但宿主面不是 opencode(如 claude 面显式
-    `native`)→ init 编排面(scout)退出码 2 + recipe,NEVER 静默按子进程运行。
+    `sdr-review-native` agent + sdr 波次纪律 fragment;init = 五只 `init-*-native`
+    孪生 agent + scout 与聚合两个波次纪律 fragment;资产门
+    `env_profile.require_native_assets` 按 surface 参数化,每面查自己的资产)时,编排面
+    退出码 2 + 重装/显式 runner recipe,NEVER 静默回退子进程。解析为 native 但宿主面
+    不是 opencode(如 claude 面显式 `native`)→ init 编排面(scout)退出码 2 + recipe,
+    NEVER 静默按子进程运行。
 - **fail-closed**:坏 JSON/非对象/未知或非整数 `v`/枚举域外取值/并发越界(含非整数与
   布尔)/quota 残缺或非正 → CLI 退出码 2 + recipe(文件路径 + 违规字段),导入形态抛
   `EnvProfileError`(ValueError 子类);NEVER 静默回退缺省(静默回退会让「以为配了

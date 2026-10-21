@@ -823,11 +823,12 @@ class TestAgentQuestionDenyPinned(unittest.TestCase):
     # fanout twins (pinned historically for headless dispatch) + their non-fanout siblings
     # (same job, same isolation, previously unpinned).
     EXT_DENY_REQUIRED = {
-        "init-induct", "init-induct-fanout",
-        "init-rulewriter", "init-rulewriter-fanout",
+        "init-induct", "init-induct-fanout", "init-induct-native",
+        "init-rulewriter", "init-rulewriter-fanout", "init-rulewriter-native",
         "init-scout", "init-scout-fanout", "init-scout-native",
         "init-scout-merge", "init-scout-merge-fanout",
-        "init-synthesis", "init-synthesis-fanout",
+        "init-scout-merge-native",
+        "init-synthesis", "init-synthesis-fanout", "init-synthesis-native",
         "sdr-review-fanout",
     }
 

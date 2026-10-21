@@ -171,7 +171,7 @@ class EmitNativePlanTest(unittest.TestCase):
                          {"v", "tier", "agent", "repo", "wave_size",
                           "wave_size_source", "units_total", "waves"})
         self.assertEqual(body["tier"], "sdr")
-        self.assertEqual(body["agent"], "sdr-review-fanout")
+        self.assertEqual(body["agent"], "sdr-review-native")
         self.assertEqual(body["units_total"], len(SDR_UIDS))
         self.assertNotIn("time", raw.lower())
         self.assertNotIn("date", raw.lower())
@@ -427,7 +427,11 @@ class EmitNativePlanTest(unittest.TestCase):
         self.assertEqual(self._plan()["waves"], [])
         self.assertEqual(json.loads(out)["units_total"], 0)
 
-    def test_needs_reduce_false_zero_unit_plan(self):
+    def test_needs_reduce_false_zero_dispatch_no_plan(self):
+        # fix-mgh-init-native-aggregate-dispatch: needs_reduce=false is the
+        # ZERO-DISPATCH invariant — no plan artifact is EVER written (the
+        # single-context stage is the orchestrator's ordinary subagent call);
+        # exit 0 + a note saying exactly that.
         init_dir = self.repo / "initdir"
         init_dir.mkdir()
         (init_dir / "run_config.json").write_text("{}", encoding="utf-8")
@@ -438,9 +442,11 @@ class EmitNativePlanTest(unittest.TestCase):
              str(init_dir), "--checkpoints", str(self.ck), "--inputs-dir",
              str(self.inputs), "--template", str(self._template())])
         self.assertEqual(code, 0, err)
-        plan = json.loads((init_dir / "native_plan.json").read_text(
-            encoding="utf-8"))
-        self.assertEqual(plan["units_total"], 0)
+        summary = json.loads(out)
+        self.assertEqual(summary["units_total"], 0)
+        self.assertIn("single-context", summary["note"])
+        self.assertFalse((init_dir / "native_plan_t2.json").exists())
+        self.assertFalse((init_dir / "native_plan.json").exists())
 
     # --- 6. --check red/green ----------------------------------------------
     def test_check_clean_plan_green(self):
@@ -558,7 +564,7 @@ class EmitNativePlanTest(unittest.TestCase):
              str(self.inputs)])
         self.assertEqual(code, 0, err)
         plan = self._plan()
-        self.assertEqual(plan["agent"], "init-scout-fanout")
+        self.assertEqual(plan["agent"], "init-scout-native")
         self.assertEqual(plan["tier"], "scout")
         ids = [u["id"] for w in plan["waves"] for u in w["units"]]
         self.assertTrue(all(i.startswith("scout-") for i in ids))
@@ -633,6 +639,150 @@ class EmitNativePlanTest(unittest.TestCase):
         self.assertEqual(code2, 2)
         self.assertIn("stale", err2)
 
+    # --- 7b. aggregate tiers (fix-mgh-init-native-aggregate-dispatch) ------
+    # Per-tier plan filenames (one plan file PER TIER so the four layers
+    # sharing one init dir never overwrite each other) + the plan body's
+    # agent = the tier's NATIVE subagent twin (the dispatch tool refuses
+    # primary-mode agents before any spawn).
+    _AGG = {
+        "t1": ("init-induct-native", "cluster_id", True),
+        "t2": ("init-synthesis-native", "shard_id", False),
+        "scout-merge": ("init-scout-merge-native", "shard_id", False),
+        "t3": ("init-rulewriter-native", "category", True),
+    }
+
+    def _agg_listing(self, tier, uid):
+        s = self.fr._safe_name(uid)
+        unit = {"input_path": str(self.inputs / f"{s}.json"),
+                "checkpoint_path": str(self.ck / f"{s}.json"),
+                "done_marker": str(self.ck / f"{s}.done"),
+                "failed_marker": str(self.ck / f"{s}.failed"),
+                "slice_dir": str(self.inputs / f"slice-{s}")}
+        if tier == "t3":
+            unit = {"input_path": str(self.inputs / f"{s}.json"),
+                    "rule_path": str(self.inputs / f"{s}.rule.md"),
+                    "done_marker": str(self.ck / f"{s}.done"),
+                    "failed_marker": str(self.ck / f"{s}.failed")}
+            unit["category"] = uid
+        else:
+            unit[self._AGG[tier][1]] = uid
+        if tier in ("t2", "scout-merge"):
+            listing = {"node": tier, "needs_reduce": True,
+                       "repo": str(self.repo), "shards": 1, "pending": [unit],
+                       "rollup": {"summary_paths": [], "output": "",
+                                  "done_marker": ""}}
+        else:
+            listing = {"repo": str(self.repo), "total": 1, "done": 0,
+                       "failed": 0, "pending": [unit]}
+        return listing
+
+    def _agg_argv(self, tier, *extra):
+        argv = ["emit_native_plan.py", "--tier", tier,
+                "--checkpoints", str(self.ck), "--inputs-dir",
+                str(self.inputs)]
+        if self._AGG[tier][2]:  # plan-anchored tier
+            artifact = {"t1": "clusters.json", "t3": "controls_inventory.json"}
+            art = self.run / artifact[tier]
+            art.write_text('{"v": 1}\n', encoding="utf-8")
+            if tier == "t1":
+                cand = self.run / "controls_candidates.json"
+                cand.write_text('{"candidates": []}\n', encoding="utf-8")
+                argv += ["--clusters", str(art), "--candidates", str(cand)]
+            else:
+                argv += ["--inventory", str(art), "--format", "opencode",
+                         "--rules-dir", str(self.run / "rules"),
+                         "--target", str(self.repo)]
+        else:  # init-dir-anchored tier
+            init_dir = self.repo / "initdir"
+            init_dir.mkdir(exist_ok=True)
+            (init_dir / "run_config.json").write_text("{}", encoding="utf-8")
+            argv += ["--init-dir", str(init_dir), "--budget", "98304"]
+        return argv + list(extra)
+
+    def _agg_run_dir(self, tier):
+        # the plan lands next to the (re-anchored) plan artifact: init dir for
+        # t2/scout-merge, the artifact's dir (self.run) for t1/t3
+        return (self.repo / "initdir") if not self._AGG[tier][2] else self.run
+
+    def test_aggregate_tiers_per_tier_plan_name_and_native_agent(self):
+        for tier, (agent, id_field, _) in self._AGG.items():
+            with self.subTest(tier=tier):
+                uid = {"t1": "clu-001::src/main", "t2": "t2-auth-part1",
+                       "scout-merge": "sm-pack-001", "t3": "authentication"}[tier]
+                self._install_listing(self._agg_listing(tier, uid))
+                code, out, err = self._run_argv(self._agg_argv(tier))
+                self.assertEqual(code, 0, err)
+                run_dir = self._agg_run_dir(tier)
+                plan_p = run_dir / f"native_plan_{tier}.json"
+                self.assertTrue(plan_p.is_file(),
+                                f"{tier}: per-tier plan missing")
+                self.assertFalse((run_dir / "native_plan.json").exists(),
+                                 f"{tier}: must NOT clobber the scout plan")
+                plan = json.loads(plan_p.read_text(encoding="utf-8"))
+                self.assertEqual(plan["tier"], tier)
+                self.assertEqual(plan["agent"], agent)
+                self.assertEqual(plan["units_total"], 1)
+                [unit] = [u for w in plan["waves"] for u in w["units"]]
+                self.assertEqual(unit["unit_id"], uid)
+                self.assertIn(id_field, unit)
+                summary = json.loads(out)
+                self.assertEqual(summary["agent"], agent)
+                self.assertEqual(summary["plan_path"], str(plan_p))
+
+    def test_t1_pack_flags_forwarded_to_enumerator(self):
+        # --pack-bytes/--pack-max wrap the tier's list_args LOCALLY (the
+        # dispatcher's tier table stays untouched) and reach the enumerator
+        # call as list_clusters's own flags.
+        captured = {}
+
+        def fake_list(tier, args):
+            captured["flags"] = tier["list_args"](args)
+            return self._agg_listing("t1", "clu-001")
+        self.fr._list_pending = fake_list
+        code, out, err = self._run_argv(
+            self._agg_argv("t1", "--pack-bytes", "16384",
+                           "--pack-max", "8"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(captured["flags"][-4:],
+                         ["--pack-bytes", "16384", "--pack-max", "8"])
+        self.assertIn("--materialize", captured["flags"][0] + " ".join(captured["flags"]))
+
+    def test_pack_flags_closed_set(self):
+        # pack flags are t1-only; --pack-max without --pack-bytes, and a
+        # non-positive --pack-bytes are misuse (exit 2, zero writes).
+        self._install_listing(self._agg_listing("t1", "clu-001"))
+        code, _, err = self._run_argv(self._agg_argv("t1", "--pack-max", "8"))
+        self.assertEqual(code, 2)
+        self.assertIn("--pack-bytes", err)
+        code, _, err = self._run_argv(
+            self._agg_argv("t1", "--pack-bytes", "0"))
+        self.assertEqual(code, 2)
+        self._install_listing(self._scout_listing(["batch-a"]))
+        scout_plan = self.run / "scout_plan.json"
+        scout_plan.write_text('{"v": 1}\n', encoding="utf-8")
+        code, _, err = self._run_argv(self._scout_argv(scout_plan,
+                                               "--pack-bytes", "16384"))
+        self.assertEqual(code, 2)
+        self.assertIn("t1-only", err)
+
+    def test_pack_unit_round_trip_is_path_transparent(self):
+        # a PACK pending unit (pack id in cluster_id + members[]) carries the
+        # same path fields, so materialization is pack-transparent end to end.
+        uid = "pack::authentication::ab12cd34"
+        listing = self._agg_listing("t1", uid)
+        listing["pending"][0]["members"] = [
+            str(self.inputs / "m1.json"), str(self.inputs / "m2.json")]
+        listing["cluster_total"] = 2
+        listing["cluster_done"] = 0
+        self._install_listing(listing)
+        code, out, err = self._run_argv(self._agg_argv("t1"))
+        self.assertEqual(code, 0, err)
+        plan = json.loads((self.run / "native_plan_t1.json")
+                          .read_text(encoding="utf-8"))
+        [unit] = [u for w in plan["waves"] for u in w["units"]]
+        self.assertEqual(unit["unit_id"], uid)
+        self.assertEqual(unit["members"], listing["pending"][0]["members"])
+
     def test_help_surface(self):
         r = subprocess.run([sys.executable, str(SCRIPT), "--help"],
                            capture_output=True, text=True, encoding="utf-8",
@@ -643,7 +793,8 @@ class EmitNativePlanTest(unittest.TestCase):
                       "--init-dir", "--inventory", "--rules-dir", "--target",
                       "--repo", "--base", "--branch", "--checkpoints",
                       "--inputs-dir", "--retry-failed", "--template",
-                      "--wave-size", "--profile", "--check"):
+                      "--wave-size", "--profile", "--check",
+                      "--pack-bytes", "--pack-max"):
             self.assertIn(token, r.stdout, f"--help missing {token!r}")
 
     def test_module_loads_from_foreign_cwd(self):

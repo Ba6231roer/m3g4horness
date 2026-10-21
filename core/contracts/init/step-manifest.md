@@ -59,6 +59,10 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
       "discipline": {"gates": [{id,desc,command,fail_exit}], "path_recipes": [{id,desc,source}], "nevers": ["<NEVER ...>"]}
     }
   ]
+  [, "dispatch": {"form": "native", "source": "profile|host-default",
+                  "profile_exists": bool, "host_face": "opencode", "consumer": "init",
+                  "profile_path": "<abs>", "plan_present": bool,
+                  "native_agent": "init-scout-native", "discipline_fragment": "<abs>"}]
 }
 ```
 
@@ -74,6 +78,12 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 - `discipline` = 该步纪律子集(gate 闸门形状 `--check` 命令 + 退出码 2 / fan-out 路径配方 /
   适用 NEVER),与 `resume_state.py` stdout 同 step 的 `discipline_reminders[]` **逐字一致**
   (共享静态表 `core/scripts/discipline_core.py`,单一真相;`done`/`not-started`/未知 → 空结构)
+- `dispatch` = **仅原生形态在场**(解析形态 native ∧ `host_face=="opencode"`;scout 读者批
+  的派发形态,经 `env_profile.resolve(<target>, consumer="init")` 单源解析)。子进程形态
+  (显式 `dispatch_mode:"runner"`、`consumer=generic`、claude/dsh/other 面)**不出现该字段**,
+  stdout 逐字节回到既有形状——读者以「字段缺席 = 子进程」解释。fail-closed 面:坏画像 /
+  native+非 opencode 面 / 缺 scout 原生资产(`agent/init-scout-native.md` 或
+  `prompts/fragments/init-scout-native-dispatch.md` 缺一)→ 退出码 2 + recipe,NEVER 静默回退。
 
 ## Step→IO 表
 
@@ -99,6 +109,36 @@ Read** `<mgh-core>/prompts/fragments/init-stage/bootstrap.md` 加载,NEVER 对 b
 > 子代理分支见 t2 fragment。scout 步另载 `extra_invocations`(scout-merge map 段驱动:
 > `fanout_runner.py --tier scout-merge`)。`merge` 是 `--merge` 模式的专用步骤(常规 pipeline
 > 不经过);真正的 scout-merge 聚合脚本是 `merge_scout.py`(见 `resume_state.py` scout 子状态)。
+
+### scout 原生步形(`dispatch` 字段在场时;子进程表不受影响)
+
+解析形态为 native 时,scout 行**整体替换**为计划物化入口(确定性脚本仍是 stdout 契约面,
+派发本身是编排纪律,由 `native_arc` 相位承载):
+
+| 字段 | 值 |
+|---|---|
+| `script` / `script_abs` | `emit_native_plan.py`(绝对) |
+| `invocation` | `py <emit_abs> --tier scout --scout-plan <init-dir>/scout_plan.json --checkpoints <init-dir>/checkpoints/scout --inputs-dir <init-dir>/inputs/scout --profile <target>` |
+| `input` | `scout_plan.json` {batches[]}(发现本体不变:批规划仍由 `plan_scout.py` 产出 + `--check` 校验) |
+| `output` | `<init-dir>/native_plan.json` + `<init-dir>/inputs/scout/<batch_id>.task.md`(页界波次拆分 + 每批任务文件;终态标记由子代理自写) |
+| `native_arc` | `[{phase:"materialize", kind:"bash", script, invocation, note}, {phase:"waves", kind:"subagent", agent:"init-scout-native", discipline_fragment, note}, {phase:"merge", kind:"bash", step_ref:"scout-merge", note}]` |
+| `extra_invocations` | **保留** scout-merge map 段驱动行(scout-merge 在原生形态仍子进程承载) |
+| `discipline` | `get_discipline("scout", domain="init", form="native")`(与 `resume_state.py` 同 step 同 form 逐字一致) |
+
+- **页语义**:一次物化只覆盖枚举器当前 pending 页(编排预算收紧页,stdout `units_total`
+  = 本页单元数);派完当前页**重物化**取下一页,循环直到 `units_total == 0` 才进
+  scout-merge——NEVER 假设一次计划覆盖全部批、NEVER 手工翻 `scout_plan.json`。
+- **波次派发**(waves 相位,编排纪律):同一条 assistant 消息并发派当前波全部单元
+  (agent `init-scout-native`,`mode: subagent`;`description`=计划短号逐字,任务体=单行
+  令牌 `mgh-dispatch: plan=<plan_path> unit=<短号>`,派发插件 `mgh_dispatch.ts` 的令牌展开
+  钩子在子代理启动前展开为任务文件全文;展开钩子缺席的旧版安装回退=固定句+task_file
+  绝对路径逐字透传)。标记唯一写者是子代理自身(成功 touch `.done`;失败自写 `.failed`,
+  内容 `{unit_id, reason}`——该指令仅住原生 agent 定义,共享任务模板零改动);失败批至多
+  一轮重派,限流特征按画像配额等窗;看门狗先行(`native_watchdog.py --run-dir <init-dir>`,
+  阈值缺省,run 落定自退)。
+- **plan 工件探针**:`dispatch.plan_present` = `<target>/.mgh-init/native_plan.json`
+  在场(佐证信号,解析形态才是绑定决策)。未来 aggregate 层原生共用该文件名时须先引入
+  按 tier 的计划命名/子目录(主规格已记为约束),本形态当前无冲突。
 
 ## Pattern portability
 

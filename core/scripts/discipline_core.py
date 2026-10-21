@@ -18,9 +18,11 @@ One table per domain, selected by `get_discipline(step, domain=...)`:
   * `init` — the /mgh-init step graph (default; existing callers unchanged).
   * `sdr`  — the /mgh-sdr step graph (`not-started|group|fanout|render|done`).
 
-The sdr fanout step additionally carries a NATIVE-dispatch variant (opencode
-face, profile-explicit `dispatch_mode: "native"`), selected by
-`get_discipline(step, domain="sdr", form="native")`; "subprocess" (the default)
+The sdr fanout step and the init scout step additionally carry a
+NATIVE-dispatch variant (opencode face, resolved form `native` — the sdr one
+via profile/consumer default, the init one via the `consumer=init ∧
+host=opencode` default), selected by
+`get_discipline(step, domain=..., form="native")`; "subprocess" (the default)
 resolves the base table, so every pre-existing caller is unchanged.
 
 Tables live in ONE module (not one file per domain) so "is sdr's defense line
@@ -391,6 +393,108 @@ _DISCIPLINE_SDR_NATIVE_FANOUT = {
     ],
 }
 
+# ---------------------------------------------------------------------
+# init domain — native-dispatch variant of the scout step (opencode face,
+# consumer=init resolved native — the opencode-face default or an explicit
+# `dispatch_mode:"native"`). Selected via get_discipline("scout", domain="init",
+# form="native") by BOTH init step scripts so the byte-verbatim list==resume
+# equality holds in the native form too. The subprocess recipes above stay the
+# default and the permanent fallback (explicit runner, claude/dsh faces).
+# Page semantics are the load-bearing init-specific addition: one
+# materialization covers only the enumerator's CURRENT pending page, so the
+# wave loop re-materializes after each page until units_total == 0.
+_INIT_NATIVE_WAVE_RECIPE = (
+    "每轮 = 重物化 → 自检 → 同消息并发派当前波 → 派完该页回①(页循环):①`emit_native_plan.py "
+    "--tier scout --scout-plan <init-dir>/scout_plan.json --checkpoints <init-dir>/checkpoints/"
+    "scout --inputs-dir <init-dir>/inputs/scout --profile <target>` + 同参 `--check`(退出码 2 → "
+    "重跑同参物化即修复;任一单元完成后计划按设计变 stale——波次收尾以重物化修复,NEVER 把该 "
+    "--check 退出码 2 当故障);②当前波全部单元在**同一条 assistant 消息**派发(agent "
+    "init-scout-native;description=计划短号逐字复制,任务体=单行令牌 `mgh-dispatch: "
+    "plan=<plan_path> unit=<短号>`——计划引用=物化 stdout plan_path 逐字、短号自计划逐字复制,"
+    "派发插件 mgh_dispatch.ts 的令牌展开钩子在子代理启动前把它展开为该批任务文件全文;展开钩子"
+    "缺席的旧版安装回退=固定句+task_file 绝对路径逐字透传);③派完当前页回①——一次物化只覆盖"
+    "枚举器当前 pending 页,重物化即重枚举(pending 由磁盘标记重派生),计划 `units_total==0` 才"
+    "进 scout-merge;NEVER 自记账「哪些派过了」、NEVER 假设一次计划覆盖全部批")
+_INIT_NATIVE_MARKER_RECIPE = (
+    "标记真相源:`.done`/`.failed` 唯一写者是子代理自身(成功 touch done_marker;失败自写 "
+    "failed_marker,内容 {unit_id, reason}——该指令仅住 init-scout-native agent 定义;共享任务"
+    "模板的「reference only; the dispatcher writes it」行描述的是子进程形态,原生形态不适用);"
+    "计划物化、看门狗、编排器 NEVER 写任何批标记(唯一例外 = 重派认领时删除该批旧 `.failed`,"
+    "与派发器 --retry-failed 的认领即删语义同形,是删除不是写入);被中止/未落标记的批经重枚举"
+    "自然回待派——中止 ≠ 失败终态,终态只能由批自身执行纪律写出")
+_INIT_NATIVE_RETRY_RECIPE = (
+    "`.failed` 批至多重派一轮:删旧 .failed → 重物化加 --retry-failed(该批回 pending)→ 派发"
+    "一次;再失败接受缺口,在 scout-merge 之前披露(后续轮次不再派它),NEVER 无限重派;恢复会话"
+    "无法判定是否已重派过时允许再一轮(代价有界=一轮配额);上一波失败原因含限流特征"
+    "(429/rate limit/quota)→ 按环境画像配额窗口(`quota.window_s`,未配置按网关公开口径,如 "
+    "10 分钟)等满一窗再重物化/重派,等待事实入 run 过程记录;NEVER 在限流窗口内连续重派烧配额")
+_INIT_NATIVE_WATCHDOG_RECIPE = (
+    "看门狗先行:第一波派发前以**脱离工具调用的独立进程**启动 `native_watchdog.py --run-dir "
+    "<init-dir>`(根会话取宿主注入的 OPENCODE_SESSION_ID,零手工传参;阈值缺省;Windows 宿主 "
+    "shell 工具是 PowerShell,用 `Start-Process … -WindowStyle Hidden -PassThru` 并记录回写 "
+    "pid,NEVER 用 `cmd &` 形态——PowerShell 解析器直接拒绝;POSIX 宿主用 `> log 2>&1 &` 记 "
+    "$!;路径全树内绝对——守卫对裸相对重定向目标保守拦截);run 落定自退;每波边界确认 "
+    "<init-dir>/watchdog/state.json 仍在新更新,缺席则同命令重启;收尾后仍存活 → 等自退"
+    "(落定即退),确需立即收尾按记录的 pid 停;NEVER 前台跑看门狗、NEVER 代替看门狗做会话中止")
+
+_DISCIPLINE_INIT_NATIVE_SCOUT = {
+    "gates": [
+        _g("scout-plan-check",
+           "scout_plan.json 批规划校验(batches 非空除非 0 target、每批 bytes≤预算、needs_slice 仅含超批文件)——两种形态共用的发现本体闸门",
+           "plan_scout.py --check <init-dir>/scout_plan.json"),
+        _g("init-native-plan-check",
+           "每轮计划自检(计划与全部任务文件 vs 重物化逐字节 + 单元集 vs 当前 pending + 短号"
+           "映射闭合):退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划",
+           "emit_native_plan.py --tier scout … --check(与物化同参)"),
+        _g("scout-merge-check",
+           "scout_candidates.json 校验(每条 source:scout + file:line)",
+           "merge_scout.py --check <init-dir>/scout_candidates.json"),
+    ],
+    "path_recipes": [
+        _pr("init-native-wave", _INIT_NATIVE_WAVE_RECIPE, "emit_native_plan --step 契约"),
+        _pr("init-native-marker", _INIT_NATIVE_MARKER_RECIPE,
+            "init-scout-native-dispatch fragment"),
+        _pr("init-native-retry", _INIT_NATIVE_RETRY_RECIPE,
+            "init-scout-native-dispatch fragment"),
+        _pr("init-native-watchdog", _INIT_NATIVE_WATCHDOG_RECIPE,
+            "init-scout-native-dispatch fragment"),
+        _pr("scout-merge-aggregate-budget",
+            "scout 读者全终态(units_total==0)后、spawn init-scout-merge 前先判聚合预算:"
+            "plan_aggregate.py --node scout-merge;needs_reduce=false → single-context "
+            "init-scout-merge(逐字不变);needs_reduce=true(> 预算)→ map-reduce,每个请求 ≤ 预算"
+            "(候选粒度装箱;病态单候选瘦身投影留痕,瘦后仍超 → 退出码 2 零物化零派发)——"
+            "scout-merge 在本形态仍走子进程派发器,不原生化",
+            "plan_aggregate.py --node scout-merge"),
+        _pr("scout-merge-fanout-dispatcher",
+            "map 主路径(needs_reduce=true 且 pending 非空)= 一次 Bash 跑 fanout_runner.py "
+            "--tier scout-merge --init-dir <init-dir> --budget <max-aggregate-bytes>(budget 与 "
+            "gate 同值;带四级超时不变式,合规 720000/540/300 或 480000/360/300);partial:true "
+            "重派同一命令;map 全 .done 后单一 rollup init-scout-merge-rollup 吞 "
+            "rollup.summary_paths;NEVER 手动翻页、NEVER 逐次撰写 subagent 任务消息",
+            "fanout_runner --step 契约"),
+        _pr("scout-merge-fanout-path",
+            "scout-merge shard 输出路径 = plan_aggregate --node scout-merge stdout "
+            "pending[].checkpoint_path,绝对逐字透传;成功恰好写 checkpoint_path(结构化 shard "
+            "摘要)+ touch done_marker;失败 ack → 编排器写 failed_marker(终态);任一 shard "
+            ".failed → 不得 rollup(缺摘要),披露后修复再 --resume",
+            "plan_aggregate --node scout-merge --step 契约"),
+    ],
+    "nevers": [
+        "NEVER 跨波合并派发 / 自增并发(波次尺寸来自计划:并发与配额算术的较小者)",
+        "NEVER 自撰任务文本 / 拼接改写任务文件路径(短号与计划引用只从计划逐字复制)",
+        "NEVER 写任何批标记(.done/.failed 唯一写者是子代理自身)",
+        "NEVER 逐个串行派发 / 手动翻页(同消息并发是形态承重点)",
+        "NEVER 假设一次物化覆盖全部批(units_total==0 才是页循环终止)",
+        "NEVER 手挖 scout_plan.json",
+        "NEVER 用 `py -c` 内省 scout_plan.json / 计划工件",
+        "NEVER 写 wrapper .py 循环",
+        "NEVER 二次聚合 / 重切批(终态)",
+        "NEVER 重跑 `merge_scout.py` fold-in(`controls_candidates.json::provenance.scout_merged` 已设时;重跑非幂等——同文件重跑把 `scout_merged` 归零,漂移文件重跑重复追加候选/簇)",
+        "NEVER Read 叶子脚本源码(报错看 stderr)",
+    ],
+}
+
+
 # step keys are exactly resume_sdr_state.py's closed set.
 _DISCIPLINE_SDR = {
     # step `group` — deterministic diff collection + interface grouping. Reached
@@ -476,18 +580,21 @@ def get_discipline(step: str, domain: str = "init", form: str = "subprocess") ->
 
     `domain` selects the run domain's table (default `init` — the pre-existing
     callers are unchanged by this parameter's arrival). `form` selects the
-    dispatch-form variant of a step where one exists (today: sdr `fanout` only;
-    "subprocess" = the default and the permanent fallback — every pre-existing
-    caller resolves through it unchanged). Unknown domain, unknown step, unknown
-    form, and no-discipline steps (`done`, `not-started`) all → EMPTY structure
-    (all three keys present, empty lists) so the stdout field shape is stable
-    everywhere. The return value is a DEFENSIVE DEEP COPY: a consumer mutating the
-    returned subset (e.g. appending to `gates`) can never pollute the module-level
-    shared table — every later call, in any domain, keeps its pristine value.
+    dispatch-form variant of a step where one exists (today: sdr `fanout` and
+    init `scout`; "subprocess" = the default and the permanent fallback — every
+    pre-existing caller resolves through it unchanged). Unknown domain, unknown
+    step, unknown form, and no-discipline steps (`done`, `not-started`) all →
+    EMPTY structure (all three keys present, empty lists) so the stdout field
+    shape is stable everywhere. The return value is a DEFENSIVE DEEP COPY: a
+    consumer mutating the returned subset (e.g. appending to `gates`) can never
+    pollute the module-level shared table — every later call, in any domain,
+    keeps its pristine value.
     """
     table = _DOMAINS.get(domain)
     if table is None:
         return copy.deepcopy(_EMPTY)
     if domain == "sdr" and step == "fanout" and form == "native":
         return copy.deepcopy(_DISCIPLINE_SDR_NATIVE_FANOUT)
+    if domain == "init" and step == "scout" and form == "native":
+        return copy.deepcopy(_DISCIPLINE_INIT_NATIVE_SCOUT)
     return copy.deepcopy(table.get(step, _EMPTY))

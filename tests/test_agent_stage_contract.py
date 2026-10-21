@@ -33,6 +33,7 @@ FANOUT_TEMPLATES = ROOT / "core" / "prompts" / "fragments" / "fanout"
 # task template for the sdr reviewer, which is self-contained by design).
 PAIRS = {
     ("opencode", "init-scout-fanout"): STAGES / "init-scout.md",
+    ("opencode", "init-scout-native"): STAGES / "init-scout.md",
     ("opencode", "init-induct-fanout"): STAGES / "init-induct.md",
     ("opencode", "init-synthesis-fanout"): STAGES / "init-synthesis-partial.md",
     ("opencode", "init-synthesis-rollup"): STAGES / "init-synthesis-rollup.md",

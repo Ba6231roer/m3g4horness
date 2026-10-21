@@ -218,7 +218,10 @@ class ContractAnchors(unittest.TestCase):
         self.assertIn("首个消费方", t)
         self.assertIn("/mgh-sdr", t)
         self.assertIn("唯一回退", t)
-        self.assertIn("consumer=sdr", t)
+        # fix-mgh-init-native-scout-dispatch widens the native-default consumer
+        # set to {sdr, init}; sdr stays the FIRST consumer and the host/consumer
+        # resolution wording stays in the contract.
+        self.assertIn("consumer ∈ {sdr, init}", t)
         self.assertIn("host-default", t)
         self.assertIn("项目级可选入口", t)
 

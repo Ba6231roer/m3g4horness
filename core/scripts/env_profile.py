@@ -8,7 +8,7 @@ concurrency, gateway quota); consumers read it through this ONE module so the
 parse/validate/resolve semantics never diverge.
 
 Usage:
-  py env_profile.py --target <abs-project> [--consumer sdr|generic]
+  py env_profile.py --target <abs-project> [--consumer sdr|init|generic]
   py env_profile.py --target <abs-project> --consumer sdr --check
 
 Schema (all keys optional; unknown fields ignored):
@@ -28,11 +28,13 @@ Semantics:
                     may pass an explicit host face (the launcher derives it from
                     its --host / PATH detection and overrides the path probe).
   consumer          the calling command surface, passed explicitly by callers:
-                    `/mgh-sdr` = "sdr"; anything else (default) = "generic".
-  default form      ONLY `consumer == "sdr"` AND `host_face == "opencode"` =>
-                    "native"; every other consumer/face combination => "runner"
-                    (the pre-existing behavior, byte-identical for /mgh-init and
-                    the claude/dsh faces).
+                    `/mgh-sdr` = "sdr", `/mgh-init` = "init"; anything else
+                    (default) = "generic".
+  default form      consumer ∈ {sdr, init} AND host_face == "opencode" =>
+                    "native" (the opencode-face default for both consumers);
+                    every other consumer/face combination => "runner"
+                    (the pre-existing behavior, byte-identical for the
+                    claude/dsh faces and the generic consumer).
   quota             all three keys are REQUIRED when the quota object is present;
                     a half-configured quota is a config error, not "no quota".
   fail-closed       unparsable JSON / non-object / unknown or non-int v /
@@ -44,11 +46,13 @@ Semantics:
                     but actually ran runner" mismatch must blow up at startup.
 
 Native asset gate: `require_native_assets()` is the ONE presence check for the
-installed opencode native assets (the `sdr-review-native` agent beside the
-mgh-core tree + the wave-discipline fragment inside it). The sdr orchestration
-surfaces call it when the resolved form is native on the opencode face; a
-missing asset is a fail-loud recipe (reinstall or explicit runner), NEVER a
-silent fall-back to the subprocess form.
+installed opencode native assets, parameterized by SURFACE (which command's
+native form is activating): `surface="sdr"` checks the `sdr-review-native`
+agent beside the mgh-core tree + the sdr wave-discipline fragment inside it;
+`surface="init"` checks the `init-scout-native` agent + the init scout
+wave-discipline fragment. The orchestration surfaces call it when the resolved
+form is native on the opencode face; a missing asset is a fail-loud recipe
+(reinstall or explicit runner), NEVER a silent fall-back to the subprocess form.
 
 Contract: stdout = one structured JSON line {target, config_path, exists,
 profile{dispatch_mode, native_concurrency, quota}, host_face, consumer, form,
@@ -78,18 +82,34 @@ _QUOTA_KEYS = ("calls", "window_s", "calls_per_unit")
 # Dispatch-form resolution dimensions (see the module docstring).
 HOST_FACES = ("opencode", "claude", "other")
 DEFAULT_HOST_FACE = "other"
-CONSUMERS = ("sdr", "generic")
+CONSUMERS = ("sdr", "init", "generic")
 DEFAULT_CONSUMER = "generic"
+# Consumers whose opencode-face default resolves native (the user-approved
+# native-dispatch rollout: /mgh-sdr first, /mgh-init second — scout layer in
+# this change, aggregate layers inherit via the same default).
+NATIVE_DEFAULT_CONSUMERS = ("sdr", "init")
 FORMS = ("native", "runner")
 DEFAULT_FORM = "runner"
 SOURCE_PROFILE = "profile"
 SOURCE_HOST_DEFAULT = "host-default"
 
-# Installed native assets (opencode face): the agent lives in the host's `agent/`
-# dir beside `mgh-core/`; the fragment lives inside it.
+# Installed native assets per surface (opencode face): each surface's agent
+# lives in the host's `agent/` dir beside mgh-core; its wave-discipline
+# fragment lives inside mgh-core. The gate is parameterized by surface so each
+# command checks ITS OWN assets through the ONE shared helper (a scout run
+# checking the sdr assets would both miss scout gaps and false-block on sdr).
 NATIVE_AGENT = "sdr-review-native"
 NATIVE_AGENT_REL = Path("agent") / f"{NATIVE_AGENT}.md"
 NATIVE_FRAGMENT_REL = Path("prompts") / "fragments" / "sdr-native-dispatch.md"
+INIT_NATIVE_AGENT = "init-scout-native"
+INIT_NATIVE_AGENT_REL = Path("agent") / f"{INIT_NATIVE_AGENT}.md"
+INIT_NATIVE_FRAGMENT_REL = (Path("prompts") / "fragments"
+                            / "init-scout-native-dispatch.md")
+NATIVE_SURFACES = {
+    "sdr": (NATIVE_AGENT_REL, NATIVE_FRAGMENT_REL),
+    "init": (INIT_NATIVE_AGENT_REL, INIT_NATIVE_FRAGMENT_REL),
+}
+DEFAULT_SURFACE = "sdr"
 
 
 def _eprint(*a):
@@ -172,8 +192,9 @@ def detect_host_face(script_path=None, explicit: str | None = None) -> str:
 def resolve_form(profile: Profile, host_face: str = DEFAULT_HOST_FACE,
                  consumer: str = DEFAULT_CONSUMER) -> str:
     """Resolved dispatch form. Explicit runner/native ALWAYS wins; the default
-    rules make ONLY the sdr consumer on the opencode face native. Every other
-    consumer/face combination keeps the established subprocess form."""
+    rules make the native-default consumers (sdr, init) native on the opencode
+    face. Every other consumer/face combination keeps the established
+    subprocess form."""
     if host_face not in HOST_FACES:
         raise ValueError(f"host_face must be one of {'|'.join(HOST_FACES)} "
                          f"(got {host_face!r})")
@@ -182,7 +203,7 @@ def resolve_form(profile: Profile, host_face: str = DEFAULT_HOST_FACE,
                          f"(got {consumer!r})")
     if profile.dispatch_mode in ("native", "runner"):
         return profile.dispatch_mode
-    if consumer == "sdr" and host_face == "opencode":
+    if consumer in NATIVE_DEFAULT_CONSUMERS and host_face == "opencode":
         return "native"
     return DEFAULT_FORM
 
@@ -201,29 +222,35 @@ def resolve(target, consumer: str = DEFAULT_CONSUMER,
                       profile_exists=(Path(target) / CONFIG_REL).is_file())
 
 
-def missing_native_assets(mgh_core_root) -> list[str]:
+def missing_native_assets(mgh_core_root, surface: str = DEFAULT_SURFACE) -> list[str]:
     """Absolute paths of the native-dispatch assets absent from this install
-    tree: the `sdr-review-native` agent (host `agent/` dir, sibling of
-    mgh-core) and the wave-discipline fragment (inside mgh-core). Empty list =
-    complete. Presence only — never parses their content."""
+    tree for the given surface (`sdr` = the `sdr-review-native` agent + its
+    wave-discipline fragment; `init` = the `init-scout-native` agent + its
+    fragment). The agent lives in the host `agent/` dir (sibling of mgh-core),
+    the fragment inside mgh-core. Empty list = complete. Presence only — never
+    parses their content."""
+    agent_rel, fragment_rel = NATIVE_SURFACES[surface]
     root = Path(mgh_core_root).resolve()
-    candidates = (root.parent / NATIVE_AGENT_REL, root / NATIVE_FRAGMENT_REL)
+    candidates = (root.parent / agent_rel, root / fragment_rel)
     return [str(p) for p in candidates if not p.is_file()]
 
 
-def require_native_assets(mgh_core_root) -> str | None:
-    """The single fail-loud gate shared by every sdr orchestration surface.
-    Returns None when the native assets are present, else one recipe string
-    (printed to stderr by the caller, which then exits 2). NEVER a silent
-    fall-back to the subprocess form — a version-skewed install must be visible."""
-    missing = missing_native_assets(mgh_core_root)
+def require_native_assets(mgh_core_root,
+                          surface: str = DEFAULT_SURFACE) -> str | None:
+    """The single fail-loud gate shared by every native orchestration surface
+    (`surface` picks which command's assets are checked; default `sdr` keeps
+    the pre-parameterization behavior byte-identical). Returns None when the
+    assets are present, else one recipe string (printed to stderr by the
+    caller, which then exits 2). NEVER a silent fall-back to the subprocess
+    form — a version-skewed install must be visible."""
+    missing = missing_native_assets(mgh_core_root, surface)
     if not missing:
         return None
     return (
         "error: native dispatch is active on the opencode face but the install "
         "tree is missing: " + "; ".join(missing) + "\n"
-        "recipe: re-run `install.sh --opencode <target>` to restore the "
-        "sdr-review-native agent and the wave-discipline fragment; or set "
+        "recipe: re-run `install.sh --opencode <target>` to restore the native "
+        "agent and the wave-discipline fragment for this surface; or set "
         '{"dispatch_mode":"runner"} in <target>/.mgh/env-profile.json to use the '
         "subprocess fallback explicitly. NEVER silently falls back — a partial "
         "install would otherwise look like a normal run.")
@@ -300,14 +327,15 @@ def main() -> int:
                     "<project>/.mgh/env-profile.json (dispatch form / native "
                     "concurrency / quota; missing config = host/consumer "
                     "defaults, malformed config = fail-closed exit 2). Default "
-                    "form resolution: consumer=sdr on the opencode install face "
-                    "=> native; every other consumer/face => runner.")
+                    "form resolution: consumer=sdr or init on the opencode "
+                    "install face => native; every other consumer/face => "
+                    "runner.")
     ap.add_argument("--target", metavar="<abs>",
                     help="absolute project root holding .mgh/env-profile.json")
     ap.add_argument("--consumer", choices=CONSUMERS, default=DEFAULT_CONSUMER,
-                    help="calling command surface: sdr (/mgh-sdr; may resolve "
-                         "native on the opencode face) or generic (default; "
-                         "everything else, stays runner)")
+                    help="calling command surface: sdr (/mgh-sdr) or init "
+                         "(/mgh-init) may resolve native on the opencode face; "
+                         "generic (default; everything else, stays runner)")
     ap.add_argument("--check", action="store_true",
                     help="fail-loud validation: schema + value ranges "
                          "(dispatch_mode auto|runner|native, "

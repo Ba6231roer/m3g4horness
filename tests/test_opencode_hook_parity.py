@@ -825,7 +825,7 @@ class TestAgentQuestionDenyPinned(unittest.TestCase):
     EXT_DENY_REQUIRED = {
         "init-induct", "init-induct-fanout",
         "init-rulewriter", "init-rulewriter-fanout",
-        "init-scout", "init-scout-fanout",
+        "init-scout", "init-scout-fanout", "init-scout-native",
         "init-scout-merge", "init-scout-merge-fanout",
         "init-synthesis", "init-synthesis-fanout",
         "sdr-review-fanout",

@@ -16,6 +16,54 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — /mgh-init scout 层 opencode 面缺省原生派发(0.1.89)
+
+- **opencode init 缺省原生(有意的行为变更)**:`env_profile.py` 消费者闭集增
+  `init`;`consumer=init ∧ host=opencode` 的缺失/`auto` 画像**也解析为
+  `native`**(与 sdr 同一宿主缺省规则;用户已拍板 mgh-init 全流程转向 opencode 缺省
+  原生),显式 `dispatch_mode:"runner"` 仍是唯一回退开关,`consumer=generic` 与
+  claude/dsh/other 面缺省零变化。CLI `--consumer` 增 `init` 选项。
+- **scout 读者批原生派发接入**:`/mgh-init` 的 scout 步在解析形态 native 时改走
+  「`emit_native_plan.py --tier scout` 页循环物化 + 编排器同一条 assistant 消息并发派
+  原生子代理 + 子代理自写终态标记」——新 opencode agent 孪生
+  `init-scout-native.md`(`mode: subagent`,权限镜像 `init-scout` + `doom_loop: deny`;
+  成功 touch `.done`,失败**自写** `.failed`(内容 `{unit_id, reason}`,该指令仅住孪生
+  定义;共享任务模板 `fanout/scout-task.md` 的「reference only」行与 runner 行为零
+  改动)+ 新波次纪律 fragment `init-scout-native-dispatch.md`(看门狗先行 / 页循环 /
+  令牌行与旧版回退 / 标记真相源 / 至多一轮重派 / 限流等窗 / 诚实边界)。
+- **页循环语义**:一次物化只覆盖枚举器当前 pending 页(编排预算收紧页,stdout
+  `units_total` 是本页单元数);派完当前页重物化取下一页,循环直到
+  `units_total == 0` 才进既有 scout-merge/audit/fold-in 段(该段本 change 不原生化,
+  仍子进程承载;T1/T2/T3 同样暂仍 runner,后续 aggregate 接入后继承同一缺省)。
+- **步骤/恢复/纪律形态感知**:`list_steps.py` 原生形态下 scout 步换
+  `emit_native_plan.py` 物化入口 + `native_arc`(materialize → waves → merge)+ 顶层
+  `dispatch` 字段;`resume_state.py` 原生 `next_action` 按 plan 工件在分派物化相位与
+  波次派发相位,`discipline_reminders` 用 init scout 原生变体
+  (`discipline_core.py` 新表);两者消费 `env_profile.resolve(target,
+  consumer="init")` 单源解析。fail-closed 三面:坏画像退出码 2 + recipe;解析 native
+  但宿主面非 opencode(claude 面显式 native)退出码 2 + recipe,NEVER 静默按子进程;
+  缺 `init-scout-native` agent 或 scout 纪律 fragment 退出码 2 + 重装/显式 runner
+  recipe(资产门按 `surface="init"` 参数化,sdr 既有门行为不变)。显式 runner 与
+  claude/dsh 面 stdout 逐字节不变。
+- **三面披露**:opencode 壳 scout 步以原生为主路径 + 「仅 scout 读者批原生」披露;
+  claude 壳与 dsh SKILL 各加一行「scout 仅子进程形态;原生缺省仅 opencode +
+  consumer=init」;`init-stage/scout.md` 加紧凑条件指针,详情下沉新 fragment。
+- **契约与分发**:四契约同步(`init/step-manifest` 原生步形 + `native_arc`、
+  `init/resume-state` 的 `dispatch` 字段与原生 next_action、`init/manifest` 的
+  `scout.dispatch` 可选八键字段、`fanout/runtime` 的第二个消费方/页语义/消费者闭集);
+  `install.sh` opencode 自检清单增 `init-scout-native` agent 与
+  `init-scout-native-dispatch.md` fragment;守卫/派发两插件与 `emit_native_plan.py`、
+  `fanout_runner.py`、`plan_scout.py`、`list_scout_batches.py`、`merge_scout.py`、
+  `discover_controls.py` 零改动。
+- **实机闸门(本机 opencode 2.1.0)**:无画像 opencode init 真会话 scout 原生全链
+  (看门狗先行 → 物化 + `--check` → 同消息 2 波 × 3 并发派 `init-scout-native` →
+  重物化收敛 → scout-merge → fold-in)6/6 单元 `ok` 回执零 `.failed`,
+  `fanout_runner` 零调用;400 批页循环实证 5 页(111×3+67+0)收敛;缺省/回退/资产门
+  六形态抽查全过;故障注入:失败批终态语义 + 至多一轮重派(限流等窗提示)与中断
+  resume(重物化恰好重 pend 被打断单元、已完成单元零重做)过;同机对照:子进程形态
+  headless 0/6 撞零推进熔断(runner 自有防线干净收口),原生 6/6——runner 形态的本机
+  不可用正是本 change 的动机实证。
+
 ### Changed — /mgh-sdr opencode 面缺省原生派发 + 特殊授权说明退役(0.1.88)
 
 - **缺省形态按宿主安装面 × 消费者解析**:`env_profile.py` 新增 `host_face`

@@ -23,27 +23,43 @@ CORE_SCRIPTS = ROOT / "core" / "scripts"
 NATIVE_AGENT_SRC = ROOT / "releases" / "opencode" / "agent" / "sdr-review-native.md"
 NATIVE_FRAGMENT_SRC = (ROOT / "core" / "prompts" / "fragments"
                        / "sdr-native-dispatch.md")
+INIT_AGENT_SRC = ROOT / "releases" / "opencode" / "agent" / "init-scout-native.md"
+INIT_FRAGMENT_SRC = (ROOT / "core" / "prompts" / "fragments"
+                     / "init-scout-native-dispatch.md")
 
 
 def build_opencode_mirror(tmp_root: Path, agent: bool = True,
-                          fragment: bool = True) -> Path:
+                          fragment: bool = True, init_agent: bool = True,
+                          init_fragment: bool = True) -> Path:
     """Create `<tmp>/.opencode/mgh-core/scripts/` with every core script copied.
-    `agent`/`fragment` toggle the two native assets (present = real file copied
-    from the repo; absent = left out). Returns the mirrored scripts dir."""
+    `agent`/`fragment` toggle the sdr native assets, `init_agent`/`init_fragment`
+    the init scout ones (present = real file copied from the repo; absent = left
+    out so that surface's missing-asset fail-closed path can be exercised).
+    Returns the mirrored scripts dir."""
     mgh_core = Path(tmp_root) / ".opencode" / "mgh-core"
     scripts = mgh_core / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     for src in sorted(CORE_SCRIPTS.glob("*.py")):
         shutil.copy2(src, scripts / src.name)
-    if fragment:
+    if fragment or init_fragment:
         frag_dir = mgh_core / "prompts" / "fragments"
         frag_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(NATIVE_FRAGMENT_SRC,
-                     frag_dir / "sdr-native-dispatch.md")
+        if fragment:
+            shutil.copy2(NATIVE_FRAGMENT_SRC,
+                         frag_dir / "sdr-native-dispatch.md")
+        if init_fragment:
+            shutil.copy2(INIT_FRAGMENT_SRC,
+                         frag_dir / "init-scout-native-dispatch.md")
+    agent_files = []
     if agent:
+        agent_files.append((NATIVE_AGENT_SRC, "sdr-review-native.md"))
+    if init_agent:
+        agent_files.append((INIT_AGENT_SRC, "init-scout-native.md"))
+    if agent_files:
         agent_dir = mgh_core.parent / "agent"
         agent_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(NATIVE_AGENT_SRC, agent_dir / "sdr-review-native.md")
+        for src, name in agent_files:
+            shutil.copy2(src, agent_dir / name)
     return scripts
 
 

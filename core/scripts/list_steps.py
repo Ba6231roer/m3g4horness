@@ -11,8 +11,34 @@ carries {step, kind, script_abs, invocation, input{}, output{}} where
 script is installed, NEVER hardcoded or passed via prompt.
 
 Zero disk preconditions (D3): does NOT read run_config.json, does NOT scan
-.mgh-init/, does NOT depend on any run-state artifacts. Queryable pre-run,
-during compaction recovery, or for pure documentation review.
+.mgh-init/ (beyond the two probes below), does NOT depend on any run-state
+artifacts. Queryable pre-run, during compaction recovery, or for pure
+documentation review. The allowed disk probes (dispatch-form awareness, mirroring
+the sdr sister script `list_sdr_steps.py`): the project env profile read
+(`<target>/.mgh/env-profile.json`, resolved via the shared `env_profile` module
+with `consumer="init"`) and — only when the resolved form is native — a
+`<target>/.mgh-init/native_plan.json` presence check reported as corroboration
+in the top-level `dispatch` field.
+
+Dispatch-form awareness (scout reader batches; zero-change by construction):
+the project env profile decides the scout step's shape. Resolution is the
+SINGLE source: explicit `dispatch_mode` wins; otherwise `consumer=init` on the
+opencode install face resolves `native` (the opencode-face default — no
+profile file means native too), and every other consumer/face keeps the
+ESTABLISHED subprocess manifest, byte-identical output (no new stdout fields).
+Resolved `native` → the scout step entry switches to the native plan
+materializer (`emit_native_plan.py --tier scout`) and gains a `native_arc`
+field (materialize → same-message wave dispatch → the unchanged scout-merge
+segment), and the top-level `dispatch` field appears with
+`source`/`profile_exists`/`host_face`/`consumer=init`. A malformed profile is
+fail-closed: exit 2 + recipe (NEVER silently treated as defaults). A resolved
+native on a non-opencode face is fail-closed too: exit 2 + recipe (native
+dispatch exists only on the opencode face — NEVER silently run as subprocess).
+On the opencode face the scout native assets (the `init-scout-native` agent +
+the wave-discipline fragment) are checked before emitting the manifest; absent
+→ exit 2 + reinstall/runner recipe (NEVER a silent fallback). Only the scout
+step is native today: t1/t2/t3/scout-merge stay subprocess in this change (the
+later aggregate change inherits the same consumer default).
 
 Complements `resume_state.py` (disk-derived "where am I / what's next"):
 resume_state gives current step; list_steps gives the exact invocation line
@@ -24,15 +50,24 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 CLI contract (`--help` is the contract surface, R5.1):
   py list_steps.py [--target <dir>] [--step <id>]
 
-  --target   target project root (default: .); accepted for future extension,
-             not used in manifest content (static contract).
+  --target   target project root (default: .); the env-profile read and the
+             plan-artifact probe resolve against it — pass the ABSOLUTE root
+             so no probe depends on cwd.
   --step     emit only the single step with this id (e.g., "t1", "discover");
              named ids only; NOT numeric indices (e.g. --step 0 → exit 2 +
              actionable hint). Exits 2 if id not recognized (closed set, R5.3b).
              Default: emit all steps.
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
-  {"steps": [{step, kind, script_abs, invocation, input{}, output{}}]}
+  {"steps": [{step, kind, script_abs, invocation, input{}, output{}}]
+   [, "dispatch": {form, source, profile_exists, host_face, consumer,
+                   profile_path, plan_present, native_agent, discipline_fragment}]}
+  - dispatch    = present ONLY in the native form (resolved form native on the
+                  opencode face): {form:"native", source:"profile"|"host-default",
+                  profile_exists, host_face:"opencode", consumer:"init",
+                  profile_path, plan_present (corroboration only, the resolved
+                  form is the binding decision), native_agent, discipline_fragment}.
+                  Absent otherwise.
   - step        = step id (enum matching resume_state.py)
   - kind        = "bash" | "subagent"
   - script_abs  = absolute path to the script (<mgh-core>/scripts/<name>.py,
@@ -46,7 +81,9 @@ stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
                 (shared static table in discipline_core.py; `done`/`not-started` and
                 unknown steps → EMPTY structure)
 
-Exit codes (R5.3b): 0 ok · 1 target not a dir · 2 misuse (--step not found).
+Exit codes (R5.3b): 0 ok · 1 target not a dir · 2 misuse (--step not found) or
+malformed env profile / native form on a non-opencode face / missing native
+assets (fail-closed, with recipe).
 Idempotent, no TTY, read-only.
 """
 from __future__ import annotations
@@ -62,6 +99,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # to resume_state.py stdout `discipline_reminders[]` for the same step (D5 asserts
 # byte-verbatim equality). discipline_core is pure data — no IO, no side effects.
 from discipline_core import get_discipline  # noqa: E402
+import env_profile  # noqa: E402 — sibling; profile read + fail-closed semantics
+
+
+# The native scout plan lands next to the plan artifact it materializes from
+# (`emit_native_plan.py` anchors the plan beside `scout_plan.json` = the init
+# dir). Corroboration probe only — the resolved form is the binding decision.
+_INIT_RUN_ROOT = ".mgh-init"
+NATIVE_PLAN_NAME = "native_plan.json"
 
 
 # Static step→IO table (D2: data-driven, defined once). Step id set matches
@@ -199,6 +244,114 @@ def _invocation(script_abs: str | None, cli_args: str | None) -> str | None:
     return f"py {script_abs} {cli_args}"
 
 
+def _mgh_core_root() -> Path:
+    """This script's installed <mgh-core> root (its `scripts/` parent)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _dispatch_form(target: Path):
+    """Native-form detection for the scout step via the ONE shared resolver
+    (`consumer=init`). An explicit `dispatch_mode` wins; otherwise the init
+    consumer on the opencode install face resolves native (the default — no
+    profile file means native too), and every other consumer/face keeps the
+    established subprocess form. The `native_plan.json` presence probe is
+    corroboration only, reported so the orchestrator can see whether a prior
+    wave round already materialized. Fail-closed faces:
+      * malformed profile → exit 2 + recipe (NEVER silently treated as
+        defaults — a "configured native but actually ran runner" mismatch must
+        blow up here);
+      * resolved native on a non-opencode face → exit 2 + recipe (native
+        dispatch exists only on the opencode face; NEVER silently run as
+        subprocess);
+      * missing scout native assets on the opencode face → exit 2 +
+        reinstall/runner recipe (NEVER a silent fallback).
+    Returns None unless the native form is active — the caller then omits the
+    `dispatch` field entirely and keeps every step byte-identical, so every
+    subprocess-form invocation keeps byte-identical stdout."""
+    try:
+        res = env_profile.resolve(target, consumer="init")
+    except env_profile.EnvProfileError as e:
+        print(f"error: env profile rejected: {e}\n"
+              f"recipe: fix or delete the config — a malformed profile is NEVER "
+              f"silently treated as defaults (a 'configured native but actually "
+              f"ran runner' mismatch must fail at startup).", file=sys.stderr)
+        sys.exit(2)
+    if res.form != "native":
+        return None
+    if res.host_face != "opencode":
+        print("error: native dispatch resolved for consumer=init but the host "
+              "install face is not opencode — native dispatch exists only on "
+              "the opencode face.\n"
+              "recipe: set {\"dispatch_mode\":\"runner\"} in "
+              "<target>/.mgh/env-profile.json to keep the subprocess form "
+              "explicitly, or run /mgh-init from the opencode face. NEVER "
+              "silently runs as subprocess.", file=sys.stderr)
+        sys.exit(2)
+    recipe = env_profile.require_native_assets(_mgh_core_root(), surface="init")
+    if recipe:
+        print(recipe, file=sys.stderr)
+        sys.exit(2)
+    plan_present = (target / _INIT_RUN_ROOT / NATIVE_PLAN_NAME).is_file()
+    return {
+        "form": "native",
+        "source": res.source,
+        "profile_exists": res.profile_exists,
+        "host_face": res.host_face,
+        "consumer": res.consumer,
+        "profile_path": str(Path(target) / env_profile.CONFIG_REL),
+        "plan_present": plan_present,
+        "native_agent": env_profile.INIT_NATIVE_AGENT,
+        "discipline_fragment": str(_mgh_core_root() / "prompts" / "fragments"
+                                   / "init-scout-native-dispatch.md"),
+    }
+
+
+def _native_scout_step(base: dict, dispatch: dict) -> dict:
+    """The scout step's NATIVE face: the deterministic entry point is the plan
+    materializer (re-materialize = re-enumerate; one materialization covers only
+    the enumerator's CURRENT pending page — the wave loop re-materializes until
+    `units_total == 0`); the wave dispatch itself is orchestrator discipline,
+    carried by the `native_arc` phases + the native discipline variant (same
+    table resume_state reports). The scout-merge segment stays subprocess
+    (extra_invocations preserved verbatim)."""
+    emit_abs = _script_abs("emit_native_plan.py")
+    cli_args = ("--tier scout --scout-plan <init-dir>/scout_plan.json "
+                "--checkpoints <init-dir>/checkpoints/scout "
+                "--inputs-dir <init-dir>/inputs/scout --profile <target>")
+    step = dict(base)
+    step.update({
+        "script": "emit_native_plan.py",
+        "script_abs": emit_abs,
+        "invocation": _invocation(emit_abs, cli_args),
+        "output": {"artifact": "native_plan.json + <batch>.task.md + checkpoints/markers",
+                   "shape": "[page-bounded wave split + per-batch task file; terminal "
+                            "markers written by the subagents themselves]",
+                   "path_pattern": "<init-dir>/native_plan.json "
+                                   "(+ <init-dir>/inputs/scout/<batch_id>.task.md)"},
+        "native_arc": [
+            {"phase": "materialize", "kind": "bash", "script": "emit_native_plan.py",
+             "invocation": _invocation(emit_abs, cli_args),
+             "note": ("每轮重跑 = 重枚举(pending 由磁盘标记重派生;一次物化只覆盖枚举器当前 "
+                      "pending 页,units_total 是本页单元数);物化后同参跑 --check;任一单元"
+                      "完成后计划按设计变 stale,波次收尾以重物化修复")},
+            {"phase": "waves", "kind": "subagent", "agent": dispatch["native_agent"],
+             "discipline_fragment": dispatch["discipline_fragment"],
+             "note": ("同一条 assistant 消息并发派当前波全部单元(description=计划短号,"
+                      "任务体=单行令牌 mgh-dispatch: plan=<plan_path> unit=<短号>,派发插件"
+                      " mgh_dispatch.ts 的令牌展开钩子展开为任务全文;展开钩子缺席的旧版"
+                      "安装回退=固定句+task_file 绝对路径逐字透传);看门狗先行(启动与收尾"
+                      "参数见 fragment 第 0 节);派完当前页回 materialize,units_total==0 "
+                      "才进 merge")},
+            {"phase": "merge", "kind": "bash", "step_ref": "scout-merge",
+             "note": ("units_total==0(失败缺口已按至多一轮重派纪律接受或为零)→ 回本步既有 "
+                      "scout-merge 段(extra_invocations;聚合预算闸门 / map-reduce / audit "
+                      "/ fold-in 形态不变,仍子进程承载)")},
+        ],
+        "discipline": get_discipline("scout", domain="init", form="native"),
+    })
+    return step
+
+
 def _build_step(entry: dict) -> dict:
     """Build output step entry from static definition, resolving runtime fields."""
     step_id = entry["step"]
@@ -231,7 +384,9 @@ def main():
     ap = argparse.ArgumentParser(
         description="emit /mgh-init per-step invocation manifest (deterministic, zero disk pre-req)")
     ap.add_argument("--target", default=".",
-                    help="target project root (default .); accepted for future extension")
+                    help="target project root (default .); the env-profile read "
+                         "and the plan-artifact probe resolve against it — pass "
+                         "the ABSOLUTE project root so no probe depends on cwd")
     ap.add_argument("--step", metavar="<id>",
                     help="emit only the single step with this id (e.g. t1, discover); "
                          "named ids only; NOT numeric indices; exits 2 if not "
@@ -254,6 +409,10 @@ def main():
 
     # Build all steps
     steps = [_build_step(e) for e in _STEPS]
+    dispatch = _dispatch_form(target)
+    if dispatch is not None:
+        steps = [_native_scout_step(s, dispatch) if s["step"] == "scout" else s
+                 for s in steps]
     step_ids = {s["step"] for s in steps}
 
     # Filter by --step if requested
@@ -273,6 +432,8 @@ def main():
               file=sys.stderr)
 
     result = {"steps": steps}
+    if dispatch is not None:
+        result["dispatch"] = dispatch
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

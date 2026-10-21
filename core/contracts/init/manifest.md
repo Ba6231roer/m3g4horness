@@ -12,7 +12,8 @@ Producer: command orchestrator (i4). Consumer: humans, `/mgh-sra`, `/mgh-blst`, 
   "scope": {"seed": "...", "scope-mode": "defined|applicable"},
   "counts": {"candidates": 0, "controls": 0, "clusters": 0, "unresolved": 0, "out_of_scope": 0, "truncated": false},
   "failures": {"scout": {"done": 0, "failed": 0, "total": 0}, "t1": {"done": 0, "failed": 0, "total": 0}, "t3": {"done": 0, "failed": 0, "total": 0}},
-  "scout": {"enabled": true, "skeleton_total": 0, "scout_targets": 0, "batches": 0, "deep_read_files": 0, "audit_sampled": 0, "audit_found": 0, "scout_merged": 0},
+  "scout": {"enabled": true, "skeleton_total": 0, "scout_targets": 0, "batches": 0, "deep_read_files": 0, "audit_sampled": 0, "audit_found": 0, "scout_merged": 0,
+            "dispatch": {"form": "native", "source": "host-default|profile", "profile_exists": false, "host_face": "opencode", "consumer": "init", "plan_path": "<abs init-dir>/native_plan.json", "plan_present": true, "native_agent": "init-scout-native"}},
   "codegraph": {"available": false, "used": false, "resolved_count": 0, "unresolved_residual": 0},
   "rules": {"block": "security-controls", "rules_dir": "docs/security-controls (opencode; absent for claude)", "rules_layout": "lazy-index (opencode) | path-scoped (claude)", "categories": 0, "migrated_legacy_blocks": 0, "lint": {"ok": true, "violations": []}},
   "provenance": {"discover": "discover_controls.py", "induct": "init-induct(T1)", "synthesis": "init-synthesis(T2)", "rules": "init-rulewriter(T3)+assemble_rules.py", "scout": "init-scout/merge/audit", "resolve": "init-resolve(codegraph)"},
@@ -40,6 +41,19 @@ Producer: command orchestrator (i4). Consumer: humans, `/mgh-sra`, `/mgh-blst`, 
 `scout.scout_merged` = fold-in 实际并入 `controls_candidates.json` 的 scout 候选数
 (取值于 `merge_scout.py` 写入的 `provenance.scout_merged`;`resume_state.py` stdout
 `tiers.scout.merged` 同源)。`--no-scout` 或 fold-in 未跑时该字段缺省/为空,不声称 scout 并入量。
+
+`scout.dispatch` = **可选字段,仅原生形态在场**(scout 读者批经原生子代理波次派发,
+opencode 面 `consumer=init` 缺省解析 native,或画像显式 `dispatch_mode:"native"`):八键
+`{form:"native", source:"host-default|profile", profile_exists, host_face:"opencode",
+consumer:"init", plan_path, plan_present, native_agent:"init-scout-native"}`,值取自
+`list_steps.py` / `resume_state.py` stdout 的 `dispatch` 字段(**NEVER** 靠模型记忆重写;
+`plan_present` = `<init-dir>/native_plan.json` 在场证据)。**子进程形态(显式
+`dispatch_mode:"runner"`、`consumer=generic`、claude/dsh 面)不出现该字段**——读者以
+「字段缺席 = 子进程派发」解释,既有 manifest 形状不变。写 manifest 时同步在
+`boundaries[]` 披露实际派发形态与计划工件在场证据(原生形态的诚实边界:止损为波次
+粒度〔挂死由看门狗中止兜底〕、编排父会话是单点、任务文件路径转述的残余错抄面〔令牌
+展开落地后只剩短号错抄,防线 = 越树守卫 + 重枚举回待派 + 至多一轮重派〕、一次物化只
+覆盖当前 pending 页)。
 
 ### Checkpoint units (`<target>/.mgh-init/checkpoints/<unit>.json`)
 

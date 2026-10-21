@@ -101,6 +101,25 @@ files → `stale_fanout: []` (field always present, shape stable). A resume-deri
 value, NOT persisted; `--check` discloses alive residuals in notes[] as ADVISORY
 only — NEVER a gate (orphan-pending is a legal re-dispatchable state).
 
+Native-dispatch face (scout layer; zero-change by construction): the dispatch
+form is the shared resolver's answer (`env_profile.resolve(target,
+consumer="init")`) — an explicit `dispatch_mode` wins; otherwise the init
+consumer on the opencode install face resolves native (the opencode-face
+default: no profile file means native too), and every other consumer/face keeps
+the subprocess form. In the native form the stdout gains a top-level `dispatch`
+field {form, source, profile_exists, host_face, consumer, profile_path,
+plan_present, native_agent, discipline_fragment}, the scout step's
+`next_action` points at the native arc (plan materialization → same-message
+wave dispatch → the unchanged scout-merge segment; the plan artifact's presence
+picks the sub-phase), and `discipline_reminders` resolves the native variant —
+progress derivation stays purely on-disk. Fail-closed faces (derive AND --check):
+a malformed profile (exit 2 + recipe, NEVER guessed over), a resolved native on
+a non-opencode face (exit 2 + recipe — native dispatch exists only on the
+opencode face, NEVER silently run as subprocess), and missing scout native
+assets on the opencode face (exit 2 + reinstall/runner recipe, NEVER a silent
+fallback). Runner form → byte-identical to the established output (no
+`dispatch` field, the subprocess fanout next_action, the subprocess discipline).
+
 Count semantics (why `tiers.<tier>.done` can differ from the file count you see in
 `checkpoints/<tier>/` — NOT data loss, three different measures):
   1. THIS SCRIPT's done = canonical unit ids judged done by FORWARD marker-path
@@ -150,7 +169,9 @@ templated <target>). `run_config.json` missing/unparseable → exit 2 + stderr r
 
 Exit codes (R5.3b): 0 ok · 1 init-dir missing/not a dir · 2 misuse (incl. flag
 combinations: --invalidate-stale with --check/--rearm-sentinel, or --dry-run alone) /
-run_config missing / --check self-consistency violation (incl. a unit carrying BOTH .done
+run_config missing / malformed env profile or resolved-native-on-non-opencode-face
+or missing scout native assets (fail-closed dispatch face, with recipe) / --check
+self-consistency violation (incl. a unit carrying BOTH .done
 and .failed; incl. an in-progress run whose sentinel .active is missing; incl. a completed
 run whose sentinel .active still exists) / --invalidate-stale unlink failure.
 Read-only (except the explicit --invalidate-stale / --rearm-sentinel actions), idempotent,
@@ -186,6 +207,12 @@ from list_rule_jobs import rule_unit_ids  # noqa: E402
 # current step's gate shapes / path recipes / applicable NEVER subset, re-derived
 # after compaction so the "how to execute THIS step" survives head-summary loss.
 from discipline_core import get_discipline  # noqa: E402
+import env_profile  # noqa: E402 — sibling; profile read + fail-closed semantics
+
+# Native-dispatch face (scout layer, consumer=init): the plan artifact inside
+# the init dir and the installed wave-discipline fragment (same <mgh-core>
+# root as this script's install layout).
+NATIVE_PLAN_NAME = "native_plan.json"
 
 
 def _load_json(path: Path):
@@ -405,6 +432,67 @@ def _next(kind: str, desc: str, paths) -> dict:
     return {"kind": kind, "desc": desc, "absolute_paths": [str(p) for p in paths]}
 
 
+def _mgh_core_root() -> Path:
+    """This script's installed <mgh-core> root (its `scripts/` parent)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _native_fragment_abs() -> str:
+    """Absolute path of the installed scout native wave-discipline fragment
+    (the prompts/ sibling of this script's <mgh-core> install root)."""
+    return str(_mgh_core_root() / "prompts" / "fragments"
+               / "init-scout-native-dispatch.md")
+
+
+def _dispatch_form(target, init_dir: Path):
+    """Native-form detection for the scout layer through the ONE shared resolver
+    (`consumer=init`). An explicit `dispatch_mode` wins; otherwise the init
+    consumer on the opencode install face resolves native (the default — no
+    profile file means native too), and every other consumer/face keeps the
+    subprocess form. The plan artifact inside THIS init dir (`native_plan.json`)
+    is the sub-phase signal (absent = the wave loop has not materialized yet).
+    Fail-closed faces (each returns (None, recipe) — the caller exits 2, NEVER
+    guessing the step graph off a profile it could not read, NEVER silently
+    running native as subprocess, NEVER falling back on a partial install):
+      * malformed profile;
+      * resolved native on a non-opencode face (native dispatch exists only on
+        the opencode face);
+      * missing scout native assets on the opencode face.
+    Returns (None, None) for the runner form, so every subprocess invocation
+    keeps byte-identical stdout (the `dispatch` field simply never appears)."""
+    if not target:
+        return None, None
+    try:
+        res = env_profile.resolve(target, consumer="init")
+    except env_profile.EnvProfileError as e:
+        return None, (f"env profile rejected: {e} — fix or delete the config "
+                      f"(fail-closed: a malformed profile is NEVER silently "
+                      f"treated as defaults).")
+    if res.form != "native":
+        return None, None
+    if res.host_face != "opencode":
+        return None, ("native dispatch resolved for consumer=init but the host "
+                      "install face is not opencode — native dispatch exists "
+                      "only on the opencode face. recipe: set "
+                      '{"dispatch_mode":"runner"} in <target>/.mgh/env-profile.json '
+                      "to keep the subprocess form explicitly, or run /mgh-init "
+                      "from the opencode face.")
+    recipe = env_profile.require_native_assets(_mgh_core_root(), surface="init")
+    if recipe:
+        return None, recipe
+    return {
+        "form": "native",
+        "source": res.source,
+        "profile_exists": res.profile_exists,
+        "host_face": res.host_face,
+        "consumer": res.consumer,
+        "profile_path": str(Path(target) / env_profile.CONFIG_REL),
+        "plan_present": (init_dir / NATIVE_PLAN_NAME).is_file(),
+        "native_agent": env_profile.INIT_NATIVE_AGENT,
+        "discipline_fragment": _native_fragment_abs(),
+    }, None
+
+
 def _pid_alive(pid) -> bool:
     """OS process-table liveness probe for a stale-fanout PID (best-effort;
     probe failure = not alive — the residual file is disclosed either way).
@@ -504,6 +592,11 @@ def resolve(init_dir: Path):
     no_scout = bool(cfg.get("no_scout"))
     skip_consistency = bool(cfg.get("skip_consistency"))
     notes = []
+
+    # --- dispatch form (scout layer; profile-binding; fail-closed) ------------
+    dispatch, drecipe = _dispatch_form(target, init_dir)
+    if drecipe:
+        return None, drecipe
 
     candidates = init_dir / "controls_candidates.json"
     clusters_p = init_dir / "clusters.json"
@@ -655,7 +748,8 @@ def resolve(init_dir: Path):
             notes.append("discover: partial — cache/scan_progress present; re-dispatch --resume.")
     elif (not no_scout) and not scout_complete(init_dir):
         step, nxt = _scout_step(init_dir, scout_plan, scout_candidates, candidates,
-                                clusters_p, scout_cp, scout_total, scout_terminal_count, notes)
+                                clusters_p, scout_cp, scout_total, scout_terminal_count,
+                                notes, dispatch)
     elif t1_total and (t1_done_count + t1_failed_count) < t1_total:
         step = "t1"
         nxt = _next("bash",
@@ -694,14 +788,36 @@ def resolve(init_dir: Path):
                     f"all stages complete{tail}; finalize: write init_manifest.json + report.md.",
                     [manifest, init_dir / "report.md"])
 
+    # native scout face: watchdog wiring + bounded-retry disclosures (advisory;
+    # after step resolution so the scout-fanout activity state is known).
+    if dispatch is not None and step == "scout" and scout_total > 0 \
+            and scout_terminal_count < scout_total \
+            and not (init_dir / "watchdog" / "state.json").is_file():
+        notes.append("watchdog artifacts absent (<init-dir>/watchdog/) — before "
+                     "dispatching waves, start the watchdog in the background per the "
+                     "wave-discipline fragment (root session = host-injected "
+                     "OPENCODE_SESSION_ID; it self-exits when the run settles).")
+    if dispatch is not None and tiers["scout"]["failed"] > 0:
+        notes.append("native form: a failed batch may be re-dispatched AT MOST ONE more "
+                     "round (delete its stale .failed marker, re-materialize with "
+                     "--retry-failed, dispatch once); a second failure closes it as a "
+                     "disclosed gap before scout-merge. A rate-limit-featured failure "
+                     "reason waits one profile quota window before any re-dispatch "
+                     "(wave-discipline fragment §2).")
+
     resumable = not (step == "done" and manifest.is_file())
     state = {
         "target": target, "format": fmt, "step": step, "resumable": resumable,
         "tiers": tiers, "next_action": nxt, "notes": notes,
         "stale_fanout": _stale_fanout(init_dir),
-        "discipline_reminders": get_discipline(step),
+        "discipline_reminders": get_discipline(
+            step,
+            form="native" if (dispatch is not None and step == "scout")
+            else "subprocess"),
         "stage_flow_files": _stage_flow_files(step),
     }
+    if dispatch is not None:
+        state["dispatch"] = dispatch
     return state, None
 
 
@@ -711,7 +827,8 @@ def _empty_tiers() -> dict:
 
 
 def _scout_step(init_dir, scout_plan, scout_candidates, candidates, clusters_p,
-                scout_cp, scout_total, scout_terminal_count, notes) -> tuple:
+                scout_cp, scout_total, scout_terminal_count, notes,
+                dispatch=None) -> tuple:
     if not scout_plan.is_file():
         return "scout", _next("bash",
                               "run plan_scout.py -> scout_plan.json (byte-budget batches)",
@@ -722,6 +839,47 @@ def _scout_step(init_dir, scout_plan, scout_candidates, candidates, clusters_p,
                               "scout_plan has 0 targets — nothing to scout; proceed to T1",
                               [scout_plan])
     if scout_terminal_count < scout_total:
+        if dispatch is not None:
+            frag = dispatch["discipline_fragment"]
+            emit_abs = str(Path(__file__).resolve().parent / "emit_native_plan.py")
+            emit_cli = (f"--tier scout --scout-plan {scout_plan} "
+                        f"--checkpoints {scout_cp} "
+                        f"--inputs-dir {init_dir / 'inputs' / 'scout'} "
+                        f"--profile {init_dir.parent}")
+            emit = f"py {emit_abs} {emit_cli}"
+            if dispatch["plan_present"]:
+                desc = (f"scout wave round (native): FIRST re-materialize (`{emit}`, "
+                        f"then the same args with `--check`; exit 2 → re-materialize "
+                        f"per stderr recipe — a completed unit makes the plan stale by "
+                        f"design, that exit code is the repair path, NEVER a fault) — "
+                        f"re-materialization IS re-enumeration (pending re-derived from "
+                        f"disk markers; one materialization covers only the enumerator's "
+                        f"CURRENT page, so after each page you re-materialize until "
+                        f"`units_total == 0`); THEN in ONE assistant message dispatch the "
+                        f"current wave's units (agent "
+                        f"{dispatch['native_agent']}; description = the plan's short unit "
+                        f"id verbatim, task body = the single token line "
+                        f"`mgh-dispatch: plan=<plan_path> unit=<short id>` (plan ref = "
+                        f"the materializer stdout's plan_path verbatim, short id verbatim "
+                        f"from the plan; the mgh_dispatch.ts plugin's expansion hook turns "
+                        f"it into the unit's task-file content before the subagent "
+                        f"starts) — full wave discipline (watchdog-first, marker truth "
+                        f"source, at-most-one retry round, rate-limit wait): "
+                        f"Read {frag} and follow it")
+                return "scout", _next("subagent", desc,
+                                      [scout_plan, scout_cp,
+                                       init_dir / NATIVE_PLAN_NAME])
+            desc = (f"native form is active but this run has no plan artifact yet: "
+                    f"run `{emit}`, then the same args with `--check` (exit 2 → "
+                    f"re-materialize per stderr recipe) — that materializes "
+                    f"{NATIVE_PLAN_NAME} + the per-batch task files. BEFORE the first "
+                    f"wave, start the watchdog in the background (`py "
+                    f"{Path(__file__).resolve().parent / 'native_watchdog.py'} "
+                    f"--run-dir {init_dir}`; root session from the host-injected "
+                    f"OPENCODE_SESSION_ID, default thresholds). Full wave discipline: "
+                    f"Read {frag} and follow it")
+            return "scout", _next("bash", desc,
+                                  [scout_plan, scout_cp, init_dir / NATIVE_PLAN_NAME])
         return "scout", _next("bash",
                               "fan out init-scout readers per pending batch via "
                               "list_scout_batches.py --materialize",
@@ -782,6 +940,14 @@ def check(init_dir: Path) -> dict:
         return {"ok": False, "violations": [{"issue": recipe}], "notes": []}
     no_scout = bool(cfg.get("no_scout"))
     fmt = cfg.get("format") or "opencode"
+    # dispatch-form resolution (scout layer): fail-closed on a malformed profile,
+    # a resolved native on a non-opencode face, or missing native assets — the
+    # same verdicts the derive path enforces, surfaced as --check violations so
+    # the boundary check refuses to bless a run whose dispatch face is broken.
+    _target = cfg.get("target") or str(init_dir.parent.resolve())
+    _dispatch, _drecipe = _dispatch_form(_target, init_dir)
+    if _drecipe:
+        violations.append({"issue": _drecipe})
     manifest = init_dir / "init_manifest.json"
     candidates = init_dir / "controls_candidates.json"
     clusters_p = init_dir / "clusters.json"

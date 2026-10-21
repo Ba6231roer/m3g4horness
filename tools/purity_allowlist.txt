@@ -23,8 +23,8 @@ core/contracts/init/scout-plan.md:3
 core/contracts/init/skeleton.md:3
 core/contracts/init/skeleton.md:4
 core/contracts/init/step-manifest.md:3
-core/contracts/init/step-manifest.md:76
 core/contracts/init/step-manifest.md:80
+core/contracts/init/step-manifest.md:90
 core/contracts/init/t1-record-schema.md:4
 core/contracts/sast/controls-intake.md:116
 core/contracts/sast/controls-intake.md:3

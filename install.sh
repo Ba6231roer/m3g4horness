@@ -155,6 +155,7 @@ done
 # agent/ dir. Missing either is a fail-soft warn here (CI enforces; the runtime
 # asset gate in env_profile.require_native_assets refuses dispatch loudly).
 [[ -f "$DEST/mgh-core/prompts/fragments/sdr-native-dispatch.md" ]] || _fanout_missing+=("prompts/fragments/sdr-native-dispatch.md")
+[[ -f "$DEST/mgh-core/prompts/fragments/init-scout-native-dispatch.md" ]] || _fanout_missing+=("prompts/fragments/init-scout-native-dispatch.md")
 # T2 synthesis map-reduce split prompts (t2 map-stage adoption): the partial (per-shard) and
 # rollup (cross-shard reduce) stage prompts mirror with the whole-core copy; a missing file
 # breaks the over-budget map-reduce path at runtime. Shared by both platforms (core copy).
@@ -164,7 +165,7 @@ for s in init-synthesis-partial init-synthesis-rollup init-scout-merge-partial i
 done
 if [[ "$PLATFORM" == "opencode" ]]; then
   for a in init-scout-fanout init-induct-fanout init-synthesis-fanout init-synthesis-rollup \
-           init-scout-merge-fanout init-scout-merge-rollup \
+           init-scout-merge-fanout init-scout-merge-rollup init-scout-native \
            init-rulewriter-fanout sdr-review-fanout sdr-review-native; do
     [[ -f "$DEST/agent/$a.md" ]] || _fanout_missing+=("agent/$a.md")
   done
@@ -172,7 +173,7 @@ fi
 if (( ${#_fanout_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing fan-out tier payload: ${_fanout_missing[*]}" >&2
 else
-  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/fragments/fanout/readability-review.md + prompts/fragments/sdr-native-dispatch.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter-fanout,sdr-review-fanout,sdr-review-native}.md" )"
+  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/fragments/fanout/readability-review.md + prompts/fragments/{sdr-native-dispatch,init-scout-native-dispatch}.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-scout-native,init-rulewriter-fanout,sdr-review-fanout,sdr-review-native}.md" )"
 fi
 
 # 4b-2) Distribution-completeness self-check (fail-soft; CI enforces via

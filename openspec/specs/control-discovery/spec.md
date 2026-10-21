@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-mgh-init. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Parse arguments and guard zero-token no-op
 
 `/mgh-init` SHALL accept `--target <dir>`(默认 `.`)、`--format opencode|claude`(默认 `opencode`;显式传
@@ -147,6 +149,7 @@ VCS / IDE / build / config / 索引);默认扫描它们会把工具自身脚本(
   `D:\repos\.cache\<repo>`(祖先分量点前缀)下,各默认运行发现
 - **THEN** 两布局下 repo 内源文件照常被发现(剪枝只看 repo 相对分量);修复前按绝对全分量判定,
   这两种布局整仓静默扫空(零候选、零 skeleton,退出码 0)
+
 ### Requirement: Skip test source directories during discovery
 
 确定性文件遍历(`expand_scope.walk_sources` / `collect_dir`)SHALL 在既有 `EXCLUDE_DIR` 精确匹配
@@ -272,6 +275,7 @@ MUST 面对**全部**定义,NEVER 只见到枚举顺序中先于本文件的定�
   A 的 `mask()`)以两种相反的文件名(交换后)分别构建调用图
 - **THEN** 两种枚举顺序产出的调用图逐边一致(A→B 与 B→A 双向边均在);修复前单向边随枚举
   顺序漂移,约半数跨文件边静默缺失
+
 ### Requirement: Emit design_controls-compatible inventory
 
 `controls_inventory.json` SHALL 为每条归纳后的控制携带:`name`(slug)、`kind`(vvah
@@ -403,6 +407,7 @@ recipe(`--line 0` 曾因真值判断静默落入骨架模式,合法请求 0 行�
 
 - **WHEN** 调用 `chunk_sources.py --in <file> --line 0 --out <slice.json>`
 - **THEN** 退出码 2 + recipe(合法行号 ≥ 1;骨架模式 = 不传 `--line`);NEVER 静默产出整文件骨架
+
 ### Requirement: Cluster competing controls and designate canonical
 
 当同 `category`(如 authorization、data-masking)存在 2+ 候选时,i2 归纳 SHALL 将其
@@ -469,6 +474,7 @@ SHALL 退出码 2 + stderr recipe(指认路径/包名),NEVER 以「空种子集 
 - **THEN** 退出码 2 + stderr 指认该路径;NEVER 输出 `{"in_scope": [], "count": 0}` + 退出码 0
   (修复前与「目录存在但无源文件」不可区分,下游产出「该模块无存量控制」的错误结论);
   `--package com.acme.nomatch`(零匹配目录)同判退出码 2;目录存在但无源文件保持 exit 0 + note
+
 ### Requirement: Standalone script invocation robustness
 
 `discover_controls.py` 与 `chunk_sources.py` SHALL 在 `from expand_scope import …` 之前,把
@@ -538,6 +544,7 @@ from a checkpoint」「Discover soft time-budget clean exit」「Discover writes
 - **WHEN** 源文件数超过 `--max-files` 的仓运行 `discover_controls.py`
 - **THEN** stdout 摘要 `truncated:true`(哨兵 = 多 yield 一个源文件即判);混合扩展名仓下配额
   语义同判(修复前配额被非源文件消耗,哨兵永不触发,截断静默)
+
 ### Requirement: Deterministic scripts are orchestrator black boxes
 
 `/mgh-init` 的编排器是宿主 agent 本身(按 `mgh-init.md` 用自身工具跑流水线,非写代码)。命令壳 SHALL 在正文最前列声明,且把编排纪律明线**扩展到一次性微脚本**(承
@@ -767,6 +774,7 @@ deterministic absolute values」),使任何 `cluster_id`(含 legacy/回归产出
 - **WHEN** 不传 `--pack-bytes`(或传 `0`)运行新旧两版 `list_clusters.py`
 - **THEN** stdout JSON 逐字段一致(不出现 `members[]`/`cluster_total`/`cluster_done`),包逻辑
   零执行;`--pack-max` 单独传入而 `--pack-bytes` 为 0 时 SHALL 退出码 2 拒识(无效组合)
+
 ### Requirement: init-survey is optional, advisory, and non-fatal
 
 init-survey 子阶段 SHALL 是**可选**的;其产出 `i1_enriched.json` 当前仅作**审计/T2 参考**,
@@ -887,10 +895,27 @@ MUST NOT 超过 `--scout-batch-cap`(默认 40)。单个 `bytes > --scout-batch-b
 MUST 经既有 `chunk_sources.py` 切片入批,MUST NOT 整文件塞入单个 LLM 上下文。每批在一个
 **独立 scout-reader subagent 上下文**深读,产出 `checkpoints/scout/<batch_id>.json`;全部
 批次完成后由**单一 scout-merge subagent** 在**仅结构化记录、无原始码**上做去重、归一、
-provisional `source` 标记 → `scout_candidates.json`。编排器 SHALL 以 `max_concurrent`
-(默认 8)并行起 subagent、跑完一波起下一波,直至无 pending 批次。批数(= subagent 数)
+provisional `source` 标记 → `scout_candidates.json`。批数(= subagent 数)
 SHALL 由 `ceil(Σtarget_bytes / batch_bytes)` **涌现而出**,而非固定常量。每批 SHALL 落
 `checkpoints/scout/<batch_id>.json.done`;`--resume` MUST 跳过已 done 批次。
+
+**派发形态由环境画像解析器选择**:`mgh-init` SHALL 经
+`env_profile.resolve(<target>, consumer="init")` 解析(与 sdr 同一解析器、不同消费者)。
+`consumer=init ∧ host=opencode` SHALL 缺省解析 `native`——**没有画像文件或 `auto` 也
+原生**(用户已拍板 mgh-init 全流程转向 opencode 缺省原生);显式
+`dispatch_mode:"runner"` SHALL 回退子进程;`consumer=generic`、claude/dsh/other 面 SHALL
+仍解析 `runner`。显式 `dispatch_mode` SHALL 覆盖缺省;坏画像 SHALL fail-closed(退出码 2 +
+recipe)。仅当解析形态为 `native` 且 `host_face=="opencode"` 时走原生形态:确定性计划物化 +
+编排器同一条 assistant 消息并发派原生子代理(agent `init-scout-native`,
+`mode: subagent`),波次尺寸来自计划的 `wave_size`(环境画像并发与配额算术的较小者),不适用
+`max_concurrent` 默认 8。显式 runner、`consumer=generic`、claude/dsh/other 面走子进程形态
+(下列 `max_concurrent`/`fanout_runner.py` 行为逐字节不变,是永久回退路径)。解析为 native
+时还 SHALL 检查 scout 原生资产(`agent/init-scout-native.md` 与
+`prompts/fragments/init-scout-native-dispatch.md`),缺一退出码 2 + 重装/显式 runner recipe,
+NEVER 静默回退。两种形态共用同一批规划、同一 checkpoint/marker 路径、同一 merge/fold-in;
+原生形态的波次纪律与无人值守闭环见「Native scout dispatch wave discipline and unattended
+loop」。claude/dsh 面保留子进程形态并在壳与规格中显式披露(宿主机制差异,不做静默镜像
+断裂)。
 
 **计划自描述与 `--check` 退出码**:`plan_scout.py` 生成时 SHALL 把生成所用
 `batch_bytes`/`batch_cap` 记入 `scout_plan.json` 顶层(自描述);`--check` 校验批预算 SHALL
@@ -901,8 +926,9 @@ SHALL 由 `ceil(Σtarget_bytes / batch_bytes)` **涌现而出**,而非固定常�
 
 编排器取得「待跑批清单」MUST 经确定性叶脚本 `list_scout_batches.py`(见「Deterministic
 scout-batch enumeration for fan-out」),MUST NOT 手挖 `scout_plan.json`、MUST NOT `py -c`
-内省。`merge_scout.py` 折叠后,`scout_candidates.json` 与改写后的 `controls_candidates.json`
-为**终态**,编排器 MUST NOT 对其二次聚合或重切批。
+内省。原生形态的物化脚本 SHALL 复用同一枚举器(不另造 pending 来源)。`merge_scout.py`
+折叠后,`scout_candidates.json` 与改写后的 `controls_candidates.json` 为**终态**,编排器
+MUST NOT 对其二次聚合或重切批。
 
 #### Scenario: Batches sized by bytes, co-located by package
 
@@ -918,8 +944,8 @@ scout-batch enumeration for fan-out」),MUST NOT 手挖 `scout_plan.json`、MUST
 
 - **WHEN** 以 `--batch-bytes 204800` 生成 plan(顶层记录该值),随后不传 `--batch-bytes`
   运行 `plan_scout.py --check <plan>`
-- **THEN** 校验按 plan 记录的 204800 判预算,合法 plan 退出码 0(修复前按缺省 98304 误报违例);
-  存量无记录 plan 回退 CLI 值,行为不变
+- **THEN** 校验按 plan 记录的 204800 判预算,合法 plan 退出码 0;存量无记录 plan 回退
+  CLI 值,行为不变
 
 #### Scenario: 损坏 plan 的 --check 退出码 2
 
@@ -928,29 +954,61 @@ scout-batch enumeration for fan-out」),MUST NOT 手挖 `scout_plan.json`、MUST
 
 #### Scenario: Batch count emerges from data, parallel waves bounded
 
-- **WHEN** scout 目标共 ~9.6MB、`--scout-batch-bytes` 96KB、`max_concurrent` 8
-- **THEN** `scout_plan.json` 产出约 100 批,编排器以每波 8 并行跑完所有批
+- **WHEN** scout 目标共 ~9.6MB、`--scout-batch-bytes` 96KB,子进程形态
+- **THEN** `scout_plan.json` 产出约 100 批,编排器以每波 `max_concurrent`(默认 8)并行跑完
+  所有批
+
+#### Scenario: Native form keeps the same batch semantics
+
+- **WHEN** opencode 面、`consumer=init`(无画像缺省 native 或显式 `dispatch_mode:"native"`),
+  scout 目标含 3 个批
+- **THEN** 原生形态仍以同一 3 个 `batch_id`、同一 checkpoint/marker 路径、同一
+  `chunk_sources.py` 切片语义产出;只是派发方式换为计划物化 + 原生子代理,发现本体与
+  merge/fold-in 不变
+
+#### Scenario: opencode init 无画像即原生
+
+- **WHEN** opencode 安装面、项目无 `.mgh/env-profile.json`(或 `dispatch_mode:"auto"`),
+  `list_steps.py --step scout` / `resume_state.py` 以 `consumer=init` 解析
+- **THEN** 解析形态为 `native`(`source=host-default`),scout 步给出 `emit_native_plan.py`
+  物化入口与原生 `next_action`;不要求用户手写画像,也不因缺画像回退子进程
+
+#### Scenario: 其它消费者与安装面仍 runner
+
+- **WHEN** 无画像或画像为 `auto`,消费者为 `generic` 或当前为 claude/dsh/other 安装面
+- **THEN** 解析形态仍为 `runner`,scout 步保持既有子进程调用行、无 `dispatch`/`native_arc`
+  ——opencode init 的缺省原生不扩散到其它消费者或安装面
+
+#### Scenario: 显式 runner 在 opencode init 回退
+
+- **WHEN** opencode 安装面、画像写着 `{"dispatch_mode":"runner"}`,`consumer=init`
+- **THEN** 解析形态为 `runner`,scout 步回到子进程调用行、无 `dispatch`/`native_arc`——
+  原生缺省可被显式关闭,回退路径保持可用
 
 #### Scenario: Merge operates on structured records only
 
-- **WHEN** scout-merge 运行
+- **WHEN** scout-merge 运行(任一形态)
 - **THEN** 其输入为各 batch 的结构化候选 JSON(无原始源码),上下文规模远小于任一
   scout-reader;跨批重复报告的同一控制被去重归一
 
 #### Scenario: Resume skips completed batches
 
 - **WHEN** scout fan-out 中途断开,随后 `mgh-init --resume`
-- **THEN** 已 done 的批次被跳过,仅继续 pending 批次,`scout_candidates.json` 最终完整
+- **THEN** 已 done 的批次被跳过,仅继续 pending 批次,`scout_candidates.json` 最终完整;
+  原生形态同样按磁盘标记重派生,不依赖对话记忆
 
 #### Scenario: Pending work-list obtained via leaf script, not hand-mining
 
 - **WHEN** 编排器进入 scout fan-out
-- **THEN** 它先调用 `list_scout_batches.py` 取 `pending[]` 再逐批扇出;不出现 `py -c` 挖 `scout_plan.json` 或 `Write _prep_scout_batches.py`
+- **THEN** 它先经确定性枚举器取 `pending[]`(子进程形态 = `list_scout_batches.py`;
+  原生形态 = `emit_native_plan.py` 复用的同一枚举器),不出现 `py -c` 挖
+  `scout_plan.json` 或 `Write _prep_scout_batches.py`
 
 #### Scenario: Merged artifacts are terminal
 
 - **WHEN** `merge_scout.py` 完成,`scout_candidates.json` 落盘
 - **THEN** 编排器不再对其二次聚合或重切批(不出现 `_aggregate_scout.py` 之类重实现)
+
 ### Requirement: Self-audit scout rejections to bound false negatives
 
 scout 批次完成后,系统 SHALL 随机抽取 `--scout-audit-pct`(默认 15%)个被 scout 判定
@@ -993,6 +1051,7 @@ SHALL 将该目标回灌(重跑其所属批次或直接补候选),并在 `init_m
 #### Scenario: Residual blind spot is disclosed
 - **WHEN** 审阅 `report.md` / `init_manifest.json` 的 `boundaries[]`
 - **THEN** 其中明示「泛型命名 + 低扇因控制可能漏报」这一残留盲区,以及 scout 的非确定性
+
 ### Requirement: Deterministic scout-batch enumeration for fan-out
 
 `/mgh-init` 的编排器 MUST 经确定性叶脚本 `core/scripts/list_scout_batches.py` 取得 scout 工作清单
@@ -1068,6 +1127,7 @@ schema:键 + 类型 + 数组元素 shape)、`--field a.b.c`(取嵌套字段)。s
 - **THEN** stdout 回显截断后的值(≤ 实现常量上限)+ `truncated:true` + 容器计数
   (`{"type":"list","count":5000,…}` 形态);NEVER 整份 5000 条倾倒进 stdout;`--field a.b --count`
   组合形态输出不变(计数模式天然有界)
+
 ### Requirement: Derived counts exposed as script output fields
 
 下游(编排器/subagent)可能需要 list keys / len / sample 才能得到的**派生量**,MUST 由该量的**产出者**
@@ -1224,6 +1284,7 @@ openspec validate-at-boundary,FD7)。覆盖:`discover_controls.py --check`(candi
 - **WHEN** `clusters.json` 的某条 `cluster_id` 超 160 字符(producer 回归)
 - **THEN** `discover_controls.py --check` 退出码 2,violations 报该簇 index 与「cluster_id 超长」issue,
   编排器在 discover 后、T1 前被闸门拦下
+
 ### Requirement: Subagent sanctioned-tools allowlist
 
 每个 `core/prompts/stages/init-*.md`(及双壳 `agents/init-*.md`)SHALL 声明一个 **Sanctioned tools**
@@ -1366,6 +1427,7 @@ LLM subagent 产出的 scout 候选 JSON SHALL 是合法 JSON,每条 candidate S
 
 - **WHEN** 审阅 `discover_controls.py::form_clusters`
 - **THEN** 其 `category` 取值方式与变更前一致(未改为 `.get`);缺 `category` 的 scout 候选在 `merge_scout._normalize` 即被跳过,不进入 `form_clusters`
+
 ### Requirement: Detect optional codegraph index and gate enrichment (fail-soft)
 
 `/mgh-init` 编排器 SHALL 在起步段(步骤 0)以 Bash 检测目标项目是否具备 codegraph:`test -d
@@ -1555,6 +1617,7 @@ journal 行数与计数不符(撕裂/篡改)→ 弃续点重扫自愈;旧内联�
   累计写入字节
 - **THEN** journal 追加总量与候选总量同阶(O(n)),`scan_progress.json` 恒为小体积元数据;
   修复前每 1000 文件全量重写累积候选,总写放大 O(n²)
+
 ### Requirement: Discover soft time-budget clean exit
 
 `discover_controls.py` SHALL 提供 `--time-budget-ms <N>`(默认 0=关)。当置位且在安全边界已超预算时,
@@ -1591,6 +1654,7 @@ defs 缓存 + scan 续点(如有)留存。理由〔修复前超时检查只在�
 - **THEN** 退出码 0 + stdout `partial:true`,`cache/callgraph_defs.json` 已落盘;重派 `--resume`
   复用 defs 缓存跳过 pass 1、从 pass 2 续跑——NEVER 从零重建两遍;修复前 pass 2 中途被宿主
   硬杀 = 零留存(scan 续点未产生、图缓存未写)
+
 ### Requirement: Discover writes are atomic
 
 `discover_controls.py` SHALL 原子写出所有产物 JSON(`controls_candidates.json`/`clusters.json`/`skeleton.json`/
@@ -1616,6 +1680,7 @@ scout 层「损坏 plan」输入的主要供给源(`scout_complete` 对截断 pl
 
 - **WHEN** `plan_scout.py` 在写 `scout_plan.json` 途中被强杀
 - **THEN** 磁盘上要么是完整 plan、要么无 plan(NEVER 截断半写 JSON);`.tmp` 残留可被下次覆盖
+
 ### Requirement: Long-running deterministic Bash calls carry a per-call timeout
 
 每份 `mgh-*.md` 命令壳的编排器 SHALL 给**长跑确定性 Bash 调用**传一个慷慨的 per-call `timeout`
@@ -1712,6 +1777,7 @@ and SHALL NOT determine "current step" from conversation memory.
 - **WHEN** the orchestrator (on `--resume` or post-compaction) needs to know the current step / next action
 - **THEN** it calls `resume_state.py`, MUST NOT `py -c`/`python -c` introspect `.mgh-init/**`, MUST NOT `Read` whole
   aggregate JSON to reconstruct progress, and MUST NOT rely on remembered step state from conversation
+
 ### Requirement: Persisted run configuration for stateless resume
 
 `/mgh-init` 编排器 SHALL 在 step 0(参数解析后、花 token 前)原子写出
@@ -1765,6 +1831,7 @@ mgh-init 的哨兵,激活错误域的写允许集);custom 名 `--init-dir` 保�
   (规范名目录与域来源冲突)
 - **THEN** 退出码 2 + stderr recipe 指认冲突;NEVER 写出 domain=mgh-ut-init 而落在 .mgh-init
   的哨兵;custom 名 `--init-dir` 组合与默认组合行为不变
+
 ### Requirement: Subagent return-to-orchestrator is a bounded ack
 
 每份 `core/prompts/stages/init-*.md` SHALL 声明一个 **Return-to-orchestrator** 契约:subagent 的**最终回传消息**
@@ -1794,6 +1861,7 @@ SHALL 是**单条有界 ack**——取值之一 `ok <绝对 checkpoint_path 或 
 - **WHEN** 编排器在 T2 完成后需要确认 inventory 落盘
 - **THEN** 它经 `resume_state.py`(或 `describe_artifact.py --count/--keys`)取得有界摘要,**不** 整份 `Read`
   `controls_inventory.json` 进编排器上下文
+
 ### Requirement: Aggregate nodes enforce a hard request budget via map-reduce
 
 T2(`init-synthesis`)与 scout-merge(`init-scout-merge`)SHALL 把 `--max-aggregate-bytes` 当作**硬闸门**(兑现
@@ -2007,6 +2075,7 @@ performance on large repos」)保持不变。本要求的禁止范围仅限**运
 - **WHEN** 编排器在摘要/披露中陈述 fan-out 规模、失败数、跳过数或覆盖率
 - **THEN** 这些计数取自 `resume_state.py` / `list_*` stdout 的结构化字段(磁盘真相),NEVER 据对话
   记忆编造
+
 ### Requirement: Partial fan-out unit failure tolerance
 
 A confirmed `/mgh-init` fan-out unit failure SHALL be treated as a terminal, non-blocking state distinct from completion. This covers the scout-reader batch, T1 per-cluster induction, and T3 per-category rule-writing tiers: when a unit's subagent returns the existing `failed <reason>` ack, the orchestrator SHALL record it with a `.failed` marker sibling to its `.done` marker (`<checkpoint_path>.failed`); the unit SHALL NOT be retried on `--resume` and SHALL NOT block tier completion. A tier SHALL be considered complete enough to proceed when `done + failed >= total` (not `done >= total`).
@@ -2283,6 +2352,7 @@ NEVER 出现「candidates 已并、clusters 缺 scout 簇」的带病进 T1 窗�
 
 - **WHEN** 审阅 `merge_scout.py` / `validate_inventory.py` 的类别常量来源
 - **THEN** 两脚本引用同一规范 8 类 + 别名表(单一真相源),不允许各自硬编码一份
+
 ### Requirement: Run directory is git-isolated by deterministic co-write
 
 `write_runconfig.py`(step 0 原子写 run 配置)SHALL 以**确定性副作用** co-write
@@ -2309,3 +2379,140 @@ gitignore 缺失不破坏 run 的正确性,只影响隔离承诺)。
 
 - **WHEN** 目标项目根已有 `.gitignore`
 - **THEN** co-write 只落在 run 目录内部,目标根的 ignore 规则零改动
+
+### Requirement: Native scout dispatch wave discipline and unattended loop
+
+当解析形态为原生(`consumer=init ∧ host=opencode`,缺省或显式 `dispatch_mode:"native"`)
+时,`/mgh-init` 的 scout 层 SHALL 按以下闭环执行;显式 runner、`consumer=generic`、
+claude/dsh/other 面 SHALL 保持既有子进程形态逐字节不变(永久回退路径)。
+
+- **形态选择**:`mgh-init` SHALL 经 `env_profile.resolve(<target>, consumer="init")`
+  解析(与 sdr 同一解析器、不同消费者),坏文件按 `env_profile` 的 fail-closed 契约
+  (退出码 2 + recipe,NEVER 静默回退缺省)。仅当解析形态为 `native` 且
+  `host_face=="opencode"` 时走原生;解析为 native 时 SHALL 在进入 fan-out 前检查 scout
+  原生资产(`agent/init-scout-native.md` 与
+  `prompts/fragments/init-scout-native-dispatch.md`),缺一退出码 2 + 重装/显式 runner
+  recipe,NEVER 静默回退子进程。解析形态为 native 但 `host_face != "opencode"`(如
+  claude 面显式 `native`)时,SHALL 退出码 2 + recipe(原生仅 opencode;改用 runner 或
+  opencode 面),NEVER 静默按子进程运行。
+- **物化与自检**:每轮以 `emit_native_plan.py --tier scout --scout-plan
+  <init-dir>/scout_plan.json --checkpoints <init-dir>/checkpoints/scout --inputs-dir
+  <init-dir>/inputs/scout --profile <target>` 物化计划(任务文件 + 波次表 + 短单元号),物化
+  后以同参跑 `--check`;`--check` 退出码 2 → 按 stderr recipe 重物化,NEVER 消费过期计划。
+- **页语义**:一次物化只覆盖枚举器当前 pending 页(`--orch-budget-bytes` 会收紧页);
+  编排器 SHALL 在派完当前页后**重物化**取下一页,循环直到计划 `units_total == 0`;
+  NEVER 假设一次计划覆盖全部批,NEVER 自行记账「哪些派过了」。
+- **波次派发**:编排器**同一条 assistant 消息**并发发出当前波全部 N 个子代理调用(agent
+  `init-scout-native`,`mode: subagent`)——每调用 `description` = 该批计划短号;任务体 =
+  单行令牌 `mgh-dispatch: plan=<plan_path> unit=<短号>`(计划引用自物化 stdout 逐字复制,
+  短号自计划逐字复制;派发插件的令牌展开钩子在子代理启动前换成任务文件全文)。令牌展开
+  钩子缺席的旧版安装 SHALL 回退为「固定一句 + 该批任务文件绝对路径逐字透传」。编排器
+  NEVER 跨波合并、NEVER 自增并发、NEVER 自撰任务文本、NEVER 拼接或改写路径。
+- **零批计划**:`units_total == 0` 时 SHALL 跳过派发,直接进入既有 scout-merge/audit/
+  fold-in 段——不产生空波次,不把空计划当错误。
+- **标记真相源**:`.done`/`.failed` 的唯一写者是子代理自身(成功 touch `.done`;失败自写
+  `.failed`,内容 `{unit_id, reason}`——该指令仅存在于原生 agent 定义;共享任务模板的
+  「reference only; the dispatcher writes it」行保持不动)。计划物化、看门狗、编排器 SHALL
+  NEVER 写任何批标记(编排器唯一标记动作 = 重派认领时删除旧 `.failed`)。
+- **失败批**:`.failed` 为终态;至多重派一轮(重派轮 = 删除旧 `.failed` + 重物化带
+  `--retry-failed` + 派发一次);重派再败 SHALL 接受缺口,在 scout-merge 之前披露,后续
+  轮次不再派它;NEVER 无限重派。
+- **限流等窗**:上一波 `.failed` 原因含限流特征(429 / rate limit / quota)时,SHALL 按画像
+  配额窗口(`quota.window_s`,未配置按网关公开口径)等满一个窗口后再重物化/重派,等待事实
+  入 run 留痕;NEVER 在限流窗口内连续重派烧配额。
+- **无人值守**:第一波派发前 SHALL 以后台形态启动看门狗——根会话取宿主注入的会话环境变量、
+  `--run-dir <init-dir>`、阈值用缺省;run 落定后看门狗自退;编排器 NEVER 代替看门狗做会话
+  中止。
+- **步骤/恢复形态感知**:原生形态下 `list_steps.py --step scout` SHALL 给出物化入口
+  (`emit_native_plan.py`)与 `native_arc`(materialize → waves),`resume_state.py` SHALL 给出
+  顶层 `dispatch` 与指向「重物化 → 派当前波」的 `next_action`。`dispatch` SHALL 与 sdr 同形:
+  `{form, source, profile_exists, host_face, consumer, profile_path, plan_present,
+  native_agent, discipline_fragment}`,其中 scout 的 `consumer` 为 `"init"`、
+  `source` 区分 `profile`/`host-default`(无画像的 opencode init 是 `host-default`);
+  显式 runner/claude/other 时两脚本 stdout 逐字节不变(不出现新字段),坏画像退出码 2 +
+  recipe。进度仍纯磁盘重派生。
+- **报告与披露**:`init_manifest.json` 的 `scout` 段在原生形态下 SHALL 增
+  `dispatch: {form:"native", source, profile_exists, host_face, consumer, plan_path,
+  plan_present, native_agent}`(值取自 `list_steps.py`/`resume_state.py` stdout,不靠模型
+  记忆);`report.md` 与 `boundaries[]` SHALL 披露实际派发形态与计划工件在场证据。诚实边界
+  SHALL 披露:止损为波次粒度(无进程树杀,挂死由看门狗中止兜底)、编排父会话是单点、任务
+  文件路径转述的残余错抄面(令牌展开落地后只剩短号错抄;防线 = 越树守卫 + 重枚举回待派 +
+  至多一轮重派)、一次物化只覆盖当前页。
+- **三面分歧披露**:本原生形态当前仅 opencode 面;claude/dsh 面保留子进程形态,壳与规格
+  SHALL 显式披露该分歧(属宿主机制差异),后续按宿主能力另行接入。
+
+#### Scenario: 显式 runner 与 claude/dsh 零变化
+
+- **WHEN** opencode 面画像显式 `dispatch_mode:"runner"`,或命令从 claude/dsh/other 安装面
+  运行,或 `consumer=generic`
+- **THEN** scout 步走现行子进程形态,stdout/产物/步骤清单与该形态改动前一致——缺省原生的
+  变更只作用于 `consumer=init ∧ host=opencode`;显式 runner 与其它面仍是可审计的回退路径
+
+#### Scenario: 同消息并发派一波
+
+- **WHEN** 原生形态当前波有 3 个待派批
+- **THEN** 编排器在一条 assistant 消息内发出 3 个子代理调用(`description`=短号,任务体=
+  令牌行或回退的固定句+任务文件绝对路径),全部返回后重物化进入下一页——不存在逐个串行
+  派发或自撰任务文本
+
+#### Scenario: 页循环覆盖全部批
+
+- **WHEN** `scout_plan.json` 有 400 批,但一次物化因 `--orch-budget-bytes` 只装下 81 批
+- **THEN** 编排器派完这 81 批后重物化,继续下一 81 批,直到 `units_total == 0`;
+  不把「81 批」误当全部,也不手工翻 `scout_plan.json`
+
+#### Scenario: 失败批至多一轮重派
+
+- **WHEN** 某批 `.failed` 在场(原因非限流特征)
+- **THEN** 重物化带 `--retry-failed` 将其重新列入至多一轮;重派再失败后该批进入缺口
+  披露,后续波次不再派它——失败批不会无限循环
+
+#### Scenario: 挂死单元由看门狗收口回待派
+
+- **WHEN** 原生形态下某子会话挂死(无标记产出),看门狗超阈值将其中止
+- **THEN** 该批因无标记在下次重物化回到待派;全程无任何一方代写标记——中止 ≠ 失败终态,
+  终态只能由单元自身执行纪律写出
+
+#### Scenario: 权限闸门在派发前关闭
+
+- **WHEN** 原生形态下某个 scout 子代理尝试访问项目外目录
+- **THEN** 运行域的 `permission.evaluate` 闸门在授权请求产生前把它改写成拒绝并附替代做法,
+  `pending` 授权请求数为 0;子代理收到明确失败后继续本回合,不会挂到隔夜
+
+#### Scenario: scout 原生资产缺席 fail-closed
+
+- **WHEN** opencode 面、解析形态 native(无画像缺省或显式),但安装树缺
+  `init-scout-native` agent 或 `init-scout-native-dispatch` fragment
+- **THEN** `list_steps`/`resume_state`/壳在进入 fan-out 前退出码 2,stderr 给出重跑
+  `install.sh --opencode` 或显式 `{"dispatch_mode":"runner"}` 的 recipe;NEVER 静默回退
+  子进程
+
+#### Scenario: 宿主不支持显式 native 时 fail-closed
+
+- **WHEN** 项目画像写着 `{"dispatch_mode":"native"}`,`consumer=init`,命令从 claude/dsh/
+  other 安装面运行
+- **THEN** init 编排面在进入 fan-out 前退出码 2,stderr 给出「原生仅 opencode;改
+  `dispatch_mode:"runner"` 或换 opencode 面」的 recipe;NEVER 静默按子进程运行
+
+#### Scenario: 步骤与恢复暴露原生形态
+
+- **WHEN** opencode 面、`consumer=init`(无画像缺省 native 或显式 native)时分别运行
+  `list_steps.py --step scout` 与 `resume_state.py`
+- **THEN** 前者给出 `emit_native_plan.py` 物化入口与 `native_arc`,后者给出 `dispatch`
+  (`form/source/profile_exists/host_face/consumer=init/plan_present/native_agent/...`;
+  无画像时 `source=host-default`)与指向「重物化 → 派当前波」的 `next_action`;显式
+  runner 或 claude/dsh 面时两脚本 stdout 逐字节回到既有形状,坏画像退出码 2 + recipe
+
+#### Scenario: 报告与清单披露派发形态
+
+- **WHEN** 原生形态 scout 收尾写 `init_manifest.json` / `report.md`
+- **THEN** manifest 的 `scout.dispatch` 含 form/source/profile_exists/host_face/
+  consumer=init/plan_path/plan_present/native_agent,report 与 boundaries 披露「本次 scout
+  怎么派的」与计划工件在场证据;诚实边界含波次粒度止损、父会话单点、路径转述残余、一次
+  物化只覆盖当前页四条
+
+#### Scenario: 三面分歧可见
+
+- **WHEN** 比对三面 `mgh-init` 壳的 scout 步
+- **THEN** opencode 面含原生条件步,claude/dsh 面为子进程形态,且各面如实披露当前分歧
+  ——不是静默的镜像断裂

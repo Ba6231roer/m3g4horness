@@ -5,6 +5,15 @@
 
 ## scout (step 3b)
 
+> **派发形态分派(opencode 面读者批缺省原生)**:step 0 的 `env_profile.py --consumer init`
+> 解析 `form=native`(opencode 安装面缺省,含无画像;或画像显式 `dispatch_mode:"native"`)
+> 时,scout **读者批**走原生派发——先 Read
+> `<mgh-core>/prompts/fragments/init-scout-native-dispatch.md` 并按其执行(看门狗先行 →
+> `emit_native_plan.py --tier scout` 页循环物化 + 同消息并发派 `init-scout-native` + 标记
+> 自写),`units_total==0` 后回到本文件下方既有 scout-merge 段(该段不原生化);本步
+> `discipline` 亦换原生变体。画像显式 `dispatch_mode:"runner"` 或 claude/dsh 面 → 本文件
+> 既有子进程段逐字适用,零变化。
+
 ```
 3b. SCOUT FAN-OUT (除非 `--no-scout`)——让 LLM 找出 regex 闸门漏掉的自研控制:
      [skeleton.json + controls_candidates.json] → plan_scout.py → [scout_plan.json::batches[]]

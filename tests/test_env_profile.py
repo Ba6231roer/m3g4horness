@@ -321,7 +321,7 @@ class DefaultResolutionTest(unittest.TestCase):
 
     def test_resolve_rejects_unknown_consumer(self):
         with self.assertRaises(ValueError):
-            self.m.resolve(self.proj, consumer="init", host_face="opencode")
+            self.m.resolve(self.proj, consumer="blst", host_face="opencode")
 
     # --- CLI surface ---
     def _run(self, *args):
@@ -406,6 +406,176 @@ class DefaultResolutionTest(unittest.TestCase):
             "x", encoding="utf-8")
         self.assertEqual(self.m.missing_native_assets(root), [])
         self.assertIsNone(self.m.require_native_assets(root))
+
+
+class InitConsumerDefaultTest(unittest.TestCase):
+    """fix-mgh-init-native-scout-dispatch 2.1: the init consumer joins the
+    native-default set — `consumer=init ∧ host=opencode` resolves native (no
+    profile file means native too; the user-approved mgh-init default-form
+    change). Explicit dispatch_mode values still always win; generic/claude/
+    other stay runner; bad profiles stay fail-closed; the native-asset gate is
+    parameterized by surface without moving the sdr default."""
+
+    def setUp(self):
+        self.m = _load()
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_envprof_init_"))
+        self.proj = self.tmp / "proj"
+        self.proj.mkdir(parents=True)
+        self.cfg = self.proj / ".mgh" / "env-profile.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_cfg(self, body):
+        self.cfg.parent.mkdir(parents=True, exist_ok=True)
+        self.cfg.write_text(json.dumps(body), encoding="utf-8")
+
+    # --- default resolution matrix for consumer=init ---
+    def test_missing_profile_init_opencode_is_native(self):
+        r = self.m.resolve(self.proj, consumer="init", host_face="opencode")
+        self.assertEqual(r.form, "native")
+        self.assertEqual(r.source, "host-default")
+        self.assertFalse(r.profile_exists)
+        self.assertEqual(r.profile.dispatch_mode, "auto")
+        # no config file is ever created by the resolution
+        self.assertFalse(self.cfg.exists())
+
+    def test_auto_profile_init_opencode_is_native(self):
+        self._write_cfg({"v": 1, "dispatch_mode": "auto"})
+        r = self.m.resolve(self.proj, consumer="init", host_face="opencode")
+        self.assertEqual(r.form, "native")
+        self.assertEqual(r.source, "host-default")
+        self.assertTrue(r.profile_exists)
+
+    def test_explicit_runner_overrides_opencode_init_default(self):
+        self._write_cfg({"dispatch_mode": "runner"})
+        r = self.m.resolve(self.proj, consumer="init", host_face="opencode")
+        self.assertEqual(r.form, "runner")
+        self.assertEqual(r.source, "profile")
+
+    def test_claude_and_other_faces_stay_runner_for_init(self):
+        for face in ("claude", "other"):
+            with self.subTest(face=face):
+                r = self.m.resolve(self.proj, consumer="init", host_face=face)
+                self.assertEqual(r.form, "runner")
+                self.assertEqual(r.source, "host-default")
+
+    def test_explicit_native_overrides_any_face_for_init(self):
+        # parser level: explicit native wins everywhere; the ORCHESTRATION faces
+        # fail-closed on non-opencode native (their own contract, tested there).
+        self._write_cfg({"dispatch_mode": "native"})
+        for face in self.m.HOST_FACES:
+            with self.subTest(face=face):
+                r = self.m.resolve(self.proj, consumer="init", host_face=face)
+                self.assertEqual(r.form, "native")
+                self.assertEqual(r.source, "profile")
+
+    def test_sdr_default_resolution_unregressed(self):
+        # the init addition must not move the sdr default (or anything else)
+        self.assertEqual(
+            self.m.resolve(self.proj, consumer="sdr",
+                           host_face="opencode").form, "native")
+        self.assertEqual(
+            self.m.resolve(self.proj, consumer="generic",
+                           host_face="opencode").form, "runner")
+        self.assertEqual(
+            self.m.resolve(self.proj, consumer="sdr",
+                           host_face="claude").form, "runner")
+
+    def test_bad_profile_init_consumer_fail_closed(self):
+        self.cfg.parent.mkdir(parents=True, exist_ok=True)
+        self.cfg.write_text('{"dispatch_mode": "nativ"}', encoding="utf-8")
+        with self.assertRaises(self.m.EnvProfileError):
+            self.m.load(self.proj)
+        sys.argv = ["env_profile.py", "--target", str(self.proj),
+                    "--consumer", "init"]
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = self.m.main()
+            except SystemExit as e:
+                code = e.code
+        self.assertEqual(code, 2)
+        self.assertIn("dispatch_mode", err.getvalue())
+        self.assertIn("recipe", err.getvalue())
+
+    def test_cli_accepts_init_consumer(self):
+        sys.argv = ["env_profile.py", "--target", str(self.proj),
+                    "--consumer", "init"]
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = self.m.main()
+            except SystemExit as e:
+                code = e.code
+        self.assertEqual(code, 0, err.getvalue())
+        d = json.loads(out.getvalue())
+        self.assertEqual(d["consumer"], "init")
+
+    def test_help_declares_init_consumer(self):
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0)
+        for token in ("--consumer", "sdr", "init", "generic"):
+            self.assertIn(token, r.stdout, f"--help missing {token!r}")
+
+    # --- native asset gate: surface dimension ---
+    def _gate_root(self):
+        root = self.tmp / ".opencode" / "mgh-core"
+        (root / "scripts").mkdir(parents=True, exist_ok=True)
+        (root / "prompts" / "fragments").mkdir(parents=True, exist_ok=True)
+        (root.parent / "agent").mkdir(parents=True, exist_ok=True)
+        # sdr assets present so the sdr default path is unaffected
+        (root.parent / "agent" / "sdr-review-native.md").write_text(
+            "x", encoding="utf-8")
+        (root / "prompts" / "fragments" / "sdr-native-dispatch.md").write_text(
+            "x", encoding="utf-8")
+        return root
+
+    def test_init_surface_missing_agent(self):
+        root = self._gate_root()
+        missing = self.m.missing_native_assets(root, surface="init")
+        self.assertEqual(len(missing), 2)
+        self.assertIn("init-scout-native.md", missing[0])
+        self.assertIn("init-scout-native-dispatch.md", missing[1])
+        recipe = self.m.require_native_assets(root, surface="init")
+        self.assertIsNotNone(recipe)
+        self.assertIn("install.sh --opencode", recipe)
+        # the sdr gate on the SAME tree stays green (surface isolation)
+        self.assertEqual(self.m.missing_native_assets(root), [])
+
+    def test_init_surface_missing_fragment_only(self):
+        root = self._gate_root()
+        (root.parent / "agent" / "init-scout-native.md").write_text(
+            "x", encoding="utf-8")
+        missing = self.m.missing_native_assets(root, surface="init")
+        self.assertEqual(len(missing), 1)
+        self.assertIn("init-scout-native-dispatch.md", missing[0])
+
+    def test_init_surface_gate_opens_when_complete(self):
+        root = self._gate_root()
+        (root.parent / "agent" / "init-scout-native.md").write_text(
+            "x", encoding="utf-8")
+        (root / "prompts" / "fragments"
+         / "init-scout-native-dispatch.md").write_text("x", encoding="utf-8")
+        self.assertEqual(self.m.missing_native_assets(root, surface="init"), [])
+        self.assertIsNone(self.m.require_native_assets(root, surface="init"))
+
+    def test_unknown_surface_rejected(self):
+        root = self._gate_root()
+        with self.assertRaises(KeyError):
+            self.m.missing_native_assets(root, surface="blst")
+
+    def test_sdr_surface_explicit_equals_default(self):
+        root = self._gate_root()
+        (root.parent / "agent").mkdir(parents=True, exist_ok=True)
+        self.assertEqual(
+            self.m.missing_native_assets(root, surface="sdr"),
+            self.m.missing_native_assets(root))
 
 
 if __name__ == "__main__":

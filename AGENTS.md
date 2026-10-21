@@ -37,7 +37,7 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 
 | 命令 | 状态 | 说明 |
 | --- | --- | --- |
-| `/mgh-init` | ✅ 主力 | 发现存量安全控制 → 生成 Agent rules。隔离优先流水线(确定性发现 → scout 扇出补漏 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ opencode `AGENTS.md` 受管块(默认)/ claude `.claude/rules`(显式 opt-in),结构不混。能力规格 `openspec/specs/control-discovery/`(出规则见 `rules-emission/`)。 |
+| `/mgh-init` | ✅ 主力 | 发现存量安全控制 → 生成 Agent rules。隔离优先流水线(确定性发现 → scout 扇出补漏 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);**scout 读者批双形态**:opencode 安装面 `consumer=init` **缺省原生**(`emit_native_plan.py --tier scout` 页循环物化 + 同消息并发派 `init-scout-native` 子代理 + 子代理自写终态标记 + 看门狗;项目画像 `dispatch_mode:"runner"` 显式回退;claude/dsh 面与 T1/T2/T3/scout-merge 仍子进程 `fanout_runner`),产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ opencode `AGENTS.md` 受管块(默认)/ claude `.claude/rules`(显式 opt-in),结构不混。能力规格 `openspec/specs/control-discovery/`(出规则见 `rules-emission/`)。 |
 | `/mgh-sdr` | ✅ 主力 | 需求分支代码 diff 的**存量安全设计符合性复核**(merge 前关卡)。`git diff base..branch` → 接口维度注解启发式分组 + standalone 簇(`diff_group.py`)→ 存量设计基线投影 + 外部前端仓主流程受控检索(`sdr_context.py`,结论物化 + 哨兵 `read_roots[]`)→ fan-out 6 维度复核(垂直/横向/其他权限、SQL 注入、敏感信息、输入校验;**双形态**:opencode 安装面**缺省原生**(同宿主 subagent 波次派发,计划物化 `emit_native_plan.py` + 看门狗无人值守闭环,不写任何配置文件即生效)+ 项目画像 `.mgh/env-profile.json` 写 `dispatch_mode:"runner"` 显式回退;claude/dsh 安装面走子进程 `fanout_runner --tier sdr`)→ 项目根中文**自包含单文件 HTML 报告**(样式/脚本/数据全内嵌、离线可读)+ `<run-dir>/sdr_report_data.json` canonical 数据文件(`render_sdr_report.py`)。零参 = 显式默认集(master / 当前分支 / 全 6 维);多分支 sweep 走 launcher `mgh_sdr_launch.py --multi-branch`;敏感目录缺省回退默认模板(与 sra/srr 显式分歧)。能力规格 `openspec/specs/security-design-review/`。 |
 | `/mgh-sra` | ✅ | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。能力规格 `openspec/specs/security-augmentation/`。 |
 | `/mgh-srr` | ✅ | **无 openspec** 的自由文本需求(word/txt/md/excel/透传)安全评审。端口-适配器:确定性 intake 适配器(`ingest_requirements.py`)产出 sra 同 shape 上下文 → **逐字复用 sra 中间引擎**(clarify/augment/consistency 零新增提示词)→ 确定性 render 适配器(`render_report.py`)产**普通报告 + 台账**(NEVER 触 openspec)。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底;与 sra 共享 `business_context.json`。原创(无 vvah 源)。能力规格 `openspec/specs/freeform-security-review/`。 |
@@ -489,6 +489,21 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   当前仅子进程形态(三面壳各自显式披露,非静默镜像断裂);标记真相源不变量 = `.done`/`.failed`
   唯一写者是子代理自身(编排器唯一标记动作 = 重派认领时删除旧 `.failed`,与 runner
   `--retry-failed` 同形)。
+- `/mgh-init` 的 **scout 读者批原生形态(opencode 面 `consumer=init` 缺省原生;显式
+  `runner` 回退;claude/dsh 面与 T1/T2/T3/scout-merge 仍子进程)**:无画像也原生
+  (`source=host-default`,有意的行为变更;回滚 = 画像写 `runner`,删画像不再等于回退)。
+  诚实边界——**页循环**:一次物化只覆盖枚举器当前 pending 页(`units_total` 是页级数不是
+  全量批数),派完该页重物化取下一页,`units_total==0` 才进 scout-merge;止损为**波次
+  粒度**(挂死由看门狗中止兜底);**编排父会话是单点**(恢复经 `resume_state.py` 接上,
+  进度纯磁盘重派生);令牌形任务体下模型输出零任务文件路径,残余错抄面只在展开钩子缺席的
+  旧版安装回退形态成立(防线 = 越树守卫 + 重枚举回待派 + 至多一轮重派);标记真相源不变量
+  与 sdr 同形(`.done` touch / `.failed` 自写 `{unit_id, reason}`,指令仅住
+  `init-scout-native` 孪生定义,共享任务模板零改动;失败批缺口语在 scout-merge 前披露);
+  缺原生资产(孪生 agent 或纪律 fragment)或 claude 面显式 native → 退出码 2 + recipe,
+  NEVER 静默回退。计划文件名 `<init-dir>/native_plan.json` 当前仅 scout 消费;aggregate
+  层接原生前 MUST 先引入按 tier 的计划命名/子目录。实机闸门:本机 2.1.0 真会话 6 单元
+  2 波全 `ok` 零 `.failed`、400 批 5 页收敛、缺省/回退/资产门六形态与失败批/中断注入过;
+  同机子进程形态 headless 0/6 撞零推进熔断(runner 防线干净收口)——即本缺省变更的动机实证。
 
 - 工具族带**尽力而为的启动遥测**(埋点在各命令启动路径的确定性脚本内部,17 个命令壳零改动):未配置遥测端点(env `MGH_TELEMETRY_URL` 与模块内置默认皆空)时**零网络行为**;发送失败/超时静默丢弃,挂载脚本的 stdout/退出码/产物永不因遥测改变;resume 与过程查询的计数是 **30 分钟冷却窗口近似**(「活动窗口开始次数」,不是精确会话数——超 30 分钟的长任务中途查询会多计、30 分钟内快速重启会漏计);params 字段原样透传、可能含项目路径等内网信息(服务端在内网,端点置空即整体停报)。
 

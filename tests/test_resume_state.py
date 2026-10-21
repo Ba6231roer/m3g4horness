@@ -1448,5 +1448,241 @@ class TestTelemetryMount(unittest.TestCase):
             self.assertEqual(json.loads(out)["step"], "discover")
 
 
+import subprocess  # noqa: E402 — native-branch tests run the mirrored leaf
+
+
+class NativeScoutBranchTest(unittest.TestCase):
+    """fix-mgh-init-native-scout-dispatch: the scout layer's dispatch face is
+    the shared resolver's answer for consumer=init. Opencode-face mirror with
+    no profile = native (host default): top-level `dispatch`, the scout
+    next_action points at the native arc (plan-absent sub-phase = materialize
+    + watchdog; plan-present sub-phase = re-materialize + same-message wave
+    dispatch), the native discipline variant. Explicit runner / claude face =
+    byte-identical subprocess output (no dispatch). Fail-closed: bad profile,
+    native-on-non-opencode face, missing scout native assets (derive AND
+    --check). Progress derivation stays purely on-disk."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.target = self.tmp / "proj"
+        self.target.mkdir()
+        from _sdr_install_mirror import build_claude_mirror, build_opencode_mirror
+        self._build_opencode = build_opencode_mirror
+        self._build_claude = build_claude_mirror
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, script, *args):
+        p = subprocess.run([sys.executable, str(script), *args],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        return p.returncode, p.stdout, p.stderr
+
+    def _profile(self, body):
+        (self.target / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.target / ".mgh" / "env-profile.json").write_text(
+            json.dumps(body), encoding="utf-8")
+
+    def _fixture(self, batches=("b1", "b2"), markers=(), failed=(),
+                 plan=True):
+        init_dir = self.target / ".mgh-init"
+        init_dir.mkdir(parents=True, exist_ok=True)
+        (init_dir / "run_config.json").write_text(json.dumps(
+            {"target": str(self.target), "format": "opencode"}),
+            encoding="utf-8")
+        (init_dir / "controls_candidates.json").write_text(json.dumps(
+            {"candidates": [], "source": "regex"}), encoding="utf-8")
+        (init_dir / "clusters.json").write_text(json.dumps(
+            {"repo": str(self.target), "clusters": [], "truncated": False}),
+            encoding="utf-8")
+        (init_dir / "scout_plan.json").write_text(json.dumps(
+            {"batches": [{"batch_id": b} for b in batches]}), encoding="utf-8")
+        if plan:
+            (init_dir / "native_plan.json").write_text("{}", encoding="utf-8")
+        cp = init_dir / "checkpoints" / "scout"
+        for b in markers:
+            cp.mkdir(parents=True, exist_ok=True)
+            (cp / f"{IT.safe_unit_filename(b)}.json.done").write_text(
+                "", encoding="utf-8")
+        for b in failed:
+            cp.mkdir(parents=True, exist_ok=True)
+            (cp / f"{IT.safe_unit_filename(b)}.json.failed").write_text(
+                json.dumps({"unit_id": b, "reason": "provider 瞬断"}),
+                encoding="utf-8")
+        return init_dir
+
+    def _mirror_script(self, **assets):
+        return self._build_opencode(
+            self.tmp / "mirror", **assets) / "resume_state.py"
+
+    # --- opencode face: native host default ---
+    def test_opencode_no_profile_plan_absent_is_materialize_phase(self):
+        self._fixture(plan=False)
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "scout")
+        self.assertEqual(st["dispatch"]["form"], "native")
+        self.assertEqual(st["dispatch"]["source"], "host-default")
+        self.assertFalse(st["dispatch"]["profile_exists"])
+        self.assertEqual(st["dispatch"]["host_face"], "opencode")
+        self.assertEqual(st["dispatch"]["consumer"], "init")
+        self.assertFalse(st["dispatch"]["plan_present"])
+        self.assertEqual(st["dispatch"]["native_agent"], "init-scout-native")
+        self.assertTrue(Path(st["dispatch"]["discipline_fragment"]).is_absolute())
+        self.assertEqual(st["next_action"]["kind"], "bash")
+        self.assertIn("emit_native_plan.py", st["next_action"]["desc"])
+        self.assertIn("native_watchdog.py", st["next_action"]["desc"])
+        self.assertIn("no plan artifact yet", st["next_action"]["desc"])
+        self.assertTrue(any("watchdog artifacts absent" in n for n in st["notes"]))
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("init-native-wave", pr)
+        self.assertIn("init-native-marker", pr)
+        self.assertIn("init-native-watchdog", pr)
+
+    def test_opencode_plan_present_is_wave_dispatch_phase(self):
+        self._fixture(plan=True)
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "scout")
+        self.assertTrue(st["dispatch"]["plan_present"])
+        self.assertEqual(st["next_action"]["kind"], "subagent")
+        desc = st["next_action"]["desc"]
+        self.assertIn("emit_native_plan.py", desc)
+        self.assertIn("init-scout-native", desc)
+        self.assertIn("mgh-dispatch: plan=", desc)
+        self.assertIn("units_total == 0", desc)
+        self.assertIn("ONE assistant message", desc)
+        self.assertIn(str(self.target / ".mgh-init" / "native_plan.json"),
+                      st["next_action"]["absolute_paths"][2])
+
+    def test_opencode_partial_completion_derived_from_disk(self):
+        self._fixture(markers=("b1",))
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "scout")
+        self.assertEqual(st["tiers"]["scout"],
+                         {"done": 1, "failed": 0, "total": 2})
+        self.assertEqual(st["next_action"]["kind"], "subagent")
+
+    def test_opencode_failed_batch_native_retry_note(self):
+        self._fixture(failed=("b1",))
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["tiers"]["scout"]["failed"], 1)
+        self.assertTrue(any("AT MOST ONE more" in n for n in st["notes"]))
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("init-native-retry", pr)
+
+    def test_opencode_zero_batch_plan_vacuously_complete(self):
+        self._fixture(batches=())
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertNotEqual(st["step"], "scout")   # advances past scout
+
+    # --- explicit runner / claude face: subprocess form, no dispatch ---
+    def test_explicit_runner_subprocess_next_action_no_dispatch(self):
+        self._fixture(plan=True)
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertNotIn("dispatch", st)
+        self.assertEqual(st["next_action"]["kind"], "bash")
+        self.assertIn("list_scout_batches.py", st["next_action"]["desc"])
+        self.assertNotIn("emit_native_plan", st["next_action"]["desc"])
+        pr = [r["id"] for r in st["discipline_reminders"]["path_recipes"]]
+        self.assertIn("scout-fanout-dispatcher", pr)
+        self.assertNotIn("init-native-wave", pr)
+
+    def test_claude_face_stays_subprocess(self):
+        self._fixture(plan=True)
+        script = self._build_claude(
+            self.tmp / "claude-mirror") / "resume_state.py"
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertNotIn("dispatch", st)
+        self.assertIn("list_scout_batches.py", st["next_action"]["desc"])
+
+    # --- fail-closed faces (derive AND --check) ---
+    def test_bad_profile_fail_closed_derive_and_check(self):
+        self._fixture()
+        self._profile({"v": 1, "dispatch_mode": "bogus"})
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertIn("env profile rejected", err)
+        code2, out2, err2 = self._run(script, "--target", str(self.target),
+                                      "--check")
+        self.assertEqual(code2, 2)
+        body = json.loads(out2)
+        self.assertFalse(body["ok"])
+        self.assertTrue(any("env profile rejected" in v["issue"]
+                            for v in body["violations"]))
+
+    def test_native_on_claude_face_fail_closed(self):
+        self._fixture()
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        script = self._build_claude(
+            self.tmp / "claude-mirror") / "resume_state.py"
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertIn("only on the opencode face", err)
+        self.assertIn("dispatch_mode", err)
+
+    def test_missing_init_agent_fail_closed(self):
+        self._fixture()
+        script = self._mirror_script(init_agent=False)
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertIn("init-scout-native.md", err)
+        self.assertIn("install.sh --opencode", err)
+
+    def test_missing_init_fragment_fail_closed_check_path(self):
+        self._fixture()
+        script = self._mirror_script(init_fragment=False)
+        code, out, err = self._run(script, "--target", str(self.target),
+                                   "--check")
+        self.assertEqual(code, 2)
+        body = json.loads(out)
+        self.assertFalse(body["ok"])
+        self.assertTrue(any("init-scout-native-dispatch.md" in v["issue"]
+                            for v in body["violations"]))
+
+    def test_explicit_runner_skips_the_asset_gate(self):
+        self._fixture()
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        script = self._mirror_script(init_agent=False, init_fragment=False)
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("dispatch", json.loads(out))
+
+    def test_native_discipline_matches_list_steps_native_variant(self):
+        self._fixture(plan=True)
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        reminders = json.loads(out)["discipline_reminders"]
+        listed = subprocess.run(
+            [sys.executable, str(script.parent / "list_steps.py"),
+             "--target", str(self.target), "--step", "scout"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        step = json.loads(listed.stdout)["steps"][0]
+        self.assertEqual(step["discipline"], reminders)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,7 +51,18 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
   "notes": ["survey: optional/advisory ...", "resolve: codegraph=on, unresolved=N ..."],
   "stale_fanout": [],
   "discipline_reminders": {"gates": [], "path_recipes": [], "nevers": []},
-  "stage_flow_files": ["<abs>/prompts/fragments/init-stage/t1.md"]
+  "stage_flow_files": ["<abs>/prompts/fragments/init-stage/t1.md"],
+  "dispatch": {
+    "form": "native",
+    "source": "host-default|profile",
+    "profile_exists": false,
+    "host_face": "opencode",
+    "consumer": "init",
+    "profile_path": "<abs>/.mgh/env-profile.json",
+    "plan_present": true,
+    "native_agent": "init-scout-native",
+    "discipline_fragment": "<abs mgh-core>/prompts/fragments/init-scout-native-dispatch.md"
+  }
 }
 ```
 
@@ -85,6 +96,18 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
   **`done` → `init-stage/done.md`**(收尾纪律——manifest 收尾 + 失败落账 + 移除哨兵——经既有
   「Read stage_flow_files[0]」壳配方可达,长跑压缩后恢复到收尾态不再失联)。resume 衍生量,
   不持久化。
+- `dispatch` = **仅原生形态在场**(scout 读者批派发形态;经 `env_profile.resolve(<target>,
+  consumer="init")` 单源解析,与 sdr 同形字段):`form:"native"`、`source`
+  (`profile` = 画像显式选择 / `host-default` = opencode 面缺省,**无画像的 opencode init
+  即 `host-default`**)、`profile_exists`、`host_face`(`"opencode"`——native 仅此面)、
+  `consumer:"init"`、`profile_path`、`plan_present`(`<init-dir>/native_plan.json` 在场,
+  佐证信号非绑定决策)、`native_agent:"init-scout-native"`、`discipline_fragment`(安装树内
+  绝对路径)。子进程形态(显式 `dispatch_mode:"runner"`、`consumer=generic`、claude/dsh/other
+  面)该字段**缺席**,stdout 逐字节回到既有形状。原生形态下 scout 步(仅该步)的
+  `next_action` 指向原生弧(见下),`discipline_reminders` 解析 `get_discipline("scout",
+  domain="init", form="native")` 原生变体(与 `list_steps.py --step scout` 的
+  `discipline` 同表逐字一致);其余 step 的 discipline 与既有表逐字一致。进度仍纯磁盘重派生
+  (`plan_present` 只是佐证探针,进度判定仍走 marker)。
 
 ## step 判定真值表(阻塞序列;由产物 + `.done` + `run_config` 解析)
 
@@ -114,7 +137,23 @@ py resume_state.py --target <dir> [--init-dir <dir>] [--run-root <name>] --rearm
 
 `scout` 启用且未完时,按序判定 next_action:
 1. `scout_plan.json` 缺 → bash `plan_scout.py`。
-2. 有 batch 未终态(`.done` 与 `.failed` 均无)→ bash `list_scout_batches.py` 扇出 init-scout readers。
+2. 有 batch 未终态(`.done` 与 `.failed` 均无)→ **形态分派**:
+   - **子进程形态**(`dispatch` 缺席)→ bash `list_scout_batches.py` 扇出 init-scout readers(既有行,零变化)。
+   - **原生形态**(`dispatch` 在场)→ 按 `plan_present` 分两个子相位:
+     - **plan 未物化**(`<init-dir>/native_plan.json` 缺)→ `kind:bash`:跑
+       `emit_native_plan.py --tier scout --scout-plan <init-dir>/scout_plan.json
+       --checkpoints <init-dir>/checkpoints/scout --inputs-dir <init-dir>/inputs/scout
+       --profile <target>` + 同参 `--check`,并在第一波前后台启动看门狗
+       (`native_watchdog.py --run-dir <init-dir>`;根会话 = 宿主注入
+       `OPENCODE_SESSION_ID`,阈值缺省);
+     - **plan 已物化** → `kind:subagent`:先重物化 + 同参 `--check`(重物化 = 重枚举;一次
+       物化只覆盖当前 pending 页,派完该页重物化取下一页,`units_total==0` 才进 merge),
+       再**同一条 assistant 消息**并发派当前波全部单元(agent `init-scout-native`;
+       `description`=计划短号逐字,任务体=单行令牌 `mgh-dispatch: plan=<plan_path>
+       unit=<短号>`);两种子相位的 desc 末尾都指向 wave-discipline fragment
+       (`dispatch.discipline_fragment`)——看门狗先行 / 页循环 / 标记真相源 / 至多一轮
+       重派 / 限流等窗的完整纪律住 fragment,step 判定仍纯 marker(哪批派过、哪批成没成
+       全由磁盘标记重派生,`plan_present` 只是佐证)。
 3. 全部 reader batch 终态(`done+failed>=total`)但 `scout_candidates.json` 缺 → **subagent init-scout-merge**
    (真实失败形状:上下文吃紧的 session 扇出了 readers 却没跑 scout-merge,resume 时编排器
    丢了步骤序,跳到 `merge_scout.py`/T1 并手搓畸形聚合——本状态防之)。按 merge/fold-in 子状态给精确
@@ -161,6 +200,16 @@ inventory categories × run format);discover 产物不一致
   re-arm recipe(`resume_state.py --rearm-sentinel`;宿主不继承 mid-session env 时守卫整 run 休眠)。
 - **完成态哨兵残留**:`init_manifest.json` 在(run 已完成)但 `<init-dir>/.active` 仍在 → 退出码 2 +
   移除 recipe(`rm <init-dir>/.active`;残留哨兵把目标项目日常开发会话整体写锁定)。
+
+**派发面 fail-closed 三违例**(派生与 `--check` 同判,退出码 2 + recipe):
+- **坏画像**:`.mgh/env-profile.json` 不可解析/schema 违例 → NEVER 静默当缺省(「以为配了
+  native 实际跑 runner」的错配必须在启动即炸),recipe = 修或删配置。
+- **native + 非 opencode 面**:画像显式 `dispatch_mode:"native"` 而 `consumer=init` 从
+  claude/dsh/other 安装面解析 → NEVER 静默按子进程运行(原生仅 opencode),recipe =
+  画像写 `"runner"` 或换 opencode 面。
+- **缺 scout 原生资产**:解析为 native 但安装树缺 `agent/init-scout-native.md` 或
+  `prompts/fragments/init-scout-native-dispatch.md` → NEVER 静默回退子进程,recipe =
+  重跑 `install.sh --opencode <target>` 或显式 `"runner"`。
 
 > **计数口径(与枚举脚本同源)**:`tiers.t1.done`/`tiers.scout.done`/`tiers.t3.done` = canonical 单元
 > id 的**正向 marker 路径判定** done 数(谓词共享自 `init_tier.forward_done_ids`/`forward_failed_ids`,

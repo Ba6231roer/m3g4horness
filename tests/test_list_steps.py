@@ -10,7 +10,7 @@ Asserts:
   - stdout/stderr separation + JSON parseability
   - Zero dependency AST scan (stdlib only)
 """
-import ast, contextlib, importlib.util, io, json, sys, tempfile, unittest
+import ast, contextlib, importlib.util, io, json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -312,6 +312,251 @@ class TestListSteps(unittest.TestCase):
             encoding="utf-8")
         self.assertNotIn("merge_inventories", src)
         out = json.loads(self._steps()[-1]) if False else None
+
+
+class NativeScoutBranchTest(unittest.TestCase):
+    """fix-mgh-init-native-scout-dispatch: the env profile decides the scout
+    step's face (consumer=init). Missing/auto profile on the opencode face =
+    the native materializer entry + `native_arc` + the top-level `dispatch`
+    field (host default); explicit runner = the established subprocess manifest
+    byte-identical (no `dispatch`, no `native_arc`); claude/other faces stay
+    subprocess; a resolved native on a non-opencode face fails loud (exit 2 +
+    recipe, NEVER silently subprocess); missing scout native assets fail loud
+    too; the native discipline variant stays byte-verbatim equal to
+    resume_state's reminders for the same step/form."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.target = self.tmp / "proj"
+        self.target.mkdir()
+        sys.path.insert(0, str(HERE))
+        from _sdr_install_mirror import build_claude_mirror, build_opencode_mirror
+        self._build_opencode = build_opencode_mirror
+        self._build_claude = build_claude_mirror
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, script, *args):
+        p = subprocess.run([sys.executable, str(script), *args],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        return p.returncode, p.stdout, p.stderr
+
+    def _profile(self, body):
+        (self.target / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.target / ".mgh" / "env-profile.json").write_text(
+            json.dumps(body), encoding="utf-8")
+
+    def _scout(self, data):
+        return [s for s in data["steps"] if s["step"] == "scout"][0]
+
+    # --- dev tree (`other` face): subprocess unchanged + fail-closed native ---
+    def test_dev_tree_no_profile_stays_subprocess(self):
+        code, out, err = self._run(SCRIPTS / "list_steps.py",
+                                   "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        scout = self._scout(d)
+        self.assertEqual(scout["script"], "fanout_runner.py")
+        self.assertNotIn("native_arc", scout)
+
+    def test_dev_tree_explicit_runner_stays_subprocess(self):
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        code, out, err = self._run(SCRIPTS / "list_steps.py",
+                                   "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        self.assertEqual(self._scout(d)["script"], "fanout_runner.py")
+
+    def test_native_on_non_opencode_face_fail_closed(self):
+        # dev tree = `other` face; profile explicitly native → exit 2 + recipe
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        code, out, err = self._run(SCRIPTS / "list_steps.py",
+                                   "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("only on the opencode face", err)
+        self.assertIn("dispatch_mode", err)
+
+    def test_dev_tree_bad_profile_fail_closed(self):
+        self._profile({"v": 1, "dispatch_mode": "bogus"})
+        code, out, err = self._run(SCRIPTS / "list_steps.py",
+                                   "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("env profile rejected", err)
+        self.assertIn("recipe:", err)
+
+    # --- opencode face mirror: native default ---
+    def _mirror_script(self, **assets):
+        return self._build_opencode(self.tmp / "mirror", **assets) / "list_steps.py"
+
+    def test_opencode_no_profile_is_native_host_default(self):
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target),
+                                   "--step", "scout")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["dispatch"]["form"], "native")
+        self.assertEqual(d["dispatch"]["source"], "host-default")
+        self.assertFalse(d["dispatch"]["profile_exists"])
+        self.assertEqual(d["dispatch"]["host_face"], "opencode")
+        self.assertEqual(d["dispatch"]["consumer"], "init")
+        self.assertFalse(d["dispatch"]["plan_present"])
+        self.assertEqual(d["dispatch"]["native_agent"], "init-scout-native")
+        self.assertTrue(Path(d["dispatch"]["profile_path"]).is_absolute())
+        self.assertTrue(Path(d["dispatch"]["discipline_fragment"]).is_absolute())
+        scout = self._scout(d)
+        self.assertEqual(scout["script"], "emit_native_plan.py")
+        self.assertTrue(scout["invocation"].startswith("py "))
+        self.assertIn("--tier scout", scout["invocation"])
+        self.assertIn("--scout-plan <init-dir>/scout_plan.json", scout["invocation"])
+        self.assertIn("--profile <target>", scout["invocation"])
+        self.assertNotIn("fanout_runner", scout["invocation"])
+        self.assertEqual([p["phase"] for p in scout["native_arc"]],
+                         ["materialize", "waves", "merge"])
+        waves = scout["native_arc"][1]
+        self.assertEqual(waves["kind"], "subagent")
+        self.assertEqual(waves["agent"], "init-scout-native")
+        self.assertEqual(waves["discipline_fragment"],
+                         d["dispatch"]["discipline_fragment"])
+        # scout-merge stays subprocess: extra_invocations preserved + merge phase
+        self.assertEqual(len(scout["extra_invocations"]), 1)
+        self.assertEqual(scout["extra_invocations"][0]["script"],
+                         "fanout_runner.py")
+        self.assertIn("--tier scout-merge",
+                      scout["extra_invocations"][0]["invocation"])
+        # the native discipline variant rides the step
+        text = json.dumps(scout["discipline"], ensure_ascii=False)
+        for needle in ("init-native-wave", "emit_native_plan.py", "--retry-failed",
+                       "同一条 assistant 消息", "唯一写者是子代理自身", "units_total"):
+            self.assertIn(needle, text, needle)
+
+    def test_opencode_auto_profile_is_native(self):
+        self._profile({"v": 1, "dispatch_mode": "auto"})
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["dispatch"]["form"], "native")
+        self.assertEqual(d["dispatch"]["source"], "host-default")
+        self.assertTrue(d["dispatch"]["profile_exists"])
+
+    def test_opencode_explicit_runner_falls_back_byte_identical(self):
+        # explicit runner on the opencode mirror must be the PRE-change
+        # subprocess manifest, path-normalized: after replacing each install
+        # tree's scripts dir with a placeholder, the mirror's runner stdout and
+        # the dev tree's (unchanged runner face) are byte-identical — no
+        # dispatch, no native_arc, subprocess discipline.
+        script = self._mirror_script()
+        code_p, out_p, err_p = self._run(script, "--target", str(self.target))
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        code_r, out_r, err_r = self._run(script, "--target", str(self.target))
+        self.assertEqual(code_r, 0, err_r)
+        code_d, out_d, err_d = self._run(SCRIPTS / "list_steps.py",
+                                         "--target", str(self.target))
+        self.assertEqual(code_d, 0, err_d)
+        # stdout is JSON: backslashes are escaped, so normalize the ESCAPED form
+        esc = lambda s: str(s).replace("\\", "\\\\")
+        mirror_norm = out_r.replace(esc(script.parent), "<scripts>")
+        dev_norm = out_d.replace(esc(SCRIPTS), "<scripts>")
+        self.assertEqual(mirror_norm, dev_norm)
+        d = json.loads(out_r)
+        self.assertNotIn("dispatch", d)
+        scout = self._scout(d)
+        self.assertEqual(scout["script"], "fanout_runner.py")
+        self.assertNotIn("native_arc", scout)
+        self.assertEqual(scout["discipline"]["path_recipes"][0]["id"],
+                         "scout-fanout-dispatcher")
+
+    def test_opencode_plan_artifact_corroboration(self):
+        script = self._mirror_script()
+        (self.target / ".mgh-init").mkdir()
+        (self.target / ".mgh-init" / "native_plan.json").write_text(
+            "{}", encoding="utf-8")
+        code, out, err = self._run(script, "--target", str(self.target),
+                                   "--step", "scout")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["dispatch"]["plan_present"])
+
+    def test_missing_init_agent_fails_loud(self):
+        script = self._mirror_script(init_agent=False)
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("init-scout-native.md", err)
+        self.assertIn("install.sh --opencode", err)
+        self.assertIn("dispatch_mode", err)
+
+    def test_missing_init_fragment_fails_loud(self):
+        script = self._mirror_script(init_fragment=False)
+        code, out, err = self._run(script, "--target", str(self.target),
+                                   "--step", "scout")
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("init-scout-native-dispatch.md", err)
+
+    def test_explicit_runner_skips_the_asset_gate(self):
+        # runner form does not need the native assets at all — a stripped
+        # install tree must still emit the subprocess manifest.
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        script = self._mirror_script(init_agent=False, init_fragment=False)
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("dispatch", json.loads(out))
+
+    def test_claude_face_stays_subprocess_face(self):
+        script = self._build_claude(self.tmp / "claude-mirror") / "list_steps.py"
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        scout = self._scout(d)
+        self.assertEqual(scout["script"], "fanout_runner.py")
+        self.assertNotIn("native_arc", scout)
+
+    def test_claude_face_explicit_native_fail_closed(self):
+        script = self._build_claude(self.tmp / "claude-mirror") / "list_steps.py"
+        self._profile({"v": 1, "dispatch_mode": "native"})
+        code, out, err = self._run(script, "--target", str(self.target))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("only on the opencode face", err)
+
+    def test_native_discipline_verbatim_equals_resume_native_reminders(self):
+        # one static table, two consumers — the native form must hold the same
+        # byte-verbatim equality the subprocess form asserts.
+        script = self._mirror_script()
+        init_dir = self.target / ".mgh-init"
+        init_dir.mkdir()
+        (init_dir / "run_config.json").write_text(
+            json.dumps({"target": str(self.target), "format": "opencode"}),
+            encoding="utf-8")
+        (init_dir / "controls_candidates.json").write_text(
+            json.dumps({"candidates": [], "source": "regex"}), encoding="utf-8")
+        (init_dir / "clusters.json").write_text(
+            json.dumps({"repo": str(self.target), "clusters": [],
+                        "truncated": False}), encoding="utf-8")
+        (init_dir / "scout_plan.json").write_text(
+            json.dumps({"batches": [{"batch_id": "b1"}, {"batch_id": "b2"}]}),
+            encoding="utf-8")
+        p = subprocess.run([sys.executable, str(script.parent / "resume_state.py"),
+                            "--target", str(self.target)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        state = json.loads(p.stdout)
+        self.assertEqual(state["step"], "scout")
+        self.assertEqual(state["dispatch"]["form"], "native")
+        code, out, err = self._run(script, "--target", str(self.target),
+                                   "--step", "scout")
+        self.assertEqual(code, 0, err)
+        listed = json.loads(out)["steps"][0]["discipline"]
+        self.assertEqual(listed, state["discipline_reminders"])
 
 
 if __name__ == "__main__":

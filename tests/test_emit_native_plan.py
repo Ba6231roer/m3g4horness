@@ -520,6 +520,24 @@ class EmitNativePlanTest(unittest.TestCase):
         self.assertIn(u1["id"], err)
 
     # --- 7. scout smoke + import robustness --------------------------------
+    def _scout_listing(self, bids, total=None, done=0, failed=0):
+        pend = []
+        for i, bid in enumerate(bids):
+            s = self.fr._safe_name(bid)
+            pend.append({"batch_id": bid,
+                         "input_path": str(self.inputs / f"{s}.json"),
+                         "checkpoint_path": str(self.ck / f"{s}.json"),
+                         "done_marker": str(self.ck / f"{s}.done"),
+                         "failed_marker": str(self.ck / f"{s}.failed"),
+                         "slice_dir": str(self.inputs / f"slice{i}")})
+        return {"repo": str(self.repo), "total": len(pend) if total is None
+                else total, "done": done, "failed": failed, "pending": pend}
+
+    def _scout_argv(self, scout_plan, *extra):
+        return (["emit_native_plan.py", "--tier", "scout", "--scout-plan",
+                 str(scout_plan), "--checkpoints", str(self.ck),
+                 "--inputs-dir", str(self.inputs)] + list(extra))
+
     def test_scout_tier_smoke(self):
         scout_plan = self.run / "scout_plan.json"
         scout_plan.write_text('{"v": 1}\n', encoding="utf-8")
@@ -547,6 +565,73 @@ class EmitNativePlanTest(unittest.TestCase):
         for unit in [u for w in plan["waves"] for u in w["units"]]:
             self.assertIn("checkpoint_path", unit)
             self.assertEqual(unit["unit_id"], unit["batch_id"])
+
+    def test_scout_materialize_then_check_round_trip(self):
+        # fix-mgh-init-native-scout-dispatch: the scout plan materializes and
+        # the SAME-ARGS --check passes while nothing has moved (the wave loop's
+        # "materialize → check" opening step).
+        scout_plan = self.run / "scout_plan.json"
+        scout_plan.write_text('{"v": 1}\n', encoding="utf-8")
+        self._install_listing(self._scout_listing(
+            ["batch-a", "batch-b", "batch-c"], total=7))
+        code, out, err = self._run_argv(self._scout_argv(scout_plan))
+        self.assertEqual(code, 0, err)
+        code2, out2, err2 = self._run_argv(self._scout_argv(scout_plan,
+                                                            "--check"))
+        self.assertEqual(code2, 0, err2)
+        summary = json.loads(out2)
+        self.assertEqual(summary["check"], "ok")
+        self.assertEqual(summary["units_total"], 3)
+
+    def test_scout_page_units_total_is_page_size_not_total(self):
+        # page semantics: the listing IS the current pending page (the
+        # enumerator's budget already shrank it, here 81 of 400) — units_total
+        # is the PAGE size, never the tier total.
+        scout_plan = self.run / "scout_plan.json"
+        scout_plan.write_text('{"v": 1}\n', encoding="utf-8")
+        bids = [f"batch-{i:03d}" for i in range(81)]
+        self._install_listing(self._scout_listing(bids, total=400))
+        code, out, err = self._run_argv(self._scout_argv(scout_plan))
+        self.assertEqual(code, 0, err)
+        summary = json.loads(out)
+        self.assertEqual(summary["units_total"], 81)
+        plan = self._plan()
+        self.assertEqual(plan["units_total"], 81)
+        self.assertEqual(len(plan["waves"]), 27)   # 81 / wave_size 3
+
+    def test_scout_zero_pending_units_total_zero(self):
+        # the page-loop termination shape: pending exhausted → units_total == 0,
+        # zero task files, exit 0 (a clean empty page, never an error).
+        scout_plan = self.run / "scout_plan.json"
+        scout_plan.write_text('{"v": 1}\n', encoding="utf-8")
+        self._install_listing(self._scout_listing([], total=400, done=400))
+        code, out, err = self._run_argv(self._scout_argv(scout_plan))
+        self.assertEqual(code, 0, err)
+        summary = json.loads(out)
+        self.assertEqual(summary["units_total"], 0)
+        self.assertEqual(summary["waves"], 0)
+        self.assertEqual(self._task_files(), [])
+
+    def test_scout_check_flags_stale_plan_after_completion(self):
+        # a completed unit makes the plan stale BY DESIGN (exit 2 + stale
+        # report) — the wave loop repairs it by re-materializing, NEVER by
+        # consuming the stale plan.
+        scout_plan = self.run / "scout_plan.json"
+        scout_plan.write_text('{"v": 1}\n', encoding="utf-8")
+        bid = "batch-a"
+        self._install_listing(self._scout_listing([bid, "batch-b"]))
+        code, out, err = self._run_argv(self._scout_argv(scout_plan))
+        self.assertEqual(code, 0, err)
+        done_marker = self.ck / f"{self.fr._safe_name(bid)}.done"
+        done_marker.parent.mkdir(parents=True, exist_ok=True)
+        done_marker.write_text("", encoding="utf-8")
+        # the enumerator now reports the completed unit as no longer pending
+        self._install_listing(self._scout_listing(["batch-b"], total=2,
+                                                  done=1))
+        code2, out2, err2 = self._run_argv(self._scout_argv(scout_plan,
+                                                            "--check"))
+        self.assertEqual(code2, 2)
+        self.assertIn("stale", err2)
 
     def test_help_surface(self):
         r = subprocess.run([sys.executable, str(SCRIPT), "--help"],

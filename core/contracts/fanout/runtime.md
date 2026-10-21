@@ -70,7 +70,13 @@ Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画�
 披露的编排契约见 [`sdr/pipeline.md`](../sdr/pipeline.md)「原生派发形态」节;子进程派发器形态
 (`fanout_runner.py --tier sdr`)是 claude/dsh 面的缺省,也是 opencode 面在画像显式
 `dispatch_mode:"runner"` 时的唯一回退——runner 形态的行为逐字节不变,两形态的单元输入构造
-同源零漂移。其它命令(如 `/mgh-init`)以 `consumer=generic` 调用解析器,缺省仍为 runner。
+同源零漂移。**第二个消费方 = `/mgh-init` 的 scout 读者批**(opencode 面 `consumer=init`
+缺省原生;页循环语义见下):步骤清单/恢复的原生步形见
+[`init/step-manifest.md`](../init/step-manifest.md)「scout 原生步形」与
+[`init/resume-state.md`](../init/resume-state.md)「`dispatch` 字段」;波次纪律 fragment =
+`init-scout-native-dispatch.md`,原生孪生 agent = `init-scout-native`(标记自写),scout-merge
+及 T1/T2/T3 在 init 原生化第二层之前仍走子进程派发器(aggregate 接入后继承同一
+`consumer=init` 缺省)。其它命令以 `consumer=generic` 调用解析器,缺省仍为 runner。
 两脚本与子进程派发器的关系 = **旁路供给面**:`emit_native_plan.py` 以兄弟导入复用派发器
 的 tier 表、枚举器调用与 run 目录锚定、模板加载与逐字填充、锚树校验、安全文件名(**派发器
 源码零改动、其行为零变化**),使原生形态与子进程形态的单元输入构造零漂移。
@@ -89,6 +95,13 @@ Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画�
   `--wave-size` > 环境画像 `native_concurrency`(缺省 3);配额只来自环境画像;
   `wave_size_source` 记录取小者来源(`concurrency|quota`,平局记 concurrency)。**静态
   算术**:运行期准入(配额滑窗/冷却/风暴截断)仍属派发器与看门狗层,计划只定形状。
+- **页语义(init scout 消费方)**:一次物化只覆盖枚举器当前 pending 页——枚举器
+  (`list_scout_batches.py`)的编排预算 flag 会把 `pending[]` 收紧成一页(超预算
+  `shrunk:true`),故物化产物的 `units_total` 是**本页**单元数,不是全量批数。消费方
+  (init scout 波次纪律)在派完当前页后**重物化**取下一页,循环直到一次物化给出
+  `units_total == 0`(pending 清零)才进入聚合段;**NEVER** 假设一次计划覆盖全部批、
+  **NEVER** 手工翻枚举器工件记账「哪些派过了」(重物化即重枚举,pending 由磁盘标记
+  重派生)。sdr 消费方的 pending 页语义同源(枚举器 `diff_group.py` 同一收紧机制)。
 - stdout 摘要(单行 JSON):tool/tier/agent/units_total/waves/wave_size/
   wave_size_source/plan_path/inputs_dir。
 
@@ -118,18 +131,21 @@ schema(全键可选、未知字段忽略;quota 在场时三键齐全):
   - 宿主面由**正在运行的脚本安装路径**判定(`.opencode` 段 → opencode,`.claude` 段 →
     claude,其余(dsh `mgh-core/`、开发树、自定义拷贝)→ other);调用方可显式传入宿主面
     覆盖(launcher 用 `--host` / PATH 探测结果覆盖)。
-  - 消费者由调用方显式传入(`/mgh-sdr` = `sdr`;缺省 = `generic`)。**仅
-    `consumer=sdr ∧ host=opencode` 解析为 `native`**;`consumer=generic`、其它消费者与
-    claude/other 安装面一律 `runner`(既有命令行为零变化)。
+  - 消费者由调用方显式传入(`/mgh-sdr` = `sdr`,`/mgh-init` = `init`;缺省 = `generic`)。
+    **仅 `consumer ∈ {sdr, init} ∧ host=opencode` 解析为 `native`**;`consumer=generic`、
+    其它消费者与 claude/other 安装面一律 `runner`(既有命令行为零变化)。
   - 显式 `dispatch_mode:"native"` / `"runner"` 永远覆盖缺省;**`"runner"` 是 opencode 上
     回到子进程形态的唯一开关**(显式回退;调用行与纪律由步骤清单给出)。
   - 解析结果可经模块与 CLI 读取:stdout 增 `host_face`/`consumer`/`form`/`source`
-    (`profile` = 显式选择,`host-default` = 缺省规则),CLI 增 `--consumer <sdr|generic>`。
-    sdr 编排面(命令壳 step 0、步骤清单、恢复、报告、launcher)全部消费该单一解析结果,
-    NEVER 各自比较原始 `dispatch_mode`。
-  - opencode 面解析为 native 但安装树缺 `sdr-review-native` agent 或波次纪律 fragment 时,
-    编排面退出码 2 + 重装/显式 runner recipe(`env_profile.require_native_assets`),
-    NEVER 静默回退子进程。
+    (`profile` = 显式选择,`host-default` = 缺省规则),CLI 增
+    `--consumer <sdr|init|generic>`。sdr/init 编排面(命令壳 step 0、步骤清单、恢复、
+    报告、launcher)全部消费该单一解析结果,NEVER 各自比较原始 `dispatch_mode`。
+  - opencode 面解析为 native 但安装树缺该 consumer 的原生资产(sdr =
+    `sdr-review-native` agent + sdr 波次纪律 fragment;init = `init-scout-native` agent +
+    scout 波次纪律 fragment;资产门 `env_profile.require_native_assets` 按 surface
+    参数化,每面查自己的资产)时,编排面退出码 2 + 重装/显式 runner recipe,
+    NEVER 静默回退子进程。解析为 native 但宿主面不是 opencode(如 claude 面显式
+    `native`)→ init 编排面(scout)退出码 2 + recipe,NEVER 静默按子进程运行。
 - **fail-closed**:坏 JSON/非对象/未知或非整数 `v`/枚举域外取值/并发越界(含非整数与
   布尔)/quota 残缺或非正 → CLI 退出码 2 + recipe(文件路径 + 违规字段),导入形态抛
   `EnvProfileError`(ValueError 子类);NEVER 静默回退缺省(静默回退会让「以为配了

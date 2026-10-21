@@ -16,6 +16,44 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — /mgh-sdr opencode 面缺省原生派发 + 特殊授权说明退役(0.1.88)
+
+- **缺省形态按宿主安装面 × 消费者解析**:`env_profile.py` 新增 `host_face`
+  (`opencode`/`claude`/`other`,按正在运行的脚本安装路径段判定,调用方可显式覆盖)与
+  `consumer`(`sdr`/`generic`,调用方显式传入)两个维度;仅 `consumer=sdr ∧
+  host=opencode` 的缺失/`auto` 解析为 `native`,其余组合仍 `runner`。CLI 增
+  `--consumer`,stdout 增 `host_face`/`consumer`/`form`/`source`。显式 `dispatch_mode`
+  永远优先,坏画像仍 fail-closed。其它命令(如 `/mgh-init`)不传 sdr,缺省不变。
+- **launcher 提示词与形态同源**:`mgh_sdr_launch.py` 在 `sdr_context` 后、spawn 前解析
+  形态;opencode 缺省生成原生第 3 步(看门狗 → 物化 + `--check` → 同消息令牌派发 →
+  重枚举),显式 runner 与 claude 宿主生成子进程提示词;claude + 显式 native / 坏画像 /
+  缺原生资产均在 spawn 前退出码 2。opencode 日志级别按宿主版本取拼写(v1 `ERROR` /
+  v2 `error`),2.x 宿主可正常启动。
+- **步骤/恢复/报告形态一致**:`list_sdr_steps.py` / `resume_sdr_state.py` 的 `dispatch`
+  字段增 `source`/`profile_exists`/`host_face`/`consumer`;opencode 无画像 run 的 fanout
+  步与 `next_action` 直接指原生(物化/派波次),不再出现子进程调用提示;
+  `render_sdr_report.py` 披露条件改为「本次 run 的计划工件在场 ∧ 解析形态 native」,
+  证据串区分画像显式与宿主缺省。
+- **opencode 命令壳原生为主**:主流程/阶段表/确定性调用清单移除子进程派发行,子进程回退
+  只经步骤清单的 fanout `invocation` 与 `discipline`;壳正文零子进程派发字面量(预算
+  4582 mid tokens,< 4.8K 目标)。`--quota-*` 标注为 runner 回退专用。
+- **原生资产在场检查**:`env_profile.require_native_assets` 单一 helper;opencode 面解析
+  native 但安装树缺 `sdr-review-native` agent 或波次纪律 fragment → 退出码 2 + 重装或
+  显式 runner recipe,**NEVER 静默回退子进程**。install 自检新增两条目。
+- **特殊授权说明退役为可选项目入口**:唯一入口 = `<repo>/.mgh/special-auth.md`(项目
+  所有、手工放置);存在时命令壳/launcher/恢复输出只加一句「先 Read 该说明」,不存在零
+  动作。删除 sdr 流程内 `cred_source.json` / `mgh_credentials.py` / `--cred-file` /
+  `credential_expired` 的硬编码步骤;`install.sh` 不再复制该文档并清理旧安装树副本
+  (打印迁移提示);`fanout_runner --cred-file` 与 `mgh_credentials.py` 保留为手动/遗留
+  能力,派发行为与测试不变。
+- **claude/dsh 零行为变化**:两面壳仍子进程形态(步骤清单/恢复无 `dispatch` 字段),三面
+  壳如实披露支持面。新增/改写测试:`test_env_profile`(解析矩阵/宿主面/资产门)、
+  `test_list_sdr_steps`/`test_resume_sdr_state`/`test_render_sdr_report`(opencode 缺省
+  原生 + claude/runner 边界)、`test_mgh_sdr_launch`(原生提示词/fail-closed/日志级别)、
+  `test_sdr_native_dispatch`(壳/fragment/契约形状锚)、`test_install_special_auth`
+  (不再安装 + 旧副本清理)、`test_fanout_runner`(项目级 advisory);同步更新
+  `sdr/pipeline.md`、`fanout/runtime.md`、fragment 与根 AGENTS.md。
+
 ### Added — /mgh 原生派发路线 #6:派发工具插件 `mgh_dispatch`(一次调用跑完全部波次)+ 令牌展开钩子(0.1.87)
 
 - **派发工具(opencode 面,插件形态)**:新增独立插件

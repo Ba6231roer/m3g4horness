@@ -110,6 +110,23 @@ def _load():
     return mod
 
 
+def _native_assets_root(tmp: Path) -> Path:
+    """A temp <mgh-core> root carrying the two native assets, so in-process
+    launcher tests (run from the dev tree, whose sibling agent/ dir does not
+    exist) exercise the native form without tripping the asset gate. The
+    missing-asset path patches `_mgh_core_root` to a bare dir instead."""
+    core = Path(tmp) / ".opencode" / "mgh-core"
+    frag = core / "prompts" / "fragments"
+    frag.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HERE.parent / "core" / "prompts" / "fragments"
+                 / "sdr-native-dispatch.md", frag / "sdr-native-dispatch.md")
+    agent = core.parent / "agent"
+    agent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HERE.parent / "releases" / "opencode" / "agent"
+                 / "sdr-review-native.md", agent / "sdr-review-native.md")
+    return core
+
+
 class TestLauncherDryRun(unittest.TestCase):
     """--dry-run end-to-end (zero spawn): artifacts + sentinel + prompt file."""
 
@@ -144,6 +161,11 @@ class TestLauncherDryRun(unittest.TestCase):
             "    @PostMapping(\"/pay/quick\")\n    public String quick() { return \"ok\"; }\n}\n",
             encoding="utf-8")
         _commit_all(self.repo, "feat")
+        # in-process launcher runs from the dev tree; give the native asset gate a
+        # complete fake install root (opencode face) so the default native form can
+        # run. `_detect_host` stays the real probe unless a test overrides it.
+        self.install_root = _native_assets_root(self.tmp / "install")
+        self.m._mgh_core_root = lambda: self.install_root
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -378,18 +400,126 @@ class TestLauncherDryRun(unittest.TestCase):
         self.assertNotIn("'sensitive_catalog']", src,
                          "the object body is never read back for embedding")
 
+    # --- fix-mgh-sdr-native-default-dispatch 3.2: prompt follows the form ---
+    def _force_host(self, host):
+        self.m._detect_host = lambda explicit=None: host
+
+    def _prompt_of_last_run(self):
+        run_dir = sorted((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))[-1]
+        return (run_dir / "orchestrator_prompt.md").read_text(encoding="utf-8")
+
+    def test_opencode_no_profile_prompt_is_native(self):
+        self._approve_front()
+        self._force_host("opencode")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        prompt = self._prompt_of_last_run()
+        for needle in ("原生派发", "emit_native_plan.py", "sdr-review-native",
+                       "mgh-dispatch: plan=<plan_path> unit=<短号>",
+                       "sdr-native-dispatch.md", "native_watchdog.py"):
+            self.assertIn(needle, prompt, needle)
+        self.assertNotIn("fanout_runner", prompt)
+        self.assertNotIn("--cred-file", prompt)
+        self.assertIn("dispatch form=native", err)
+
+    def test_opencode_runner_profile_prompt_is_subprocess(self):
+        self._approve_front()
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps({"v": 1, "dispatch_mode": "runner"}), encoding="utf-8")
+        self._force_host("opencode")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        prompt = self._prompt_of_last_run()
+        self.assertIn("fanout_runner.py", prompt)
+        self.assertIn("--wave 1", prompt)
+        self.assertNotIn("emit_native_plan.py", prompt)
+        self.assertIn("dispatch form=runner", err)
+
+    def test_claude_prompt_keeps_subprocess_form(self):
+        self._approve_front()
+        self._force_host("claude")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        prompt = self._prompt_of_last_run()
+        self.assertIn("fanout_runner.py", prompt)
+        self.assertNotIn("emit_native_plan.py", prompt)
+        self.assertIn("dispatch form=runner", err)
+
+    def test_claude_explicit_native_exits_2_before_prompt(self):
+        self._approve_front()
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps({"v": 1, "dispatch_mode": "native"}), encoding="utf-8")
+        self._force_host("claude")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertIn("not supported by the claude host", err)
+        self.assertIn("--host opencode", err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        self.assertFalse((run_dir / "orchestrator_prompt.md").exists(),
+                         "fail-closed must happen before the prompt is written")
+
+    def test_bad_profile_exits_2_before_prompt(self):
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text("{broken",
+                                                            encoding="utf-8")
+        self._force_host("opencode")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertIn("env profile rejected", err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        self.assertFalse((run_dir / "orchestrator_prompt.md").exists())
+
+    def test_missing_native_assets_exit_2_before_prompt(self):
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps({"v": 1, "dispatch_mode": "native"}), encoding="utf-8")
+        bare = self.tmp / "bare-core"
+        bare.mkdir()
+        self.m._mgh_core_root = lambda: bare
+        self._force_host("opencode")
+        code, out, err = self._launch(["--repo", str(self.repo),
+                                       "--branch", "feature-pay", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertIn("sdr-review-native.md", err)
+        self.assertIn("install.sh --opencode", err)
+        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        self.assertFalse((run_dir / "orchestrator_prompt.md").exists())
+
+    def test_multibranch_dry_run_prompts_follow_the_form(self):
+        _git(self.repo, "checkout", "-qb", "feature-b2")
+        (self.repo / "src" / "B2.java").write_text("class B2 {}\n", encoding="utf-8")
+        _commit_all(self.repo, "b2")
+        _git(self.repo, "checkout", "-q", "feature-pay")
+        mb = self.tmp / "branches-native.txt"
+        mb.write_text("feature-pay\nfeature-b2\n", encoding="utf-8")
+        self._force_host("opencode")
+        code, out, err = self._launch(["--repo", str(self.repo), "--dry-run",
+                                       "--multi-branch", str(mb)])
+        self.assertEqual(code, 0, err)
+        prompts = [p.read_text(encoding="utf-8") for p in
+                   (self.repo / ".mgh-sdr" / "runs").glob("*/orchestrator_prompt.md")]
+        self.assertEqual(len(prompts), 2)
+        for prompt in prompts:
+            self.assertIn("emit_native_plan.py", prompt)
+            self.assertNotIn("fanout_runner", prompt)
+
 
 
 
 class TestSpecialAuthPromptFace(unittest.TestCase):
-    """The launcher is the PREFERRED zero-prompt entry: when the special-auth
-    deployment doc is present in the install tree, the orchestrator prompt MUST
-    carry the credential-preparation block and the step-3 invocation MUST carry
-    --cred-file (a host session that only sees this prompt would otherwise
-    dispatch per-child SSO logins). Doc absent => prompt bytes unchanged
-    (generic install, no --cred-file anywhere)."""
-
-    _created = False
+    """fix-mgh-sdr-native-default-dispatch 7.x: the special-auth doc is a
+    PROJECT-OWNED optional entry (`<repo>/.mgh/special-auth.md`). Present => the
+    prompt carries exactly one "read it first" line (both dispatch forms);
+    absent => zero special-auth bytes. The flow NEVER presets credential
+    commands (mgh_credentials.py / cred_source.json / --cred-file /
+    credential_expired)."""
 
     def setUp(self):
         self.m = _load()
@@ -404,19 +534,12 @@ class TestSpecialAuthPromptFace(unittest.TestCase):
         (self.repo / "src" / "PayController.java").write_text(
             "@RestController\npublic class PayController {}\n", encoding="utf-8")
         _commit_all(self.repo, "feat")
-        self.doc = (Path(self.m.__file__).resolve().parent.parent /
-                    "mgh-special-auth.md")
-        self.removed_real = None
-        if self.doc.exists():  # park the maintainer's real copy for the test
-            self.removed_real = self.tmp / "parked-real-doc.md"
-            shutil.copy2(self.doc, self.removed_real)
-            self.doc.unlink()
+        self.install_root = _native_assets_root(self.tmp / "install")
+        self.m._mgh_core_root = lambda: self.install_root
+        self.m._detect_host = lambda explicit=None: "claude"
+        self.doc = self.repo / ".mgh" / "special-auth.md"
 
     def tearDown(self):
-        if self.removed_real is not None:
-            shutil.copy2(self.removed_real, self.doc)
-        else:
-            self.doc.unlink(missing_ok=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _launch(self, extra):
@@ -434,7 +557,7 @@ class TestSpecialAuthPromptFace(unittest.TestCase):
         code, out, err = self._launch(["--repo", str(self.repo),
                                        "--branch", "feature-pay", "--dry-run"])
         self.assertEqual(code, 0, err)
-        run_dir = next((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))
+        run_dir = sorted((self.repo / ".mgh-sdr" / "runs").glob("*-feature-pay"))[-1]
         return (run_dir / "orchestrator_prompt.md").read_text(encoding="utf-8"), err
 
     def test_doc_absent_generic_prompt_no_cred(self):
@@ -443,16 +566,27 @@ class TestSpecialAuthPromptFace(unittest.TestCase):
         self.assertNotIn("--cred-file", prompt)
         self.assertNotIn("special-auth", err)
 
-    def test_doc_present_prompt_carries_preparation_and_cred_flag(self):
-        self._created = True
+    def test_doc_present_prompt_carries_one_entry_line(self):
+        self.doc.parent.mkdir(parents=True, exist_ok=True)
         self.doc.write_text("# guide\n", encoding="utf-8")
         prompt, err = self._prompt()
-        self.assertIn("special-auth", prompt)
-        self.assertIn("mgh_credentials.py", prompt)
-        self.assertIn("cred_source.json", prompt)
-        self.assertIn("--cred-file <run>/cred.json", prompt)
-        self.assertIn("credential_expired", prompt)
-        self.assertIn("special-auth deployment doc present", err)
+        self.assertIn(str(self.doc.resolve()), prompt)
+        self.assertIn("先 Read 该说明", prompt)
+        for banned in ("mgh_credentials.py", "cred_source.json", "--cred-file",
+                       "credential_expired"):
+            self.assertNotIn(banned, prompt, banned)
+        self.assertNotIn("special-auth", err)
+
+    def test_doc_present_native_prompt_also_carries_the_entry(self):
+        self.doc.parent.mkdir(parents=True, exist_ok=True)
+        self.doc.write_text("# guide\n", encoding="utf-8")
+        self.m._detect_host = lambda explicit=None: "opencode"
+        prompt, err = self._prompt()
+        self.assertIn("emit_native_plan.py", prompt)
+        self.assertIn(str(self.doc.resolve()), prompt)
+        for banned in ("mgh_credentials.py", "cred_source.json", "--cred-file",
+                       "credential_expired"):
+            self.assertNotIn(banned, prompt, banned)
 
 import shutil  # noqa: E402  (tearDown uses it; placed here to keep the header import list stdlib-honest)
 
@@ -530,6 +664,14 @@ class _FakeHostMixin:
         self.ev_dir = Path(tempfile.mkdtemp(prefix="mgh_launch_glog_"))
         self.addCleanup(shutil.rmtree, self.ev_dir, ignore_errors=True)
         m._opencode_global_log_path = lambda: self.ev_dir / "opencode.log"
+        # native asset gate: these flows default to the opencode-native form, so a
+        # complete fake install root keeps the gate satisfied (dev-tree runs have
+        # no sibling agent/ dir).
+        self.install_root = _native_assets_root(
+            Path(tempfile.mkdtemp(prefix="mgh_launch_assets_")))
+        self.addCleanup(shutil.rmtree, self.install_root.parent.parent,
+                        ignore_errors=True)
+        m._mgh_core_root = lambda: self.install_root
 
         def fake_context(repo, run_dir, base, branch, dims, read_roots,
                          no_codegraph=False):
@@ -889,11 +1031,29 @@ class TestSpawnEnvAndFlags(unittest.TestCase):
     def test_opencode_carries_log_flags_claude_does_not(self):
         self.m._spawn_host("opencode", self.repo, "p")
         cmd, _ = self._last()
-        self.assertEqual(cmd[2:5], ["--print-logs", "--log-level", "ERROR"])
+        self.assertEqual(cmd[2], "--print-logs")
+        self.assertEqual(cmd[3], "--log-level")
+        self.assertIn(cmd[4], ("ERROR", "error"),
+                      "the level spelling follows the installed host version")
         self.m._spawn_host("claude", self.repo, "p")
         cmd, _ = self._last()
         self.assertNotIn("--print-logs", cmd)
         self.assertNotIn("--log-level", cmd)
+
+    def test_opencode_log_level_is_version_aware(self):
+        # v1 (1.x) requires uppercase ERROR; v2 (2.x) rejects it for lowercase
+        saved = self.m.subprocess.run
+        try:
+            self.m.subprocess.run = lambda cmd, **kw: subprocess.CompletedProcess(
+                cmd, 0, stdout="opencode v2.1.0\n", stderr="")
+            self.assertEqual(self.m._opencode_log_flags("opencode"),
+                             ["--print-logs", "--log-level", "error"])
+            self.m.subprocess.run = lambda cmd, **kw: subprocess.CompletedProcess(
+                cmd, 0, stdout="1.19.3\n", stderr="")
+            self.assertEqual(self.m._opencode_log_flags("opencode"),
+                             ["--print-logs", "--log-level", "ERROR"])
+        finally:
+            self.m.subprocess.run = saved
 
     def test_model_passthrough_both_hosts_only_when_given(self):
         for host in ("opencode", "claude"):
@@ -928,6 +1088,13 @@ class TestUpstreamOutputGuard(unittest.TestCase, _FakeHostMixin):
         self._two_branch_repo()
         self.spawned = []
         self.run_dirs = []
+        # the healthy branch resolves the default opencode-native form: satisfy
+        # the native asset gate with a complete fake install root
+        self.install_root = _native_assets_root(
+            Path(tempfile.mkdtemp(prefix="mgh_launch_assets_")))
+        self.addCleanup(shutil.rmtree, self.install_root.parent.parent,
+                        ignore_errors=True)
+        self.m._mgh_core_root = lambda: self.install_root
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)

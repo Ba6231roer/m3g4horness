@@ -72,7 +72,9 @@ their existing behavior); none present → exit 2 + fallback recipe (the
 orchestrator falls back to the existing manual dispatch, behavior unchanged).
 
 Child execution-environment isolation (OPTIONAL, default OFF — absent flags
-mean a byte-identical legacy spawn):
+mean a byte-identical legacy spawn). These are MANUAL/LEGACY capabilities: no
+mgh command flow references them (the sdr flow neither presets credential
+commands nor appends --cred-file):
   --cred-file <run>/cred.json  static credential injection (opencode host form
             only; claude/dsh forms exit 2): per-unit child config
             `<run>/childcfg/<unit>/opencode/opencode.json` (a copy of the
@@ -96,10 +98,10 @@ output tails scanned against the cred file's `expired_signatures[]`; the first
 hit stops NEW dispatch immediately (priority above the rate-limit storm and
 cooldowns), exit 2, stdout `credential_expired` + `credential_expired_units`,
 stderr recipe = re-acquire → update cred file → `--resume --retry-failed`.
-Disk marker semantics unchanged. Special-auth advisory: when the install tree
-carries `<mgh-core>/mgh-special-auth.md` (optional deployment doc,
-maintainer-carried, NOT in git) and no --cred-file was passed, one stderr
-note points at it — command-agnostic, all tiers.
+Disk marker semantics unchanged. Special-auth advisory: when the PROJECT
+carries `<repo>/.mgh/special-auth.md` (optional, deployment-owned) and no
+--cred-file was passed, one stderr note points at it — command-agnostic, all
+tiers, exit code untouched.
 --dry-run (dispatch form) is a PURE PLAN: zero writes, zero spawns — the unit
 list, the would-write paths and the command form go to stdout; the
 --kill-stale/--purge-audit review guards are separate and unchanged.
@@ -620,15 +622,16 @@ _CRED_EXPIRED_RECIPE = (
     "token; recipe: re-acquire credentials (mgh_credentials.py, or per the "
     "special-auth deployment doc when present), update the cred file, then "
     "re-run with --resume --retry-failed (done units are never re-dispatched)")
-SPECIAL_AUTH_DOC = "mgh-special-auth.md"
+SPECIAL_AUTH_DOC = Path(".mgh") / "special-auth.md"
 
 
-def _special_auth_doc_path() -> Path:
-    """Optional deployment doc in the install tree (`<mgh-core>/`): present =
-    the maintainer carries enterprise-specific auth/environment guidance and
-    the orchestrator/runner should point at it; absent = generic flows only.
-    Maintainer-carried, NOT in git; install converges the target copy."""
-    return Path(__file__).resolve().parent.parent / SPECIAL_AUTH_DOC
+def _special_auth_doc_path(repo) -> Path:
+    """Optional PROJECT-owned entry (`<repo>/.mgh/special-auth.md`, placed by the
+    deployment): present = the project carries its own authentication
+    instructions and the orchestrator/runner points at them; absent = generic
+    flows only. The maintainer's install-tree copy is retired (install no longer
+    distributes it)."""
+    return Path(repo) / SPECIAL_AUTH_DOC
 
 
 # Per-unit extra spawn env (uid -> dict), the env twin of _UNIT_SINKS:
@@ -2389,15 +2392,15 @@ def main() -> int:
                          "— zero writes zero spawns, unit list + would-write paths + "
                          "command form on stdout, exit 0")
     ap.add_argument("--cred-file", metavar="<run>/cred.json",
-                    help="static credential injection (opencode host form only; "
+                    help="MANUAL/LEGACY static credential injection (no mgh "
+                         "command flow uses it; opencode host form only; "
                          "claude/dsh exit 2): per-unit child config with the "
                          "cred-declared provider overridden to baseURL+apiKey "
                          "(id unchanged) + child env XDG_CONFIG_HOME/XDG_DATA_HOME "
                          "per unit — children never run their own login flow; "
                          "apikey reaches only the child config file, NEVER "
                          "stdout/stderr/logs. Validated by the mgh_credentials "
-                         "validator (acquire the file there first; see the "
-                         "special-auth deployment doc when present). Bad/missing "
+                         "validator (acquire the file there first). Bad/missing "
                          "file exits 2 before any spawn. Absent flag = "
                          "byte-identical legacy spawn")
     ap.add_argument("--isolate-data", action="store_true",
@@ -3046,12 +3049,11 @@ def main() -> int:
     # Special-auth advisory (command-agnostic, all tiers): the optional
     # deployment doc is present but this run dispatches without static
     # injection — one stderr note, exit code and behavior untouched.
-    _auth_doc = _special_auth_doc_path()
+    _auth_doc = _special_auth_doc_path(repo)
     if cred is None and _auth_doc.is_file():
-        _eprint(f"[fanout_runner] note: special-auth deployment doc present "
-                f"({_auth_doc}) — credential preparation and --cred-file "
-                f"usage are described there; this run dispatches WITHOUT "
-                f"static injection")
+        _eprint(f"[fanout_runner] note: special-auth entry present "
+                f"({_auth_doc}) — read it when needed and follow its own "
+                f"instructions; this run dispatches WITHOUT static injection")
     # Orphan advisory (non-blocking): a residual liveness file means the
     # previous run ended hard; read it BEFORE the write below replaces it.
     _orphan_advisory(plan_path.parent, args.tier)

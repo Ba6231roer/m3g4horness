@@ -103,22 +103,14 @@ case "$PLATFORM" in
 esac
 find "${_prune_dirs[@]}" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
-# 3b) Optional special-auth deployment doc (maintainer-carried, NOT in git;
-#     enterprise SSO/credential runbook consumed by fanout_runner /
-#     list_sdr_steps / resume_sdr_state). Convergence: the target copy exists
-#     IFF the repo-root source exists — a present source installs (revealed in
-#     the install output); an absent source REMOVES a stale target copy (stale
-#     enterprise guidance must never linger). Generic installs (no source, no
-#     target copy) are byte-identical to before; the co-location self-check
-#     below never warns about this file.
-AUTH_SRC="$HERE/mgh-special-auth.md"
+# 3b) Special-auth is a PROJECT-owned optional entry (<target>/.mgh/special-auth.md),
+#     never an install artifact. The maintainer's package-side doc is NOT copied
+#     into the target; a stale install-tree copy left by an older version is
+#     removed with a migration hint (the runtime probes only the project path).
 AUTH_DST="$DEST/mgh-core/mgh-special-auth.md"
-if [[ -f "$AUTH_SRC" ]]; then
-  cp "$AUTH_SRC" "$AUTH_DST"
-  echo "✓ installed special-auth deployment doc (enterprise credential/environment runbook)"
-elif [[ -f "$AUTH_DST" ]]; then
+if [[ -f "$AUTH_DST" ]]; then
   rm -f "$AUTH_DST"
-  echo "✓ removed stale special-auth deployment doc from target (source not present in this package)"
+  echo "✓ removed legacy install-tree special-auth doc; place a valid note at <target>/.mgh/special-auth.md if this project needs one"
 fi
 
 # 4) Self-check (fail-soft per R5.8): the /mgh-init discover/scout/assemble pipeline
@@ -139,14 +131,15 @@ for s in expand_scope discover_controls chunk_sources plan_scout merge_scout ass
          classify_tests list_test_groups assemble_test_rules validate_test_rules derive_mutators \
          resume_ut_init_state write_ut_runconfig list_ut_steps \
          diff_group sdr_context render_sdr_report human_face_vocab mgh_sdr_launch read_roots_config \
-         resume_sdr_state list_sdr_steps sdr_tier mgh_telemetry mgh_credentials; do
+         resume_sdr_state list_sdr_steps sdr_tier env_profile emit_native_plan native_watchdog \
+         mgh_telemetry mgh_credentials; do
   [[ -f "$DEST/mgh-core/scripts/$s.py" ]] || _missing+=("$s.py")
 done
 if (( ${#_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing co-located scripts in $DEST/mgh-core/scripts/: ${_missing[*]}" >&2
   echo "  (partial install? /mgh-init, /mgh-sast, /mgh-sra, /mgh-srr, /mgh-ut-init, or /mgh-sdr may fail at runtime; CI enforces co-location)" >&2
 else
-  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/scout-merge/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/human_face_vocab/mgh_sdr_launch/read_roots_config/resume_sdr_state/list_sdr_steps/sdr_tier/mgh_telemetry/mgh_credentials"
+  echo "✓ mgh-init + mgh-sast + mgh-sra + mgh-srr + mgh-ut-init + mgh-sdr scripts co-located: expand_scope/discover_controls/chunk_sources/plan_scout/merge_scout/assemble_rules + list_clusters/list_scout_batches/list_rule_jobs/plan_aggregate/list_steps/describe_artifact/validate_inventory + fanout_runner(tier-aware dispatcher: scout/scout-merge/t1/t2/t3/sdr) + prepare_augment/merge_augment/merge_memory + ingest_requirements/render_report + list_chunks/list_verify_jobs/prefilter/dedup/emit_sarif + classify_tests/list_test_groups/assemble_test_rules/validate_test_rules/derive_mutators/resume_ut_init_state/write_ut_runconfig/list_ut_steps + diff_group/sdr_context/render_sdr_report/human_face_vocab/mgh_sdr_launch/read_roots_config/resume_sdr_state/list_sdr_steps/sdr_tier/env_profile/emit_native_plan/native_watchdog/mgh_telemetry/mgh_credentials"
 fi
 
 # 4a) Fan-out tier payload self-check (fail-soft per R5.8): the tier-aware
@@ -157,6 +150,11 @@ _fanout_missing=()
 for t in scout-task scout-merge-task t1-task t2-task t3-task sdr-task readability-review; do
   [[ -f "$DEST/mgh-core/prompts/fragments/fanout/$t.md" ]] || _fanout_missing+=("prompts/fragments/fanout/$t.md")
 done
+# Native-dispatch assets (opencode face defaults /mgh-sdr to native): the wave
+# discipline fragment is core-shipped; the agent clone below lives in the host's
+# agent/ dir. Missing either is a fail-soft warn here (CI enforces; the runtime
+# asset gate in env_profile.require_native_assets refuses dispatch loudly).
+[[ -f "$DEST/mgh-core/prompts/fragments/sdr-native-dispatch.md" ]] || _fanout_missing+=("prompts/fragments/sdr-native-dispatch.md")
 # T2 synthesis map-reduce split prompts (t2 map-stage adoption): the partial (per-shard) and
 # rollup (cross-shard reduce) stage prompts mirror with the whole-core copy; a missing file
 # breaks the over-budget map-reduce path at runtime. Shared by both platforms (core copy).
@@ -167,14 +165,14 @@ done
 if [[ "$PLATFORM" == "opencode" ]]; then
   for a in init-scout-fanout init-induct-fanout init-synthesis-fanout init-synthesis-rollup \
            init-scout-merge-fanout init-scout-merge-rollup \
-           init-rulewriter-fanout sdr-review-fanout; do
+           init-rulewriter-fanout sdr-review-fanout sdr-review-native; do
     [[ -f "$DEST/agent/$a.md" ]] || _fanout_missing+=("agent/$a.md")
   done
 fi
 if (( ${#_fanout_missing[@]} )); then
   echo "⚠ self-check (non-blocking): missing fan-out tier payload: ${_fanout_missing[*]}" >&2
 else
-  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/fragments/fanout/readability-review.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter-fanout,sdr-review-fanout}.md" )"
+  echo "✓ fan-out tier payload co-located: prompts/fragments/fanout/{scout,scout-merge,t1,t2,t3,sdr}-task.md + prompts/fragments/fanout/readability-review.md + prompts/fragments/sdr-native-dispatch.md + prompts/stages/init-synthesis-{partial,rollup}.md + prompts/stages/init-scout-merge-{partial,rollup}.md$( [[ "$PLATFORM" == "opencode" ]] && echo " + agent/{init-scout-fanout,init-induct-fanout,init-synthesis-fanout,init-synthesis-rollup,init-scout-merge-fanout,init-scout-merge-rollup,init-rulewriter-fanout,sdr-review-fanout,sdr-review-native}.md" )"
 fi
 
 # 4b-2) Distribution-completeness self-check (fail-soft; CI enforces via

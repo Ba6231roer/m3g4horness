@@ -40,10 +40,15 @@ Per-branch flow (single branch, or serially per --multi-branch line):
   CLI in PATH; --host explicit > opencode > claude; none => exit 2 + recipe) -> run dir
   <repo>/.mgh-sdr/runs/<ts[-branch]>/ -> sdr_context.py (external retrieval + baseline +
   sensitive catalog, IN THIS PROCESS, which also co-writes the guard sentinel + the
-  run_config.json codegraph signal) -> sentinel refresh (idempotent; read_roots =
+  run_config.json codegraph signal) -> dispatch-form resolution (the shared env-profile
+  resolver with consumer=sdr, host face from --host/PATH detection; opencode defaults to
+  native, claude/explicit runner to the subprocess form; a malformed profile, an explicit
+  native on a non-opencode host, or missing native assets exits 2 BEFORE any host spawn)
+  -> sentinel refresh (idempotent; read_roots =
   actually-searched roots + --read-root additions, re-judged against the project config
   as the second authorization gate) -> orchestrator prompt file (verbatim absolute paths
-  from the sdr_context stdout) -> spawn host CLI (`opencode run --print-logs --log-level
+  from the sdr_context stdout; step 3 follows the resolved form) -> spawn host CLI
+  (`opencode run --print-logs --log-level
   ERROR` with the task on stdin / `claude -p` likewise; claude gets a 480000ms
   soft-deadline note — claude Bash per-call cap 600000 x 0.8; the child env is spawned
   WITHOUT `PWD` so the host resolves the project by the explicit cwd = the target repo)
@@ -103,6 +108,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import env_profile  # noqa: E402 — sibling; the ONE dispatch-form resolver
 
 SENTINEL_REL = Path(".mgh-sdr") / ".active"
 RUNS_REL = Path(".mgh-sdr") / "runs"
@@ -305,15 +312,65 @@ def _run_context(repo: Path, run_dir: Path, base: str, branch: str, dims: str | 
     return ctx
 
 
+def _mgh_core_root() -> Path:
+    """This launcher's installed <mgh-core> root (its `scripts/` parent)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolve_dispatch(repo: Path, host: str) -> dict:
+    """Resolve the run's dispatch form BEFORE spawning the host (fail-closed).
+
+    The shared resolver (`env_profile.resolve`, consumer=sdr) decides with the
+    host face explicitly overridden by `--host`/PATH detection — the launcher
+    knows which CLI it will spawn, so the path probe of the installed copy is
+    not the binding signal here. Three refusal paths, each exit 2 + recipe and
+    ZERO host spawn:
+      * malformed profile (fail-closed, never silent defaults);
+      * explicit `dispatch_mode:"native"` on a non-opencode host (native exists
+        only on the opencode face — NEVER silently degraded to subprocess);
+      * native resolved but the install tree lacks the native assets.
+    """
+    try:
+        res = env_profile.resolve(repo, consumer="sdr", host_face=host)
+    except env_profile.EnvProfileError as e:
+        _eprint(f"error: env profile rejected: {e}\n"
+                f"recipe: fix or delete {repo / env_profile.CONFIG_REL} — a "
+                f"malformed profile is NEVER silently treated as defaults.")
+        sys.exit(2)
+    if host != "opencode" and res.form == "native":
+        _eprint(f"error: dispatch_mode=native is not supported by the {host} "
+                f"host (native dispatch exists only on the opencode face).\n"
+                f"recipe: run with `--host opencode`, or set "
+                f'{{"dispatch_mode":"runner"}} in '
+                f"{repo / env_profile.CONFIG_REL} to use the subprocess form. "
+                f"NEVER silently degraded.")
+        sys.exit(2)
+    if res.form == "native":
+        recipe = env_profile.require_native_assets(_mgh_core_root())
+        if recipe:
+            _eprint(recipe)
+            sys.exit(2)
+    _eprint(f"[launch] dispatch form={res.form} (source={res.source}, "
+            f"host_face={res.host_face}, consumer=sdr)")
+    return {"form": res.form, "source": res.source,
+            "host_face": res.host_face, "consumer": res.consumer,
+            "profile_exists": res.profile_exists}
+
+
 def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
-                  host: str) -> str:
+                  host: str, dispatch: dict) -> str:
     """Orchestrator prompt file: verbatim absolute paths from the sdr_context stdout.
-    The host agent's ONLY job is steps 2-5 of the shell (diff_group -> fanout -> render);
+    The host agent's ONLY job is steps 2-5 of the shell (diff_group -> fan-out -> render);
     step 1 (external retrieval) is ALREADY done here — the prompt says so explicitly so
     the orchestrator never re-reads an external repo. The sensitive catalog is pointed
     at as a read-only file path, NEVER embedded (no truncation happens on this object):
     the task template carries the path to every subagent, same shape as the external
-    conclusions."""
+    conclusions.
+
+    Step 3 follows the resolved dispatch form: native (opencode default, or an
+    explicit native profile) expands the native arc (watchdog -> materialize ->
+    same-message wave dispatch -> re-enumerate); runner keeps the established
+    subprocess invocation (claude hosts and explicit runner profiles)."""
     ext = ctx.get("external_repos", [])
     skipped = ctx.get("external_skipped", [])
     catalog_path = ctx.get("sensitive_catalog_path") \
@@ -353,48 +410,63 @@ def _build_prompt(repo: Path, run_dir: Path, base: str, branch: str, ctx: dict,
             "拒绝 → 不写配置,按当前降级继续,报告如实披露。",
             "铁律:**NEVER 未经用户明确同意写配置**。",
         ]
-    # Special-auth deployment face: the launcher is the PREFERRED zero-prompt
-    # entry, so the credential-preparation guidance must ride THIS prompt — a
-    # host session that only ever sees this file would otherwise dispatch
-    # fanout with per-child SSO logins (the structural all-but-one-stall
-    # failure). Probe is deterministic: the doc lives beside the scripts tree
-    # in every host layout, exactly where the runner/manifest/resume probes
-    # look for it. Absent doc (generic install) => prompt bytes unchanged.
-    own_mgh_core = Path(__file__).resolve().parent.parent
-    auth_doc = own_mgh_core / "mgh-special-auth.md"
-    cred_suffix = ""
+    # Special-auth is a PROJECT-OWNED optional entry, not a credential branch:
+    # `<repo>/.mgh/special-auth.md`, placed by hand by the deployment. Present =>
+    # exactly one "read it first, follow its own instructions" line (both forms);
+    # absent => zero extra prompt bytes. The sdr flow NEVER presets
+    # mgh_credentials.py / --cred-file / cred_source.json / credential_expired.
+    auth_doc = repo / ".mgh" / "special-auth.md"
     if auth_doc.is_file():
-        cred_suffix = " --cred-file <run>/cred.json"
         lines += [
             "",
-            f"special-auth 部署文档在场({auth_doc})——本环境模型网关走统一认证,"
-            "每个 fanout 子进程各自弹浏览器登录必然互相挤掉(登录票据一次有效),"
-            "step 3 之前 MUST 先完成凭证准备:",
-            f"  a. Read 上述文档;凭证准备与故障处置以它为准;",
-            f"  b. 按文档写 <run>/cred_source.json(编排器 Write 的 JSON 参数文件;"
-            f"家目录路径写进文件内,NEVER 上命令行),再跑 "
-            f"`py {_script_path('mgh_credentials.py')} --source <run>/cred_source.json "
-            f"--out <run>/cred.json` 取证(出现浏览器弹窗属预期,完成登录即可);",
-            f"  c. 凭证就绪后才执行 step 3(下方调用行已带 --cred-file);"
-            f"step 3 以 `credential_expired:true` + 退出码 2 收口 → 按文档重新取证、"
-            f"更新 <run>/cred.json 后同参 + `--retry-failed` 续跑(已完成单元不重跑)。",
+            f"特殊授权说明在场({auth_doc}):先 Read 该说明,按其鉴权说明执行;"
+            f"本流程不预设任何凭证命令。",
         ]
     time_budget = CLAUDE_TIME_BUDGET_MS if host == "claude" else OPENCODE_TIME_BUDGET_MS
     call_timeout = CALL_TIMEOUT_S[host]
+    checkpoints = run_dir / "markers"
+    slices = run_dir / "slices"
+    if dispatch["form"] == "native":
+        frag = _mgh_core_root() / "prompts" / "fragments" / "sdr-native-dispatch.md"
+        emit = _script_path("emit_native_plan.py")
+        step3 = [
+            f"3. 原生派发(本 run 解析形态 = native,source={dispatch['source']};"
+            f"第一波之前先 Read {frag} 并按其执行):",
+            "   a. 看门狗先行:第一波派发前在后台启动 "
+            f"`py {_script_path('native_watchdog.py')} --run-dir {run_dir}`"
+            "(Windows 宿主用 `Start-Process ... -PassThru`,POSIX 用 `&`),"
+            "之后每波边界确认 <run-dir>/watchdog/state.json 有近两周期更新;",
+            f"   b. 每轮先物化:`py {emit} --tier sdr --repo {repo} --base {base} "
+            f"--branch {branch} --checkpoints {checkpoints} --inputs-dir {slices} "
+            f"--profile {repo}`,再同参加 `--check`(退出码 2 → 按 stderr recipe "
+            f"重物化;重物化即重枚举);",
+            "   c. 同一条 assistant 消息并发派当前波全部单元:agent "
+            "`sdr-review-native`,description = 计划短号;任务体 = 单行令牌 "
+            "`mgh-dispatch: plan=<plan_path> unit=<短号>`(plan_path 取物化 stdout "
+            "逐字,短号自计划逐字复制;mgh_dispatch.ts 的令牌展开钩子将其展开为任务"
+            "文件全文);",
+            "   d. 波收尾重物化重枚举,pending 清空 → step 4;失败单元至多一轮重派,"
+            "限流特征按画像配额等满一个窗口后再重派。",
+        ]
+    else:
+        step3 = [
+            f"3. `py {_script_path('fanout_runner.py')} --tier sdr --repo {repo} "
+            f"--base {base} --branch {branch} --checkpoints {checkpoints} "
+            f"--inputs-dir {slices} "
+            f"--wave 1 --time-budget-ms {time_budget} --call-timeout-s {call_timeout} "
+            f"--stall-timeout-s {STALL_TIMEOUT_S}`(带 per-call `timeout` ≥ "
+            f"{time_budget}ms 跑;四级超时不变式已按此组合满足,NEVER 省略 call/stall 两级;"
+            f"调用次数限流网关再加配额三 flag `--quota-calls <N> --quota-window-s <W> "
+            f"[--quota-calls-per-unit <K>]`,估算式准入、未配置零变化)"
+            f";partial:true → 同参重派;退出码 2 → 转述 stderr 停止。",
+        ]
     lines += [
         "",
         "按 /mgh-sdr 命令壳的 Orchestration flow 执行 step 2 起:",
         "2. `py <mgh-core>/scripts/diff_group.py --repo <repo> --base <base> --branch <branch> "
         "--checkpoints <run>/markers --materialize <run>/slices`;empty:true → 直接 step 4;"
         "跑 `--check <run>`。",
-        f"3. `py <mgh-core>/scripts/fanout_runner.py --tier sdr --repo <repo> --base <base> "
-        f"--branch <branch> --checkpoints <run>/markers --inputs-dir <run>/slices "
-        f"--wave 1 --time-budget-ms {time_budget} --call-timeout-s {call_timeout} "
-        f"--stall-timeout-s {STALL_TIMEOUT_S}{cred_suffix}`(带 per-call `timeout` ≥ "
-        f"{time_budget}ms 跑;四级超时不变式已按此组合满足,NEVER 省略 call/stall 两级;"
-        f"调用次数限流网关再加配额三 flag `--quota-calls <N> --quota-window-s <W> "
-        f"[--quota-calls-per-unit <K>]`,估算式准入、未配置零变化)"
-        f";partial:true → 同参重派;退出码 2 → 转述 stderr 停止。",
+        *step3,
         "4. `py <mgh-core>/scripts/render_sdr_report.py --run-dir <run> --repo <repo>`;"
         "跑 `--check <run>`。",
         "5. 打印报告绝对路径 + counts;声明「发现是 LLM 候选需人工复核」;`rm <repo>/.mgh-sdr/.active`。",
@@ -509,6 +581,24 @@ def _evidence_suffix(count, ev_path, glog: str) -> str:
             f"run window in the opencode global log {glog})")
 
 
+def _opencode_log_flags(bin_path: str) -> list[str]:
+    """`--print-logs --log-level <L>` with the level spelling the installed
+    opencode accepts: v1 (1.x) requires the uppercase `ERROR`, v2 (2.x) rejects
+    it and requires lowercase `error`. Probed from `--version`; an unreadable
+    version keeps the v1 spelling (the historical shape). Best-effort: this only
+    affects parent-run log verbosity, never dispatch semantics."""
+    level = "ERROR"
+    try:
+        r = subprocess.run([bin_path, "--version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        m = re.search(r"v?(\d+)\.", r.stdout or "")
+        if m and int(m.group(1)) >= 2:
+            level = "error"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ["--print-logs", "--log-level", level]
+
+
 def _spawn_host(host: str, repo: Path, prompt: str, model: str | None = None,
                 spawn_window: list | None = None) -> int:
     """Spawn the host CLI with the task message on stdin; return its exit code.
@@ -528,8 +618,8 @@ def _spawn_host(host: str, repo: Path, prompt: str, model: str | None = None,
     it stripped the host falls back to the explicit cwd = the target repo. claude takes
     the same path (it does not read PWD; stripping is harmless)."""
     if host == "opencode":
-        cmd = [shutil.which("opencode") or "opencode", "run",
-               "--print-logs", "--log-level", "ERROR"]
+        exe = shutil.which("opencode") or "opencode"
+        cmd = [exe, "run", *_opencode_log_flags(exe)]
     else:
         cmd = [shutil.which("claude") or "claude", "-p"]
     if model:
@@ -619,6 +709,12 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
         # already wrote stays for the recovery entries to detect (same failure-path
         # sentinel semantics as the sdr_context-exit branch above)
         return False, f"sdr_context upstream output unusable for {branch}: {e}", []
+    # Dispatch form: resolved here (after sdr_context, before ANY host spawn) so a
+    # bad profile / unsupported explicit native / partial install refuses loudly
+    # instead of silently running the other form. Exit code 2 is misuse-class and
+    # propagates out of the per-branch loop (the same deterministic point fails
+    # every branch — never a mixed-form sweep).
+    dispatch = _resolve_dispatch(repo, host)
     pending = list(ctx.get("pending_approval") or [])
     for p in pending:
         _eprint(f"[launch] WARN: external repo declared but NOT approved — zero reads, "
@@ -641,7 +737,7 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     _write_sentinel(repo, roots)
     _eprint(f"[launch] sentinel written (read_roots={len(roots)} root(s))")
     try:
-        prompt = _build_prompt(repo, run_dir, base, branch, ctx, host)
+        prompt = _build_prompt(repo, run_dir, base, branch, ctx, host, dispatch)
     except _UpstreamOutputError as e:
         # L2: hard field access over the upstream record failed => per-branch FAILED,
         # not a traceback; the just-refreshed sentinel stays (recovery entries detect
@@ -650,11 +746,6 @@ def _run_one(repo: Path, branch: str, base: str, host: str, dims: str | None,
     prompt_path = run_dir / "orchestrator_prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
     _eprint(f"[launch] orchestrator prompt: {prompt_path}")
-    auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
-    if auth_doc.is_file():
-        _eprint(f"[launch] note: special-auth deployment doc present "
-                f"({auth_doc}) — credential-preparation guidance embedded in "
-                f"the orchestrator prompt (step 3 carries --cred-file)")
     if dry_run:
         _eprint("[launch] --dry-run: sentinel + prompt + sdr_context artifacts ready; "
                 "NOT spawning the host CLI (sentinel kept for the next real run)")

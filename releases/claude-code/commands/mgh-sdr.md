@@ -66,7 +66,7 @@ task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相�
 
 **步骤清单即调用行真相源**:执行某步前先取该步的确切调用行与纪律(压断/新会后同——
 清单是静态契约,磁盘状态查询走「中断恢复」):
-`py .claude/mgh-core/scripts/list_sdr_steps.py --step <id>` → 按 stdout `invocation`
+`py .claude/mgh-core/scripts/list_sdr_steps.py --target <abs> --step <id>` → 按 stdout `invocation`
 逐字执行(仅把 `py` 换成本 run 解释器)、按 `discipline`(gates → path_recipes → nevers)
 执行;stdout 过大 → 同参加 `--summary`;要瞄产物结构 → `describe_artifact.py`。fanout 与
 render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
@@ -114,18 +114,13 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
      `excluded{}`/`codegraph_stats{}`(probe 失败原因在 stderr)。
 3. fan-out(清单 step id `fanout`;逐字执行 invocation,配额三 flag 按参数表指引追加;
    **NEVER** 手工循环):取清单 → 执行(带 per-call timeout)。
-   · **special-auth 前置检查(先于 invocation,不可跳过)**:清单 stdout
-     `special_auth.present==true` → MUST 先 Read 该文档并按文档完成凭证准备(写参数文件
-     `cred_source.json` → 跑 `mgh_credentials.py` 取证 → 本步追加
-     `--cred-file <run>/cred.json`;家目录路径写进参数文件,NEVER 上命令行),**然后**才执行
-     invocation;`credential_expired:true` 退出码 2 → 按文档重新取证后同参
-     `--resume --retry-failed`。present==false → 直接执行 invocation,零额外动作。
+   · **特殊授权(可选项目入口)**:清单 stdout `special_auth.present==true` → 先 Read
+     `special_auth.path` 并按其鉴权说明执行;`false` → 零动作、零额外提示。本流程**不预设**
+     任何凭证命令(不追加凭证注入参数、不生成凭证文件)。
    · 终态分派(快败风暴三层 recipe 已在该步 discipline,摘要):`partial:true` → 同参重派
      (resume 语义);STALLED(退出码 2)→ 先跑 `diff_group.py --check <run-dir>` 分拥塞/损坏
      (见 discipline),停止重派,报告 degraded;`rate_limited:true` → 等满一个配额窗口再同参
-     重派;`credential_expired:true` → 按 special-auth 文档(在场时)或 `mgh_credentials.py`
-     重新取证、更新 cred 文件后同参 `--resume --retry-failed`(已完成单元不重跑);gate 形
-     退出码 2 → 转述 stderr recipe,停止。非 ok 单元证据在
+     重派;gate 形退出码 2 → 转述 stderr recipe,停止。非 ok 单元证据在
      `<run-dir>/markers/sdr/<unit>.run.log`。
 4. render(清单 step id `render`):取清单 → 执行 → 该步 gates 的
    `render_sdr_report.py --check <run-dir>`。报告 = 自包含单文件 HTML + `<run-dir>/`
@@ -147,7 +142,7 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
 
 读 stdout 的 `step`(语义 = **当前待办步**)/ `next_action` / `discipline_reminders` / `notes`,
 按该步纪律(闸门 → 路径配方 → 硬边界)继续即接上流水线——待办步的确切调用行再问
-`list_sdr_steps.py --step <id>`。进度与纪律**纯从磁盘重派生**,与对话记忆是否保留无关。
+`list_sdr_steps.py --target <abs> --step <id>`。进度与纪律**纯从磁盘重派生**,与对话记忆是否保留无关。
 选中解释器不确定(压缩/新会话)→ **重跑 step 0 探测命令**重建该事实(单条、廉价),
 NEVER 逐命令换解释器试错。`--run-dir` 必填;推不出时脚本 fail-loud,**NEVER** 猜步骤。
 run 进行中(`step ∈ group|fanout|render`)哨兵却缺失 = 守卫休眠 → `--check` 退出码 2 +
@@ -170,10 +165,10 @@ re-arm recipe:
 ### Deterministic invocation (Bash)
 
 ```bash
-py .claude/mgh-core/scripts/list_sdr_steps.py --step not-started
-py .claude/mgh-core/scripts/list_sdr_steps.py --step group
-py .claude/mgh-core/scripts/list_sdr_steps.py --step fanout
-py .claude/mgh-core/scripts/list_sdr_steps.py --step render
+py .claude/mgh-core/scripts/list_sdr_steps.py --target <abs> --step not-started
+py .claude/mgh-core/scripts/list_sdr_steps.py --target <abs> --step group
+py .claude/mgh-core/scripts/list_sdr_steps.py --target <abs> --step fanout
+py .claude/mgh-core/scripts/list_sdr_steps.py --target <abs> --step render
 py .claude/mgh-core/scripts/describe_artifact.py --in .mgh-sdr/runs/<ts>/grouping.json --keys
 py .claude/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> --repo <abs> --arm-sentinel
 py .claude/mgh-core/scripts/read_roots_config.py --target <abs> --add <abs-外部仓>
@@ -197,12 +192,12 @@ py .claude/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> --c
   (含 fan-out);低成本试跑出口 = `--dry-run`(仅 step 1 + `--check`,不派发不渲染;壳级
   dry-run 会照常产生 run 目录、context.json 与哨兵——**不是**零副作用试跑;
   `fanout_runner.py --dry-run` 才是零写盘纯计划,产物只走 stdout)。
-- **special-auth 部署文档是可选覆盖**:安装树携带 `mgh-special-auth.md`(清单 stdout
-  `special_auth` 字段披露)时,fan-out 步的凭证准备与派发 flag 以该文档为准;缺席时通用
-  流程完整可用、行为零差异。
+- **特殊授权说明只作可选项目入口**:`<repo>/.mgh/special-auth.md` 存在时(清单 stdout
+  `special_auth` 字段披露)先 Read 并按说明执行;缺席时零动作、通用流程完整可用。流程不预设
+  任何凭证命令。
 - **派发形态(三面分歧,如实披露)**:本命令当前仅子进程形态(`fanout_runner --tier sdr`);
-  原生派发(环境画像 `dispatch_mode:"native"`)当前仅 opencode 面支持,本面行为与该画像
-  无关(配了 native 也不改变本面)——宿主机制差异,非镜像断裂。
+  原生派发(opencode 面自己的缺省形态,或环境画像 `dispatch_mode:"native"`)仅 opencode 面
+  支持,本面行为与该画像无关(配了 native 也不改变本面)——宿主机制差异,非镜像断裂。
 - **发现是 LLM 候选,非确认漏洞**;覆盖受基线投影与启发式分组上界约束。
 - **接口分组是注解启发式**:未识别接口/链退入目录聚簇单元(粒度粗、覆盖不丢);非 java web
   项目整体退化为 standalone 模式,仍可运行。

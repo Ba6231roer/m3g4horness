@@ -32,9 +32,14 @@ Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)、`emit_native_pl
 
 ## 子进程执行环境注入(可选;两 flag 全缺席 = 与上表逐字节一致)
 
+> **手动/遗留能力**:本节两个 flag 与 `mgh_credentials.py` 保留实现与测试,但**不被任何 sdr
+> 流程引用**(sdr 命令壳、launcher 提示词、步骤清单、恢复输出都不出现凭证命令)。opencode 的
+> 原生派发形态使用宿主会话自身的 provider 配置;claude/dsh 与显式 runner 回退仍可手动传
+> `--cred-file` 做静态注入。
+
 | flag | host 域 | 子进程 env 增设 | 磁盘物化(plan 工件同级的 run/init 目录下) |
 | --- | --- | --- | --- |
-| `--cred-file <run>/cred.json` | 仅 opencode 形(claude/dsh 退出码 2 拒识,NEVER 静默退化;in-process 测试钩子 `test` 形允许物化验证) | `XDG_CONFIG_HOME=<…>/childcfg/<unit>` + `XDG_DATA_HOME=<…>/ocdata/<unit>`(按单元) | `<…>/childcfg/<unit>/opencode/opencode.json` = 全局配置副本,仅 `provider_id` 定位的 provider 覆盖为静态 `options.baseURL`+`options.apiKey`(**provider id 不变**——model id 前缀耦合;`keep_plugins:false` 时摘 plugin 列表);幂等,重派/续期重物化结果一致 |
+| `--cred-file <run>/cred.json`(手动/遗留) | 仅 opencode 形(claude/dsh 退出码 2 拒识,NEVER 静默退化;in-process 测试钩子 `test` 形允许物化验证) | `XDG_CONFIG_HOME=<…>/childcfg/<unit>` + `XDG_DATA_HOME=<…>/ocdata/<unit>`(按单元) | `<…>/childcfg/<unit>/opencode/opencode.json` = 全局配置副本,仅 `provider_id` 定位的 provider 覆盖为静态 `options.baseURL`+`options.apiKey`(**provider id 不变**——model id 前缀耦合;`keep_plugins:false` 时摘 plugin 列表);幂等,重派/续期重物化结果一致 |
 | `--isolate-data` | opencode 形(其它形 stderr note 后忽略) | 仅 `XDG_DATA_HOME=<…>/ocdata/<unit>` | `<…>/ocdata/<unit>/`(log/sqlite/repos 随变量隔离,消除并发 fat client 互踩) |
 
 - cred 文件 schema 闭集 `{v, baseURL, apikey, provider_id, global_config, keep_plugins,
@@ -49,22 +54,23 @@ Producer: 本契约是脚本族 `fanout_runner.py`(dispatcher)、`emit_native_pl
   `credential_expired_units[]`;stderr recipe = 重取证 → 更新 cred 文件 → 同参
   `--resume --retry-failed`。marker 语义不变(命中单元按既有合同落盘);空特征集 =
   扫描面不激活;签名漂移 → 退化到既有 stall/冷却兜底(签名层 NEVER 唯一防线)。
-- **special-auth advisory**:安装树存在 `<mgh-core>/mgh-special-auth.md`(维护者随包
-  分发,NEVER 提交 git;install 做「源在场才落盘」收敛复制)且未传 `--cred-file` →
-  派发前 stderr 一行提示(不阻塞、不改退出码,全 tier 一致)。
+- **special-auth advisory(项目级可选入口)**:`<repo>/.mgh/special-auth.md` 存在(项目所有、
+  手工放置;install 不再分发维护者的随包文档)且未传 `--cred-file` → 派发前 stderr 一行提示
+  「说明在场,按需先读;本次不启用静态凭证注入」(不阻塞、不改退出码,全 tier 一致)。
+  `--cred-file` 的派发行为与既有测试不受影响。
 - **`--dry-run` 纯计划**:零写盘零 spawn(审计副本/liveness/sidecar/marker/子配置全
   跳过),单元清单 + 将写路径 + 命令形 + pre-spawn 锚检查预判只走 stdout,退出码 0;
   `--kill-stale`/`--purge-audit` 的 dry-run 审视守卫是独立语义,不变。
 
 ## native plan(原生派发的确定性计划工件)
 
-Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画像读取);消费方
-= 后续接入原生派发的命令壳/步骤清单(编排会话直接派同宿主 subagent,零 headless 子进程)。
-**首个消费方 = `/mgh-sdr`(opencode 面,环境画像显式 `dispatch_mode:"native"` 时)**:
-波次循环、标记写者、看门狗接线与报告披露的编排契约见
-[`sdr/pipeline.md`](../sdr/pipeline.md)「原生派发形态」节;子进程派发器形态
-(`fanout_runner.py --tier sdr`)是缺省与永久回退——画像缺失/auto/runner 一律回退形态,
-行为逐字节不变,两形态的单元输入构造同源零漂移。
+Producer: `emit_native_plan.py`(计划物化)+ `env_profile.py`(项目环境画像读取 + 形态解析);
+消费方 = 已接入原生派发的命令壳/步骤清单(编排会话直接派同宿主 subagent,零 headless 子进程)。
+**首个消费方 = `/mgh-sdr`(opencode 安装面缺省原生)**:波次循环、标记写者、看门狗接线与报告
+披露的编排契约见 [`sdr/pipeline.md`](../sdr/pipeline.md)「原生派发形态」节;子进程派发器形态
+(`fanout_runner.py --tier sdr`)是 claude/dsh 面的缺省,也是 opencode 面在画像显式
+`dispatch_mode:"runner"` 时的唯一回退——runner 形态的行为逐字节不变,两形态的单元输入构造
+同源零漂移。其它命令(如 `/mgh-init`)以 `consumer=generic` 调用解析器,缺省仍为 runner。
 两脚本与子进程派发器的关系 = **旁路供给面**:`emit_native_plan.py` 以兄弟导入复用派发器
 的 tier 表、枚举器调用与 run 目录锚定、模板加载与逐字填充、锚树校验、安全文件名(**派发器
 源码零改动、其行为零变化**),使原生形态与子进程形态的单元输入构造零漂移。
@@ -108,9 +114,22 @@ schema(全键可选、未知字段忽略;quota 在场时三键齐全):
  "quota":{"calls":<int>0>, "window_s":<int>0>, "calls_per_unit":<int>0>}}
 ```
 
-- **缺文件 = 现状缺省**(`auto` → 解析为现状派发形态;缺省并发 3、无配额)——画像落地后
-  任何既有命令的行为零变化。`auto` 的缺省解析**钉死为「现状派发形态」**;任何细化(如按
-  认证形态切 native)须另立变更,NEVER 实现层暗改。
+- **缺文件或 `auto` = 按宿主安装面 + 消费者解析**(缺省并发 3、无配额):
+  - 宿主面由**正在运行的脚本安装路径**判定(`.opencode` 段 → opencode,`.claude` 段 →
+    claude,其余(dsh `mgh-core/`、开发树、自定义拷贝)→ other);调用方可显式传入宿主面
+    覆盖(launcher 用 `--host` / PATH 探测结果覆盖)。
+  - 消费者由调用方显式传入(`/mgh-sdr` = `sdr`;缺省 = `generic`)。**仅
+    `consumer=sdr ∧ host=opencode` 解析为 `native`**;`consumer=generic`、其它消费者与
+    claude/other 安装面一律 `runner`(既有命令行为零变化)。
+  - 显式 `dispatch_mode:"native"` / `"runner"` 永远覆盖缺省;**`"runner"` 是 opencode 上
+    回到子进程形态的唯一开关**(显式回退;调用行与纪律由步骤清单给出)。
+  - 解析结果可经模块与 CLI 读取:stdout 增 `host_face`/`consumer`/`form`/`source`
+    (`profile` = 显式选择,`host-default` = 缺省规则),CLI 增 `--consumer <sdr|generic>`。
+    sdr 编排面(命令壳 step 0、步骤清单、恢复、报告、launcher)全部消费该单一解析结果,
+    NEVER 各自比较原始 `dispatch_mode`。
+  - opencode 面解析为 native 但安装树缺 `sdr-review-native` agent 或波次纪律 fragment 时,
+    编排面退出码 2 + 重装/显式 runner recipe(`env_profile.require_native_assets`),
+    NEVER 静默回退子进程。
 - **fail-closed**:坏 JSON/非对象/未知或非整数 `v`/枚举域外取值/并发越界(含非整数与
   布尔)/quota 残缺或非正 → CLI 退出码 2 + recipe(文件路径 + 违规字段),导入形态抛
   `EnvProfileError`(ValueError 子类);NEVER 静默回退缺省(静默回退会让「以为配了

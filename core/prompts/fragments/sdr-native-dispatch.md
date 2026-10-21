@@ -1,18 +1,22 @@
 <!--
-  mgh-sdr native-dispatch wave discipline (opencode face only). Loaded ON DEMAND by the
-  mgh-sdr command shell when the project environment profile selects native dispatch
-  (`dispatch_mode: "native"`); the shell's subprocess fan-out line stays the default and
-  the permanent fallback. Install mirrors to <mgh-core>/prompts/fragments/sdr-native-dispatch.md.
+  mgh-sdr native-dispatch wave discipline (opencode face). Loaded ON DEMAND by the
+  mgh-sdr command shell when the resolved dispatch form is native — the opencode
+  install face default (no env-profile needed), or an explicit
+  `dispatch_mode: "native"`. An explicit `dispatch_mode: "runner"` selects the
+  subprocess fallback instead; the claude/dsh faces stay subprocess-only.
+  Install mirrors to <mgh-core>/prompts/fragments/sdr-native-dispatch.md.
   This is an ORCHESTRATOR discipline fragment, not a task template: the per-unit task
   message lives in prompts/fragments/fanout/sdr-task.md (shared with the subprocess form,
   zero-changed); the per-unit agent behavior lives in the agent definition
   sdr-review-native. Not loaded into any context automatically.
 -->
 
-# 原生派发波次纪律(/mgh-sdr,画像显式 native 时)
+# 原生派发波次纪律(/mgh-sdr,opencode 面缺省形态)
 
-适用前提:step 0 读到的环境画像 `dispatch_mode == "native"`。画像缺失 / `auto` /
-`runner` → 本 fragment 不适用,回到命令壳的子进程派发行(缺省形态,行为零变化)。
+适用前提:step 0 的 `env_profile.py --consumer sdr` 解析出 `form=native`——opencode 安装面
+不写任何配置文件即缺省原生;项目画像显式 `dispatch_mode:"native"` 同样启用。项目画像显式
+`dispatch_mode:"runner"` → 本 fragment 不适用,按步骤清单的 fanout invocation 执行子进程
+回退形态;claude/dsh 安装面仍只有子进程形态。
 
 ## 0. 看门狗先行(第一波派发前完成,不可跳过)
 
@@ -101,7 +105,8 @@
 - **编排父会话是单点**:父会话挂掉则波次暂停;进度在磁盘(计划 + 标记),恢复会话经
   `resume_sdr_state.py` 接上,已完成单元不重做。
 - **任务文件路径经编排器转述存在残余错抄面**:防线链 = 越树路径被运行域守卫拦(fail-loud)、
-  树内错配单元因无标记经重枚举回待派、重派代价有界(至多一轮)。
+  树内错配单元因无标记经重枚举回待派、重派代价有界(至多一轮)。令牌形任务体下模型输出零
+  任务路径(展开钩子把令牌展开为文件全文),残余面只在展开钩子缺席的旧版安装回退形态成立。
 
 ## 5. 收敛 → 渲染
 

@@ -28,6 +28,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1419,6 +1420,65 @@ class DispatchDisclosureTest(unittest.TestCase):
         self.assertNotEqual(pdata["meta"], ndata["meta"])
         self.assertEqual(set(ndata["meta"]) - set(pdata["meta"]), {"dispatch"})
         self.assertEqual(set(nmanifest) - set(pmanifest), {"dispatch"})
+
+
+    # --- fix-mgh-sdr-native-default-dispatch 2.5: host-default disclosure ---
+    def _render_mirror(self, repo, run_dir, **assets):
+        sys.path.insert(0, str(HERE))
+        from _sdr_install_mirror import build_opencode_mirror
+        scripts = build_opencode_mirror(self.tmp / "mirror", **assets)
+        p = subprocess.run([sys.executable,
+                            str(scripts / "render_sdr_report.py"),
+                            "--run-dir", str(run_dir), "--repo", str(repo)],
+                           capture_output=True, text=True, encoding="utf-8")
+        return p
+
+    def test_opencode_host_default_discloses_without_profile(self):
+        repo, run_dir = self._build(native=False)
+        (run_dir / "native_plan.json").write_text("{}", encoding="utf-8")
+        p = self._render_mirror(repo, run_dir)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads((run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        manifest = json.loads((run_dir / "sdr_manifest.json").read_text(
+            encoding="utf-8"))
+        d = data["meta"]["dispatch"]
+        self.assertEqual(d["form"], "native")
+        self.assertEqual(d["source"], "host-default")
+        self.assertEqual(d["host_face"], "opencode")
+        self.assertEqual(d["consumer"], "sdr")
+        self.assertFalse(d["profile_exists"])
+        self.assertIn("opencode host default", d["evidence"])
+        self.assertEqual(manifest["dispatch"]["form"], "native")
+        report = Path(json.loads(p.stdout)["report"]).read_text(encoding="utf-8")
+        self.assertEqual(_embed(self.m, report)["meta"]["dispatch"]["form"],
+                         "native")
+
+    def test_opencode_no_plan_artifact_stays_silent(self):
+        repo, run_dir = self._build(native=False)
+        p = self._render_mirror(repo, run_dir)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads((run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        manifest = json.loads((run_dir / "sdr_manifest.json").read_text(
+            encoding="utf-8"))
+        self.assertNotIn("dispatch", data["meta"])
+        self.assertNotIn("dispatch", manifest)
+
+    def test_opencode_explicit_runner_stays_silent_with_plan(self):
+        repo, run_dir = self._build(native=False)
+        (run_dir / "native_plan.json").write_text("{}", encoding="utf-8")
+        (repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (repo / ".mgh" / "env-profile.json").write_text(json.dumps(
+            {"v": 1, "dispatch_mode": "runner"}), encoding="utf-8")
+        p = self._render_mirror(repo, run_dir)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads((run_dir / "sdr_report_data.json").read_text(
+            encoding="utf-8"))
+        manifest = json.loads((run_dir / "sdr_manifest.json").read_text(
+            encoding="utf-8"))
+        self.assertNotIn("dispatch", data["meta"])
+        self.assertNotIn("dispatch", manifest)
 
 
 if __name__ == "__main__":

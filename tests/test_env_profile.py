@@ -229,5 +229,184 @@ class EnvProfileTest(unittest.TestCase):
         self.assertIn("auto", r.stdout)
 
 
+class DefaultResolutionTest(unittest.TestCase):
+    """fix-mgh-sdr-native-default-dispatch 1.x: the default dispatch form is
+    resolved from the host install face x the calling consumer. ONLY consumer=sdr
+    on the opencode face becomes native; every other combination keeps runner.
+    Explicit dispatch_mode values always win; bad profiles stay fail-closed."""
+
+    def setUp(self):
+        self.m = _load()
+        self.tmp = Path(tempfile.mkdtemp(prefix="mgh_envprof_res_"))
+        self.proj = self.tmp / "proj"
+        self.proj.mkdir(parents=True)
+        self.cfg = self.proj / ".mgh" / "env-profile.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_cfg(self, body):
+        self.cfg.parent.mkdir(parents=True, exist_ok=True)
+        self.cfg.write_text(json.dumps(body), encoding="utf-8")
+
+    # --- default resolution matrix ---
+    def test_missing_profile_sdr_opencode_is_native(self):
+        r = self.m.resolve(self.proj, consumer="sdr", host_face="opencode")
+        self.assertEqual(r.form, "native")
+        self.assertEqual(r.source, "host-default")
+        self.assertFalse(r.profile_exists)
+        self.assertEqual(r.profile.dispatch_mode, "auto")
+        # no config file is ever created by the resolution
+        self.assertFalse(self.cfg.exists())
+
+    def test_auto_profile_sdr_opencode_is_native(self):
+        self._write_cfg({"v": 1, "dispatch_mode": "auto"})
+        r = self.m.resolve(self.proj, consumer="sdr", host_face="opencode")
+        self.assertEqual(r.form, "native")
+        self.assertEqual(r.source, "host-default")
+        self.assertTrue(r.profile_exists)
+
+    def test_generic_consumer_on_opencode_stays_runner(self):
+        r = self.m.resolve(self.proj, consumer="generic", host_face="opencode")
+        self.assertEqual(r.form, "runner")
+        self.assertEqual(r.source, "host-default")
+
+    def test_claude_and_other_faces_stay_runner_for_sdr(self):
+        for face in ("claude", "other"):
+            with self.subTest(face=face):
+                r = self.m.resolve(self.proj, consumer="sdr", host_face=face)
+                self.assertEqual(r.form, "runner")
+                self.assertEqual(r.source, "host-default")
+
+    def test_explicit_native_overrides_any_face(self):
+        self._write_cfg({"dispatch_mode": "native"})
+        for face in self.m.HOST_FACES:
+            with self.subTest(face=face):
+                r = self.m.resolve(self.proj, consumer="sdr", host_face=face)
+                self.assertEqual(r.form, "native")
+                self.assertEqual(r.source, "profile")
+
+    def test_explicit_runner_overrides_opencode_sdr_default(self):
+        self._write_cfg({"dispatch_mode": "runner"})
+        r = self.m.resolve(self.proj, consumer="sdr", host_face="opencode")
+        self.assertEqual(r.form, "runner")
+        self.assertEqual(r.source, "profile")
+
+    def test_resolution_as_dict_shape(self):
+        r = self.m.resolve(self.proj, consumer="sdr", host_face="opencode")
+        d = r.as_dict()
+        self.assertEqual(set(d), {"host_face", "consumer", "form", "source",
+                                  "profile_exists", "profile"})
+        self.assertEqual(d["host_face"], "opencode")
+        self.assertEqual(d["consumer"], "sdr")
+        self.assertEqual(d["form"], "native")
+
+    # --- host face detection ---
+    def test_detect_host_face_from_install_segments(self):
+        cases = {
+            self.tmp / ".opencode" / "mgh-core" / "scripts" / "env_profile.py": "opencode",
+            self.tmp / ".claude" / "mgh-core" / "scripts" / "env_profile.py": "claude",
+            self.tmp / "mgh-core" / "scripts" / "env_profile.py": "other",
+            self.tmp / "core" / "scripts" / "env_profile.py": "other",
+        }
+        for path, face in cases.items():
+            with self.subTest(path=str(path)):
+                self.assertEqual(self.m.detect_host_face(script_path=path), face)
+
+    def test_detect_host_face_explicit_wins(self):
+        self.assertEqual(self.m.detect_host_face(explicit="opencode"), "opencode")
+        with self.assertRaises(ValueError):
+            self.m.detect_host_face(explicit="vscode")
+
+    def test_resolve_rejects_unknown_consumer(self):
+        with self.assertRaises(ValueError):
+            self.m.resolve(self.proj, consumer="init", host_face="opencode")
+
+    # --- CLI surface ---
+    def _run(self, *args):
+        sys.argv = ["env_profile.py"] + list(args)
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = self.m.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli_reports_resolution_fields(self):
+        code, out, err = self._run("--target", str(self.proj), "--consumer", "sdr")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["consumer"], "sdr")
+        self.assertEqual(d["host_face"], "other")      # dev-tree invocation
+        self.assertEqual(d["form"], "runner")          # non-opencode face
+        self.assertEqual(d["source"], "host-default")
+
+    def test_cli_check_reports_resolution_read_only(self):
+        self._write_cfg({"dispatch_mode": "auto"})
+        before = sorted(str(p) for p in self.tmp.rglob("*"))
+        code, out, err = self._run("--target", str(self.proj), "--consumer",
+                                   "sdr", "--check")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["check"], "ok")
+        self.assertEqual(d["form"], "runner")
+        self.assertEqual(d["host_face"], "other")
+        self.assertEqual(before, sorted(str(p) for p in self.tmp.rglob("*")))
+
+    def test_cli_mirrored_opencode_face_sdr_is_native(self):
+        # the install-face probe is the SCRIPT'S OWN path: a mirrored copy under
+        # .opencode/mgh-core/scripts must resolve native for consumer=sdr without
+        # any config file, while the same call for generic stays runner.
+        mirror = self.tmp / ".opencode" / "mgh-core" / "scripts"
+        mirror.mkdir(parents=True)
+        import shutil
+        shutil.copy2(SCRIPT, mirror / "env_profile.py")
+        r = subprocess.run([sys.executable, str(mirror / "env_profile.py"),
+                            "--target", str(self.proj), "--consumer", "sdr"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        self.assertEqual((d["host_face"], d["consumer"], d["form"]),
+                         ("opencode", "sdr", "native"))
+        r2 = subprocess.run([sys.executable, str(mirror / "env_profile.py"),
+                             "--target", str(self.proj)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(json.loads(r2.stdout)["form"], "runner")
+
+    def test_help_declares_consumer_choices(self):
+        r = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0)
+        for token in ("--consumer", "sdr", "generic", "native", "runner",
+                      "host"):
+            self.assertIn(token, r.stdout, f"--help missing {token!r}")
+
+    # --- native asset gate (single shared helper) ---
+    def test_native_assets_missing_and_present(self):
+        root = self.tmp / ".opencode" / "mgh-core"
+        (root / "scripts").mkdir(parents=True)
+        missing = self.m.missing_native_assets(root)
+        self.assertEqual(len(missing), 2)
+        recipe = self.m.require_native_assets(root)
+        self.assertIn("install.sh --opencode", recipe)
+        self.assertIn("dispatch_mode", recipe)
+        # create both assets -> gate opens
+        (root.parent / "agent").mkdir(parents=True)
+        (root.parent / "agent" / "sdr-review-native.md").write_text(
+            "x", encoding="utf-8")
+        (root / "prompts" / "fragments").mkdir(parents=True)
+        (root / "prompts" / "fragments" / "sdr-native-dispatch.md").write_text(
+            "x", encoding="utf-8")
+        self.assertEqual(self.m.missing_native_assets(root), [])
+        self.assertIsNone(self.m.require_native_assets(root))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

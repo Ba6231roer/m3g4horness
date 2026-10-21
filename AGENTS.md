@@ -17,7 +17,8 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 
 > **必读(维护者环境,文件缺席时跳过)**:企业定制运行环境约束(模型窗口/限频/CAS 认证
 > 闭环/共享数据目录危害/宿主上限)的完整最新清单汇总在 `docs/enterprise-environment.md`
-> (不入 git,维护者随包分发;认证操作细则同为其私档 `mgh-special-auth.md`)。本仓工作
+> (不入 git,维护者随包分发;认证操作细则如需随项目使用,由部署方放在项目
+> `.mgh/special-auth.md`,不再随 install 分发)。本仓工作
 > 时若该文件存在以其为准;公开 clone 缺席时按下面通用约束理解即可——研发铁律自身自足。
 
 本工具族为以下运行环境量身设计;读研发铁律时,把每条规则都理解成对这张表中某个约束的
@@ -37,7 +38,7 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
 | 命令 | 状态 | 说明 |
 | --- | --- | --- |
 | `/mgh-init` | ✅ 主力 | 发现存量安全控制 → 生成 Agent rules。隔离优先流水线(确定性发现 → scout 扇出补漏 → T1 per-cluster 归纳 → T2 综合 → T3 per-category 出 rules → T4 一致性);产 `controls_inventory.json`(与 vvah `design_controls` schema 兼容)+ opencode `AGENTS.md` 受管块(默认)/ claude `.claude/rules`(显式 opt-in),结构不混。能力规格 `openspec/specs/control-discovery/`(出规则见 `rules-emission/`)。 |
-| `/mgh-sdr` | ✅ 主力 | 需求分支代码 diff 的**存量安全设计符合性复核**(merge 前关卡)。`git diff base..branch` → 接口维度注解启发式分组 + standalone 簇(`diff_group.py`)→ 存量设计基线投影 + 外部前端仓主流程受控检索(`sdr_context.py`,结论物化 + 哨兵 `read_roots[]`)→ fan-out 6 维度复核(垂直/横向/其他权限、SQL 注入、敏感信息、输入校验;**双形态**:子进程 `fanout_runner --tier sdr` 缺省/回退 + 原生同宿主 subagent 波次派发〔仅 opencode 面,环境画像 `.mgh/env-profile.json` 显式 `dispatch_mode:"native"` 才启用,缺省行为零变化;计划物化 `emit_native_plan.py` + 看门狗无人值守闭环〕)→ 项目根中文**自包含单文件 HTML 报告**(样式/脚本/数据全内嵌、离线可读)+ `<run-dir>/sdr_report_data.json` canonical 数据文件(`render_sdr_report.py`)。零参 = 显式默认集(master / 当前分支 / 全 6 维);多分支 sweep 走 launcher `mgh_sdr_launch.py --multi-branch`;敏感目录缺省回退默认模板(与 sra/srr 显式分歧)。能力规格 `openspec/specs/security-design-review/`。 |
+| `/mgh-sdr` | ✅ 主力 | 需求分支代码 diff 的**存量安全设计符合性复核**(merge 前关卡)。`git diff base..branch` → 接口维度注解启发式分组 + standalone 簇(`diff_group.py`)→ 存量设计基线投影 + 外部前端仓主流程受控检索(`sdr_context.py`,结论物化 + 哨兵 `read_roots[]`)→ fan-out 6 维度复核(垂直/横向/其他权限、SQL 注入、敏感信息、输入校验;**双形态**:opencode 安装面**缺省原生**(同宿主 subagent 波次派发,计划物化 `emit_native_plan.py` + 看门狗无人值守闭环,不写任何配置文件即生效)+ 项目画像 `.mgh/env-profile.json` 写 `dispatch_mode:"runner"` 显式回退;claude/dsh 安装面走子进程 `fanout_runner --tier sdr`)→ 项目根中文**自包含单文件 HTML 报告**(样式/脚本/数据全内嵌、离线可读)+ `<run-dir>/sdr_report_data.json` canonical 数据文件(`render_sdr_report.py`)。零参 = 显式默认集(master / 当前分支 / 全 6 维);多分支 sweep 走 launcher `mgh_sdr_launch.py --multi-branch`;敏感目录缺省回退默认模板(与 sra/srr 显式分歧)。能力规格 `openspec/specs/security-design-review/`。 |
 | `/mgh-sra` | ✅ | openspec `propose` 后、`apply` 前对变更 specs/tasks 做**维度驱动安全缺口分析 + 三信号语义匹配存量控制**(维度契合 / 业务域相似 / 业务事实)+ **批量澄清问答**沉淀跨迭代项目级业务记忆。确定性 prepare/merge + LLM 隔离扇出(a2 clarify 单上下文 / a3 augment per-capability / a4 consistency)+ 幂等非破坏性受管块合并。原创(无 vvah 源)。能力规格 `openspec/specs/security-augmentation/`。 |
 | `/mgh-srr` | ✅ | **无 openspec** 的自由文本需求(word/txt/md/excel/透传)安全评审。端口-适配器:确定性 intake 适配器(`ingest_requirements.py`)产出 sra 同 shape 上下文 → **逐字复用 sra 中间引擎**(clarify/augment/consistency 零新增提示词)→ 确定性 render 适配器(`render_report.py`)产**普通报告 + 台账**(NEVER 触 openspec)。docx/xlsx 走标准库尽力抽 + 降级标注 + `--text` 透传兜底;与 sra 共享 `business_context.json`。原创(无 vvah 源)。能力规格 `openspec/specs/freeform-security-review/`。 |
 | `/mgh-sast` | ✅ | 9 阶段 agentic SAST。零运行时依赖地复刻 vvaharness 流水线(上游对照见 `docs/upstream-index.md`)。能力规格 `openspec/specs/sast-orchestration-discipline/`。 |
@@ -453,11 +454,12 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   不删除**,也不被当作项目约定;opencode/claude 两面结构不混。
 - `/mgh-sdr` 的发现是 **LLM 候选,非确认漏洞**;接口分组是**注解启发式**(Spring/JAX-RS/Servlet 常用注解),漏分组接口退入独立变更单元(粒度粗、覆盖不丢),非 java web 项目整体退化为 standalone 模式;外部仓结论是**检索时点快照**(不保证前端分支同步);基线经字节预算投影(低优先级细节可能未全量投影);敏感目录来源为 project 或 default-template 回退(目录外字段仅按回退规则识别);报告为**自包含单文件 HTML**(数据同步落 `<run-dir>/sdr_report_data.json`,人读 HTML 与机器读 JSON 同源),源文件链接为仓内相对路径(部分浏览器对 `.java` 等扩展名可能下载而非打开),历史 `.md` 报告不迁移不回写。
 - 守卫 Bash 面路径净网是 **regex-over-string 提取、非 shell 解析器**(与全部 Bash 规则同立场),已知残余:① **未知写动词把数据写进已声明只读根**——token 在读允许集内放行、变异规则又不认得该动词 → 漏(sdr 审批流 change 落地后声明根全部经用户拍板,风险受控);② **别名/变量间接**(`$p='D:\out'; cp x $p`)提取不到裸路径 → 漏;③ 接受的新拦截(原放行→现拦,救济=配置声明或非运行会话):`> /tmp/x` 单写、`--flag=<树外路径>` 取值、`git -C <树外>`、无害提及树外路径;④ **通配按去通配前缀判属**——引号闭合路径后紧邻 glob 段先拼为单 token、含 `*`/`?` 的 token 按首个元字符前的前缀 resolve 判定(治「树内路径+通配」被拆成越树碎片误拦),glob 的**展开结果**不判定、别名/变量间接照旧不可见(同 ②)。
-- fan-out 的**静态凭证注入与数据目录隔离是 opencode host 形专属**(`--cred-file` 对
-  claude/dsh 形退出码拒识;`--isolate-data` 对其它形提示后忽略);凭证过期特征扫描是
-  **签名快停层**,漂移时优雅退化到既有 stall/冷却兜底;企业认证/环境细节只住在不入 git
-  的 `mgh-special-auth.md` 与 `docs/enterprise-environment.md`(install 对前者做源在场
-  收敛复制,通用分发面零企业内容)。
+- fan-out 的**静态凭证注入与数据目录隔离是手动/遗留能力**(`--cred-file` 对
+  claude/dsh 形退出码拒识;`--isolate-data` 对其它形提示后忽略);**不被任何 sdr 流程
+  引用**(命令壳 / launcher 提示词 / 步骤清单 / 恢复输出都不出现凭证命令)。凭证过期特征
+  扫描仅在手动传 `--cred-file` 时生效,漂移时优雅退化到既有 stall/冷却兜底;企业认证/
+  环境细节若需随项目使用,由部署方放在项目 `.mgh/special-auth.md`(install 不再复制该
+  文档),环境约束清单仍见 `docs/enterprise-environment.md`。
 - opencode 的**权限询问闸门只做「无人值守关询问」、不做授权策略**:运行域内(六运行根
   直查哨兵,不向上走链)`ask` → deny(+唯一例外:哨兵 `read_roots[]` 全属的
   `external_directory` → allow)、`question` 非 deny → deny,域外/allow 效果零介入;
@@ -470,8 +472,10 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   `*` 兜底为 allow(越目录读默认不询问,ask 面现实入口 = 显式 ask 配置/`.env` 内置
   ask/`question` 工具);`run` 非交互形对产生的询问立即 auto-reject,无应答挂起是
   TUI/服务形的形态。
-- `/mgh-sdr` 的**原生派发形态(opencode 面,画像显式 native)**:子进程形态缺省保留、
-  永久回退;原生形态的诚实边界——止损为**波次粒度**(无进程树杀,挂死由看门狗中止兜底,
+- `/mgh-sdr` 的**原生派发形态(opencode 面缺省;claude/dsh 与显式 `runner` 仍子进程)**:
+  opencode 安装面不写环境画像即走原生,项目画像 `dispatch_mode:"runner"` 是唯一回退开关
+  (回退路径行为逐字节不变)。原生形态的诚实边界——止损为**波次粒度**(无进程树杀,挂死由
+  看门狗中止兜底,
   看门狗在 Windows 宿主经 `Start-Process` 后台启动,POSIX `&` 形态在 PowerShell shell 工具
   下解析失败已实测);**编排父会话是单点**(进度在磁盘,恢复经 `resume_sdr_state.py` 接上);
   单元任务文件路径经编排器转述存在**残余错抄面**(防线 = 越树被守卫拦 + 错配单元经重枚举

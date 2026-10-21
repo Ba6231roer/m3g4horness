@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 mgh_credentials — credential center: one-shot model-gateway credential
-acquisition for every mgh-* fanout flow (command-agnostic).
+acquisition for static fanout injection.
+
+MANUAL/LEGACY capability: no mgh command flow references this script (the sdr
+command shells, launcher prompt, step manifest and resume output preset NO
+credential commands). It remains available for a hand-built orchestration that
+explicitly wants static per-child injection.
 
 WHY: in single-sign-on gateway environments (browser login, one-time tickets,
 local callback ports) a fan-out of N host-CLI children CANNOT each run its own
@@ -15,10 +20,10 @@ own config — children never authenticate themselves.
 Contract split (dev-facing): this script is GENERIC. Every enterprise-specific
 value (env var name, env-file path, global host-CLI config path, model id,
 provider id, gateway baseURL, expiry signatures) lives in the PARAMETER FILE
-(`--source`, written by the orchestrator into the run dir; values come from the
-special-auth deployment doc when present) — never hard-coded here. `~` prefixes
-are expanded by this script so orchestrator command lines never carry home-dir
-literals (the runtime guard's Bash path net would intercept them).
+(`--source`, written by the caller; values may come from a project-owned
+authentication note such as `<repo>/.mgh/special-auth.md`) — never hard-coded
+here. `~` prefixes are expanded by this script so command lines never carry
+home-dir literals (the runtime guard's Bash path net would intercept them).
 
 CLI contract (`--help` is the contract surface, R5.1):
   py mgh_credentials.py --source <run>/cred_source.json --out <run>/cred.json
@@ -363,7 +368,8 @@ def _acquire(src_path: Path, out_path: Path, login_timeout_s: int) -> dict:
             raise ValueError(
                 f"env var {var!r} not set in this process — recipe: run from "
                 f"a host session that has completed the login, or use the "
-                f"env-file / login-process mode per the special-auth doc")
+                f"env-file / login-process mode described by the caller's own "
+                f"authentication instructions")
     elif mode == "env-file":
         ef = src.get("env_file")
         if not isinstance(ef, str) or not ef.strip():

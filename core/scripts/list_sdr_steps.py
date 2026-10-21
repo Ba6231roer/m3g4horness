@@ -14,21 +14,27 @@ installed, NEVER hardcoded or passed via prompt. Sister script of init's
 Zero disk preconditions: does NOT read `context.json`, does NOT scan
 `<repo>/.mgh-sdr/`, does NOT depend on any run-state artifact. Queryable pre-run, during
 compaction recovery, or for pure documentation review. The allowed disk probes are:
-the optional special-auth deployment doc (`<mgh-core>/mgh-special-auth.md`,
-maintainer-carried, absent in generic installs): its presence is reported in the
-top-level `special_auth` field so the orchestrator can consult it before the fan-out
-step; and — ONLY when the project env profile explicitly selects the native dispatch
-form — the profile read itself plus a `native_plan.json` presence glob (reported in the
-top-level `dispatch` field, see below). No other state is read.
+the optional PROJECT-level special-auth entry (`<target>/.mgh/special-auth.md`, placed
+by the deployment; absent in generic installs): its presence is reported in the
+top-level `special_auth` field so the orchestrator can read it before the fan-out step
+(one "read it first" entry; the sdr flow presets NO credential commands); and the
+profile read itself plus a `native_plan.json` presence glob when the resolved form is
+native (reported in the top-level `dispatch` field, see below). No other state is read.
 
 Dispatch-form awareness (zero-change by construction): the project env profile
-(`<target>/.mgh/env-profile.json`, read via the shared `env_profile` module) decides the
-fan-out step's shape. Profile absent / `auto` / `runner` → the ESTABLISHED subprocess
-manifest, byte-identical output (no new stdout fields). Profile `native` → the fanout
-step entry switches to the native plan materializer and gains a `native_arc` field
-(materialize → same-message wave dispatch → render), and the top-level `dispatch` field
-appears. A malformed profile is fail-closed: exit 2 + recipe (NEVER silently treated as
-defaults — a "configured native but actually ran runner" mismatch must blow up here).
+(`<target>/.mgh/env-profile.json`, read + resolved via the shared `env_profile`
+module with `consumer=sdr`) decides the fan-out step's shape. Resolution is the
+SINGLE source: explicit `dispatch_mode` wins; otherwise ONLY the sdr consumer on
+the opencode install face resolves `native` (the opencode default), and every
+other consumer/face keeps the ESTABLISHED subprocess manifest, byte-identical
+output (no new stdout fields). Resolved `native` → the fanout step entry switches
+to the native plan materializer and gains a `native_arc` field (materialize →
+same-message wave dispatch → render), and the top-level `dispatch` field appears
+with `source`/`profile_exists`/`host_face`/`consumer`. A malformed profile is
+fail-closed: exit 2 + recipe (NEVER silently treated as defaults — a "configured
+native but actually ran runner" mismatch must blow up here). On the opencode face
+the native assets (agent + discipline fragment) are checked before emitting the
+manifest; absent → exit 2 + reinstall/runner recipe (NEVER a silent fallback).
 
 Complements `resume_sdr_state.py` (disk-derived "where am I / what's next"):
 resume_sdr_state gives the CURRENT step; list_sdr_steps gives the exact invocation line
@@ -40,8 +46,9 @@ Zero runtime deps (Python >=3.10 stdlib: argparse/json/pathlib/sys).
 CLI contract (`--help` is the contract surface, R5.1):
   py list_sdr_steps.py [--target <dir>] [--step <id>]
 
-  --target   target project root (default: .); accepted for future extension,
-             validated as a directory, not used in manifest content (static contract).
+  --target   target project root (default: .); the root the profile, the optional
+             project-level special-auth entry, and the plan-artifact probe resolve
+             against — pass the ABSOLUTE project root so no probe depends on cwd.
   --step     emit only the single step with this id (e.g., "group", "fanout"); NAMED ids
              only, NOT numeric indices; exits 2 if not recognized (closed set, R5.3b).
              Default: emit all steps.
@@ -49,16 +56,19 @@ CLI contract (`--help` is the contract surface, R5.1):
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"steps": [{step, kind, script, script_abs, invocation, input{}, output{}, discipline}],
    "special_auth": {present, path}
-   [, "dispatch": {form, profile_path, plan_present, native_agent, discipline_fragment}]}
+   [, "dispatch": {form, source, profile_exists, host_face, consumer, profile_path,
+                   plan_present, native_agent, discipline_fragment}]}
   - special_auth = {present: bool, path: <abs>|null} — presence of the optional
-                   special-auth deployment doc in this install tree. present=true →
-                   the orchestrator reads it BEFORE the fan-out step and follows it
-                   for credential preparation and dispatch flags; present=false →
-                   the generic flow needs nothing else.
-  - dispatch     = present ONLY in the native form (profile dispatch_mode "native"):
-                   {form:"native", profile_path, plan_present (any
+                   PROJECT-level special-auth entry `<target>/.mgh/special-auth.md`.
+                   present=true → the orchestrator reads it BEFORE the fan-out step and
+                   follows ITS OWN authentication instructions (the sdr flow presets no
+                   credential commands); present=false → the generic flow needs nothing
+                   else, zero extra prompt bytes.
+  - dispatch     = present ONLY in the native form (resolved form native):
+                   {form:"native", source:"profile"|"host-default", profile_exists,
+                   host_face, consumer:"sdr", profile_path, plan_present (any
                    <target>/.mgh-sdr/runs/*/native_plan.json — corroboration only,
-                   the profile is the binding decision), native_agent, and the
+                   the resolved form is the binding decision), native_agent, and the
                    installed wave-discipline fragment path}. Absent otherwise.
   - step        = step id (enum matching resume_sdr_state.py)
   - kind        = "bash" | "done"
@@ -173,42 +183,60 @@ _STEPS = [
 ]
 
 
-def _special_auth() -> dict:
-    """Presence probe for the optional special-auth deployment doc (see module
-    docstring for the allowed disk probes). present=false is the generic-install
-    shape and carries path=null."""
-    doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
+def _special_auth(target: Path) -> dict:
+    """Presence probe for the optional PROJECT-level special-auth entry
+    (`<target>/.mgh/special-auth.md`, see module docstring for the allowed disk
+    probes). present=false is the generic shape and carries path=null. The
+    probe is absolute-path only — it never depends on the process cwd."""
+    doc = (Path(target) / ".mgh" / "special-auth.md").resolve()
     if doc.is_file():
         return {"present": True, "path": str(doc)}
     return {"present": False, "path": None}
 
 
+def _mgh_core_root() -> Path:
+    """This script's installed <mgh-core> root (its `scripts/` parent)."""
+    return Path(__file__).resolve().parent.parent
+
+
 def _dispatch_form(target: Path):
-    """Native-form detection. The env profile is the BINDING decision
-    (`dispatch_mode: "native"` and nothing else — missing / auto / runner keep
-    the established subprocess form); the `native_plan.json` presence glob is
-    corroboration only, reported so the orchestrator can see whether a prior
-    wave round already materialized. A malformed profile is fail-closed
-    (exit 2 + recipe) per the shared env-profile contract. Returns None unless
-    the native form is active — the caller then omits the `dispatch` field
-    entirely, so every subprocess-form invocation keeps byte-identical stdout."""
+    """Native-form detection via the ONE shared resolver (`consumer=sdr`). An
+    explicit `dispatch_mode` wins; otherwise the sdr consumer on the opencode
+    install face resolves native (the default), and every other consumer/face
+    keeps the established subprocess form. The `native_plan.json` presence glob
+    is corroboration only, reported so the orchestrator can see whether a prior
+    wave round already materialized. A malformed profile is fail-closed (exit 2
+    + recipe) per the shared env-profile contract. Returns None unless the
+    native form is active — the caller then omits the `dispatch` field entirely,
+    so every subprocess-form invocation keeps byte-identical stdout."""
     try:
-        profile = env_profile.load(target)
+        res = env_profile.resolve(target, consumer="sdr")
     except env_profile.EnvProfileError as e:
         print(f"error: env profile rejected: {e}\n"
               f"recipe: fix or delete the config — a malformed profile is NEVER "
               f"silently treated as defaults (a 'configured native but actually "
               f"ran runner' mismatch must fail at startup).", file=sys.stderr)
         sys.exit(2)
-    if profile.dispatch_mode != "native":
+    if res.form != "native":
         return None
+    if res.host_face == "opencode":
+        # The opencode face is the one that can actually dispatch natively:
+        # version-skewed / partial installs must fail loud, never fall back.
+        recipe = env_profile.require_native_assets(_mgh_core_root())
+        if recipe:
+            print(recipe, file=sys.stderr)
+            sys.exit(2)
     runs = target / ".mgh-sdr" / "runs"
     plan_present = runs.is_dir() and any(runs.glob("*/native_plan.json"))
     return {
         "form": "native",
+        "source": res.source,
+        "profile_exists": res.profile_exists,
+        "host_face": res.host_face,
+        "consumer": res.consumer,
         "profile_path": str(target / env_profile.CONFIG_REL),
         "plan_present": plan_present,
-        "native_agent": "sdr-review-native",
+        "native_agent": env_profile.NATIVE_AGENT,
         "discipline_fragment": str(
             Path(__file__).resolve().parent.parent / "prompts" / "fragments"
             / "sdr-native-dispatch.md"),
@@ -294,7 +322,10 @@ def main():
         description="emit /mgh-sdr per-step invocation manifest (deterministic, zero "
                     "disk pre-req)")
     ap.add_argument("--target", default=".",
-                    help="target project root (default .); accepted for future extension")
+                    help="target project root (default .); pass the ABSOLUTE project "
+                         "root — the env-profile read, the optional project-level "
+                         "special-auth entry, and the plan-artifact probe resolve "
+                         "against it")
     ap.add_argument("--step", metavar="<id>",
                     help="emit only the single step with this id (e.g. group, fanout); "
                          "named ids only; NOT numeric indices; exits 2 if not recognized "
@@ -336,7 +367,7 @@ def main():
         print(f"[list_sdr_steps] emitting {len(steps)} steps (use --step <id> for "
               f"single step)", file=sys.stderr)
 
-    payload = {"steps": steps, "special_auth": _special_auth()}
+    payload = {"steps": steps, "special_auth": _special_auth(target)}
     if dispatch is not None:
         payload["dispatch"] = dispatch
     print(json.dumps(payload, ensure_ascii=False, indent=2))

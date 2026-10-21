@@ -1,12 +1,12 @@
 ---
-description: Run a security design review on a branch diff: git diff base..branch, interface-dimension grouping, fan-out 6-dimension review against the existing security design (mgh-init rules), and a Simplified-Chinese report at the project root. LLM candidates needing human review. Default: current branch vs master; launcher (mgh_sdr_launch.py) is the zero-prompt preferred entry for multi-branch sweeps.
+description: Run a security design review on a branch diff: git diff base..branch, interface-dimension grouping, fan-out 6-dimension review against the existing security design (mgh-init rules), and a Simplified-Chinese report at the project root. LLM candidates needing human review. Default: current branch vs master; opencode dispatches natively by default (env-profile dispatch_mode "runner" reverts to the subprocess form).
 ---
 
 # /mgh-sdr — 需求分支安全设计符合性复核(security design review)
 
 > 编排器 = 你(宿主 agent):按本提示词,用自身工具(Bash / 子任务 / Read / Write)把流水线
 > **跑出来**,而非写成代码。确定性逻辑已在 `diff_group.py` / `sdr_context.py` /
-> `render_sdr_report.py` / `fanout_runner.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,
+> `emit_native_plan.py` / `render_sdr_report.py` 里,直接 `Bash` 调用即可,无需 `Read` 其源码,
 > 也不要另写 `.py` 去包装或重实现。
 
 > **输出是 LLM 候选,非已确认漏洞。引用存量控制断言存在、不断言有效。每次总结都声明。**
@@ -27,11 +27,10 @@ description: Run a security design review on a branch diff: git diff base..branc
   **实测字节**;超预算三级处置(无损重切 → 上下文瘦身 → 退出码 2 零派发)由脚本承载;
   resume **预算粘滞**:run 目录已有 grouping.json 预算记录且未显式传 flag → 复用记录值
   (单元身份不漂移),显式传 flag 才覆盖
-- `--quota-calls <N>` / `--quota-window-s <W>` / `--quota-calls-per-unit <K>`(可选,透传
-  fanout_runner 的配额模式:调用次数限流网关(如 100 次/10 分钟)的估算式准入;配对要求
-  (N 与 W 必须成对)与取值域见 `fanout_runner.py --help`;未配置零变化)
-- 派发并发:规范行默认 `--wave 1`(内网串行最稳;opencode 并行子进程另有数据库锁前科);
-  要并发建议 1~2
+- **派发形态**:opencode 面缺省 **原生**(不写任何配置文件);项目画像
+  `.mgh/env-profile.json` 写 `"dispatch_mode":"runner"` 才回退子进程形态。`--quota-calls <N>` /
+  `--quota-window-s <W>` / `--quota-calls-per-unit <K>` **仅 runner 回退形态**可传(透传子进程
+  派发器的估算式准入);原生形态的配额从画像 `quota` 读取,不传 flag。
 - `--include-excluded`(兜底:不套排除集(测试树/构建产物/静态资源/锁文件/构建脚本),
   恢复全量评审;默认排除且 stdout `excluded{count,by_reason}` + 报告诚实边界披露)
 - `--no-codegraph`(可选:把**信号**标为 off——不传时由 `sdr_context.py` 自动探测。该开关**只影响
@@ -56,20 +55,21 @@ heredoc/here-string **按形态即拦**;合法出口是 **stdout 直消费**(读
 内联代码或文件中转重派生);(c) `Read` 叶子 `.py` 源码(报错看 stderr,不读源码)。
 运行域守卫(`block-adhoc-scripts`)确定性兜底。
 
-**fan-out 刚性三元组**:`[diff_group pending[]::字段] → fanout_runner --tier sdr → [drafts/*.json + markers]`;
-路径 = `diff_group` stdout `pending[]` 每项**绝对** `input_path`/`draft_path`/`done_marker`/
-`failed_marker`/`baseline_path`/`external_dir`(逐字透传给 dispatcher,dispatcher 逐字填进 subagent
-task)——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、**NEVER** 相对路径。
+**原生扇出三元组**:`[diff_group pending[]::字段] → [emit_native_plan 计划 + 单元任务文件] →
+[sdr-review-native 子代理 + 磁盘标记]`;路径 = `diff_group` stdout `pending[]` 每项**绝对**
+`input_path`/`draft_path`/`done_marker`/`failed_marker`/`baseline_path`/`external_dir`,
+以及物化 stdout 的 `plan_path`/`task_file`——**NEVER** 自拼路径、**NEVER** `py -c` 算路径、
+**NEVER** 相对路径。标记(.done/.failed)的唯一写者是子代理自身。
 
 **边界校验**:每步后跑产出者 `--check`;失败(退出码 2)→ 回退重跑该步,**不带着破损产物继续**。
 报告/manifest **NEVER** 写进 `openspec/`。
 
 **步骤清单即调用行真相源**:执行某步前先取该步的确切调用行与纪律(压断/新会后同——
 清单是静态契约,磁盘状态查询走「中断恢复」):
-`py .opencode/mgh-core/scripts/list_sdr_steps.py --step <id>` → 按 stdout `invocation`
-逐字执行(仅把 `py` 换成本 run 解释器)、按 `discipline`(gates → path_recipes → nevers)
-执行;stdout 过大 → 同参加 `--summary`;要瞄产物结构 → `describe_artifact.py`。fanout 与
-render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
+`py .opencode/mgh-core/scripts/list_sdr_steps.py --target <abs> --step <id>` → 按 stdout
+`invocation` 逐字执行(仅把 `py` 换成本 run 解释器)、按 `discipline`(gates → path_recipes →
+nevers)执行;stdout 过大 → 同参加 `--summary`;要瞄产物结构 → `describe_artifact.py`。
+fanout 与 render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
 
 ## Orchestration flow
 
@@ -79,17 +79,17 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
      `for c in py python python3; do "$c" --version >/dev/null 2>&1 && echo "PYPROBE $c OK $("$c" --version 2>&1)" || echo "PYPROBE $c UNAVAILABLE"; done`
      ——取 `PYPROBE <c> OK` 行中**第一个**版本 ≥3.10 者为本次 run 的解释器(判据 = 退出码 0
      **且**版本达标,Store stub rc 49 与 2.x 均落选);全部不达标 → 早停披露(转述探测输出 +
-     ≥3.10 要求)并按下方干净停止规则 `rm <repo>/.mgh-sdr/.active`(此时哨兵可能尚未武装,
-     rm 无操作即可)。探测结果 **NEVER** 落盘(`run_config.json`/哨兵 schema 不动)。
+     ≥3.10 要求)并按下方干净停止规则 `rm <repo>/.mgh-sdr/.active`。探测结果 **NEVER** 落盘。
    · `Bash: export MGH_SDR_ACTIVE=1`;解析 run 目录(默认 `<project>/.mgh-sdr/runs/<ts>/`;
      `mkdir -p`)。
    · **零参默认路径**:`--base`/`--branch` 整体省略(脚本 argparse 兜底 master/当前分支),
      run 目录命名只用 `<ts>` 不含分支;后续步骤与报告消费 step 1 stdout 已解析的 `branch`/`base`
      字段,NEVER 在壳里 `git rev-parse` 猜分支。
-   · **派发形态判定**(step 0,缺省零变化):`py .opencode/mgh-core/scripts/env_profile.py
-     --target <abs>` ——退出码 2 = 画像损坏:转述 stderr recipe 后 STOP(NEVER 带着坏画像
-     跑);缺文件 / `auto` / `runner` = 现行子进程形态(本壳下文零变化);仅
-     `dispatch_mode == "native"` → step 3 fan-out 改走**原生形态**。
+   · **派发形态判定**(step 0):`py .opencode/mgh-core/scripts/env_profile.py
+     --target <abs> --consumer sdr` ——退出码 2 = 画像损坏:转述 stderr recipe 后 STOP;
+     stdout `form` = 本次形态(opencode 缺省 `native`,`source:"host-default"`;项目画像显式
+     `runner` 时 `form:"runner"`,那是唯一回退开关)。`form=native` → step 3 走原生形态
+     (本壳主路径);`form=runner` → step 3 按步骤清单的 fanout invocation 执行子进程回退。
    · **预武装哨兵**(先于 step 1 唤醒守卫;确定性脚本副作用,**NEVER** 手执行 `printf` 配方写哨兵):
      `py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir> --repo <abs> --arm-sentinel`
      (同 target 重复执行 = no-op)。哨兵细化覆盖(read_roots)与 codegraph 信号
@@ -116,30 +116,21 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
      `total==0` 且 `excluded.count>0` = 全部文件被排除(非零 diff),照常渲染。
    · 预算默认口径与粘滞见该步 discipline(`sdr-group-budget`);诊断读 stdout
      `excluded{}`/`codegraph_stats{}`(probe 失败原因在 stderr)。
-3. fan-out(清单 step id `fanout`;逐字执行 invocation,配额三 flag 按参数表指引追加;
-   **NEVER** 手工循环):取清单 → 执行(带 per-call timeout)。
-   · **画像 native(step 0 判定)→ 原生形态,本步以下 runner 子流程不适用**:读
-     `.opencode/mgh-core/prompts/fragments/sdr-native-dispatch.md` 并按其执行——看门狗
-     先行(后台,`OPENCODE_SESSION_ID` 宿主注入)→ `emit_native_plan.py --tier sdr` 每轮
-     物化 + `--check`(重物化即重枚举)→ **同一条 assistant 消息**并发派 `sdr-review-native`
-     子代理(description=计划短号、任务体=单行令牌 `mgh-dispatch: plan=<plan_path>
-     unit=<短号>`,派发插件 `mgh_dispatch.ts` 的展开钩子将其展开为任务文件全文,模型输出
-     零任务路径)→ 标记唯一写者是子代理 → 失败单元至多一轮重派、限流特征按画像配额等窗
-     → pending 清空进 step 4。
-     步骤调用行与恢复的原生分支由 `list_sdr_steps.py` / `resume_sdr_state.py` 形态感知给出。
-   · **special-auth 前置检查(先于 invocation,不可跳过)**:清单 stdout
-     `special_auth.present==true` → MUST 先 Read 该文档并按文档完成凭证准备(写参数文件
-     `cred_source.json` → 跑 `mgh_credentials.py` 取证 → 本步追加
-     `--cred-file <run>/cred.json`;家目录路径写进参数文件,NEVER 上命令行),**然后**才执行
-     invocation;`credential_expired:true` 退出码 2 → 按文档重新取证后同参
-     `--resume --retry-failed`。present==false → 直接执行 invocation,零额外动作。
-   · 终态分派(快败风暴三层 recipe 已在该步 discipline,摘要):`partial:true` → 同参重派
-     (resume 语义);STALLED(退出码 2)→ 先跑 `diff_group.py --check <run-dir>` 分拥塞/损坏
-     (见 discipline),停止重派,报告 degraded;`rate_limited:true` → 等满一个配额窗口再同参
-     重派;`credential_expired:true` → 按 special-auth 文档(在场时)或 `mgh_credentials.py`
-     重新取证、更新 cred 文件后同参 `--resume --retry-failed`(已完成单元不重跑);gate 形
-     退出码 2 → 转述 stderr recipe,停止。非 ok 单元证据在
-     `<run-dir>/markers/sdr/<unit>.run.log`。
+3. fan-out(清单 step id `fanout`;**形态由 step 0 的 `form` 决定**):
+   · `form=native`(本面缺省):读 `.opencode/mgh-core/prompts/fragments/sdr-native-dispatch.md`
+     并按其执行——① 看门狗先行(后台,`OPENCODE_SESSION_ID` 宿主注入);② `emit_native_plan.py
+     --tier sdr` 每轮物化 + `--check`(重物化即重枚举);③ **同一条 assistant 消息**并发派
+     `sdr-review-native` 子代理(description=计划短号、任务体=单行令牌
+     `mgh-dispatch: plan=<plan_path> unit=<短号>`,派发插件 `mgh_dispatch.ts` 的展开钩子将其
+     展开为任务文件全文);④ 标记唯一写者是子代理;失败单元至多一轮重派、限流特征按画像配额
+     等窗;⑤ pending 清空进 step 4。步骤调用行与恢复的原生分支由 `list_sdr_steps.py` /
+     `resume_sdr_state.py` 形态感知给出。
+   · `form=runner`(项目画像显式回退):按 `list_sdr_steps.py --target <abs> --step fanout`
+     的 `invocation` 逐字执行、按该步 `discipline` 走子进程回退细则(超时不变式 / 配额 /
+     终态分派)。子进程形态细则只住该步 discipline,壳不重复。
+   · **特殊授权(可选项目入口)**:清单 stdout `special_auth.present==true` → 先 Read
+     `special_auth.path` 并按其鉴权说明执行;`false` → 零动作、零额外提示。本流程**不预设**
+     任何凭证命令。
 4. render(清单 step id `render`):取清单 → 执行 → 该步 gates 的
    `render_sdr_report.py --check <run-dir>`。报告 = 自包含单文件 HTML + `<run-dir>/`
    `sdr_manifest.json` + `sdr_report_data.json`(canonical 数据文件,下游程序只消费它,
@@ -158,9 +149,10 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
 
      py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir <abs-run-dir>
 
-读 stdout 的 `step`(语义 = **当前待办步**)/ `next_action` / `discipline_reminders` / `notes`,
-按该步纪律(闸门 → 路径配方 → 硬边界)继续即接上流水线——待办步的确切调用行再问
-`list_sdr_steps.py --step <id>`。进度与纪律**纯从磁盘重派生**,与对话记忆是否保留无关。
+读 stdout 的 `step`(语义 = **当前待办步**)/ `next_action` / `dispatch.form`(native =
+原生、缺席 = 子进程回退)/ `discipline_reminders` / `notes`,按该步纪律(闸门 → 路径配方 →
+硬边界)继续即接上流水线——待办步的确切调用行再问 `list_sdr_steps.py --target <abs> --step <id>`。
+进度与纪律**纯从磁盘重派生**,与对话记忆是否保留无关。
 选中解释器不确定(压缩/新会话)→ **重跑 step 0 探测命令**重建该事实(单条、廉价),
 NEVER 逐命令换解释器试错。`--run-dir` 必填;推不出时脚本 fail-loud,**NEVER** 猜步骤。
 run 进行中(`step ∈ group|fanout|render`)哨兵却缺失 = 守卫休眠 → `--check` 退出码 2 +
@@ -175,18 +167,21 @@ re-arm recipe:
 |---|---|---|
 | 基线投影 + 外部仓检索 + 敏感目录 | **script** | `sdr_context.py` |
 | diff 采集 + 接口分组 + slice 物化 | **script** | `diff_group.py` |
-| per-unit 复核扇出 | dispatcher `fanout_runner --tier sdr` | `sdr-task.md`(fanout fragments)+ agent `sdr-review-fanout` |
+| per-unit 复核扇出(原生) | 计划物化 + 同消息子代理 | `emit_native_plan.py` + agent `sdr-review-native` + `sdr-native-dispatch.md` |
+| per-unit 复核扇出(显式 runner 回退) | 步骤清单 fanout invocation | 清单 `discipline`(子进程派发细则) |
 | 汇总渲染 | **script** | `render_sdr_report.py` |
 | stage boundary check | **script** | `sdr_context`/`diff_group`/`render_sdr_report` `--check` |
 | 每步调用行 + 步骤纪律清单 | **script** | `list_sdr_steps.py` |
+| 派发形态解析 | **script** | `env_profile.py --consumer sdr` |
 
 ### Deterministic invocation (Bash)
 
 ```bash
-py .opencode/mgh-core/scripts/list_sdr_steps.py --step not-started
-py .opencode/mgh-core/scripts/list_sdr_steps.py --step group
-py .opencode/mgh-core/scripts/list_sdr_steps.py --step fanout
-py .opencode/mgh-core/scripts/list_sdr_steps.py --step render
+py .opencode/mgh-core/scripts/env_profile.py --target <abs> --consumer sdr
+py .opencode/mgh-core/scripts/list_sdr_steps.py --target <abs> --step not-started
+py .opencode/mgh-core/scripts/list_sdr_steps.py --target <abs> --step group
+py .opencode/mgh-core/scripts/list_sdr_steps.py --target <abs> --step fanout
+py .opencode/mgh-core/scripts/list_sdr_steps.py --target <abs> --step render
 py .opencode/mgh-core/scripts/describe_artifact.py --in .mgh-sdr/runs/<ts>/grouping.json --keys
 py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> --repo <abs> --arm-sentinel
 py .opencode/mgh-core/scripts/read_roots_config.py --target <abs> --add <abs-外部仓>
@@ -196,8 +191,6 @@ py .opencode/mgh-core/scripts/sdr_context.py --repo <abs> --run-dir .mgh-sdr/run
 py .opencode/mgh-core/scripts/sdr_context.py --repo <abs> --run-dir .mgh-sdr/runs/<ts> --approve-external <abs-外部仓>
 py .opencode/mgh-core/scripts/diff_group.py --repo <abs> --base master --branch feature-pay --checkpoints .mgh-sdr/runs/<ts>/markers --materialize .mgh-sdr/runs/<ts>/slices
 py .opencode/mgh-core/scripts/diff_group.py --check .mgh-sdr/runs/<ts>
-py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base master --checkpoints .mgh-sdr/runs/<ts>/markers --inputs-dir .mgh-sdr/runs/<ts>/slices --wave 1 --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300
-py .opencode/mgh-core/scripts/fanout_runner.py --tier sdr --repo <abs> --base master --checkpoints .mgh-sdr/runs/<ts>/markers --inputs-dir .mgh-sdr/runs/<ts>/slices --wave 1 --time-budget-ms 720000 --call-timeout-s 540 --stall-timeout-s 300 --quota-calls 100 --quota-window-s 600
 py .opencode/mgh-core/scripts/render_sdr_report.py --run-dir .mgh-sdr/runs/<ts> --repo <abs>
 py .opencode/mgh-core/scripts/render_sdr_report.py --check .mgh-sdr/runs/<ts>
 py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts>
@@ -208,14 +201,13 @@ py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> -
 
 - **零参默认执行口径**:不带参数 = 按 base=`master` / 当前分支 / 全 6 维直接跑完整流水线
   (含 fan-out);低成本试跑出口 = `--dry-run`(仅 step 1 + `--check`,不派发不渲染;壳级
-  dry-run 会照常产生 run 目录、context.json 与哨兵——**不是**零副作用试跑;
-  `fanout_runner.py --dry-run` 才是零写盘纯计划,产物只走 stdout)。
-- **special-auth 部署文档是可选覆盖**:安装树携带 `mgh-special-auth.md`(清单 stdout
-  `special_auth` 字段披露)时,fan-out 步的凭证准备与派发 flag 以该文档为准;缺席时通用
-  流程完整可用、行为零差异。
-- **派发形态支持面(三面分歧,如实披露)**:本面(opencode)= 子进程形态(缺省/回退)+
-  原生形态(环境画像显式 `dispatch_mode:"native"` 才启用,缺省行为零变化);claude/dsh
-  面当前仅子进程形态——属宿主机制差异,非镜像断裂,后续按宿主能力另行接入。
+  dry-run 会照常产生 run 目录、context.json 与哨兵——**不是**零副作用试跑)。
+- **派发形态(本面缺省原生)**:opencode 面不写环境画像即走原生子代理波次派发
+  (`form=native`);要回到子进程形态,项目画像写 `{"dispatch_mode":"runner"}`(显式回退,
+  调用行与纪律由步骤清单给)。claude/dsh 面当前仅子进程形态——宿主机制差异,非镜像断裂。
+  原生形态使用宿主会话自身的 provider 配置,不做子进程凭证注入。
+- **特殊授权说明只作可选项目入口**:`<repo>/.mgh/special-auth.md` 存在时先 Read 并按说明
+  执行;缺席零动作。流程不预设任何凭证命令。
 - **发现是 LLM 候选,非确认漏洞**;覆盖受基线投影与启发式分组上界约束。
 - **接口分组是注解启发式**:未识别接口/链退入目录聚簇单元(粒度粗、覆盖不丢);非 java web
   项目整体退化为 standalone 模式,仍可运行。
@@ -232,9 +224,9 @@ py .opencode/mgh-core/scripts/resume_sdr_state.py --run-dir .mgh-sdr/runs/<ts> -
   存在 → 复用;缺失 → **回退默认模板**(37 项,不收窄 6 facet——复核域漏检代价不对称)。
   来源在报告 + manifest 披露。
 - **基线经字节预算投影**(32KB 默认,优先级截断):低优先级维度的存量设计细节可能未全量投影。
-- **配额模式是估算式准入**:每单元真实调用数在子代理会话内、dispatcher 不可观测;准入按
-  估算节流,估算偏小仍可能吃 429(窗口复位冷却与限流截断兜底);未配置配额三 flag 时
-  派发行为零变化。
+- **配额模式是估算式准入(runner 回退专用)**:每单元真实调用数在子代理会话内、dispatcher
+  不可观测;准入按估算节流,估算偏小仍可能吃 429(窗口复位冷却与限流截断兜底);原生形态
+  按画像 `quota` 等窗。
 - **宿主 shell 超时**:opencode 全局 shell 超时 env 须启动前就绪;per-call `timeout` 是跨宿主公共
   杠杆。claude Bash per-call 上限 600000ms。
 - **可读性自检小节是尽力而为的评审产出**:缺席/失败只少该小节;建议仅提示,采纳由人确认。

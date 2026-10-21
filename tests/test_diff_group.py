@@ -1344,7 +1344,11 @@ public class BigController {{
                                "--branch", "feat",
                                "--checkpoints", str(self.tmp / "p2" / "markers"),
                                "--materialize", str(self.tmp / "p2" / "slices"))
-        self.assertIn("no binary", err2)
+        # .codegraph present but the env override points at a missing path: the
+        # probe names that operator mistake specifically (a blanket "no binary"
+        # would hide which of the two mistakes was made)
+        self.assertTrue(("no binary" in err2)
+                        or ("points to a missing path" in err2), err2)
 
     # --- chain materialization (improve-mgh-sdr-report-structure) ---------------
 

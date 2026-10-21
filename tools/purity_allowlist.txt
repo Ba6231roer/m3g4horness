@@ -32,7 +32,7 @@ core/contracts/sast/controls-intake.md:73
 core/contracts/sast/controls-intake.md:8
 core/contracts/sast/fanout-enumeration.md:3
 core/contracts/sast/fanout-enumeration.md:85
-core/contracts/sdr/pipeline.md:164
+core/contracts/sdr/pipeline.md:175
 core/contracts/sdr/resume-state.md:3
 core/contracts/sensitive-catalog.md:74
 core/contracts/sra/augmentation.md:100

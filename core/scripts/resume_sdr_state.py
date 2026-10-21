@@ -60,15 +60,20 @@ failure, NOT retried on --resume, NOT blocking). Any non-zero `failed` is surfac
 `notes[]` (advisory). Every path on stdout is `Path.resolve()` absolute (Windows-native,
 NEVER a shell MSYS form).
 
-Native-dispatch face (zero-change by construction): when the run's repo profile
-explicitly selects `dispatch_mode: "native"`, the stdout gains a top-level `dispatch`
-field {form, profile_path, plan_present, native_agent, discipline_fragment}, the fanout
-step's `next_action` points at the native arc (plan materialization → same-message wave
-dispatch → render; the plan artifact's presence picks the sub-phase), and
-`discipline_reminders` resolves the native variant — progress derivation stays purely
-on-disk. A malformed profile is fail-closed (exit 2 + recipe). Profile missing / auto /
-runner → byte-identical to the established output (no `dispatch` field, the subprocess
-fanout next_action, the subprocess discipline).
+Native-dispatch face (zero-change by construction): the dispatch form is the shared
+resolver's answer (`env_profile.resolve(repo, consumer="sdr")`) — an explicit
+`dispatch_mode` wins; otherwise ONLY the sdr consumer on the opencode install face
+resolves native (the opencode default), and every other consumer/face keeps the
+subprocess form. In the native form the stdout gains a top-level `dispatch` field
+{form, source, profile_exists, host_face, consumer, profile_path, plan_present,
+native_agent, discipline_fragment}, the fanout step's `next_action` points at the
+native arc (plan materialization → same-message wave dispatch → render; the plan
+artifact's presence picks the sub-phase), and `discipline_reminders` resolves the
+native variant — progress derivation stays purely on-disk. A malformed profile is
+fail-closed (exit 2 + recipe). Missing assets on the opencode face are fail-closed
+too (reinstall / explicit runner recipe — NEVER a silent subprocess fallback).
+Runner form → byte-identical to the established output (no `dispatch` field, the
+subprocess fanout next_action, the subprocess discipline).
 
 Exit codes (R5.3b): 0 ok · 1 run-dir missing/not a dir · 2 misuse (argparse) or
 underivable state (malformed context.json/grouping.json, or a `--check` violation) —
@@ -138,28 +143,44 @@ def _fragment_abs() -> str:
                / "sdr-native-dispatch.md")
 
 
+def _mgh_core_root() -> Path:
+    """This script's installed <mgh-core> root (its `scripts/` parent)."""
+    return Path(__file__).resolve().parent.parent
+
+
 def _dispatch_form(repo: str, run_dir: Path, notes: list):
-    """Native-form detection for the run's repo. The env profile is the BINDING
-    decision (`dispatch_mode: "native"`); the plan artifact inside THIS run dir
+    """Native-form detection for the run's repo through the ONE shared resolver
+    (`consumer=sdr`). An explicit `dispatch_mode` wins; otherwise the sdr consumer
+    on the opencode install face resolves native (the default) and every other
+    consumer/face keeps the subprocess form. The plan artifact inside THIS run dir
     (`native_plan.json`) is the sub-phase signal (absent = the wave loop has not
     materialized yet) and the render-disclosure evidence. A malformed profile is
-    fail-closed: returns (None, recipe) — the caller exits 2, NEVER guessing the
-    step graph off a profile it could not read. Returns (None, None) unless the
-    native form is active, so every subprocess-form invocation keeps
-    byte-identical stdout (the `dispatch` field simply never appears)."""
+    fail-closed (returns (None, recipe) — the caller exits 2, NEVER guessing the
+    step graph off a profile it could not read). A missing native asset on the
+    opencode face is fail-closed too. Returns (None, None) for the runner form, so
+    every subprocess invocation keeps byte-identical stdout (the `dispatch` field
+    simply never appears)."""
     if not repo:
         return None, None
     profile_path = Path(repo) / env_profile.CONFIG_REL
     try:
-        profile = env_profile.load(repo)
+        res = env_profile.resolve(repo, consumer="sdr")
     except env_profile.EnvProfileError as e:
         return None, (f"env profile rejected: {e} — fix or delete the config "
                       f"(fail-closed: a malformed profile is NEVER silently "
                       f"treated as defaults).")
-    if profile.dispatch_mode != "native":
+    if res.form != "native":
         return None, None
+    if res.host_face == "opencode":
+        recipe = env_profile.require_native_assets(_mgh_core_root())
+        if recipe:
+            return None, recipe
     return {
         "form": "native",
+        "source": res.source,
+        "profile_exists": res.profile_exists,
+        "host_face": res.host_face,
+        "consumer": res.consumer,
         "profile_path": str(profile_path),
         "plan_present": (run_dir / NATIVE_PLAN_NAME).is_file(),
         "native_agent": NATIVE_AGENT,
@@ -351,13 +372,7 @@ def resolve(run_dir: Path, args) -> tuple:
     if step == "fanout":
         notes.append(f"{pending_n}/{total} unit(s) have no terminal marker yet "
                      f"(done={len(done_ids)} failed={len(failed_ids)}).")
-        if dispatch is None:
-            auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
-            if auth_doc.is_file():
-                notes.append(f"special-auth deployment doc present ({auth_doc}) — "
-                             f"credential renewal and the re-dispatch flags for this "
-                             f"step follow that doc when it covers them.")
-        else:
+        if dispatch is not None:
             if not (run_dir / "watchdog" / "state.json").is_file():
                 notes.append("watchdog artifacts absent (<run-dir>/watchdog/) — before "
                              "dispatching further waves, start the watchdog in the "
@@ -453,23 +468,19 @@ def resolve(run_dir: Path, args) -> tuple:
                            f"(four-level timeout invariant; opencode hosts calibrated to 900s use "
                            f"720000/540/300) — unit paths come from that command's own "
                            f"`pending[]`, never hand-built")
-            auth_doc = Path(__file__).resolve().parent.parent / "mgh-special-auth.md"
-            if auth_doc.is_file():
-                # Rides next_action.desc (NOT just notes): the recovering
-                # orchestrator executes desc verbatim and may never read notes —
-                # the doc pointer must be on the executed path itself.
-                fanout_desc = (
-                    f"special-auth deployment doc is PRESENT ({auth_doc}): FIRST Read it "
-                    f"and complete credential preparation per the doc (write "
-                    f"<run-dir>/cred_source.json, run mgh_credentials.py to produce "
-                    f"<run-dir>/cred.json — home-dir paths go INSIDE the parameter file, "
-                    f"never on a command line), THEN run the command below with "
-                    f"`--cred-file <run-dir>/cred.json` appended; on "
-                f"`credential_expired:true` (exit 2) re-acquire and re-run with "
-                f"`--resume --retry-failed` (done units never re-dispatched). — "
-                + fanout_desc)
             nxt = _next("bash", fanout_desc,
                         [repo, checkpoints, slices, grp_path])
+        # Special-auth is a PROJECT-owned optional entry (applies to BOTH forms):
+        # present => exactly one "read it first, follow its own instructions"
+        # sentence on the EXECUTED path (next_action.desc); absent => zero extra
+        # action. The sdr flow presets NO credential commands (no cred_source.json,
+        # no mgh_credentials.py, no --cred-file, no credential_expired branch).
+        auth_doc = (Path(repo) / ".mgh" / "special-auth.md") if repo else None
+        if auth_doc is not None and auth_doc.is_file():
+            nxt = {"kind": nxt["kind"],
+                   "desc": (f"特殊授权说明在场({auth_doc}):先 Read 该说明,按其鉴权说明"
+                            f"执行。 — " + nxt["desc"]),
+                   "absolute_paths": nxt["absolute_paths"] + [str(auth_doc)]}
     elif step == "render":
         nxt = _next("bash",
                     f"run `py {_script_abs('render_sdr_report.py')} --run-dir {run_dir} "

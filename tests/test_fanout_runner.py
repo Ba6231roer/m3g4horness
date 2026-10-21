@@ -4204,9 +4204,9 @@ class TestDryRunPurePlan(unittest.TestCase):
 
 
 class TestSpecialAuthAndOrphanAdvisories(unittest.TestCase):
-    """stderr advisories (non-blocking, exit-neutral): the special-auth
-    deployment doc present + no --cred-file → one note; cred-file passed →
-    no note; doc absent → no note. A residual liveness file → orphan note."""
+    """stderr advisories (non-blocking, exit-neutral): the PROJECT-level
+    special-auth entry present + no --cred-file → one note; cred-file passed →
+    no note; entry absent → no note. A residual liveness file → orphan note."""
 
     def setUp(self):
         self.base = _FakeDispatchBase.__new__(_FakeDispatchBase)
@@ -4222,14 +4222,14 @@ class TestSpecialAuthAndOrphanAdvisories(unittest.TestCase):
         doc.parent.mkdir(parents=True)
         doc.write_text("guide", encoding="utf-8")
         saved = self.fr._special_auth_doc_path
-        self.fr._special_auth_doc_path = lambda: doc
+        self.fr._special_auth_doc_path = lambda repo=None: doc
         try:
             code, out, err = self.base._run_main(
                 lambda uid, nth: ("spawn-ok", "ok"))
         finally:
             self.fr._special_auth_doc_path = saved
         self.assertEqual(code, 0, err)
-        self.assertIn("special-auth deployment doc present", err)
+        self.assertIn("special-auth entry present", err)
         self.assertIn("WITHOUT static injection", err)
 
     def test_doc_present_with_cred_file_no_note(self):
@@ -4249,7 +4249,7 @@ class TestSpecialAuthAndOrphanAdvisories(unittest.TestCase):
                         encoding="utf-8")
         saved_doc = self.fr._special_auth_doc_path
         saved_host = self.fr._detect_host
-        self.fr._special_auth_doc_path = lambda: doc
+        self.fr._special_auth_doc_path = lambda repo=None: doc
         self.fr._detect_host = lambda explicit, tier: "opencode"
         try:
             code, out, err = self.base._run_main(
@@ -4258,7 +4258,7 @@ class TestSpecialAuthAndOrphanAdvisories(unittest.TestCase):
             self.fr._special_auth_doc_path = saved_doc
             self.fr._detect_host = saved_host
         self.assertEqual(code, 0, err)
-        self.assertNotIn("special-auth deployment doc present", err)
+        self.assertNotIn("special-auth entry present", err)
 
     def test_doc_absent_silent(self):
         code, out, err = self.base._run_main(

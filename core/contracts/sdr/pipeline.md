@@ -23,13 +23,15 @@ JSON / stderr=诊断严格分流、退出码 `0` 成功 · `1` 输入错误(文�
     ├── sensitive_catalog.json       # sdr_context 物化的解析后敏感目录对象(subagent 只读路径的指向)
     ├── readability_text_bundle.json # render 每次渲染写出;全部问题记录人类面文本的单束(读者模拟评审唯一输入)
     ├── readability_advisories.json  # 读者模拟评审建议(编排器在首次渲染后派发一次评审产出;可选)
-    ├── cred_source.json             # 凭证取证参数文件(编排器 Write;企业值见 mgh-special-auth.md;可选——仅 special-auth 部署面激活时)
-    ├── cred.json                    # 凭证载荷(mgh_credentials.py 产出,fanout_runner --cred-file 消费;权限收紧,用完随 run 目录清理)
-    ├── childcfg/<unit>/opencode/    # 每单元子配置(--cred-file 注入;全局配置副本 + provider 静态覆盖)
-    ├── ocdata/<unit>/               # 每单元独立数据目录(--cred-file/--isolate-data;log/sqlite/repos 随 XDG_DATA_HOME 隔离)
     ├── markers/                     # <unit_id>.done / <unit_id>.failed(磁盘真相,resume 锚)
     └── sdr_manifest.json            # render 产出 counts + boundaries + failed_units[];整条 run 的终止凭证
 ```
+
+**特殊授权说明不在 run 目录布局内**:它是项目所有的手工文件 `<repo>/.mgh/special-auth.md`
+(可选入口;存在时命令壳/launcher/恢复输出只加一句「先 Read 该说明,按其鉴权说明执行」,
+不存在零动作)。sdr 流程不预设任何凭证命令,也不在 run 目录里生成凭证参数/载荷/子配置/
+数据目录;子进程派发器的 `--cred-file` 与 `mgh_credentials.py` 是**手动/遗留能力**,不被任何
+sdr 流程引用。
 
 **运行目录里没有起始态文件**:repo / base / branch 由 `context.json`(及 `grouping.json`)承载,
 恢复时从它们重派生;`run_config.json` 只承载 codegraph 信号。`<repo>/.mgh-sdr/.active` 与
@@ -101,25 +103,29 @@ py render_sdr_report.py --check <run-dir>
 | 写面 | NEVER 写 `openspec/`、NEVER 写 run 目录与报告/数据文件/文本束之外的目标仓文件 |
 | `--check` | run 目录自洽:manifest 计数与 draft 实际一致、数据文件存在可解析且与报告内嵌数据块 JSON 等价、manifest `rows[]` 与数据文件一致、报告(若已渲染)为 `.html` 且含内嵌数据块与各章节锚点标记;另对模型人类面文本(`risk`/`suggestion`/`repro`/`fix_diff`)做闭集扫描(闭集 import `human_face_vocab.py` 单源)——命中仅 stderr 计数告警(字段名 + 词),**退出码不变**(模型措辞是软质量);确定性文案闭集合规由回归测试保障,不入 `--check` 面。违例退出 2 |
 
-## 原生派发形态(opencode 面,画像显式 native)
+## 原生派发形态(opencode 面缺省)
 
-fan-out 的双形态契约。子进程形态(`fanout_runner.py --tier sdr`,见上「消费方」)是缺省与
-永久回退;本节只约束原生形态。**激活条件 = 项目环境画像 `<project>/.mgh/env-profile.json`
-的 `dispatch_mode` 显式为 `"native"`**——画像缺失 / `auto` / `runner` 一律现行子进程形态,
-行为逐字节不变;坏画像 fail-closed(退出码 2 + recipe),由步骤/恢复脚本在读画像时透传。
-评审本体(六维检查面、draft schema、写作纪律、检查基线投影)与形态无关,两形态同源,报告
-数据可跨形态对照。
+fan-out 的双形态契约。**形态由环境画像的单一路径解析**(`env_profile.resolve`,
+`consumer=sdr`):显式 `dispatch_mode` 永远优先;**opencode 安装面在画像缺失或 `auto` 时缺省
+`native`**(不要求用户创建任何配置文件);claude 与其它安装面、以及 `consumer=generic` 的
+其它命令解析为 `runner`。显式 `dispatch_mode:"runner"` 是 opencode 上唯一回到子进程形态的
+开关;坏画像 fail-closed(退出码 2 + recipe)。opencode 面解析为 native 但安装树缺
+`sdr-review-native` agent 或本文件对应的波次纪律 fragment 时,编排面在进入 fan-out 前退出码
+2 + 重装/显式 runner recipe(共享检查 `env_profile.require_native_assets`),**NEVER 静默回退
+子进程**。评审本体(六维检查面、draft schema、写作纪律、检查基线投影)与形态无关,两形态
+同源,报告数据可跨形态对照。
 
 | 项 | 契约 |
 |---|---|
 | 物化与自检 | 每轮 `py emit_native_plan.py --tier sdr --repo <abs> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers --inputs-dir <run-dir>/slices --profile <project>` 物化 `<run-dir>/native_plan.json` + `<run-dir>/slices/<unit_id>.task.md`,随后**同参** `--check`(退出码 2 → 重跑同参物化即修复,NEVER 消费过期计划)。**每轮重跑物化 = 重枚举**:pending 由磁盘标记重派生,有终态标记的单元自动出局 |
-| 波次派发 | 编排器**同一条 assistant 消息**并发发出当前波全部子代理调用(agent `sdr-review-native`,`mode: subagent`,权限面与 fanout 孪生一致);每调用 `description` = 计划短号(逐字复制),任务体 = 固定一句 + 该单元 `task_file` 绝对路径(逐字透传)。波次尺寸 = 计划 `wave_size`(并发与画像配额算术的较小者)。NEVER 跨波合并 / NEVER 自增并发 / NEVER 自撰任务文本 / NEVER 拼接改写路径 |
+| 波次派发 | 编排器**同一条 assistant 消息**并发发出当前波全部子代理调用(agent `sdr-review-native`,`mode: subagent`,权限面与 fanout 孪生一致);每调用 `description` = 计划短号(逐字复制),任务体 = **单行令牌** `mgh-dispatch: plan=<plan_path> unit=<短号>`(计划引用取物化 stdout 逐字、短号自计划逐字);派发插件 `mgh_dispatch.ts` 的令牌展开钩子把它展开为该单元任务文件全文(展开结果与计划物化产物逐字一致),模型输出里因此零任务路径。展开钩子缺席的旧版安装回退 = 固定句 + `task_file` 绝对路径逐字透传。波次尺寸 = 计划 `wave_size`(并发与画像配额算术的较小者)。NEVER 跨波合并 / NEVER 自增并发 / NEVER 自撰任务文本 / NEVER 拼接改写路径 |
 | 标记写者 | `.done`/`.failed` 的唯一写者是子代理自身(指令仅住在 `sdr-review-native` agent 定义:成功 touch `done_marker`;失败自写 `failed_marker`,内容 `{"unit_id", "reason"}`);计划物化、看门狗、编排器 NEVER 写任何单元标记(唯一例外 = 重派认领时删除旧 `.failed`,与派发器 `--retry-failed` 的认领即删同形——是删除不是写入)。子进程形态的模板行与派发器写标记行为零改动——两形态失败终态语义等价、写者各自单一 |
 | 重派与等窗 | `.failed` 单元(原因非限流特征)至多重派一轮:删旧 `.failed` → 重物化加 `--retry-failed`(该单元回 pending)→ 派发一次;再失败接受缺口随报告披露(`failed_units[]`),NEVER 无限重派。上一波失败原因含限流特征(429/rate limit/quota)→ 按画像配额窗口等满一窗再查询/重派,等待事实入 run 过程记录 |
 | 看门狗接线 | native 步**第一波前**以后台形态启动 `native_watchdog.py --run-dir <run-dir>`(根会话 = 宿主注入的 `OPENCODE_SESSION_ID`,零手工传参;阈值缺省);run 落定自退;编排器 NEVER 代替看门狗做会话中止。启动/重启/收尾纪律在 fragment `prompts/fragments/sdr-native-dispatch.md` |
-| 步骤与恢复形态感知 | `list_sdr_steps.py`(原生形态):fanout 步入口 = 物化脚本 + 新增 `native_arc` 三相(materialize→waves→render)+ native 纪律变体,顶层增 `dispatch` 字段;`resume_sdr_state.py`(原生形态):stdout 增 `dispatch` 字段,fanout `next_action` 按计划工件在场与否指到物化/派波次,纪律变体与清单同表(字节等价断言在原生形态同样成立)。进度仍纯磁盘重派生;子进程形态输出零新字段 |
-| 报告披露 | `render_sdr_report.py` 在「计划工件在场 ∧ 画像 native」时:数据文件 `meta.dispatch`、manifest `dispatch`、报告头部「派发形态」行、诚实边界增一条(波次粒度止损 / 父会话单点 / 路径转述残余)。依据不成立 → 零新字段(既有 run 输出字节不变);坏画像在渲染侧降级为不披露(fail-closed 启动契约属派发面脚本,它们根本不会带着坏画像跑到渲染) |
-| 三面分歧 | 原生形态当前仅 opencode 面;claude/dsh 面保留子进程形态,各面壳以一行如实披露当前支持面(宿主机制差异白名单类,非镜像断裂),后续按宿主能力另行接入 |
+| 步骤与恢复形态感知 | `list_sdr_steps.py`(原生形态):fanout 步入口 = 物化脚本 + 新增 `native_arc` 三相(materialize→waves→render)+ native 纪律变体,顶层增 `dispatch` 字段 `{form, source:"profile"|"host-default", profile_exists, host_face, consumer, profile_path, plan_present, native_agent, discipline_fragment}`;`resume_sdr_state.py`(原生形态):stdout 增同形 `dispatch` 字段,fanout `next_action` 按计划工件在场与否指到物化/派波次,纪律变体与清单同表(字节等价断言在原生形态同样成立)。进度仍纯磁盘重派生;runner 形态输出零新字段 |
+| launcher 提示词 | `mgh_sdr_launch.py` 在 `sdr_context` 之后、spawn 宿主之前按 `--host` 显式覆盖宿主面解析形态:`opencode + native` → 第 3 步只展开原生动作(看门狗 → 物化 + `--check` → 同消息令牌派发 → 重枚举),不出现子进程派发调用;`opencode + runner` 与 claude 宿主 → 现行子进程提示词;claude 宿主 + 画像显式 native → 退出码 2 + recipe(**NEVER 静默降级**);坏画像与缺原生资产同样 spawn 前退出码 2 |
+| 报告披露 | `render_sdr_report.py` 在「本次 run 的计划工件在场 ∧ 解析形态 native」时:数据文件 `meta.dispatch`(含 `source`/`host_face`/`profile_exists`/`evidence`)、manifest `dispatch`、报告头部「派发形态」行、诚实边界增一条(波次粒度止损 / 父会话单点 / 路径转述残余)。**没有环境画像文件的 opencode 缺省 run 同样披露**,`evidence` 串写明是画像显式选择还是宿主缺省。依据不成立 → 零新字段(既有 run 输出字节不变);坏画像在渲染侧降级为不披露(fail-closed 启动契约属派发面脚本,它们根本不会带着坏画像跑到渲染) |
+| 三面分歧 | 原生形态仅 opencode 面且为其缺省;claude/dsh 面保留子进程形态(步骤清单/恢复输出无 `dispatch` 字段),各面壳以一行如实披露当前支持面(宿主机制差异白名单类,非镜像断裂),后续按宿主能力另行接入 |
 
 版本矩阵:opencode 2.1.0 实机闸门(本机);企业 2.0.32 CAS 真仓对照 = 交接内网闸门(差异
 回填 fanout 运行契约([`fanout/runtime.md`](../fanout/runtime.md))的版本矩阵)。
@@ -160,20 +166,27 @@ fan-out 的双形态契约。子进程形态(`fanout_runner.py --tier sdr`,见�
 
 ## 消费方
 
-- `fanout_runner.py --tier sdr`:`diff_group.py --materialize` 是 pending 唯一来源;
-  模板 `core/prompts/fragments/fanout/sdr-task.md`;agent `sdr-review-fanout`。
-- 原生形态(opencode 面,画像显式 native):`emit_native_plan.py --tier sdr` 物化计划
+- 形态解析(`env_profile.py`,唯一真相源):`consumer=sdr` 的解析结果(CLI stdout
+  `host_face`/`consumer`/`form`/`source`)是命令壳 step 0、`list_sdr_steps.py`、
+  `resume_sdr_state.py`、`render_sdr_report.py` 与 launcher 的共同依据;各消费者 NEVER 各自
+  比较原始 `dispatch_mode`。
+- `fanout_runner.py --tier sdr`(子进程形态;claude/dsh 缺省与 opencode 显式 `runner` 回退):
+  `diff_group.py --materialize` 是 pending 唯一来源;模板
+  `core/prompts/fragments/fanout/sdr-task.md`;agent `sdr-review-fanout`。
+- 原生形态(opencode 面缺省):`emit_native_plan.py --tier sdr` 物化计划
   (同一 pending 源、同一模板),编排器按「原生派发形态」节的波次循环派 `sdr-review-native`
-  子代理;子进程形态原样保留为回退。
-- 编排器(双壳):step 链 sdr_context → diff_group → fanout_runner → render →
-  (尽力而为的读者模拟评审,一次,经 `readability-review.md` 评审模板——与
-  `sdr-task.md` 同目录)→ 重渲染,每步后跑产出者 `--check`,失败(退出码 2)回退重跑;
-  评审失败只少「可读性自检」小节,NEVER 阻断 run、NEVER 影响 resume 收尾。
+  子代理;子进程形态原样保留为显式回退。
+- 编排器(opencode 壳缺省原生、claude/dsh 壳子进程):step 链 sdr_context → diff_group →
+  fan-out(按解析形态)→ render →(尽力而为的读者模拟评审,一次,经
+  `readability-review.md` 评审模板——与 `sdr-task.md` 同目录)→ 重渲染,每步后跑产出者
+  `--check`,失败(退出码 2)回退重跑;评审失败只少「可读性自检」小节,NEVER 阻断 run、
+  NEVER 影响 resume 收尾。
 - `resume_sdr_state.py`:恢复入口(崩溃 / 压缩 / 新会话)——从运行目录磁盘产物重派生
-  `step` / `next_action` / 纪律子集;`list_sdr_steps.py` 给任一步的确切调用。详见
-  [`resume-state.md`](resume-state.md)。
+  `step` / `next_action` / `dispatch`(形态)/ 纪律子集;`list_sdr_steps.py` 给任一步的确切
+  调用。详见 [`resume-state.md`](resume-state.md)。
 - launcher(`mgh_sdr_launch.py`):调 `sdr_context` 完成外部仓先期检索(主进程内),
-  在 spawn 宿主编排器**之前**对已确认根再做一次项目配置复核并刷新哨兵(幂等,内容与
-  `sdr_context` 同源,是版本错配的第二道闸门),spawn 宿主 CLI,退出后移除哨兵。
-  每次调用**新建**一个时间戳运行目录(无 `--resume` / `--run-dir`),故「重跑 launcher
-  = 续跑」**不成立**;续跑须带着**同一个**运行目录经 `resume_sdr_state.py` 进行。
+  随后按宿主与画像解析派发形态并据此生成编排提示词(原生/回退同源),在 spawn 宿主编排器
+  **之前**对已确认根再做一次项目配置复核并刷新哨兵(幂等,内容与 `sdr_context` 同源,是版本
+  错配的第二道闸门),spawn 宿主 CLI,退出后移除哨兵。每次调用**新建**一个时间戳运行目录
+  (无 `--resume` / `--run-dir`),故「重跑 launcher = 续跑」**不成立**;续跑须带着**同一个**
+  运行目录经 `resume_sdr_state.py` 进行。

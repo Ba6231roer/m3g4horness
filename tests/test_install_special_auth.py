@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""install.sh special-auth doc copy convergence (R5.8 fail-soft family).
+"""install.sh special-auth retirement (R5.8 fail-soft family).
 
-The optional, maintainer-carried `mgh-special-auth.md` (NOT in git) converges
-to `<dest>/mgh-core/mgh-special-auth.md` with a THREE-STATE contract:
+fix-mgh-sdr-native-default-dispatch 7.6: the special-auth note is a PROJECT-owned
+optional entry (`<target>/.mgh/special-auth.md`), never an install artifact. The
+installer has a THREE-STATE contract:
 
-  1. source present → target copy installed, install output discloses it;
-  2. source absent, stale target copy exists → copy removed, output discloses;
-  3. source absent, no target copy → byte-identical to a generic install (no
-     mention, no file, self-check never warns).
+  1. package-side source present → still NOT copied into the target;
+  2. stale `<dest>/mgh-core/mgh-special-auth.md` from an older version → removed,
+     output carries the migration hint (move it to `<target>/.mgh/`);
+  3. neither → byte-identical to a generic install (no mention, no file).
 
 Runs the REAL `install.sh --opencode` into a scratch target (fast path: no
 dsh wiring). Skipped when bash is unavailable."""
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
@@ -26,7 +26,7 @@ ROOT = HERE.parent
 DOC_NAME = "mgh-special-auth.md"
 
 
-class InstallSpecialAuthConvergence(unittest.TestCase):
+class InstallSpecialAuthRetirement(unittest.TestCase):
     SRC = ROOT / DOC_NAME
 
     def setUp(self):
@@ -43,7 +43,8 @@ class InstallSpecialAuthConvergence(unittest.TestCase):
             self.SRC.unlink()
 
     def tearDown(self):
-        # restore the maintainer's real copy exactly as found
+        if self.SRC.exists():
+            self.SRC.unlink(missing_ok=True)
         if self.saved_src is not None:
             shutil.copy2(self.saved_src, self.SRC)
         shutil.rmtree(self.d, ignore_errors=True)
@@ -57,28 +58,28 @@ class InstallSpecialAuthConvergence(unittest.TestCase):
     def _dst(self) -> Path:
         return self.target / ".opencode" / "mgh-core" / DOC_NAME
 
-    def test_three_state_convergence(self):
-        # state 3: no source, no target copy → generic install, no mention
+    def test_source_present_is_not_copied(self):
+        self.SRC.write_text("# guide\n", encoding="utf-8")
+        r = self._install()
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertFalse(self._dst().exists(),
+                         "the package-side doc must NEVER be installed")
+        self.assertNotIn("installed special-auth", r.stdout)
+
+    def test_stale_install_tree_copy_is_removed_with_hint(self):
+        self._dst().parent.mkdir(parents=True, exist_ok=True)
+        self._dst().write_text("legacy", encoding="utf-8")
+        r = self._install()
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertFalse(self._dst().exists())
+        self.assertIn("removed legacy install-tree special-auth doc", r.stdout)
+        self.assertIn(".mgh/special-auth.md", r.stdout)
+
+    def test_no_source_no_copy_is_silent(self):
         r = self._install()
         self.assertEqual(r.returncode, 0, r.stderr[-800:])
         self.assertFalse(self._dst().exists())
         self.assertNotIn("special-auth", r.stdout)
-        # state 1: source present → installed + disclosed
-        self.SRC.write_text("# guide\n", encoding="utf-8")
-        try:
-            r = self._install()
-            self.assertEqual(r.returncode, 0, r.stderr[-800:])
-            self.assertTrue(self._dst().is_file())
-            self.assertEqual(self._dst().read_text(encoding="utf-8"),
-                             "# guide\n")
-            self.assertIn("special-auth deployment doc", r.stdout)
-        finally:
-            self.SRC.unlink(missing_ok=True)
-        # state 2: source gone again, stale target copy → removed + disclosed
-        r = self._install()
-        self.assertEqual(r.returncode, 0, r.stderr[-800:])
-        self.assertFalse(self._dst().exists())
-        self.assertIn("stale special-auth deployment doc", r.stdout)
 
 
 if __name__ == "__main__":

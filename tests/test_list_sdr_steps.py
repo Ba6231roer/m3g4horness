@@ -189,21 +189,24 @@ class ShellOutsourcedInvocationAnchorTest(unittest.TestCase):
 
 class SpecialAuthFieldTest(unittest.TestCase):
     """The top-level special_auth presence field (the manifest's ONE allowed
-    disk probe): absent doc → {present: false, path: null} with every other
-    field unchanged; present doc → {present: true, path: <abs>}. The doc is
-    transiently created at <mgh-core>/mgh-special-auth.md (its real,
-    gitignored location) and removed in the finally block."""
+    disk probe) is now PROJECT-scoped: `<target>/.mgh/special-auth.md`. Absent →
+    {present: false, path: null} with every other field unchanged; present →
+    {present: true, path: <abs>} resolved against the --target root (never the
+    process cwd)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
-        self.doc = SCRIPT.parent.parent / "mgh-special-auth.md"
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self.doc = self.repo / ".mgh" / "special-auth.md"
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _run(self):
-        p = subprocess.run([sys.executable, str(SCRIPT)],
+    def _run(self, *args):
+        p = subprocess.run([sys.executable, str(SCRIPT), "--target", str(self.repo),
+                            *args],
                            capture_output=True, text=True, encoding="utf-8")
         return p.returncode, p.stdout, p.stderr
 
@@ -215,20 +218,30 @@ class SpecialAuthFieldTest(unittest.TestCase):
         # the steps surface is untouched by the new field
         self.assertEqual({s["step"] for s in d["steps"]}, STEP_IDS)
 
-    def test_present_doc_shape(self):
+    def test_present_doc_shape_is_project_absolute(self):
+        self.doc.parent.mkdir(parents=True, exist_ok=True)
+        self.doc.write_text("guide", encoding="utf-8")
+        code, out, err = self._run()
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertTrue(d["special_auth"]["present"])
+        self.assertEqual(Path(d["special_auth"]["path"]),
+                         self.doc.resolve())
+
+    def test_install_tree_doc_is_not_probed(self):
+        # the retired install-tree location must have NO effect anymore
+        legacy = SCRIPT.parent.parent / "mgh-special-auth.md"
         created = False
         try:
-            if not self.doc.exists():
-                self.doc.write_text("guide", encoding="utf-8")
+            if not legacy.exists():
+                legacy.write_text("legacy", encoding="utf-8")
                 created = True
             code, out, err = self._run()
             self.assertEqual(code, 0, err)
-            d = json.loads(out)
-            self.assertTrue(d["special_auth"]["present"])
-            self.assertTrue(Path(d["special_auth"]["path"]).is_absolute())
+            self.assertFalse(json.loads(out)["special_auth"]["present"])
         finally:
             if created:
-                self.doc.unlink(missing_ok=True)
+                legacy.unlink(missing_ok=True)
 
 
 class NativeDispatchFormTest(unittest.TestCase):
@@ -348,6 +361,115 @@ class NativeDispatchFormTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         listed = json.loads(out)["steps"][0]["discipline"]
         self.assertEqual(listed, state["discipline_reminders"])
+
+
+class HostDefaultDispatchTest(unittest.TestCase):
+    """fix-mgh-sdr-native-default-dispatch 2.4/2.6: resolution follows the
+    install face of the running copy. An opencode-face mirror with NO profile
+    resolves native for the sdr consumer (host default); an explicit runner
+    profile falls back to the subprocess manifest; the claude face stays
+    runner; and a native-opencode tree missing either native asset fails loud
+    (exit 2 + recipe, never a silent subprocess fallback)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        sys.path.insert(0, str(HERE))
+        from _sdr_install_mirror import build_claude_mirror, build_opencode_mirror
+        self._build_opencode = build_opencode_mirror
+        self._build_claude = build_claude_mirror
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, script, *args):
+        p = subprocess.run([sys.executable, str(script), *args],
+                           capture_output=True, text=True, encoding="utf-8")
+        return p.returncode, p.stdout, p.stderr
+
+    def _profile(self, body):
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps(body), encoding="utf-8")
+
+    def _mirror_script(self, **assets):
+        return self._build_opencode(self.tmp / "mirror", **assets) / "list_sdr_steps.py"
+
+    def test_opencode_no_profile_sdr_is_native(self):
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.repo),
+                                   "--step", "fanout")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["dispatch"]["form"], "native")
+        self.assertEqual(d["dispatch"]["source"], "host-default")
+        self.assertFalse(d["dispatch"]["profile_exists"])
+        self.assertEqual(d["dispatch"]["host_face"], "opencode")
+        self.assertEqual(d["dispatch"]["consumer"], "sdr")
+        fan = d["steps"][0]
+        self.assertEqual(fan["script"], "emit_native_plan.py")
+        self.assertNotIn("fanout_runner", fan["invocation"])
+        self.assertEqual([p["phase"] for p in fan["native_arc"]],
+                         ["materialize", "waves", "render"])
+
+    def test_opencode_auto_profile_is_native(self):
+        self._profile({"v": 1, "dispatch_mode": "auto"})
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.repo))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual(d["dispatch"]["form"], "native")
+        self.assertEqual(d["dispatch"]["source"], "host-default")
+        self.assertTrue(d["dispatch"]["profile_exists"])
+
+    def test_opencode_explicit_runner_falls_back(self):
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        script = self._mirror_script()
+        code, out, err = self._run(script, "--target", str(self.repo),
+                                   "--step", "fanout")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        fan = d["steps"][0]
+        self.assertEqual(fan["script"], "fanout_runner.py")
+        self.assertNotIn("native_arc", fan)
+
+    def test_claude_face_stays_subprocess_face(self):
+        script = self._build_claude(self.tmp / "claude-mirror") / "list_sdr_steps.py"
+        code, out, err = self._run(script, "--target", str(self.repo))
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertNotIn("dispatch", d)
+        fan = [s for s in d["steps"] if s["step"] == "fanout"][0]
+        self.assertEqual(fan["script"], "fanout_runner.py")
+
+    def test_missing_agent_fails_loud(self):
+        script = self._mirror_script(agent=False)
+        code, out, err = self._run(script, "--target", str(self.repo))
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("sdr-review-native.md", err)
+        self.assertIn("install.sh --opencode", err)
+        self.assertIn("dispatch_mode", err)
+
+    def test_missing_fragment_fails_loud(self):
+        script = self._mirror_script(fragment=False)
+        code, out, err = self._run(script, "--target", str(self.repo),
+                                   "--step", "fanout")
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("sdr-native-dispatch.md", err)
+
+    def test_explicit_runner_skips_the_asset_gate(self):
+        # runner form does not need the native assets at all — a stripped
+        # install tree must still emit the subprocess manifest.
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        script = self._mirror_script(agent=False, fragment=False)
+        code, out, err = self._run(script, "--target", str(self.repo))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("dispatch", json.loads(out))
 
 
 if __name__ == "__main__":

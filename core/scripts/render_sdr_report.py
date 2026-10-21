@@ -82,7 +82,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import human_face_vocab  # sibling single source: closed-set vocabulary + scanner
-import env_profile  # sibling: native-dispatch disclosure basis (profile read)
+import env_profile  # sibling: native-dispatch disclosure basis (form resolution)
 
 TOOL_NAME = "mgh-sdr"
 DATA_FILE = "sdr_report_data.json"
@@ -643,25 +643,36 @@ def _load_grouping(run_dir: Path) -> dict:
 
 def _dispatch_disclosure(repo: Path, run_dir: Path):
     """Native-dispatch disclosure basis, CONJUNCTIVE: the run dir carries the
-    native plan artifact AND the repo's env profile explicitly selects
-    `dispatch_mode: "native"`. Anything else (no plan artifact, profile missing
-    / auto / runner / corrupt) -> None, and the report keeps byte-identical
+    native plan artifact AND the shared resolver (`consumer=sdr`) resolves the
+    native form — an explicit profile `native`, or the opencode host default for
+    the sdr consumer (no profile file needed). Anything else (no plan artifact,
+    runner form, corrupt profile) -> None, and the report keeps byte-identical
     output — absent means not applicable, so every pre-native run is unchanged.
-    A corrupt profile degrades to no disclosure here (this is a report reader,
-    not a dispatch consumer; the fail-closed startup contract belongs to the
+    The evidence string names WHICH basis applied (profile choice vs host
+    default) so a reader can tell a configured run from a default one. A corrupt
+    profile degrades to no disclosure here (this is a report reader, not a
+    dispatch consumer; the fail-closed startup contract belongs to the
     dispatch-facing scripts, which refuse to run on a corrupt profile in the
     first place)."""
     plan = run_dir / "native_plan.json"
     if not plan.is_file():
         return None
     try:
-        profile = env_profile.load(repo)
+        res = env_profile.resolve(repo, consumer="sdr")
     except Exception:
         return None
-    if profile.dispatch_mode != "native":
+    if res.form != "native":
         return None
-    return {"form": "native", "plan_artifact": str(plan.resolve()),
-            "evidence": "native_plan.json + env-profile dispatch_mode=native"}
+    evidence = ("native_plan.json + env-profile dispatch_mode=native"
+                if res.source == env_profile.SOURCE_PROFILE
+                else "native_plan.json + opencode host default (no env profile)")
+    return {"form": "native",
+            "source": res.source,
+            "host_face": res.host_face,
+            "consumer": res.consumer,
+            "profile_exists": res.profile_exists,
+            "plan_artifact": str(plan.resolve()),
+            "evidence": evidence}
 
 
 def _overview_and_details(grouping: dict, excluded, cg_stats) -> tuple[list, list]:

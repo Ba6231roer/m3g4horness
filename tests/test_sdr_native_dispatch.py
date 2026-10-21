@@ -52,22 +52,48 @@ class OpencodeShellAnchors(unittest.TestCase):
     def test_step0_profile_read_with_fail_closed_stop(self):
         t = _read(OPENCODE_SHELL)
         self.assertIn("env_profile.py", t)
-        self.assertIn("dispatch_mode == \"native\"", t)
+        self.assertIn("--consumer sdr", t)
+        self.assertIn("form", t)
         self.assertIn("STOP", t)  # corrupt profile -> stop, never run past it
-        self.assertIn("缺省零变化", t)
+        self.assertIn("host-default", t)
 
-    def test_fanout_step_native_conditional(self):
+    def test_native_triple_and_step3_actions(self):
         t = _read(OPENCODE_SHELL)
-        self.assertIn("sdr-native-dispatch.md", t)
+        self.assertIn("diff_group pending[]", t)
         self.assertIn("emit_native_plan.py", t)
         self.assertIn("sdr-review-native", t)
-        self.assertIn("同一条 assistant 消息", t)
-        self.assertIn("runner 子流程不适用", t)
+        self.assertIn("磁盘标记", t)
+        for needle in ("看门狗", "同一条 assistant 消息", "mgh-dispatch:",
+                       "重枚举", "sdr-native-dispatch.md"):
+            self.assertIn(needle, t, needle)
+
+    def test_subprocess_runner_is_not_the_main_path(self):
+        t = _read(OPENCODE_SHELL)
+        # the literal is banned from this face: the runner fallback is reached
+        # ONLY through the step manifest's fanout invocation
+        self.assertNotIn("fanout_runner", t)
+        self.assertIn("form=runner", t)
+        self.assertIn("list_sdr_steps.py --target <abs> --step fanout", t)
+        self.assertIn("discipline", t)
+
+    def test_no_preset_credential_commands(self):
+        for shell in (OPENCODE_SHELL, CLAUDE_SHELL, DSH_SHELL):
+            t = _read(shell)
+            for banned in ("cred_source.json", "mgh_credentials.py",
+                           "--cred-file", "credential_expired"):
+                self.assertNotIn(banned, t, f"{shell.name}: {banned}")
+
+    def test_optional_special_auth_entry_one_sentence(self):
+        for shell in (OPENCODE_SHELL, CLAUDE_SHELL, DSH_SHELL):
+            t = _read(shell)
+            self.assertIn("special_auth.present", t)
+            self.assertIn("先 Read", t)
 
     def test_three_face_divergence_disclosure_opencode_claim(self):
         t = _read(OPENCODE_SHELL)
-        self.assertIn("派发形态支持面", t)
-        self.assertIn('dispatch_mode:"native"', t)
+        self.assertIn("派发形态", t)
+        self.assertIn("缺省原生", t)
+        self.assertIn('"dispatch_mode":"runner"', t)
         self.assertIn("claude/dsh", t)
 
 
@@ -76,14 +102,16 @@ class SiblingShellDisclosureAnchors(unittest.TestCase):
         t = _read(CLAUDE_SHELL)
         self.assertIn("派发形态", t)
         self.assertIn("仅子进程形态", t)
-        self.assertIn("仅 opencode 面支持", t)
+        self.assertIn("仅 opencode 面", t)
+        self.assertIn("宿主机制差异", t)
         self.assertNotIn("sdr-native-dispatch.md", t)
 
     def test_dsh_shell_subprocess_only_claim(self):
         t = _read(DSH_SHELL)
         self.assertIn("派发形态", t)
         self.assertIn("仅子进程形态", t)
-        self.assertIn("仅 opencode 面支持", t)
+        self.assertIn("仅 opencode 面", t)
+        self.assertIn("宿主机制差异", t)
         self.assertNotIn("sdr-native-dispatch.md", t)
 
 
@@ -92,8 +120,11 @@ class FragmentAnchors(unittest.TestCase):
         t = _read(FRAGMENT)
         self.assertIn("ORCHESTRATOR discipline fragment", t)
         self.assertIn("sdr-native-dispatch.md", t)  # install mirror path
-        self.assertIn('dispatch_mode == "native"', t)
-        self.assertIn("回到命令壳的子进程派发行", t)
+        self.assertIn("opencode 安装面", t)
+        self.assertIn("form=native", t)
+        self.assertIn("显式", t)
+        self.assertIn("runner", t)
+        self.assertIn("claude/dsh", t)
 
     def test_watchdog_first_section(self):
         t = _read(FRAGMENT)
@@ -176,16 +207,20 @@ class ContractAnchors(unittest.TestCase):
     def test_sdr_pipeline_native_section(self):
         t = _read(SDR_PIPELINE)
         self.assertIn("原生派发形态", t)
-        for needle in ("dispatch_mode", "native_plan.json", "sdr-review-native",
-                       "唯一写者", "至多重派一轮", "OPENCODE_SESSION_ID",
-                       "三面分歧", "版本矩阵", "sdr-native-dispatch.md"):
+        for needle in ("dispatch_mode", "host-default", "require_native_assets",
+                       "native_plan.json", "sdr-review-native", "唯一写者",
+                       "至多重派一轮", "OPENCODE_SESSION_ID", "三面分歧",
+                       "版本矩阵", "sdr-native-dispatch.md", "launcher 提示词"):
             self.assertIn(needle, t, needle)
 
-    def test_fanout_runtime_names_sdr_first_consumer(self):
+    def test_fanout_runtime_names_sdr_first_consumer_and_host_resolution(self):
         t = _read(FANOUT_RUNTIME)
         self.assertIn("首个消费方", t)
         self.assertIn("/mgh-sdr", t)
-        self.assertIn("永久回退", t)
+        self.assertIn("唯一回退", t)
+        self.assertIn("consumer=sdr", t)
+        self.assertIn("host-default", t)
+        self.assertIn("项目级可选入口", t)
 
 
 if __name__ == "__main__":

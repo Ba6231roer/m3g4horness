@@ -574,31 +574,31 @@ class TelemetryMountTest(unittest.TestCase):
 
 
 class SpecialAuthFanoutNoteTest(unittest.TestCase):
-    """fanout-step resume note: when the special-auth deployment doc is
-    present in the install tree, the stdout notes carry one pointer line
-    (credential renewal follows that doc); doc absent → no note, notes
-    unchanged. The doc is transiently created at its real (gitignored)
-    location and removed afterwards."""
+    """fix-mgh-sdr-native-default-dispatch 7.2/7.8: the special-auth doc is a
+    PROJECT-owned optional entry (`<repo>/.mgh/special-auth.md`). Present => the
+    fanout next_action.desc (the executed path) carries ONE "read it first"
+    sentence, both dispatch forms, and the path joins absolute_paths; absent =>
+    no special-auth bytes. The flow NEVER presets credential commands."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
-        self.doc = SCRIPT.parent.parent / "mgh-special-auth.md"
+        self.repo = self.tmp / "repo"
+        self.doc = self.repo / ".mgh" / "special-auth.md"
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def _fanout_state(self):
-        run = self.tmp / "repo" / ".mgh-sdr" / "runs" / "20260101_000000"
+        run = self.repo / ".mgh-sdr" / "runs" / "20260101_000000"
         run.mkdir(parents=True, exist_ok=True)
-        repo = self.tmp / "repo"
         (run / "context.json").write_text(json.dumps({
-            "repo": str(repo), "run_dir": str(run), "base": "master",
+            "repo": str(self.repo), "run_dir": str(run), "base": "master",
             "branch": "feat",
             "baseline_path": str(run / "baseline.md"),
             "external_repos": []}), encoding="utf-8")
         (run / "grouping.json").write_text(json.dumps({
-            "repo": str(repo), "base": "master", "branch": "feat",
+            "repo": str(self.repo), "base": "master", "branch": "feat",
             "empty": False, "total": 2,
             "units": [{"unit_id": "u1", "kind": "standalone", "route": "",
                        "chain": [], "status": "pending"},
@@ -612,44 +612,29 @@ class SpecialAuthFanoutNoteTest(unittest.TestCase):
         assert p.returncode == 0, p.stderr
         return json.loads(p.stdout)
 
-    def test_doc_present_note_and_absent_silent(self):
-        # absent (or pre-existing) baseline first
+    def _assert_no_credential_commands(self, state):
+        text = json.dumps(state, ensure_ascii=False)
+        for banned in ("cred_source.json", "mgh_credentials.py", "--cred-file",
+                       "credential_expired"):
+            self.assertNotIn(banned, text, banned)
+
+    def test_doc_absent_zero_action(self):
         st = self._fanout_state()
         self.assertEqual(st["step"], "fanout")
-        base_notes = list(st["notes"])
-        # generic install (doc absent this run): the executed path stays clean
-        if not self.doc.exists():
-            self.assertNotIn("special-auth", st["next_action"]["desc"])
-        has_note_without_doc = any("special-auth deployment doc present" in n
-                                   for n in base_notes)
-        created = False
-        try:
-            if not self.doc.exists():
-                self.doc.write_text("guide", encoding="utf-8")
-                created = True
-            st2 = self._fanout_state()
-            if created:
-                notes_with_doc = st2["notes"]
-                self.assertTrue(any("special-auth deployment doc present" in n
-                                    and "credential renewal" in n
-                                    for n in notes_with_doc))
-                # the pointer rides next_action.desc (the executed path), not
-                # just notes — a recovering orchestrator may never read notes
-                self.assertIn("special-auth deployment doc is PRESENT",
-                              st2["next_action"]["desc"])
-                self.assertIn("--cred-file <run-dir>/cred.json",
-                              st2["next_action"]["desc"])
-                self.assertIn("mgh_credentials.py",
-                              st2["next_action"]["desc"])
-            else:
-                # doc already exists on this machine: the note is expected in
-                # BOTH states — assert presence in the baseline instead
-                self.assertTrue(has_note_without_doc)
-        finally:
-            if created:
-                self.doc.unlink(missing_ok=True)
-        if not created and not has_note_without_doc:
-            self.fail("doc exists but the fanout note is missing")
+        self.assertNotIn("special-auth", st["next_action"]["desc"])
+        self.assertFalse(any("special-auth" in n for n in st["notes"]))
+        self._assert_no_credential_commands(st)
+
+    def test_doc_present_one_entry_sentence(self):
+        self.doc.parent.mkdir(parents=True, exist_ok=True)
+        self.doc.write_text("guide", encoding="utf-8")
+        st = self._fanout_state()
+        desc = st["next_action"]["desc"]
+        self.assertIn(str(self.doc.resolve()), desc)
+        self.assertEqual(desc.count("先 Read 该说明"), 1)
+        self.assertTrue(desc.startswith("特殊授权说明在场"))
+        self.assertIn(str(self.doc.resolve()), st["next_action"]["absolute_paths"])
+        self._assert_no_credential_commands(st)
 
 
 class NativeFormResumeTest(unittest.TestCase):
@@ -813,6 +798,126 @@ class NativeFormResumeTest(unittest.TestCase):
         st2 = json.loads(out)
         self.assertNotIn("dispatch", st2)
         self.assertFalse(any("watchdog artifacts absent" in n for n in st2["notes"]))
+
+
+class HostDefaultResumeTest(unittest.TestCase):
+    """fix-mgh-sdr-native-default-dispatch 2.4/2.6: the resume entry uses the
+    same resolved form as the step manifest — opencode install face + no
+    profile = native next_action (materialize / wave dispatch, never
+    fanout_runner); explicit runner = the established subprocess next_action;
+    the claude face stays subprocess; a missing native asset fails closed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        sys.path.insert(0, str(HERE))
+        from _sdr_install_mirror import build_claude_mirror, build_opencode_mirror
+        self._build_opencode = build_opencode_mirror
+        self._build_claude = build_claude_mirror
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _seed(self, run, uids=("u1", "u2")):
+        (run / "markers").mkdir(parents=True, exist_ok=True)
+        (run / "slices").mkdir()
+        (run / "context.json").write_text(json.dumps({
+            "repo": str(self.repo), "base": "master", "branch": "feat",
+            "external_repos": []}), encoding="utf-8")
+        (run / "grouping.json").write_text(json.dumps({
+            "repo": str(self.repo), "base": "master", "branch": "feat",
+            "empty": False, "total": len(uids),
+            "units": [{"unit_id": u, "status": "pending"} for u in uids],
+            "done": 0, "failed": 0,
+            "excluded": {"count": 0, "by_reason": {}}, "pending": [],
+        }), encoding="utf-8")
+
+    def _profile(self, body):
+        (self.repo / ".mgh").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".mgh" / "env-profile.json").write_text(
+            json.dumps(body), encoding="utf-8")
+
+    def _run_dir(self):
+        run = self.repo / ".mgh-sdr" / "runs" / TS
+        run.mkdir(parents=True, exist_ok=True)
+        return run
+
+    def _state(self, script, run, *extra):
+        p = subprocess.run([sys.executable, str(script), "--run-dir", str(run),
+                            *extra], capture_output=True, text=True,
+                           encoding="utf-8")
+        return p.returncode, p.stdout, p.stderr
+
+    def test_opencode_default_is_native_materialize(self):
+        script = (self._build_opencode(self.tmp / "mirror")
+                  / "resume_sdr_state.py")
+        run = self._run_dir()
+        self._seed(run)
+        code, out, err = self._state(script, run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["step"], "fanout")
+        self.assertEqual(st["dispatch"]["form"], "native")
+        self.assertEqual(st["dispatch"]["source"], "host-default")
+        self.assertEqual(st["dispatch"]["host_face"], "opencode")
+        self.assertEqual(st["dispatch"]["consumer"], "sdr")
+        self.assertFalse(st["dispatch"]["profile_exists"])
+        desc = st["next_action"]["desc"]
+        self.assertEqual(st["next_action"]["kind"], "bash")
+        self.assertIn("emit_native_plan.py", desc)
+        self.assertNotIn("fanout_runner.py", desc)
+
+    def test_opencode_default_plan_present_is_wave_dispatch(self):
+        script = (self._build_opencode(self.tmp / "mirror")
+                  / "resume_sdr_state.py")
+        run = self._run_dir()
+        self._seed(run)
+        (run / "native_plan.json").write_text("{}", encoding="utf-8")
+        code, out, err = self._state(script, run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertEqual(st["next_action"]["kind"], "subagent")
+        self.assertIn("sdr-review-native", st["next_action"]["desc"])
+        self.assertNotIn("fanout_runner.py", st["next_action"]["desc"])
+
+    def test_opencode_explicit_runner_restores_subprocess_next_action(self):
+        script = (self._build_opencode(self.tmp / "mirror")
+                  / "resume_sdr_state.py")
+        run = self._run_dir()
+        self._seed(run)
+        self._profile({"v": 1, "dispatch_mode": "runner"})
+        code, out, err = self._state(script, run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertNotIn("dispatch", st)
+        self.assertIn("fanout_runner.py", st["next_action"]["desc"])
+
+    def test_claude_face_stays_subprocess(self):
+        script = (self._build_claude(self.tmp / "claude-mirror")
+                  / "resume_sdr_state.py")
+        run = self._run_dir()
+        self._seed(run)
+        code, out, err = self._state(script, run)
+        self.assertEqual(code, 0, err)
+        st = json.loads(out)
+        self.assertNotIn("dispatch", st)
+        self.assertIn("fanout_runner.py", st["next_action"]["desc"])
+
+    def test_missing_native_asset_fails_closed(self):
+        script = (self._build_opencode(self.tmp / "mirror", agent=False)
+                  / "resume_sdr_state.py")
+        run = self._run_dir()
+        self._seed(run)
+        code, out, err = self._state(script, run)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["step"], None)
+        self.assertIn("install.sh --opencode", err)
+        # --check runs the same resolver: same fail-closed verdict
+        code2, out2, err2 = self._state(script, run, "--check")
+        self.assertEqual(code2, 2)
+        self.assertIn("sdr-review-native.md", out2 + err2)
 
 
 if __name__ == "__main__":

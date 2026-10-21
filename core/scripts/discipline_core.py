@@ -287,8 +287,10 @@ _SDR_NATIVE_WAVE_RECIPE = (
     "--tier sdr --repo <target> --base <ref> [--branch <ref>] --checkpoints <run-dir>/markers "
     "--inputs-dir <run-dir>/slices --profile <target>` + 同参 `--check`(退出码 2 → 重跑同参"
     "物化即修复;计划与任务文件以最新一次物化为准);②当前波全部单元在**同一条 assistant 消息**"
-    "派发(agent sdr-review-native;description=计划短号逐字复制,任务体=固定句+task_file "
-    "绝对路径逐字透传);③波收尾重跑物化 = 重枚举(pending 由磁盘标记重派生,NEVER 自记账"
+    "派发(agent sdr-review-native;description=计划短号逐字复制,任务体=单行令牌 "
+    "`mgh-dispatch: plan=<plan_path> unit=<短号>`——计划引用=物化 stdout plan_path 逐字、"
+    "短号自计划逐字复制,派发插件 mgh_dispatch.ts 的令牌展开钩子在子代理启动前把它展开为"
+    "该单元任务文件全文);③波收尾重跑物化 = 重枚举(pending 由磁盘标记重派生,NEVER 自记账"
     "「哪些派过了」)")
 _SDR_NATIVE_MARKER_RECIPE = (
     "标记真相源:`.done`/`.failed` 唯一写者是子代理自身(成功 touch done_marker;失败自写 "

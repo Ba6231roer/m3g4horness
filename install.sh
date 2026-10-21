@@ -229,12 +229,14 @@ if [[ "$ENFORCE_HOOK" == "1" ]]; then
       echo "⚠ hook injection failed (non-blocking, R5.8 fail-soft); discipline via shell bright-lines + R5.9" >&2
     fi
   elif [[ "$PLATFORM" == "opencode" ]]; then
-    # opencode: place the tool.execute.before plugin (.ts) that pipes to the shared guard.
+    # opencode: place the tool.execute.before plugin (.ts) that pipes to the shared guard,
+    # PLUS the mgh_dispatch native-dispatch plugin — a fixed two-file set; the installer
+    # manages exactly those two filenames and never touches the user's other plugins.
     # (dsh is NOT handled here — its placement + wiring lives in the dedicated 5c block.)
     if py "$HERE/tools/install_opencode_plugin.py" \
           --plugins-dir "$DEST/plugins" \
-          --source "$HERE/releases/opencode/plugins/block_adhoc_scripts.ts" >/dev/null; then
-      echo "✓ injected block-adhoc-scripts plugin (tool.execute.before) into $DEST/plugins (idempotent; --no-enforce-hook to skip)"
+          --source-dir "$HERE/releases/opencode/plugins" >/dev/null; then
+      echo "✓ injected opencode plugins (block-adhoc-scripts guard + mgh-dispatch) into $DEST/plugins (idempotent; --no-enforce-hook to skip)"
     else
       echo "⚠ plugin injection failed (non-blocking, R5.8 fail-soft); discipline via shell bright-lines + R5.9" >&2
     fi

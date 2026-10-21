@@ -755,7 +755,8 @@ class NativeFormResumeTest(unittest.TestCase):
         desc = st["next_action"]["desc"]
         self.assertIn("ONE assistant message", desc)
         self.assertIn("sdr-review-native", desc)
-        self.assertIn("task_file", desc)
+        self.assertIn("mgh-dispatch: plan=<plan_path> unit=<short id>", desc)
+        self.assertIn("mgh_dispatch.ts", desc)
         self.assertIn("sdr-native-dispatch.md", desc)
 
     def test_native_marker_combos(self):

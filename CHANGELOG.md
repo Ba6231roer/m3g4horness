@@ -16,6 +16,49 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — /mgh 原生派发路线 #6:派发工具插件 `mgh_dispatch`(一次调用跑完全部波次)+ 令牌展开钩子(0.1.87)
+
+- **派发工具(opencode 面,插件形态)**:新增独立插件
+  `releases/opencode/plugins/mgh_dispatch.ts`(与守卫插件分文件,后者零触碰),注册
+  自定义工具 `mgh_dispatch`:一次调用在宿主进程内读计划(`native_plan.json`,只读)、
+  按波次并发创建/驱动/收割子会话(波内并发 = 计划波次尺寸,波间顺序),直到计划跑完
+  ——数百至上千单元场景零 LLM 波次回合。派发语义与内置子代理工具逐项对齐:每次创建前
+  `permission.assert(subagent)`(同动作同资源面)、沿 `parentID` 链深度计数按保守缺省
+  1 拒绝(插件面读不到宿主深度配置,与缺省配置等价,如实披露)、primary 模式 agent
+  创建前拒绝 + recipe、任务消息 = 单元任务文件逐字注入(编排器模型零撰写)。
+- **输入契约(闭集)**:`plan`(唯一路径形态字段,绝对或项目相对)+ 可选 `wave`
+  (只跑该波,1-based)+ 可选 `units`(只派指定短号);二者互斥;单元任务/产物/标记
+  路径 NEVER 入参。校验失败(计划不可读/短号不在计划内/越界/同传)一律 spawn 前
+  工具错误 + 一句 recipe,零会话创建。
+- **收割与幂等**:每单元以磁盘标记三分(done/failed/no-marker),会话终态只触发查标记
+  不判成败;已有终态标记的单元跳过(重试 = 编排器再调用一次,幂等重入);工具内零重派。
+  摘要 = 分类计数 + failed/no-marker 短号清单 + 每单元会话 id + 实跑波次,NEVER 携带
+  findings/任务文本;插件零标记写入、零 findings 解读(判定单一来源保持在磁盘与
+  Python)。
+- **取消级联与配额自限**:工具调用被中止时逐个 interrupt 仍活跃的已建子会话后返回
+  (零孤儿);项目画像含配额时波间按既有估算算术(窗内已派 × K + K ≤ N)准入,余量
+  不足 ~1s 分片睡等窗口滚动(等待事实计入摘要),画像缺省/坏文件零节流并披露,
+  NEVER 忙旋、每单元至多派一次 NEVER 无限循环。
+- **令牌展开钩子(同插件文件)**:`execute.before` 对内置子代理工具的任务文本识别
+  固定前缀令牌行(`mgh-dispatch: plan=<计划引用> unit=<短号>`),按计划展开为该单元
+  任务文件全文后放行——通道 A(内置子代理路径)的编排器输出从此零长任务路径;非令牌
+  文本原样放行;未知短号/计划不可读 fail-loud。sdr 原生波次纪律 fragment 的任务中继行
+  切换为令牌形(钩子的首个消费者;命令壳行、step 清单/续跑纪律同步换形,纪律语义
+  不变;旧版安装插件缺席时回退固定句 + task_file 绝对路径,路径同样逐字自计划)。
+- **分发面**:安装器 `tools/install_opencode_plugin.py` 从单文件名扩为**固定文件集**
+  (守卫 + 派发两文件,`--source-dir` 指向 canonical 目录,stdout 每文件一行 action,
+  幂等放置,NEVER 触碰用户其它插件);`install.sh --opencode` 同步接线;源码形状锚
+  (双注册被 await、断言/深度/模式三分支、取消级联、短号校验、令牌前缀常量与
+  fragment 同形、零标记写入面、零第三方 import)进 CI,移除任一分支即红。
+- **契约**:`core/contracts/fanout/runtime.md` 增「native dispatch tool」子节(输入
+  契约/语义对齐表/收割幂等/取消/自限/令牌展开/分发自检/版本矩阵);
+  `core/contracts/hooks/runtime-enforcement.md` 补范围注(派发插件不在守卫契约辖域)。
+- **实机闸门(本机 2.1.0)**:真实 sdr 链物化 5 单元/3 波一次调用全 done(摘要与磁盘
+  标记逐一对上)、幂等重入零重派、错抄短号与 primary 真计划均 fail-loud 零会话、中止
+  级联(子会话全部 interrupted、零孤儿、波 2 未创建)、令牌展开端到端(nonce 实证);
+  企业 2.0.32 只读探测交接内网(不阻塞归档,复现清单在本 change 实机笔记 §5)。
+
+
 ### Added — /mgh-sdr 原生派发接入:波次同消息并发 + 标记自写 + 看门狗无人值守闭环(0.1.86)
 
 - **双形态派发(缺省零变化)**:fan-out 派发形态升级为双形态——子进程形态

@@ -423,8 +423,12 @@ def resolve(run_dir: Path, args) -> tuple:
                         f"re-derived from disk markers); THEN in ONE assistant message "
                         f"dispatch the current wave's units (agent {NATIVE_AGENT}; "
                         f"description = the plan's short unit id verbatim, task body = "
-                        f"the fixed sentence + the unit's task_file absolute path "
-                        f"verbatim from the plan) — full wave discipline "
+                        f"the single token line `mgh-dispatch: plan=<plan_path> "
+                        f"unit=<short id>` (plan ref = the materializer stdout's "
+                        f"plan_path verbatim, short id verbatim from the plan; the "
+                        f"mgh_dispatch.ts plugin's expansion hook turns it into the "
+                        f"unit's task-file content before the subagent starts) — full "
+                        f"wave discipline "
                         f"(watchdog-first, marker truth source, at-most-one retry "
                         f"round, rate-limit wait): Read {frag} and follow it")
                 nxt = _next("subagent", desc,

@@ -185,6 +185,47 @@ def assert_shim_v2_shape(text: str):
             raise AssertionError(f"opencode shim carries 1.x shape token ({why}): {token!r}")
 
 
+def assert_dispatch_plugin_shape(text: str):
+    """Shared shape pins for releases/opencode/plugins/mgh_dispatch.ts (the native-dispatch
+    plugin), applied to the repo source AND the installed copy. Covers the load-bearing
+    branches only (the rich behavioral tests + Python mirrors live in
+    TestDispatchPluginShape): removing any pinned branch turns CI red — the per-spawn gates
+    (permission assert / depth / primary-mode refusal), the cancel cascade, the short-id
+    validation, the token prefix constant, the never-writes-markers property, and the
+    node-builtin-only import face."""
+    import re as _re
+    pins = [
+        (r'export default \{\s*id:\s*"mgh-dispatch"', "default export carrying the plugin id (2.x module contract)"),
+        (r"async setup\(", "async setup(ctx) entry"),
+        (r"await ctx\.tool\.transform\(", "mgh_dispatch tool registration awaited inside setup"),
+        (r'await ctx\.tool\.hook\("execute\.before"', "token-expansion hook registration awaited inside setup"),
+        (r"ctx\??\.location\??\.directory", "project-root anchor captured in setup"),
+        (r"await ctx\.permission\.assert\(", "per-spawn permission assert (same face as the built-in subagent tool)"),
+        (r'depth >= DEPTH_LIMIT_DEFAULT', "parent-chain depth limit (conservative default 1)"),
+        (r'agent\.mode === "primary"', "primary-mode agent refusal before any spawn"),
+        (r'addEventListener\("abort"', "abort listener (cancel cascade entry)"),
+        (r"ctx\.session\.interrupt\(", "cascade interrupts still-active children"),
+        (r"未知短号", "unknown short-id branch (mis-transcription collected before spawn)"),
+        (r'const TOKEN_PREFIX = "mgh-dispatch:"', "fixed token prefix constant"),
+        (r"markerExists\(unit\.done_marker\)", "disk-marker classification (done)"),
+        (r"markerExists\(unit\.failed_marker\)", "disk-marker classification (failed)"),
+        (r"isTerminal\(item\.unit\)", "terminal-marker skip (idempotent re-entry)"),
+    ]
+    for rx, why in pins:
+        if _re.search(rx, text) is None:
+            raise AssertionError(f"mgh_dispatch.ts misses load-bearing shape ({why}): /{rx}/")
+    for forbidden, why in [
+        ("writeFileSync", "plugin must never write (marker truth-source invariant)"),
+        ("appendFileSync", "plugin must never write (marker truth-source invariant)"),
+        ("mkdirSync", "plugin must never write (marker truth-source invariant)"),
+    ]:
+        if forbidden in text:
+            raise AssertionError(f"mgh_dispatch.ts carries a write face ({forbidden}) — {why}")
+    for mod in _re.findall(r'^import .*from "([^"]+)"', text, _re.MULTILINE):
+        if not mod.startswith("node:"):
+            raise AssertionError(f"mgh_dispatch.ts imports {mod!r} — node builtins only (zero npm dependency)")
+
+
 def _run_guard(mod, payload, domain_env, target=None):
     """Feed a normalized payload to the guard. domain_env is one of MGH_*_ACTIVE, or None to
     simulate 'outside any run-domain' (guard MUST pass silently). Returns (exit_code, stderr)."""
@@ -907,6 +948,221 @@ class TestAgentQuestionDenyPinned(unittest.TestCase):
             f"guard dispatches on {sorted(missing)} but the dsh shim TOOL_MAP does not map "
             f"any dsh tool id onto them — those branches are DEAD on dsh (extend TOOL_MAP "
             f"+ normalize in releases/dsh/plugins/mgh-guard.ts)")
+
+
+class TestDispatchPluginShape(unittest.TestCase):
+    """mgh_dispatch.ts shape anchors (native dispatch tool). The plugin is the IN-PROCESS
+    execution face of the native-dispatch route: its per-spawn gates (permission assert /
+    depth limit / primary-mode refusal), the cancel cascade, the short-id validation, the
+    token-expansion hook, and the never-writes-markers property are the safety/completeness
+    checklist — "miss one gate = a gap" is enforced by pinning each branch as a source-form
+    anchor (no JS runtime in CI; same posture as the guard shim's v2 shape class). The pure
+    glue (token-line regex, quota admission arithmetic) is mirrored in Python below with
+    round-trip samples, pinned to the plugin source by tokens so mirror and source cannot
+    drift apart silently. The GUARD shim's existing anchors are untouched: this class pins
+    releases/opencode/plugins/mgh_dispatch.ts only."""
+
+    PLUGIN = ROOT / "releases" / "opencode" / "plugins" / "mgh_dispatch.ts"
+    FRAGMENT = ROOT / "core" / "prompts" / "fragments" / "sdr-native-dispatch.md"
+
+    def _plugin(self):
+        return self.PLUGIN.read_text(encoding="utf-8")
+
+    # --- module contract: double registration, both awaited inside async setup ---
+    def test_default_export_and_double_registration_awaited(self):
+        t = self._plugin()
+        self.assertRegex(t, r"export default \{\s*id:\s*\"mgh-dispatch\"")
+        self.assertIn("async setup(", t)
+        # both faces registered, both awaited inside setup (fire-and-forget lets the first
+        # dispatch / first subagent call slip past an unregistered face)
+        self.assertIn('await ctx.tool.transform(', t,
+                      "mgh_dispatch tool registration missing or not awaited")
+        self.assertIn('await ctx.tool.hook("execute.before"', t,
+                      "token-expansion hook registration missing or not awaited")
+        self.assertRegex(t, r"ctx\??\.location\??\.directory",
+                      "project-root anchor missing (relative plan refs would resolve "
+                      "against the service process cwd)")
+
+    # --- per-spawn gate 1: permission assert mirrors the built-in subagent tool ---
+    def test_permission_assert_per_spawn(self):
+        t = self._plugin()
+        self.assertIn("await ctx.permission.assert(", t,
+                      "per-spawn permission assert missing — the plugin would bypass the "
+                      "permission layer the built-in subagent tool goes through")
+        self.assertIn('action: SUBAGENT_TOOL', t)
+        self.assertIn("resources: [agent.id]", t)
+        self.assertIn("save: [agent.id]", t)
+        self.assertIn('source: { type: "tool", messageID: context.messageID, id: context.id }', t,
+                      "assert source face drifted from the built-in subagent tool's shape")
+
+    # --- per-spawn gate 2: parent-chain depth limit (conservative default 1) ---
+    def test_depth_walk_and_limit(self):
+        t = self._plugin()
+        self.assertIn("parentID", t, "parent-chain depth walk missing")
+        self.assertIn("DEPTH_LIMIT_DEFAULT = 1", t,
+                      "conservative depth default missing (must equal the built-in's "
+                      "default when host config is unreachable)")
+        self.assertIn("depth >= DEPTH_LIMIT_DEFAULT", t,
+                      "depth comparison missing — nesting would be unbounded")
+
+    # --- per-spawn gate 3: primary-mode agent refusal before any spawn ---
+    def test_primary_mode_refusal(self):
+        t = self._plugin()
+        self.assertIn('agent.mode === "primary"', t,
+                      "primary-mode refusal branch missing")
+        self.assertIn("NEVER", t[t.index('agent.mode === "primary"'):],
+                      "primary refusal carries no recipe (must refuse loudly, never fall "
+                      "back to another agent name)")
+
+    # --- cancel cascade: abort -> interrupt every still-active child ---
+    def test_cancel_cascade_branch(self):
+        t = self._plugin()
+        self.assertIn('addEventListener("abort"', t, "abort listener missing")
+        # the interrupt calls live INSIDE the abort path (onAbort), not on the happy path
+        on_abort = t[t.index("const onAbort"):]
+        self.assertIn("ctx.session.interrupt(", t[t.index("const onAbort"):t.index("const dispatchUnit")],
+                      "interrupt cascade not inside the abort handler")
+        self.assertIn("Promise.allSettled(interrupts)", t,
+                      "cascade interrupts never settle before the tool returns")
+
+    # --- input contract: closed set, short-id validation, mutual exclusion, zero sessions ---
+    def test_input_validation_branches(self):
+        t = self._plugin()
+        self.assertIn('input.wave !== undefined && input.units !== undefined', t,
+                      "wave/units mutual-exclusion check missing")
+        self.assertIn("未知短号", t, "unknown short-id branch missing (mis-transcription "
+                                     "must be collected before spawn)")
+        self.assertIn("additionalProperties: false", t,
+                      "input schema not closed-set")
+        self.assertIn("required: [\"plan\"]", t)
+
+    # --- harvest: disk markers only; idempotent skip; compact summary ---
+    def test_marker_truth_source_and_idempotency(self):
+        t = self._plugin()
+        self.assertIn("markerExists(unit.done_marker)", t)
+        self.assertIn("markerExists(unit.failed_marker)", t)
+        self.assertIn('"no-marker"', t, "no-marker classification missing")
+        self.assertIn("isTerminal(item.unit)", t,
+                      "terminal-marker skip (idempotent re-entry) missing")
+        # the summary carries counts/lists/ids only — never a findings key
+        self.assertIsNone(re.search(r"findings:", t),
+                          "summary must not carry a findings field")
+
+    def test_never_writes_markers_or_any_artifact(self):
+        t = self._plugin()
+        # zero marker-write face: the plugin's only fs writes are READS (readFileSync);
+        # writeFileSync / appendFileSync / mkdir must not appear at all.
+        for forbidden in ("writeFileSync", "appendFileSync", "mkdir", "rmSync", "unlink"):
+            self.assertNotIn(forbidden, t,
+                             f"plugin carries a write face ({forbidden}) — the marker "
+                             f"truth-source invariant says the plugin NEVER writes any "
+                             f"unit marker or run artifact")
+
+    def test_zero_third_party_imports(self):
+        t = self._plugin()
+        imports = re.findall(r'^import .*from "([^"]+)"', t, re.MULTILINE)
+        self.assertTrue(imports, "no imports found — extractor drifted")
+        for mod in imports:
+            self.assertTrue(mod.startswith("node:"),
+                            f"non-builtin import {mod!r} — the plugin is glue over the host "
+                            f"API + node builtins only (zero npm dependency)")
+
+    # --- token-expansion hook: fixed prefix, whole-text replacement, non-token passthrough ---
+    def test_token_hook_branches(self):
+        t = self._plugin()
+        self.assertIn('const TOKEN_PREFIX = "mgh-dispatch:"', t,
+                      "fixed token prefix constant missing (the fragment and the hook must "
+                      "share ONE literal)")
+        self.assertIn("TOKEN_RX", t, "token-line regex missing")
+        self.assertIn('event?.tool !== SUBAGENT_TOOL', t,
+                      "hook not scoped to the built-in subagent tool")
+        self.assertIn("startsWith(TOKEN_PREFIX)", t,
+                      "cheap non-token short-circuit missing (ordinary subagent usage must "
+                      "pass untouched)")
+        self.assertIn("event.input!.prompt = taskText", t,
+                      "whole-text replacement missing (the subagent must receive the file "
+                      "content verbatim)")
+        # fail-loud faces: unknown short id + unreadable plan both refuse before spawn
+        self.assertIn("未知短号", t)
+        self.assertIn("计划不可读/不可解析", t)
+
+    def test_token_prefix_shared_with_sdr_fragment(self):
+        """钩子与首个消费者的契约不靠口头约定:插件常量与 sdr 纪律 fragment 引用同一
+        固定令牌前缀(同形字面量),前缀漂移即红。"""
+        frag = self.FRAGMENT.read_text(encoding="utf-8")
+        self.assertIn("mgh-dispatch: plan=", frag,
+                      "sdr fragment no longer references the token-line form — the hook's "
+                      "first consumer drifted")
+        self.assertIn('const TOKEN_PREFIX = "mgh-dispatch:"', self._plugin())
+        # and the fragment's relay line is the TOKEN form (path form only as fallback)
+        self.assertIn("单行令牌", frag)
+        self.assertIn("mgh_dispatch.ts", frag)
+
+    # --- Python mirror of the token-line glue (pinned by source tokens) ---
+    TOKEN_RX = re.compile(r"^mgh-dispatch:[ \t]+plan=(\S+)[ \t]+unit=(\S+)[ \t]*$")
+
+    def test_token_regex_roundtrip_samples(self):
+        cases = [
+            # (first line, expected (plan, unit) or None)
+            ("mgh-dispatch: plan=.mgh-sdr/runs/r1/native_plan.json unit=sdr-k3f7",
+             (".mgh-sdr/runs/r1/native_plan.json", "sdr-k3f7")),
+            ("mgh-dispatch: plan=C:/abs/run/native_plan.json unit=sdr-a1b2",
+             ("C:/abs/run/native_plan.json", "sdr-a1b2")),
+            ("mgh-dispatch:  plan=x  unit=y  ", ("x", "y")),  # [ 	]+ spans multiple spaces
+            ("mgh-dispatch:plan=x unit=y", None),       # missing space after prefix
+            ("读取并逐字执行以下任务文件: D:/x/task.md", None),   # legacy path form: passthrough
+            ("just do the thing", None),
+            ("mgh-dispatch: plan=x", None),             # missing unit
+        ]
+        for line, expected in cases:
+            m = self.TOKEN_RX.match(line.strip())
+            got = None if m is None else (m.group(1), m.group(2))
+            self.assertEqual(got, expected, f"token RX mirror drifted on {line!r}")
+        self.assertIn(r'/^mgh-dispatch:[ \t]+plan=(\S+)[ \t]+unit=(\S+)[ \t]*$/', self._plugin(),
+                      "mirror RX drifted from the plugin source")
+
+    # --- Python mirror of the quota admission arithmetic (port of the subprocess
+    #     dispatcher's estimate; same shapes: (dispatch_times, window_s, calls, per_unit, now)
+    #     -> (admissible, used, resume_ts)) ---
+    @staticmethod
+    def _quota_admission(times, window_s, calls, per_unit, now):
+        recent = [t for t in times if now - t <= window_s]
+        used = len(recent) * per_unit
+        if used + per_unit <= calls:
+            return True, used, 0.0
+        max_in_window = max(0, calls // per_unit - 1)
+        need_slide = len(recent) - max_in_window
+        if need_slide <= 0:
+            return False, used, float(now)
+        return False, used, sorted(recent)[need_slide - 1] + window_s
+
+    def test_quota_admission_roundtrip_samples(self):
+        q = self._quota_admission
+        # empty window -> admissible iff K <= N
+        self.assertEqual(q([], 600, 100, 10, 1000.0), (True, 0, 0.0))
+        # 3 dispatches in window (used 30) -> next K fits (40 <= 100)
+        self.assertEqual(q([999.0, 999.5, 1000.0], 600, 100, 10, 1000.0), (True, 30, 0.0))
+        # 10 in window (used 100) -> 100+10 > 100 -> wait for the oldest to slide out
+        times = [400.0 + i for i in range(10)]
+        admissible, used, resume = q(times, 600, 100, 10, 1000.0)
+        self.assertFalse(admissible)
+        self.assertEqual(used, 100)
+        self.assertEqual(resume, 400.0 + 600)  # oldest ts + window
+        # K > N: never admissible even at zero dispatches, resume = now (caller must not spin)
+        self.assertEqual(q([], 600, 5, 10, 1000.0), (False, 0, 1000.0))
+        # window slide: old timestamps age out
+        self.assertEqual(q([100.0, 900.0], 600, 100, 10, 1000.0), (True, 10, 0.0))
+        self.assertIn("function quotaAdmission(", self._plugin(),
+                      "plugin quota arithmetic drifted from the mirrored shape")
+
+    def test_summary_never_carries_task_text_or_findings(self):
+        # structural: the summary builder assembles counts/lists/ids only — assert the
+        # summary literal's keys and that no findings/task content key exists
+        t = self._plugin()
+        for key in ("dispatched", "skipped_terminal", "failed_units", "no_marker_units",
+                    "waves_run", "aborted"):
+            self.assertIn(f"{key}:", t, f"summary key {key} missing")
+        self.assertNotIn("taskText}'", t)  # task text never interpolated into the summary
 
 
 if __name__ == "__main__":

@@ -122,8 +122,10 @@ render 调用传慷慨 per-call `timeout`(毫秒,≥ `--time-budget-ms`)。
      `.opencode/mgh-core/prompts/fragments/sdr-native-dispatch.md` 并按其执行——看门狗
      先行(后台,`OPENCODE_SESSION_ID` 宿主注入)→ `emit_native_plan.py --tier sdr` 每轮
      物化 + `--check`(重物化即重枚举)→ **同一条 assistant 消息**并发派 `sdr-review-native`
-     子代理(description=计划短号、任务体=固定句+任务文件绝对路径,逐字透传)→ 标记唯一
-     写者是子代理 → 失败单元至多一轮重派、限流特征按画像配额等窗 → pending 清空进 step 4。
+     子代理(description=计划短号、任务体=单行令牌 `mgh-dispatch: plan=<plan_path>
+     unit=<短号>`,派发插件 `mgh_dispatch.ts` 的展开钩子将其展开为任务文件全文,模型输出
+     零任务路径)→ 标记唯一写者是子代理 → 失败单元至多一轮重派、限流特征按画像配额等窗
+     → pending 清空进 step 4。
      步骤调用行与恢复的原生分支由 `list_sdr_steps.py` / `resume_sdr_state.py` 形态感知给出。
    · **special-auth 前置检查(先于 invocation,不可跳过)**:清单 stdout
      `special_auth.present==true` → MUST 先 Read 该文档并按文档完成凭证准备(写参数文件

@@ -244,7 +244,9 @@ def _native_fanout_step(dispatch: dict) -> dict:
             {"phase": "waves", "kind": "subagent", "agent": dispatch["native_agent"],
              "discipline_fragment": dispatch["discipline_fragment"],
              "note": ("同一条 assistant 消息并发派当前波全部单元(description=计划短号,"
-                      "任务体=固定句+task_file 绝对路径逐字透传);看门狗先行(启动与收尾"
+                      "任务体=单行令牌 mgh-dispatch: plan=<plan_path> unit=<短号>,派发插件"
+                      " mgh_dispatch.ts 的令牌展开钩子展开为任务全文;展开钩子缺席的旧版"
+                      "安装回退=固定句+task_file 绝对路径逐字透传);看门狗先行(启动与收尾"
                       "参数见 fragment 第 0 节)")},
             {"phase": "render", "kind": "bash", "step_ref": "render",
              "note": ("pending 清空(失败缺口已按至多一轮重派纪律接受)→ 进清单 render 步"

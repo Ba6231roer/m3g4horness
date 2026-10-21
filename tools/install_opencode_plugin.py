@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-install_opencode_plugin — idempotently place the block-adhoc-scripts opencode plugin into a
-target project's .opencode/plugins/ (the opencode analog of install_hook.py; R5.7 deliverable).
+install_opencode_plugin — idempotently place the mgh opencode plugin file set into a target
+project's .opencode/plugins/ (the opencode analog of install_hook.py; R5.7 deliverable).
 
-opencode auto-loads .opencode/plugins/*.{js,ts} at startup (NO config registration), so "wiring"
-= placing the .ts file. Idempotent + merge-aware: a second run refreshes our own file to the
-canonical source and NEVER touches the user's other plugins (we manage exactly one filename).
+The set is FIXED (two files, both managed by this repo, never user-extensible):
+  block_adhoc_scripts.ts   tool.execute.before guard + permission.evaluate gate (Python guard shim)
+  mgh_dispatch.ts          mgh_dispatch native-dispatch tool + subagent token-expansion hook
 
-Mirrors install_hook.py's CLI contract:
-  py install_opencode_plugin.py --plugins-dir <path> --source <ts-file>
-       [--plugin-name block_adhoc_scripts] [--remove]
+opencode auto-loads .opencode/plugins/*.{js,ts} at startup (NO config registration), so
+"wiring" = placing the .ts files. Idempotent + merge-aware: a second run refreshes OUR OWN two
+files to the canonical sources and NEVER touches the user's other plugins (we manage exactly
+this fixed name set, nothing else in the directory).
 
-stdout (R5.3b): {"plugins_dir":"...","plugin":"...","action":"written|present|removed","path":"..."}
+CLI contract:
+  py install_opencode_plugin.py --plugins-dir <path> --source-dir <dir> [--remove]
+
+  --plugins-dir  target .opencode/plugins/ (created if missing)
+  --source-dir   directory holding the canonical two .ts files (releases/opencode/plugins);
+                 required for placement, unused by --remove
+  --remove       take OUR two files back out (user plugins untouched)
+
+stdout (R5.3b): one JSON line
+  {"plugins_dir":"...","files":[{"plugin":"<stem>","action":"written|present|removed|absent",
+                                 "path":"..."}, ...]}
 stderr = diagnostics. Exit codes (R5.3b): 0 ok · 1 IO error · 2 misuse.
 
 Build/install-time tool (like tools/install_hook.py / gen_*.py); NOT the /mgh-* orchestrator,
@@ -26,53 +37,74 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-_DEFAULT_PLUGIN_NAME = "block_adhoc_scripts"
+# The fixed file set: both filenames are repo-owned; adding a third plugin file means
+# changing THIS constant (and the install self-check + shape anchors with it), never
+# scanning the directory.
+_FILES = ("block_adhoc_scripts.ts", "mgh_dispatch.ts")
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="idempotently place block-adhoc-scripts opencode plugin into .opencode/plugins/")
+        description="idempotently place the mgh opencode plugin file set (guard + dispatch) "
+                    "into .opencode/plugins/")
     ap.add_argument("--plugins-dir", required=True,
                     help="path to target .opencode/plugins/ (created if missing)")
-    ap.add_argument("--source", required=True,
-                    help="canonical .ts plugin file to copy from (e.g. releases/opencode/plugins/block_adhoc_scripts.ts)")
-    ap.add_argument("--plugin-name", default=_DEFAULT_PLUGIN_NAME,
-                    help=f"plugin filename stem (default: {_DEFAULT_PLUGIN_NAME})")
+    ap.add_argument("--source-dir",
+                    help="directory holding the canonical two .ts files "
+                         "(e.g. releases/opencode/plugins); required for placement, "
+                         "unused by --remove")
     ap.add_argument("--remove", action="store_true",
-                    help="remove our plugin file instead of placing it")
+                    help="remove our plugin files instead of placing them")
     args = ap.parse_args()
 
     plugins_dir = Path(args.plugins_dir)
-    source = Path(args.source)
-    dest = plugins_dir / f"{args.plugin_name}.ts"
+    results = []
 
     if args.remove:
-        if dest.is_file():
-            dest.unlink()
-            action = "removed"
-        else:
-            action = "absent"  # nothing to remove (still a success / idempotent no-op)
-        print(f"[install_opencode_plugin] {dest}: {action}", file=sys.stderr)
-        print(json.dumps({"plugins_dir": str(plugins_dir), "plugin": args.plugin_name,
-                          "action": action, "path": str(dest)}, ensure_ascii=False))
+        for name in _FILES:
+            dest = plugins_dir / name
+            if dest.is_file():
+                dest.unlink()
+                action = "removed"
+            else:
+                action = "absent"  # nothing to remove (still a success / idempotent no-op)
+            print(f"[install_opencode_plugin] {dest}: {action}", file=sys.stderr)
+            results.append({"plugin": dest.stem, "action": action, "path": str(dest)})
+        print(json.dumps({"plugins_dir": str(plugins_dir), "files": results},
+                         ensure_ascii=False))
         return 0
 
-    if not source.is_file():
-        print(f"error: source plugin not found: {source}", file=sys.stderr)
-        return 1
+    if not args.source_dir:
+        print("error: --source-dir is required for placement (directory holding the "
+              "canonical two .ts plugin files)", file=sys.stderr)
+        return 2
+    source_dir = Path(args.source_dir)
 
-    new_text = source.read_text(encoding="utf-8")
-    # Idempotent: if our file already matches the canonical source, leave it (present); else refresh (written).
-    if dest.is_file() and dest.read_text(encoding="utf-8") == new_text:
-        action = "present"
-    else:
-        plugins_dir.mkdir(parents=True, exist_ok=True)
-        dest.write_text(new_text, encoding="utf-8")
-        action = "written"
+    # Check ALL sources before writing ANY target: a skewed source tree must not leave a
+    # half-installed plugin set behind.
+    sources = {}
+    for name in _FILES:
+        src = source_dir / name
+        if not src.is_file():
+            print(f"error: source plugin not found: {src}", file=sys.stderr)
+            return 1
+        sources[name] = src.read_text(encoding="utf-8")
 
-    print(f"[install_opencode_plugin] {dest}: {action}", file=sys.stderr)
-    print(json.dumps({"plugins_dir": str(plugins_dir), "plugin": args.plugin_name,
-                      "action": action, "path": str(dest)}, ensure_ascii=False))
+    for name in _FILES:
+        dest = plugins_dir / name
+        # Idempotent: if our file already matches the canonical source, leave it (present);
+        # else refresh (written).
+        if dest.is_file() and dest.read_text(encoding="utf-8") == sources[name]:
+            action = "present"
+        else:
+            plugins_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_text(sources[name], encoding="utf-8")
+            action = "written"
+        print(f"[install_opencode_plugin] {dest}: {action}", file=sys.stderr)
+        results.append({"plugin": dest.stem, "action": action, "path": str(dest)})
+
+    print(json.dumps({"plugins_dir": str(plugins_dir), "files": results},
+                     ensure_ascii=False))
     return 0
 
 

@@ -146,6 +146,13 @@ packages/core/src/tool/plugin/{shell,patch,write,edit,read,glob,grep}.ts).
 | Version matrix | implemented against **2.1.0** (local, real-machine gated) and **2.0.32** (enterprise shared-service form, gated on the intranet before archive); the module contract + hook/event shapes above are the common surface both accept per the 2.0.32 gate checklist in the change's real-machine notes. |
 | Loader notes | `.opencode/plugins/*.ts` auto-discovery unchanged; plugin runtime imports are limited to `effect` / `@opencode/plugin` / node builtins (the shim uses `node:fs`/`node:url`/`Bun.spawn` only — no npm dependency). |
 
+> **Scope note**: the mgh plugin directory carries a SECOND repo-owned file,
+`mgh_dispatch.ts` (native-dispatch tool + token-expansion hook). It is placed by the same
+installer (fixed two-file set) but is NOT part of the guard's contract — its input
+contract / dispatch semantics / version matrix live in the fan-out runtime contract's
+「native dispatch tool」节. This file's rules (shape anchors, glue-only, HANDLED set)
+govern ONLY `block_adhoc_scripts.ts`.
+
 **Two-generation tool-id convergence** (the same install file may be loaded by a 2.0.x or a
 2.1.x host; dropping either generation silently un-guards that host — upgrade-drift AND
 revert-drift are both CI-guarded, see `TestShimV2ModuleShape`):

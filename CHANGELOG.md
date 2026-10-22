@@ -16,6 +16,24 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — mgh-init 产出质量评审计划 + 评审方法术语入词典(0.1.91)
+
+- **docs/mgh-init-output-quality-review-plan-2026-10-22.md**(维护者资料,不分发):以
+  最终规则产物质量为唯一目标的逐阶段评审战役计划——弱模型透镜五问(企业主力模型仍为
+  DeepSeek V4 Flash 0731 / 150K,「准确度交给模型」的原赌注未兑现)、六维质量标尺
+  (GQM)、方法箱(事前验尸/头脑风暴/FMEA/5why 根因五分类 A–E/双向追溯/方差/强模型
+  对照/下游 A/B)、九张阶段评审卡(危险度序:T4 一致性兜底最弱居首)与 Phase 0–4
+  实施排程、四个待拍板决策点(弱模型证据腿三选项/金标仓/下游 A/B/提案节奏)。
+- **docs/glossary.md** 补 13 条评审方法术语(5why、FMEA、GQM、事前验尸、金标仓、追溯
+  审计、证据等级 S/L/E、形状偏差/语义偏差等),支撑上述人类面文档的用词后盾。
+- **docs/mgh-init-output-quality-review-handoff-2026-10-22.md**(交接文档):换环境/新
+  会话自包含开工指引——缺省执行路径(D1–D4 未拍板时直接跑 P1 静态卡 C7→C2→C4→C5→
+  C6→C8→C1→C3→C9,动态腿不动)、纪律红线(DEEPSEEK_API_KEY 须当次明确授权、评审只读
+  产品文件、证据等级纪律)、逐卡快速启动索引与本会话已核实情报。
+- **docs/reviews/init-quality-2026-10/register.md**:缺陷登记册预置 7 项(2026-10-21
+  实机 pack 账本两项 [E] 级未修可提前立项 + 诚实边界披露 4 项 + edit: deny 待验证),
+  评审会话只增补不重复。
+
 ### Changed — /mgh-init 聚合四层(t1/t2/t3/scout-merge)接入原生派发,聚合层默认通道 B(0.1.90)
 
 - **四层接入原生派发(opencode 面 `consumer=init` 缺省原生,收尾原生派发路线第 8 个

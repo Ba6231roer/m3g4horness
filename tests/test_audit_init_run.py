@@ -40,31 +40,34 @@ class AuditInitRunTest(unittest.TestCase):
 
     def _build_run(self):
         cp = self.init / "checkpoints"
-        # t1: good record + done; bad json + done; orphan marker whose id lives
-        # inside the good record (pack member shape)
+        # t1: good record + done; bad json + done; orphan marker whose sha8 tail
+        # appears inside the good record (pack-member shape, sanitized names)
         _w(cp / "t1/alpha.json", json.dumps(
-            {"unit": "input-validation::Foo", "members": ["gamma.json"],
-             "evidence": ["src/Foo.java::Foo.bar"]}))
+            {"unit": "input-validation::Foo::src/Foo.java::deadbeef",
+             "members": [], "evidence": ["src/Foo.java:Foo.bar"]}))
         (cp / "t1/alpha.json.done").touch()
         _w(cp / "t1/beta.json", "{not valid json")
         (cp / "t1/beta.json.done").touch()
-        _w(cp / "t1/gamma.json.done", "")
-        # t2: one shard record + marker-only synthesis marker (by design)
-        _w(cp / "t2/part-1.json", json.dumps({"summary": "ok"}))
-        (cp / "t2/part-1.json.done").touch()
+        _w(cp / "t1/input-validation__X__src_Foo_java__deadbeef.json.done", "")
+        # t2: shard record NESTED one level (regression for recursion) + the
+        # marker-only synthesis marker (absent content file is by design)
+        _w(cp / "t2/parts/part-1.json", json.dumps({"summary": "ok"}))
+        (cp / "t2/parts/part-1.json.done").touch()
         _w(cp / "t2/synthesis.json.done", "")
-        # t3: one category record
+        # t3: one category record + one artifact-attached marker (base NOT
+        # .json — native rule-file marker shape -> orphan_other, not missing)
         _w(cp / "t3/input-validation.json", json.dumps({"category": "input-validation"}))
         (cp / "t3/input-validation.json.done").touch()
+        _w(cp / "t3/input-validation.opencode.md.done", "")
         # t4: consistency record + marker
         _w(cp / "t4/consistency.json", json.dumps({"changes": [], "flags": []}))
         (cp / "t4/consistency.json.done").touch()
-        # inventory: 2 controls, one with a valid anchor, one pointing at a
-        # missing file (bad_file) and unrepresented in any rule file
+        # inventory: 2 controls — single-colon symbol evidence (T1 contract
+        # format) and a missing-file anchor
         _w(self.init / "controls_inventory.json", json.dumps({
             "controls": [
                 {"name": "Foo sanitizer", "category": "input-validation",
-                 "evidence": ["src/Foo.java:4"]},
+                 "evidence": ["src/Foo.java:Foo.bar"]},
                 {"name": "Ghost limiter", "category": "rate-limiting",
                  "evidence": ["src/Missing.java:5"]},
             ]}))
@@ -107,24 +110,31 @@ class AuditInitRunTest(unittest.TestCase):
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         m = self._stdout_map(proc)
-        # markers: scout absent → 0/0; t1 done=3 failed=0; t2 done=2 (incl
-        # marker-only synthesis); t3 1/0; t4 1/0
-        self.assertEqual(m["markers:scout"], "0/0")
+        # markers: only tiers with a checkpoints dir appear; scout absent here
+        self.assertNotIn("markers:scout", m)
         self.assertEqual(m["markers:t1"], "3/0")
         self.assertEqual(m["markers:t2"], "2/0")
-        self.assertEqual(m["records:t1"], "2")
+        self.assertEqual(m["markers:t3"], "2/0")
+        # records: t1=2; t2=1 via ONE-LEVEL RECURSION (parts/part-1.json);
+        # files_total includes markers themselves
+        self.assertEqual(m["records:t1"], "2(files=5)")
+        self.assertEqual(m["records:t2"], "1(files=3)")
         self.assertEqual(m["json_bad:total"], "1")
         self.assertEqual(m["json_bad:t1"], "1")
-        # gamma.json.done has no record; its id appears inside alpha.json → pack
-        self.assertEqual(m["orphan_done:t1"], "1(in_pack=1)")
-        self.assertEqual(m["orphan_done:rec_no_done_total"], "0")
-        # synthesis.json content absent by design and not counted as orphan
+        # orphan json marker (sanitized name) matches record content via sha8
+        self.assertEqual(m["orphan_json:t1"], "1(sha_hit=1)")
+        self.assertEqual(m["orphan_json:rec_no_total"], "0")
+        # non-json marker base → artifact-attached (native design), not a
+        # missing record
+        self.assertEqual(m["orphan_json:other_marker"], "1")
+        # synthesis.json content absent by design, not an orphan
         self.assertEqual(m["t2:synthesis"], "absent")
         self.assertEqual(m["t2:shards"], "1")
         self.assertEqual(m["t4:consistency"], "ok")
         self.assertEqual(m["t4:post_t4_lint"], "skipped")
-        # anchors: inv[0] line anchor ok; inv[1] file missing; rule file symbol
-        # anchor ok → total=3 ok=2 bad_file=1
+        # anchors: inv[0] single-colon symbol evidence ok (parses to path +
+        # symbol, file + class + method all present); inv[1] file missing;
+        # rule-file :: anchor ok → total=3 ok=2 bad_file=1
         self.assertEqual(m["anchors:total"], "3")
         self.assertEqual(m["anchors:ok"], "2")
         self.assertEqual(m["anchors:bad_file"], "1")
@@ -133,7 +143,8 @@ class AuditInitRunTest(unittest.TestCase):
         self.assertEqual(m["inv:cats"], "2")
         self.assertEqual(m["inv:files"], "1")
         self.assertEqual(m["inv:missing_files"], "1")
-        # control 1 represented (path appears in rule text), control 2 missing
+        # control 1 represented (its evidence PATH appears in rule text after
+        # single-colon parsing strips the symbol), control 2 missing
         self.assertEqual(m["cover:represented"], "1")
         self.assertEqual(m["cover:missing"], "1")
         self.assertEqual(m["index:links"], "1")

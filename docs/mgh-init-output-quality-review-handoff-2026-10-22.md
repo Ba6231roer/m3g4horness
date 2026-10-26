@@ -160,17 +160,26 @@ cwd 可用。输入是跑完的 `<target>/.mgh-init/` 和规则目录;输出两�
 | E | inventory↔规则覆盖对账(缺几个、多几个、按 category) | 完全缺失 |
 | F | 运行健康:manifest、marker 计数、failed reason、boundaries | 散落在多个文件,无汇总 |
 
-输出示例(手抄页的形态):
+输出示例(v1.1 手抄页的实际形态;2026-10-26 首页实测:json_bad=0、结构 8/8、
+T4 后 lint 过;工具 v1 的 anchors bad_file=1179 / cover missing=649 为**单冒号证据
+解析误报**,v1.1 已修,以重跑为准):
 
 ```
-AUDIT v1 repo=real
-json_bad_total=3 json_bad_t1=2 json_bad_t2=1 json_bad_t3=0 json_bad_t4=0
-t2_synthesis=ok t2_shards=12/12
-t4_consistency=ok post_t4_lint=0
-anchors_total=214 anchors_valid=205 anchor_bad_file=5 anchor_bad_line=4
-snippet_mismatch=6
-inv=41 rules=39 missing=2 extra=0
-failed_t1=1 failed_t2=0 failed_t3=1 failed_t4=0
+AUDIT v1.1 fmt=opencode
+markers scout=…/0 t1=…/0 t2=…/0 t3=…/0 t4=…/0
+records scout=…(files=…) t1=…(files=…) …
+orphan_json t1=…(sha_hit=…) scout=… t2=… t3=… other_marker=… rec_no_scout=… rec_no_total=…
+json_bad total=… scout=… t1=… t2=… t3=… t4=…
+t2 shards=… shard_bad=… synthesis=absent
+t4 consistency=ok post_t4_lint=ok
+anchors total=… ok=… bad_file=… bad_line=… bad_symbol=… unchecked=…
+snippets checked=… mismatch=…
+inv controls=… cats=… files=… missing_files=… extra_files=…
+cover represented=… missing=…
+index links=… files=…
+manifest boundaries=… failures=… report_md=… cfg_scout=on
+scout_mismatch_examples=…(仅 scout 有差异时)
+decl_cfg scanned=… hit_files=… hits=…(--scan-config 时)
 ```
 
 验收:不修改任何文件;退出码 0 = 已产出报告(发现问题不算失败)、2 = 用法错;对缺失的

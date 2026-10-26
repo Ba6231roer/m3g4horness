@@ -141,61 +141,93 @@ def resolve_path(raw: str, target: Path):
 
 
 def parse_anchor_token(tok):
-    """'path::Cls.method' -> (path, None, (cls, method)); 'path:123' -> (path, 123, None)."""
+    """Evidence/anchor token -> (path, line|None, symbol|None).
+
+    Accepted forms (t1-record-schema.md + rules-detail.md):
+      'path::Cls.method'  rule-file anchor (double colon)
+      'path:Cls.method'   T1/inventory evidence (SINGLE colon symbol form)
+      'path:123'          line anchor
+      'path'              bare path
+    """
     tok = tok.strip().strip('"').strip("'").replace("\\", "/")
     if "::" in tok:
         path, sym = tok.split("::", 1)
         return path, None, sym
     m = re.match(r"^(.*):(\d{1,7})$", tok)
-    if m and "/" in m.group(1):
+    if m and ("/" in m.group(1)
+              or re.search(r"\.(?:%s)$" % "|".join(SRC_EXT), m.group(1), re.I)):
         return m.group(1), int(m.group(2)), None
+    m = re.match(r"^(.*\.(?:%s)):([^:]+)$" % "|".join(SRC_EXT), tok, re.I)
+    if m:
+        return m.group(1), None, m.group(2)
     return tok, None, None
 
 
 def scan_tier(cp_dir: Path):
-    """One tier dir -> dict of marker/record reconciliation + strict-parse counts."""
+    """One tier dir (one-level recursion) -> marker/record reconciliation.
+
+    Markers whose base does NOT end in .json are classified as `orphan_other`
+    (artifact-attached markers, e.g. rule files in native dispatch) instead of
+    missing records — a design shape, not an anomaly.
+    """
     st = {"done": 0, "failed": 0, "records": 0, "json_bad": 0,
-          "orphan_done": 0, "rec_no_done": 0, "orphan_ids": [],
-          "bad_files": [], "failed_reasons": [], "markers_terminal_only": 0}
+          "orphan_done": 0, "orphan_other": 0, "rec_no_done": 0,
+          "orphan_ids": [], "marker_other_ids": [], "rec_no_done_ids": [],
+          "bad_files": [], "failed_reasons": [], "markers_terminal_only": 0,
+          "files_total": 0}
+    names: dict[str, Path] = {}
     try:
-        entries = sorted(os.listdir(cp_dir))
+        for entry in sorted(os.listdir(cp_dir)):
+            p = cp_dir / entry
+            if p.is_dir():
+                try:
+                    for sub in sorted(os.listdir(p)):
+                        if (p / sub).is_file():
+                            names[entry + "/" + sub] = p / sub
+                except OSError:
+                    pass
+            elif p.is_file():
+                names[entry] = p
     except OSError:
         return st
-    record_names = set()
-    for name in entries:
-        if name.endswith(".json"):
-            record_names.add(name)
-    done_bases, failed_bases = [], []
-    for name in entries:
+    st["files_total"] = len(names)
+    record_names = {n for n in names if n.endswith(".json")}
+    done_json, done_other = [], []
+    for name in names:
         if name.endswith(".done"):
             base = name[: -len(".done")]
             st["done"] += 1
-            if base in MARKER_ONLY_BASES:
+            leaf = base.split("/")[-1]
+            if leaf in MARKER_ONLY_BASES:
                 st["markers_terminal_only"] += 1
-                continue
-            done_bases.append(base)
+            elif base.endswith(".json"):
+                done_json.append(base)
+            else:
+                done_other.append(base)
         elif name.endswith(".failed"):
             st["failed"] += 1
-            failed_bases.append(name[: -len(".failed")])
-    for name in entries:
+    for name in names:
         if name.endswith(".failed"):
-            p = cp_dir / name
-            ok, data, _ = read_text(p)
+            ok, data, _ = read_text(names[name])
             if ok and data.strip():
                 st["failed_reasons"].append(data.strip()[:200])
-    for base in done_bases:
+    for base in done_json:
         if base not in record_names:
             st["orphan_done"] += 1
             st["orphan_ids"].append(base)
+    for base in done_other:
+        st["orphan_other"] += 1
+        if len(st["marker_other_ids"]) < 20:
+            st["marker_other_ids"].append(base)
     for name in sorted(record_names):
         st["records"] += 1
-        expected_marker = name + ".done"
-        has_done = expected_marker in entries
-        has_failed = expected_marker[:-len(".done")] + ".failed" in entries or \
-            (name + ".failed") in entries
-        if not (has_done or has_failed):
+        if not ((name + ".done") in names
+                or (name[: -len(".json")] + ".failed") in names
+                or (name + ".failed") in names):
             st["rec_no_done"] += 1
-        ok, _, err = load_json(cp_dir / name)
+            if len(st["rec_no_done_ids"]) < 20:
+                st["rec_no_done_ids"].append(name)
+        ok, _, err = load_json(names[name])
         if not ok:
             st["json_bad"] += 1
             if len(st["bad_files"]) < 20:
@@ -204,22 +236,32 @@ def scan_tier(cp_dir: Path):
 
 
 def pack_reconcile(t1_st: dict, cp_dir: Path):
-    """Resolve t1 orphan done-markers against record contents (pack members)."""
+    """Match orphan t1 marker ids to record contents via the trailing sha8.
+
+    Marker filenames are SANITIZED cluster ids (`::` is unsafe on NTFS), so a
+    plain substring match against raw ids inside records never hits; the
+    trailing 8-hex sha8 survives sanitization and is a safe join key.
+    """
     ids = t1_st.get("orphan_ids") or []
     if not ids:
         return 0
-    corpus = []
-    total = 0
+    blob, total = [], 0
     for name in sorted(os.listdir(cp_dir)):
         if name.endswith(".json"):
             ok, data, _ = read_text(cp_dir / name)
             if ok:
                 total += len(data)
-                corpus.append(data)
+                blob.append(data)
                 if total > 60_000_000:
                     break
-    blob = "\n".join(corpus)
-    return sum(1 for i in ids if i and i in blob)
+    text = "\n".join(blob)
+    hit = 0
+    for i in ids:
+        stem = i[: -len(".json")] if i.endswith(".json") else i
+        tail = stem[-8:]
+        if re.fullmatch(r"[0-9a-f]{8}", tail) and tail in text:
+            hit += 1
+    return hit
 
 
 def audit_anchors(inventory: dict | None, rule_files: dict, target: Path,
@@ -453,10 +495,8 @@ def main(argv=None) -> int:
                 tiers_found.append(d)
     for tier in tiers_found:
         st = scan_tier(cp_root / tier)
-        if tier == "t1" and st["orphan_ids"]:
-            st["orphan_in_pack"] = pack_reconcile(st, cp_root / tier)
-        else:
-            st["orphan_in_pack"] = 0
+        st["orphan_sha_hit"] = pack_reconcile(st, cp_root / tier) \
+            if tier == "t1" else 0
         detail["tiers"][tier] = st
 
     ok_inv, inventory, inv_err = load_json(init_dir / "controls_inventory.json")
@@ -504,7 +544,6 @@ def main(argv=None) -> int:
             scout_batches = len(b)
 
     t2 = detail["tiers"].get("t2", {})
-    json_bad_total = sum(t.get("json_bad", 0) for t in detail["tiers"].values())
 
     detail.update({"anchors": anchors, "reconciliation": recon,
                    "post_t4_lint": lint, "t4_consistency": t4c,
@@ -527,24 +566,35 @@ def main(argv=None) -> int:
 
     def mk(name):
         t = detail["tiers"].get(name, {})
-        return "%d/%d" % (t.get("done", 0), t.get("failed", 0))
+        return "%s=%d/%d" % (name, t.get("done", 0), t.get("failed", 0))
 
-    dc = detail.get("declarative_config") or {}
+    tier_names = sorted(detail["tiers"])
+    scout_t = detail["tiers"].get("scout", {})
+    mismatch_examples = []
+    for n in (scout_t.get("orphan_ids") or []) + (scout_t.get("rec_no_done_ids") or []):
+        leaf = n.split("/")[-1][:36]
+        if leaf.isascii() and len(mismatch_examples) < 3:
+            mismatch_examples.append(leaf)
+    t1_t = detail["tiers"].get("t1", {})
+    json_bad_total = sum(t.get("json_bad", 0) for t in detail["tiers"].values())
     lines = [
-        "AUDIT v1 fmt=%s" % args.format,
-        "markers scout=%s t1=%s t2=%s t3=%s t4=%s" % tuple(mk(t) for t in TIERS),
+        "AUDIT v1.1 fmt=%s" % args.format,
+        "markers " + " ".join(mk(t) for t in tier_names),
         "records " + " ".join(
-            "%s=%d" % (t, detail["tiers"].get(t, {}).get("records", 0))
-            for t in TIERS if t in detail["tiers"]),
-        "orphan_done t1=%d(in_pack=%d) t2=%d t3=%d rec_no_done_total=%d" % (
-            detail["tiers"].get("t1", {}).get("orphan_done", 0),
-            detail["tiers"].get("t1", {}).get("orphan_in_pack", 0),
+            "%s=%d(files=%d)" % (t, detail["tiers"][t].get("records", 0),
+                                 detail["tiers"][t].get("files_total", 0))
+            for t in tier_names),
+        "orphan_json t1=%d(sha_hit=%d) scout=%d t2=%d t3=%d other_marker=%d rec_no_scout=%d rec_no_total=%d" % (
+            t1_t.get("orphan_done", 0), t1_t.get("orphan_sha_hit", 0),
+            scout_t.get("orphan_done", 0),
             detail["tiers"].get("t2", {}).get("orphan_done", 0),
             detail["tiers"].get("t3", {}).get("orphan_done", 0),
+            detail["tiers"].get("t3", {}).get("orphan_other", 0),
+            scout_t.get("rec_no_done", 0),
             sum(t.get("rec_no_done", 0) for t in detail["tiers"].values())),
         "json_bad total=%d %s" % (json_bad_total, " ".join(
-            "%s=%d" % (t, detail["tiers"].get(t, {}).get("json_bad", 0))
-            for t in TIERS if t in detail["tiers"])),
+            "%s=%d" % (t, detail["tiers"][t].get("json_bad", 0))
+            for t in tier_names)),
         "t2 shards=%d shard_bad=%d synthesis=%s" % (
             t2.get("records", 0), t2.get("json_bad", 0), _synthesis_state(detail)),
         "t4 consistency=%s post_t4_lint=%s" % (t4c, lint.split("|")[0]),
@@ -567,6 +617,9 @@ def main(argv=None) -> int:
             "off" if (cfg and cfg.get("no_scout")) else "on"),
         "detail_json=written",
     ]
+    if mismatch_examples:
+        lines.append("scout_mismatch_examples=" + ",".join(mismatch_examples))
+    dc = detail.get("declarative_config") or {}
     if dc:
         lines.append("decl_cfg scanned=%d hit_files=%d hits=%d" % (
             dc["files_scanned"], dc["files_hit"], dc["hits"]))

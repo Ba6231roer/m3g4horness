@@ -16,6 +16,28 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — run 后检查工具 audit_init_run.py + 真实仓首跑实录与首两份质量实测入册(0.1.96)
+
+- **tools/audit_init_run.py**(单文件、零依赖、只读、任意 cwd;内网可单独携带):对跑完的
+  run 目录做确定性审计——A 各 tier marker↔记录对账(done/failed/orphan/pack 成员解析/
+  严格 JSON 解析坏数)、B t2 分片与 synthesis 状态(absent 属设计正常)、C t4
+  consistency.json 解析 + 装配后纯净复检(找到已装 assemble_rules 才跑,否则 skipped)、
+  D 锚点四查(文件在/行在范围/符号在文内/证据引文一致性,utf-8→gbk 回退,源读预算上限)、
+  E inventory↔规则对账(类别缺文件/控制未呈现/索引链接) + F 运行健康(boundaries/
+  failures/report.md/run_config/scout 批数)+ 可选 --scan-config(声明式配置安全模式
+  计数,假设 A4 的量化腿)。stdout ≤16 行 ASCII 手抄页;明细落 <init-dir>/audit_report.json
+  **留在内网不外发**;退出码 0=已出报告、2=用法错。配 tests/test_audit_init_run.py
+  (合成 run 树,3 用例:全链数字断言/符号漂移+行越界/用法错)。
+- **真实仓首跑实录回填交接文档 §八**(全部 [E] 手抄):12,798 Java 文件/243 万行,原生
+  派发全程未用 fanout_runner,DeepSeek V4 Flash 0731(150K),**36h 无人值守零 .failed
+  一次性跑完**;scout 1052/1052、t1 done 836 vs json 721(待工具对账,疑似 pack 成员级
+  marker)、t2 18/18、t3 8、t4 1/1;AGENTS.md 971B + 8 详述文件。**原赌注的"流程稳定
+  性"腿被实证成立,问题干净隔离为纯质量面。**
+- **登记册 #14**:锚点首测——8 文件 258 锚点 257 准确存在(99.6%),唯一缺陷为符号级漂移
+  (方法名不存在、文件类均在),与预测失败形态一致([E] 手抄,工具将机器复核)。
+- **登记册 #15**:语义首测——每类抽 1 条共 8 条,严格 5/8、放宽 7/8;裁判 = 同弱模型
+  ([H] 弱信号,样本不可外推);定性结论"语义误差存在"。待办:3 条被标记规则抄回归类。
+
 ### Added — 真实仓首跑观察表、周一检查工具约定、开发人员可评审性边界(0.1.95)
 
 按维护者安排(2026-10-23 夜在真实大仓首跑;周一按需做过程文件检查)补齐评审可执行面:

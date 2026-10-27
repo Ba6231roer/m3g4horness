@@ -252,6 +252,11 @@ bash /path/to/m3g4horness/install.sh --claude <业务仓路径>
 > 不带宿主 flag 时默认 opencode（与宿主优先级一致；多台机器/CI 里建议仍显式传参，免得
 > 依赖默认值）。dsh 面另需 `DSH_HOME` 环境变量指向 dsh 宿主目录。
 
+> 企业内网 skillhub 通道（维护者操作）：`bash install.sh --pack` 在工具包根产出
+> `m3g4horness-<版本>-opencode.zip`，上传 skillhub 后，使用者把**包内容**解压到业务仓根
+> 目录即完成 opencode 安装（效果与跑安装脚本一致；注意是解压"包内容"到项目根，不要套在
+> zip 同名文件夹里；包根的 SKILL.md 仅为上传格式要求，解压后可删）。
+
 install 会做三件事：(1) 自检零运行时依赖；(2) 拷贝命令壳 + `core/`（**不**拷 `tools/`、
 `tests/`、`openspec/`、`docs/`）；(3) 三端对等注入**运行纪律守卫**——AI 在命令运行期间
 临时乱写脚本、往项目目录外写文件、用内联代码翻产物，会被 hook 直接拦下并给出正确做法

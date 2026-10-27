@@ -12,6 +12,20 @@ $Here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Target = (Resolve-Path $Target).Path
 $ShellSrc = Join-Path $Here "releases\$Platform"
 $CoreSrc  = Join-Path $Here 'core'
+
+# 0) Interpreter probe (twin of install.sh step 0): on some machines `py` is the real
+#    launcher and `python` a silent Store placeholder, on others the reverse — take the
+#    first candidate that is a real Python >= 3.10.
+$Py = $null
+foreach ($c in @('py','python','python3')) {
+  if (Get-Command $c -ErrorAction SilentlyContinue) {
+    & $c -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $Py = $c; break }
+  }
+}
+if (-not $Py) { Write-Host "x no usable Python interpreter (tried py/python/python3; need >= 3.10)" -ForegroundColor Red; exit 1 }
+Write-Host "v interpreter: $Py"
+
 if (-not (Test-Path $ShellSrc)) { throw "unknown platform shell: $ShellSrc" }
 if (-not (Test-Path $CoreSrc))  { throw "missing core/: $CoreSrc" }
 
@@ -105,10 +119,10 @@ if ($Platform -eq 'dsh') {
   # Tier mounts + named-delegation fragment (mirror of install.sh): generation failure =
   # fail-loud at install, never deferred to first dispatch; --check = deterministic 1:1
   # assertion mounts<->definitions (warn-only per R5.8, CI enforces).
-  py (Join-Path $Here 'tools\gen_dsh_tiers.py') --agents (Join-Path $Here 'releases\dsh\agents') `
+  & $Py (Join-Path $Here 'tools\gen_dsh_tiers.py') --agents (Join-Path $Here 'releases\dsh\agents') `
     --out (Join-Path $DshDir 'tiers') --delegates-out (Join-Path $DshDir 'delegates.patch.yml')
   if ($LASTEXITCODE -ne 0) { throw "x dsh tier generation failed (fail-loud, no partial placement)" }
-  py (Join-Path $Here 'tools\gen_dsh_tiers.py') --agents (Join-Path $Here 'releases\dsh\agents') `
+  & $Py (Join-Path $Here 'tools\gen_dsh_tiers.py') --agents (Join-Path $Here 'releases\dsh\agents') `
     --out (Join-Path $DshDir 'tiers') --delegates-out (Join-Path $DshDir 'delegates.patch.yml') --check
   if ($LASTEXITCODE -eq 0) {
     Write-Host "v dsh tier mounts current: mgh-core\dsh\tiers\{scout,t1,t2,t3,sdr}.yml + delegates.patch.yml (1:1 with agents definitions)"
@@ -127,12 +141,12 @@ if ($Platform -eq 'dsh') {
   $DshProfile = 'mgh'
   # profile skeleton (add-only, foreign package.json collision = fail-loud); NOT gated by
   # -NoEnforceHook -- _dsh_precheck needs the profile dir even when enforcement is off.
-  py (Join-Path $Here 'tools\create_dsh_profile.py') --dsh-home $DshHome
+  & $Py (Join-Path $Here 'tools\create_dsh_profile.py') --dsh-home $DshHome
   if ($LASTEXITCODE -ne 0) { throw "x mgh profile skeleton failed (fail-loud, nothing wired)" }
   $PatchFile = Join-Path $ProfilesDir "$DshProfile\cordis.patch.yml"
   if (-not $NoEnforceHook) {
     $shimWin = (Join-Path $DshDir 'mgh-guard.ts')
-    py (Join-Path $Here 'tools\install_dsh_wiring.py') --patch-file $PatchFile --shim $shimWin `
+    & $Py (Join-Path $Here 'tools\install_dsh_wiring.py') --patch-file $PatchFile --shim $shimWin `
       --delegates-file (Join-Path $DshDir 'delegates.patch.yml')
     if ($LASTEXITCODE -ne 0) { throw "x dsh profile wiring failed (fail-loud, no partial wiring): $PatchFile" }
     Write-Host "v wired mgh composition block (guard shim + timeout policy + named delegates) into dsh profile 'mgh' ($PatchFile; idempotent managed block)"

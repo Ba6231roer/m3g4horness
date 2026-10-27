@@ -16,6 +16,29 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — install.sh 一键打包模式(--pack):opencode 分发 zip 直出,接内网 skillhub 通道(0.1.97)
+
+- **install.sh 新增打包模式 `--pack[=<输出.zip>]`**(仅 opencode):同一条安装流先完整跑进
+  临时 staging 目录(镜像/字节码清理/自检/插件安装零改动复用,零第二份拷贝清单),过完整性
+  硬闸(脚本族共存/fan-out 资产/subagent 清单/分发纯净四组自检由 warn 升格为缺一即退 2,
+  另加四处打包专属断言:两件插件/守卫脚本/SKILL.md/敏感目录模板),再由新工具
+  `tools/pack_release.py`(纯标准库 zipfile)一次压成 zip;缺省文件名
+  `m3g4horness-<VERSION>-opencode.zip`,staging 成功即删、失败保留并打印路径。
+- **用途与包形态**:企业内网 skillhub 只收 zip 且要求包根有标准 SKILL.md——包根放惰性
+  `releases/opencode/SKILL.md`(name=m3g4horness,仅为上传格式要求,非功能入口,解压可删;
+  普通安装零影响);zip 顶层闭集恰为 `SKILL.md`/`.opencode/`/`.mgh-sra/` 三条目,用户把包
+  内容解压到项目根 = 与 `install.sh --opencode` 落地树逐字节等同(唯一差异是多出的
+  SKILL.md)。fail-loud 边界:与 `--claude`/`--dsh`/`--no-enforce-hook`、位置参数目标、
+  缺失/空 VERSION 同传一律退出码 2 零产出(无版本包正是要防的陈旧包事故)。
+- **测试与卫生**:新增 tests/test_install_pack.py(21 用例:结构闭集/关键资产/SKILL 形态/
+  零字节码/fail-loud 七形态/repo-lite 动态闸门〔缺插件不出包+staging 保留〕/解压↔安装逐
+  字节等价;内置 py→sys.executable 垫片,坏 `py` 启动器机器可跑)。字节码清理扩为
+  「`__pycache__` 目录 + 散装 `.pyc/.pyo`」,对全部安装面生效(治发行树本机残留字节码进
+  用户项目)。非目标:claude/dsh 不出包;install.ps1 不扩展;不做卸载/旧文件清理。
+- **install.sh / install.ps1 补 step 0 解释器探测**(py/python/python3 取第一个 ≥3.10 的真
+  解释器,与分发壳 step 0 同款;全缺 fail-loud):不同开发机上 `py`/`python` 恰一个是商店
+  静默占位的问题由安装器自适应消化,真装/打包测试不再需要手工垫 py 转发。
+
 ### Added — run 后检查工具 audit_init_run.py + 真实仓首跑实录与首两份质量实测入册(0.1.96)
 
 - **tools/audit_init_run.py**(单文件、零依赖、只读、任意 cwd;内网可单独携带):对跑完的

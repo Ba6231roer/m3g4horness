@@ -270,9 +270,10 @@ deepseek-harness(dsh) / Claude Code)的**安全工作流工具族**,所有命令
     helper)时跑。理由〔全量耗时集中在 4 个真·I/O 面(`test_fanout_runner` 真子进程与计时器 ~50s /
     `test_install_dsh` 真跑 `install.sh --dsh` ~30s / `test_diff_group` 真建 git 仓 ~20s /
     `test_mgh_sdr_launch` 真子进程 ~9s),其余 62 个文件均 <10s;把它当每次改动的习惯会挤掉
-    真正该做的实机验证〕。**本机注意**:`py` 在维护者 Git Bash 里是坏的 Windows Store 占位,
-    直接跑 `install.sh --dsh` 相关测试会 `py: command not found`——垫一个转发到 `python` 的
-    `py` 再跑(分发壳内的 `py` 由各壳 step 0 解释器探测兜底,不受影响)。
+    真正该做的实机验证〕。**解释器探测**:install.sh / install.ps1 自带 step 0 探测
+    (py/python/python3,取第一个 ≥3.10 的真解释器——不同开发机上 `py`/`python` 恰一个可能
+    是商店静默占位),真装/打包测试各机直接跑、无需手工垫片;`tests/test_install_pack.py`
+    另内置 py→sys.executable 子进程垫片作双保险。
   - **回归测 NEVER 吃 300s 级墙钟默认值**:in-process harness 跑 `fanout_runner.main()` MUST 显式
     传 `--cooldown-s 0`——理由〔`--cooldown-s` 默认 300 是**真实等待**,harness 漏传 = 单测静默
     挂 5 分钟(实测:单测 300.8s → 1.0s);`test_fanout_stale.py::_Env.main` 与
@@ -333,7 +334,7 @@ m3g4horness/
 ├── README.md                 # 面向使用者
 ├── CHANGELOG.md              # 版本历史(Keep a Changelog 格式)
 ├── VERSION                   # 当前版本号(任何 .md/脚本改动 bump)
-├── install.sh / install.ps1  # 安装脚本(bash / PowerShell;--opencode|--dsh|--claude,默认 opencode)
+├── install.sh / install.ps1  # 安装脚本(bash / PowerShell;--opencode|--dsh|--claude,默认 opencode;bash 面另有 --pack 打 opencode 分发 zip)
 ├── CLAUDE.md                 # 壳引导:@AGENTS.md 内联,自身不持规则
 ├── core/                     # 平台中立的单一真相源
 │   ├── prompts/              # 阶段 SYSTEM 提示词 + fragments + lenses + baselines(移植)
@@ -364,6 +365,9 @@ m3g4horness/
 # 装入目标项目(优先级序:opencode → dsh → claude;默认 opencode,CI/多机建议显式传参)
 ./install.sh --opencode <目标项目>    # 或: --dsh / --claude
 
+# 打 opencode 分发 zip(内网 skillhub 通道;包内容解压到项目根即完成安装)
+./install.sh --pack                   # 产 m3g4horness-<VERSION>-opencode.zip;--pack=<路径> 显式指定
+
 # 零依赖自检(应无输出)
 grep -rnE "^[[:space:]]*(import[[:space:]]+vvaharness|from[[:space:]]+vvaharness[[:space:]]+import)" --include=*.py .
 
@@ -373,7 +377,7 @@ python tools/check_distributed_purity.py         # R5.10/R5.11 分发纯净 + SD
 python tools/check_distributed_prompt_budget.py  # R5.6 壳 token 预算
 python tools/check_plain_language.py             # R3 人话 lint(人类面文件)
 
-# 定向回归测(默认姿势:改哪面跑哪面,见下表;本机 `py` 是坏的 Store 占位,用 `python`)
+# 定向回归测(默认姿势:改哪面跑哪面,见下表;解释器用本机真身——py/python 在不同开发机恰一个是商店静默占位,先 --version 探测;install.sh/install.ps1 已内置 step 0 探测)
 python tests/test_fanout_runner.py    # 单一文件 = 一套测试;多文件逐个跑
 
 # 全量回归测(仅发布前 / 跨面改动时)
@@ -409,6 +413,7 @@ helper)或发布前才跑全量。
 | ut-init 面 | `test_ut_init_runtime` `test_ut_init_ack_contract` `test_resume_ut_init_state` `test_write_ut_runconfig` `test_classify_tests` `test_test_rules_purity` |
 | sast 确定性阶段 | `test_deterministic` `test_sast_runtime` `test_chunk_sources` `test_list_chunks` `test_list_verify_jobs` `test_stage_check` `test_load_controls` `test_focus_scope` |
 | 命令壳 / 提示词 / 分发产物 | `test_distributed_md_purity` `test_plain_language` `test_recipe_visibility` `test_dsh_command_surface` `test_mgh_init_codegraph_parity` `test_mgh_sra_codegraph_parity` `test_mgh_srr_codegraph_parity` + `python tools/check_contracts.py` |
+| `install.sh` 打包面(`--pack`)/ `tools/pack_release.py` | `test_install_pack`(慢文件 ~35s,真跑七次安装/打包流)+ 顺手 `test_install_dsh`(共享参数解析) |
 | 任意 `core/scripts/*.py` / `tools/*.py` | `test_zero_deps` `test_no_compile_warnings`(各 ~0.5s,建议顺手带上) |
 
 ### 慢测清单(真·墙钟等待;非必要不单独跑)
@@ -503,6 +508,8 @@ install)、`test_diff_group`(20s/45 测,每测真建一次 git 仓)、`test_mgh_
   NEVER 静默回退。计划文件按 tier 命名:scout/sdr 用既有 `native_plan.json`,聚合四层各用 `native_plan_<tier>.json`(层间互不覆写;`needs_reduce=false` 零派发 = 不产计划)。实机闸门:本机 2.1.0 真会话 6 单元
   2 波全 `ok` 零 `.failed`、400 批 5 页收敛、缺省/回退/资产门六形态与失败批/中断注入过;
   同机子进程形态 headless 0/6 撞零推进熔断(runner 防线干净收口)——即本缺省变更的动机实证。
+
+- **`install.sh --pack` 的 opencode 分发 zip(内网 skillhub 通道;claude/dsh 不出包,install.ps1 不扩展)**:包内容与脚本安装逐字节等同,顶层闭集恰为 `SKILL.md`/`.opencode/`/`.mgh-sra/` 三条目。诚实边界——解压必须把**包内容**落项目根(Windows「提取所有文件」默认套一层同名文件夹 = 命令/agent/插件全静默失效,防线在发布说明页);解压覆盖 ≠ 卸载(旧版残留文件不清理,干净重装 = 删 `.opencode/` 重解压);zip 解压非原子(中断 = 半套文件零告警);包根 SKILL.md 仅为上传格式要求(name=m3g4horness,非功能入口,可删);完整性硬闸(四组自检升格 + 四处打包专属断言)只保证**打包时点**资产齐,不保证用户解压后目标项目的既有状态;特殊授权文档不随包(部署方放项目 `.mgh/special-auth.md` 的现行立场不变;install.sh 与 install.ps1 在该文档语义上的既有分歧未收敛,见 add-mgh-opencode-pack design D6)。
 
 - 工具族带**尽力而为的启动遥测**(埋点在各命令启动路径的确定性脚本内部,17 个命令壳零改动):未配置遥测端点(env `MGH_TELEMETRY_URL` 与模块内置默认皆空)时**零网络行为**;发送失败/超时静默丢弃,挂载脚本的 stdout/退出码/产物永不因遥测改变;resume 与过程查询的计数是 **30 分钟冷却窗口近似**(「活动窗口开始次数」,不是精确会话数——超 30 分钟的长任务中途查询会多计、30 分钟内快速重启会漏计);params 字段原样透传、可能含项目路径等内网信息(服务端在内网,端点置空即整体停报)。
 

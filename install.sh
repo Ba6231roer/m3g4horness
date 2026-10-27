@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # m3g4h⊿rness installer — copies a platform shell + core/ into a project.
-# Usage: ./install.sh [--claude|--opencode|--dsh] [target_project_dir]
+# Usage: ./install.sh [--claude|--opencode|--dsh] [--dsh-profile <name>] [--no-enforce-hook] [--pack[=<output.zip>]] [target_project_dir]
 #   default platform: opencode ; default target: current dir
+#   --pack[=<output.zip>]: build a skillhub-ready opencode distribution zip from a
+#     staging install instead of installing (opencode only; refuses --claude/--dsh,
+#     --no-enforce-hook, a positional target, and a missing/empty VERSION)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +12,8 @@ PLATFORM="opencode"
 TARGET="${TARGET:-.}"
 ENFORCE_HOOK="1"   # inject PreToolUse hook (R5.7); --no-enforce-hook opts out
 DSH_PROFILE="${DSH_PROFILE:-}"   # --dsh: accepted only as 'mgh' (the fixed composition face); other names fail loud
+PACK=""   # ""=install mode; "__default__"=pack with the versioned default name; else explicit zip path
+TARGET_GIVEN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,13 +22,53 @@ while [[ $# -gt 0 ]]; do
     --dsh)     PLATFORM="dsh"; shift;;
     --dsh-profile) DSH_PROFILE="${2:?--dsh-profile needs a profile name}"; shift 2;;
     --no-enforce-hook) ENFORCE_HOOK="0"; shift;;
+    --pack)    PACK="__default__"; shift;;
+    --pack=*)  PACK="${1#--pack=}"; [[ -n "$PACK" ]] || { echo "✗ --pack= needs an output zip path (bare --pack takes the versioned default name)" >&2; exit 2; }; shift;;
     -h|--help)
-      echo "Usage: $0 [--claude|--opencode|--dsh] [--dsh-profile <name>] [--no-enforce-hook] [target_project_dir]"; exit 0;;
-    *) TARGET="$1"; shift;;
+      echo "Usage: $0 [--claude|--opencode|--dsh] [--dsh-profile <name>] [--no-enforce-hook] [--pack[=<output.zip>]] [target_project_dir]"; exit 0;;
+    *) TARGET="$1"; TARGET_GIVEN="1"; shift;;
   esac
 done
 
+# Pack preflight (add-mgh-opencode-pack): pack mode builds a skillhub-ready opencode
+# zip from a staging install instead of installing into a project. Refuse up front,
+# before any work: non-opencode faces (claude/dsh rewrite existing host config /
+# machine-local profile state, which zip extraction cannot do), the enforcement
+# opt-out (a release always ships the guard + dispatch plugins), a positional target
+# (staging is created internally), and a missing/empty VERSION (an unversioned
+# release zip is exactly the stale-package accident this mode exists to prevent).
+if [[ -n "$PACK" ]]; then
+  [[ -z "$TARGET_GIVEN" ]] || { echo "✗ --pack stages internally; a target_project_dir argument has no meaning here" >&2; exit 2; }
+  [[ "$PLATFORM" == "opencode" ]] || { echo "✗ --pack supports the opencode face only (got --$PLATFORM): claude/dsh installs rewrite existing host config or machine-local profile state, which zip extraction cannot do" >&2; exit 2; }
+  [[ "$ENFORCE_HOOK" == "1" ]] || { echo "✗ --pack always ships the guard + dispatch plugins; drop --no-enforce-hook" >&2; exit 2; }
+  [[ -f "$HERE/VERSION" ]] || { echo "✗ VERSION file missing: cannot name a versioned release zip" >&2; exit 2; }
+  MGH_VERSION="$(tr -d '[:space:]' < "$HERE/VERSION")"
+  [[ -n "$MGH_VERSION" ]] || { echo "✗ VERSION file is empty: cannot name a versioned release zip" >&2; exit 2; }
+fi
+
+# 0) Interpreter probe (installer twin of the command shells' step-0 probe): dev/CI
+#    machines vary — `py` may be the real launcher or a broken Store placeholder, and
+#    so may `python`/`python3`, per machine. Take the first candidate that is a real
+#    Python >= 3.10 and use it for every interpreter call below. Fail loud: a machine
+#    without any usable interpreter cannot run the toolchain's scripts anyway, so
+#    fail-soft warns here would only defer the breakage to first /mgh-* use.
+PY_BIN=""
+for _c in py python python3; do
+  if "$_c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    PY_BIN="$_c"
+    break
+  fi
+done
+[[ -n "$PY_BIN" ]] || { echo "✗ no usable Python interpreter (tried py/python/python3; need >= 3.10) — required for self-checks, hook/plugin wiring and --pack" >&2; exit 1; }
+echo "✓ interpreter: $PY_BIN ($("$PY_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null))"
+
 TARGET="$(cd "$TARGET" && pwd)"
+PACK_STAGING=""
+if [[ -n "$PACK" ]]; then
+  PACK_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/mgh-pack.XXXXXX")"
+  TARGET="$PACK_STAGING"
+  trap 'echo "✗ pack failed; staging kept at: $PACK_STAGING" >&2' ERR
+fi
 case "$PLATFORM" in
   claude)   SHELL_SRC="$HERE/releases/claude-code"; DEST_REL=".claude";;
   opencode) SHELL_SRC="$HERE/releases/opencode";    DEST_REL=".opencode";;
@@ -102,6 +147,10 @@ case "$PLATFORM" in
   dsh)             _prune_dirs=("$TARGET/mgh-core" "$TARGET/.dsh");;
 esac
 find "${_prune_dirs[@]}" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+# Loose bytecode files (build-machine residue riding the release tree) are pruned too —
+# the __pycache__ sweep above never sees them. Extension of the same hygiene contract
+# (add-mgh-opencode-pack D8); a shipped zip makes the residue user-visible.
+find "${_prune_dirs[@]}" \( -name '*.pyc' -o -name '*.pyo' \) -type f -delete 2>/dev/null || true
 
 # 3b) Special-auth is a PROJECT-owned optional entry (<target>/.mgh/special-auth.md),
 #     never an install artifact. The maintainer's package-side doc is NOT copied
@@ -205,11 +254,13 @@ fi
 #     free of dev-only provenance / dangling references (rule/decision ids, change-
 #     folder names, glasswing_docs/, task.*.md, dev-meta). Warn only on violation —
 #     don't block a partial install; CI / tests enforce purity.
-if py "$HERE/tools/check_distributed_purity.py" >/dev/null 2>&1; then
+_purity_ok=0
+if "$PY_BIN" "$HERE/tools/check_distributed_purity.py" >/dev/null 2>&1; then
+  _purity_ok=1
   echo "✓ distribution-purity check passed (shipped md clean, R5.10)"
 else
   echo "⚠ distribution-purity check FAILED (non-blocking, R5.8 fail-soft): shipped md carries dev-only provenance" >&2
-  echo "  run 'py tools/check_distributed_purity.py' for details; CI enforces purity" >&2
+  echo "  run '$PY_BIN tools/check_distributed_purity.py' for details; CI enforces purity" >&2
 fi
 
 # 5) Runtime discipline hook injection (R5.7 deliverable). Both platforms get an equivalent
@@ -225,7 +276,7 @@ if [[ "$ENFORCE_HOOK" == "1" ]]; then
   if [[ "$PLATFORM" == "claude" ]]; then
     SETTINGS="$DEST/settings.json"
     HOOK_CMD="py .claude/hooks/block_adhoc_scripts.py"
-    if py "$HERE/tools/install_hook.py" --settings "$SETTINGS" --hook-command "$HOOK_CMD" >/dev/null; then
+    if "$PY_BIN" "$HERE/tools/install_hook.py" --settings "$SETTINGS" --hook-command "$HOOK_CMD" >/dev/null; then
       echo "✓ injected PreToolUse hook (block-adhoc-scripts) into $SETTINGS (idempotent; --no-enforce-hook to skip)"
     else
       echo "⚠ hook injection failed (non-blocking, R5.8 fail-soft); discipline via shell bright-lines + R5.9" >&2
@@ -235,7 +286,7 @@ if [[ "$ENFORCE_HOOK" == "1" ]]; then
     # PLUS the mgh_dispatch native-dispatch plugin — a fixed two-file set; the installer
     # manages exactly those two filenames and never touches the user's other plugins.
     # (dsh is NOT handled here — its placement + wiring lives in the dedicated 5c block.)
-    if py "$HERE/tools/install_opencode_plugin.py" \
+    if "$PY_BIN" "$HERE/tools/install_opencode_plugin.py" \
           --plugins-dir "$DEST/plugins" \
           --source-dir "$HERE/releases/opencode/plugins" >/dev/null; then
       echo "✓ injected opencode plugins (block-adhoc-scripts guard + mgh-dispatch) into $DEST/plugins (idempotent; --no-enforce-hook to skip)"
@@ -302,7 +353,7 @@ if [[ "$PLATFORM" == "dsh" ]]; then
   # Tier mounts + named-delegation fragment (fanout dispatch reads mgh-core/dsh/tiers/<tier>.yml
   # per spawn; install_dsh_wiring embeds the delegates into the mgh managed block). Compile-time
   # generation landing in the target tree —缺件/失败在 install 期 fail-loud,不拖到首次派发。
-  if ! py "$HERE/tools/gen_dsh_tiers.py" --agents "$HERE/releases/dsh/agents" \
+  if ! "$PY_BIN" "$HERE/tools/gen_dsh_tiers.py" --agents "$HERE/releases/dsh/agents" \
        --out "$TARGET/mgh-core/dsh/tiers" \
        --delegates-out "$TARGET/mgh-core/dsh/delegates.patch.yml"; then
     echo "✗ dsh tier generation failed (fail-loud, no partial placement)" >&2
@@ -311,7 +362,7 @@ if [[ "$PLATFORM" == "dsh" ]]; then
   # self-check (deterministic 1:1: every fan-out tier has a current mount AND delegates match
   # the agents definition set; --check compares would-write vs on-disk, never writes). Warn
   # only per R5.8; CI enforces.
-  if py "$HERE/tools/gen_dsh_tiers.py" --agents "$HERE/releases/dsh/agents" \
+  if "$PY_BIN" "$HERE/tools/gen_dsh_tiers.py" --agents "$HERE/releases/dsh/agents" \
        --out "$TARGET/mgh-core/dsh/tiers" \
        --delegates-out "$TARGET/mgh-core/dsh/delegates.patch.yml" --check; then
     echo "✓ dsh tier mounts current: mgh-core/dsh/tiers/{scout,t1,t2,t3,sdr}.yml + delegates.patch.yml (1:1 with agents definitions)"
@@ -334,14 +385,14 @@ if [[ "$PLATFORM" == "dsh" ]]; then
   # profile skeleton (base+headless bundles package.json + cordis.yml stub; add-only, foreign
   # package.json collision = fail-loud never-rewrite). NOT gated by --no-enforce-hook:
   # _dsh_precheck requires the profile dir to exist even when enforcement is off.
-  if ! py "$HERE/tools/create_dsh_profile.py" --dsh-home "${DSH_HOME:-$HOME/.dsh}"; then
+  if ! "$PY_BIN" "$HERE/tools/create_dsh_profile.py" --dsh-home "${DSH_HOME:-$HOME/.dsh}"; then
     echo "✗ mgh profile skeleton failed (fail-loud, nothing wired)" >&2
     exit 1
   fi
   PATCH_FILE="$PROFILES_DIR/$DSH_PROFILE/cordis.patch.yml"
   if [[ "$ENFORCE_HOOK" == "1" ]]; then
     _shim_win="$(cygpath -w "$TARGET/mgh-core/dsh/mgh-guard.ts" 2>/dev/null || echo "$TARGET/mgh-core/dsh/mgh-guard.ts")"
-    if ! py "$HERE/tools/install_dsh_wiring.py" --patch-file "$PATCH_FILE" --shim "$_shim_win" \
+    if ! "$PY_BIN" "$HERE/tools/install_dsh_wiring.py" --patch-file "$PATCH_FILE" --shim "$_shim_win" \
          --delegates-file "$TARGET/mgh-core/dsh/delegates.patch.yml"; then
       echo "✗ dsh profile wiring failed (fail-loud, no partial wiring): $PATCH_FILE" >&2
       exit 1
@@ -371,6 +422,50 @@ if [[ -f "$EXAMPLE_SRC" ]]; then
   echo "✓ landed .mgh-sra/sensitive_catalog.json.example (PIPL/GB-T 35273 37-item template; NOT auto-applied — cp to sensitive_catalog.json or use --sensitive-catalog to activate)"
 else
   echo "⚠ sensitive_catalog.json.example not landed (source missing: $EXAMPLE_SRC; non-blocking, R5.8 fail-soft)" >&2
+fi
+
+# 7) Pack mode (add-mgh-opencode-pack): everything above ran against the staging dir.
+#    The fail-soft self-checks upgrade to a hard gate here — a zip user sees no warns,
+#    and a missing-asset release fails a whole enterprise fleet silently — plus four
+#    pack-only assertions, then the zip is written once, last, so no half-built package
+#    can exist. Staging is kept and its path printed on any failure.
+if [[ -n "$PACK" ]]; then
+  cp "$HERE/releases/opencode/SKILL.md" "$TARGET/SKILL.md"
+  _pack_fail=()
+  if (( ${#_missing[@]} )); then _pack_fail+=("mgh-core scripts missing: ${_missing[*]}"); fi
+  if (( ${#_fanout_missing[@]} )); then _pack_fail+=("fan-out payload missing: ${_fanout_missing[*]}"); fi
+  if [[ "$_purity_ok" != "1" ]]; then _pack_fail+=("distribution-purity check failed"); fi
+  if declare -p _agent_missing >/dev/null 2>&1 && (( ${#_agent_missing[@]} )); then
+    _pack_fail+=("mgh-init subagent inventory incomplete: ${_agent_missing[*]}")
+  fi
+  for _p in plugins/block_adhoc_scripts.ts plugins/mgh_dispatch.ts hooks/block_adhoc_scripts.py; do
+    [[ -f "$DEST/$_p" ]] || _pack_fail+=(".opencode/$_p missing")
+  done
+  for _c in mgh-blst mgh-init mgh-sast mgh-sdr mgh-sra mgh-srr mgh-ut-init; do
+    [[ -f "$DEST/command/$_c.md" ]] || _pack_fail+=("command/$_c.md missing")
+  done
+  [[ -f "$TARGET/SKILL.md" ]] || _pack_fail+=("SKILL.md missing (releases/opencode/SKILL.md)")
+  [[ -f "$TARGET/.mgh-sra/sensitive_catalog.json.example" ]] || _pack_fail+=(".mgh-sra/sensitive_catalog.json.example missing")
+  if (( ${#_pack_fail[@]} )); then
+    for _f in "${_pack_fail[@]}"; do echo "✗ pack gate: $_f" >&2; done
+    echo "✗ pack aborted; staging kept at: $TARGET" >&2
+    exit 2
+  fi
+  if [[ "$PACK" == "__default__" ]]; then
+    OUT_ZIP="$PWD/m3g4horness-$MGH_VERSION-opencode.zip"
+  else
+    OUT_ZIP="$PACK"
+  fi
+  if "$PY_BIN" "$HERE/tools/pack_release.py" --staging "$TARGET" --out "$OUT_ZIP"; then
+    trap - ERR
+    rm -rf "$TARGET"
+    echo "✓ packed opencode release: $OUT_ZIP"
+    echo "  upload this zip to the intranet skillhub; users extract its CONTENTS at a project root (SKILL.md is upload-format only, safe to delete)"
+  else
+    echo "✗ packing failed; staging kept at: $TARGET" >&2
+    exit 2
+  fi
+  exit 0
 fi
 
 echo "✓ installed $PLATFORM shell into $DEST"

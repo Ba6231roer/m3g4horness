@@ -267,5 +267,170 @@ class TestLintClaude(unittest.TestCase):
         self.assertTrue(summ["lint"]["ok"])
 
 
+class TestCoverageGateOpencode(unittest.TestCase):
+    """Inventory<->rules coverage gate (harden-mgh-init-output-gates): every
+    evidenced control MUST have >=1 evidence path (or basename) in its category
+    rule file; default = fail-loud no-write exit 2; --accept-coverage-gaps =
+    write WITH disclosure; managed-block disclosure line idempotent."""
+
+    def setUp(self):
+        self.target = Path(tempfile.mkdtemp(prefix="mgh_cov_"))
+        self.rules_dir = self.target / "docs" / "security-controls"
+        self.agents = self.target / "AGENTS.md"
+        self.init_dir = self.target / ".mgh-init"
+        self.init_dir.mkdir(parents=True, exist_ok=True)
+        self.cwd = self.target
+
+    def _run(self, *args):
+        return subprocess.run([PY, str(SCRIPT), "--target", str(self.target), *args],
+                              cwd=str(self.cwd), env=_CHILD_ENV,
+                              capture_output=True, text=True, encoding="utf-8")
+
+    def _seed_rule(self, cat="authentication", anchor="src/A.java::A.b"):
+        _write(self.rules_dir / f"{cat}.md",
+               f"# {cat} 安全控制\n\n- **AuthConfig**: Bearer。锚点: {anchor}\n")
+
+    def _seed_inv(self, controls):
+        (self.init_dir / "controls_inventory.json").write_text(json.dumps(
+            {"repo": str(self.target), "format": "opencode",
+             "controls": controls}, ensure_ascii=False), encoding="utf-8")
+
+    def _ctl(self, name, cat="authentication", evidence=("src/A.java::A.b",)):
+        return {"name": name, "kind": "auth", "category": cat,
+                "evidence": list(evidence)}
+
+    def test_all_presented_passes_with_disclosure(self):
+        self._seed_rule()
+        self._seed_inv([self._ctl("c1"), self._ctl("c2")])
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertIn("- 覆盖:2/2 控制已入规则(全部覆盖)", body)
+        cov = json.loads(r.stdout)["coverage"]
+        self.assertFalse(cov["skipped"])
+        self.assertEqual(cov["evaluated"], 2)
+        self.assertEqual(cov["covered"], 2)
+        self.assertTrue(cov["ok"])
+
+    def test_disclosure_line_idempotent(self):
+        self._seed_rule()
+        self._seed_inv([self._ctl("c1")])
+        self._run("--format", "opencode")
+        self._run("--format", "opencode")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertEqual(body.count("覆盖:"), 1)
+
+    def test_unpresented_refuses_write_exit_2(self):
+        self._seed_rule()
+        self._seed_inv([self._ctl("c-hit"), self._ctl("c-miss",
+                                                      evidence=("src/Gone.java:9",))])
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 2)
+        # NOT written
+        self.assertFalse(self.agents.exists())
+        cov = json.loads(r.stdout)["coverage"]
+        self.assertEqual(cov["missing"], 1)
+        self.assertFalse(cov["ok"])
+        # stderr: per-category count + control name
+        self.assertIn("c-miss", r.stderr)
+        self.assertIn("[authentication] missing=1", r.stderr)
+        self.assertIn("--accept-coverage-gaps", r.stderr)
+
+    def test_check_mode_reports_gate_without_write(self):
+        self._seed_rule()
+        self._seed_inv([self._ctl("c-miss", evidence=("src/Gone.java:9",))])
+        r = self._run("--format", "opencode", "--check")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse(self.agents.exists())
+        self.assertFalse(json.loads(r.stdout)["coverage"]["ok"])
+
+    def test_accept_gaps_writes_with_disclosure_and_ledger_fields(self):
+        self._seed_rule()
+        self._seed_inv([self._ctl("c-hit"), self._ctl("c-miss",
+                                                      evidence=("src/Gone.java:9",))])
+        r = self._run("--format", "opencode", "--accept-coverage-gaps")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertIn("- 覆盖:1/2 控制已入规则,缺口清单见运行报告", body)
+        cov = json.loads(r.stdout)["coverage"]
+        self.assertTrue(cov["accepted"])
+        self.assertEqual(cov["by_category"]["authentication"]["missing"], 1)
+
+    def test_basename_key_matches_too(self):
+        # evidence rooted differently from the rule text still matches by basename
+        self._seed_rule(anchor="modules/deep/src/A.java::A.b")
+        self._seed_inv([self._ctl("c1", evidence=("src/A.java::A.b",))])
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+
+    def test_missing_category_file_counts_all_missing(self):
+        # T3 wrote no file for the category -> every control of that category is
+        # unrepresented (gate fires; never a silent partial index)
+        _write(self.rules_dir / "crypto.md",
+               "# crypto 安全控制\n\n- **X**: 锚点: src/Y.java::Y.z\n")
+        self._seed_inv([self._ctl("c1", cat="authentication")])
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout)["coverage"]["missing"], 1)
+
+    def test_no_inventory_skips_gate_with_disclosure(self):
+        # out-of-pipeline standalone use (no .mgh-init): gate skipped, no line
+        self._seed_rule()
+        r = self._run("--format", "opencode")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+        cov = json.loads(r.stdout)["coverage"]
+        self.assertTrue(cov["skipped"])
+        body = self.agents.read_text(encoding="utf-8")
+        self.assertNotIn("覆盖:", body)
+
+    def test_coverage_top_caps_stderr_names(self):
+        self._seed_rule()
+        self._seed_inv([self._ctl(f"c-{i}", evidence=("src/Gone.java:9",))
+                        for i in range(4)])
+        r = self._run("--format", "opencode", "--coverage-top", "2")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("[authentication] missing=4: c-0, c-1 (+2 more)", r.stderr)
+        self.assertNotIn("c-2", r.stderr)
+        self.assertNotIn("c-3", r.stderr)
+
+
+class TestCoverageGateClaude(unittest.TestCase):
+    def setUp(self):
+        self.target = Path(tempfile.mkdtemp(prefix="mgh_ccl_"))
+        self.init_dir = self.target / ".mgh-init"
+        self.init_dir.mkdir(parents=True, exist_ok=True)
+
+    def _run(self, *args):
+        return subprocess.run([PY, str(SCRIPT), "--target", str(self.target), *args],
+                              env=_CHILD_ENV,
+                              capture_output=True, text=True, encoding="utf-8")
+
+    def _seed_inv(self, controls):
+        (self.init_dir / "controls_inventory.json").write_text(json.dumps(
+            {"repo": str(self.target), "format": "claude",
+             "controls": controls}, ensure_ascii=False), encoding="utf-8")
+
+    def test_claude_gate_fires_on_unpresented(self):
+        _write(self.target / ".claude" / "rules" / "security-crypto.md",
+               "---\npaths: [\"src/**\"]\n---\n# 安全\n- **C**: 锚点: src/C.java::C.b\n")
+        self._seed_inv([{"name": "c-hit", "kind": "other", "category": "crypto",
+                         "evidence": ["src/C.java::C.b"]},
+                        {"name": "c-miss", "kind": "other", "category": "crypto",
+                         "evidence": ["src/Gone.java:1"]}])
+        r = self._run("--format", "claude", "--check")
+        self.assertEqual(r.returncode, 2)
+        cov = json.loads(r.stdout)["coverage"]
+        self.assertEqual(cov["missing"], 1)
+        self.assertIn("c-miss", r.stderr)
+
+    def test_claude_gate_passes_when_presented(self):
+        _write(self.target / ".claude" / "rules" / "security-crypto.md",
+               "---\npaths: [\"src/**\"]\n---\n# 安全\n- **C**: 锚点: src/C.java::C.b\n")
+        self._seed_inv([{"name": "c-hit", "kind": "other", "category": "crypto",
+                         "evidence": ["src/C.java::C.b"]}])
+        r = self._run("--format", "claude", "--check")
+        self.assertEqual(r.returncode, 0, f"{r.stdout}\n{r.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

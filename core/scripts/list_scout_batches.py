@@ -28,9 +28,16 @@ CLI contract (`--help` is the contract surface, R5.1):
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<BatchLite>, ...],
+   "marker_without_record": R, "unknown_files": U,
    "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
   - pending[] item: {batch_id, targets_count, bytes, needs_slice[], input_path,
-                     checkpoint_path, done_marker, failed_marker, oversize, slice_dir}
+                     checkpoint_path, done_marker, failed_marker, oversize, slice_dir
+                     [, reason:"no_record"]}
+  - marker_without_record = #units whose `.done` exists but whose RECORD file is
+                     absent (product lost after the marker): NOT terminal — the
+                     unit re-enters pending[] with reason `no_record`; the stale
+                     `.done` is deleted at claim (same shape as the failed-marker
+                     claim deletion). done excludes these units.
   - each materialized <batch_id>.input.json ALSO carries the absolute `repo` root as a
     TOP-LEVEL field (fan-out input anchor: the reader anchors its tool paths on it and
     rejects path fields resolving outside the anchored tree as poisoned).
@@ -68,7 +75,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from init_tier import (safe_unit_filename, forward_marker_paths, forward_done_ids,
-                       forward_failed_ids, orphan_markers)  # noqa: E402
+                       forward_failed_ids, orphan_markers,
+                       marker_without_record_ids, unknown_checkpoint_files)  # noqa: E402
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB
 DEFAULT_ORCH_BUDGET_BYTES = 64 * 1024  # 64KB
@@ -102,8 +110,12 @@ def _done_ids(checkpoints_dir: Path, canonical_ids):
     same shape as list_clusters): encode `<safe(batch_id)>.json.done` with the same
     `_safe_name` the write side uses, `is_file()` = done. NEVER reads a record-body
     `batch_id` field or a filename stem (today's alignment of record body and id is
-    coincidence, not structure — one truncation/drift and glob+stem misjudges forever)."""
-    return forward_done_ids(checkpoints_dir, canonical_ids)
+    coincidence, not structure — one truncation/drift and glob+stem misjudges forever).
+    marker-without-record ids are EXCLUDED: a `.done` whose record file is absent does
+    not constitute a terminal state (the batch re-enters pending with reason
+    `no_record` and the dispatcher's claim deletes the stale marker)."""
+    done = forward_done_ids(checkpoints_dir, canonical_ids)
+    return done - marker_without_record_ids(checkpoints_dir, canonical_ids)
 
 
 def _failed_ids(checkpoints_dir: Path, canonical_ids):
@@ -260,6 +272,15 @@ def main():
                      if isinstance(b, dict) and b.get("batch_id")]
     done = _done_ids(checkpoints_dir, canonical_ids)
     failed = _failed_ids(checkpoints_dir, canonical_ids)
+    mwr = marker_without_record_ids(checkpoints_dir, canonical_ids)
+    for uid in sorted(mwr):
+        print(f"warn: marker-without-record {uid}: .done exists but the record file "
+              f"is absent — re-listed as pending (reason no_record); the stale "
+              f".done is deleted at claim", file=sys.stderr)
+    unknown = unknown_checkpoint_files(checkpoints_dir)
+    for name in unknown:
+        print(f"warn: unknown file in checkpoints dir (not a record/marker/pack/"
+              f"runner-log form; audit only): {name}", file=sys.stderr)
     for name in orphan_markers(checkpoints_dir, canonical_ids,
                                exclude=("merge.json", "audit.json")):
         print(f"warn: orphan marker (no canonical batch id matches; audit only, "
@@ -294,6 +315,7 @@ def main():
         # construction.
         cp, dm, fm = forward_marker_paths(checkpoints_dir, bid)
         slice_dir = str((init_dir / "slices" / "scout" / _safe_name(bid)).resolve())
+        reason = "no_record" if bid in mwr else None
         if materialize:
             ipath, _ = _write_batch_input(inputs_dir, bid, batch, wrapper.get("repo"))
             nbytes = int(batch.get("bytes", 0))
@@ -301,7 +323,7 @@ def main():
             if oversize:
                 print(f"warn: batch {bid} oversize ({nbytes}B > {args.max_unit_bytes}B); "
                       f"big files in needs_slice[] sliced by init-scout", file=sys.stderr)
-            all_units.append({
+            unit = {
                 "batch_id": bid,
                 "targets_count": len(batch.get("targets", [])),
                 "bytes": nbytes,
@@ -312,9 +334,12 @@ def main():
                 "failed_marker": fm,
                 "oversize": oversize,
                 "slice_dir": slice_dir,
-            })
+            }
+            if reason:
+                unit["reason"] = reason
+            all_units.append(unit)
         else:
-            all_units.append({
+            unit = {
                 "batch_id": bid,
                 "targets_count": len(batch.get("targets", [])),
                 "bytes": batch.get("bytes", 0),
@@ -323,7 +348,10 @@ def main():
                 "done_marker": dm,
                 "failed_marker": fm,
                 "slice_dir": slice_dir,
-            })
+            }
+            if reason:
+                unit["reason"] = reason
+            all_units.append(unit)
 
     total = len(batches)
     # re-included failed batches sit in BOTH all_units and failed_count — add
@@ -337,6 +365,8 @@ def main():
         "total": total,
         "done": done_count,
         "failed": failed_count,
+        "marker_without_record": len(mwr),
+        "unknown_files": len(unknown),
         "pending": page,
         "truncated": bool(wrapper.get("truncated", False)),
         "offset": args.offset,
@@ -345,7 +375,8 @@ def main():
         "shrunk": shrunk,
     }
     print(f"scout_plan.json: {total} total, {done_count} done, {failed_count} failed, "
-          f"{len(all_units)} pending batch(es); page offset={args.offset} eff={eff} "
+          f"{len(all_units)} pending batch(es); marker_without_record={len(mwr)} "
+          f"unknown_files={len(unknown)}; page offset={args.offset} eff={eff} "
           f"shrunk={shrunk} (checkpoints: {checkpoints_dir})", file=sys.stderr)
     print(json.dumps(result, ensure_ascii=False))
     return 0

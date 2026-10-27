@@ -221,9 +221,17 @@ t3 `.done` 在但 inventory 缺;`scout_candidates.json` 在但 merge 标记缺;
 violation,列 id + 磁盘路径 + recipe「NEVER 重派该单元,先核对 marker 形态再修复枚举身份」;
 **孤儿审计与判定一致性审计覆盖 scout/t1/t3 三个 checkpoint 目录**,t3 的 canonical id 集 =
 inventory categories × run format);discover 产物不一致
-(`controls_candidates.json` 与 `clusters.json` 须同在或同缺)。`.done`/`.failed` 无 sibling 记录体**不**报违例
-(touch-only 是合法终态形态——marker 即凭证、记录体仅诊断);**孤儿 marker**(编码文件名不对应任何 canonical
+(`controls_candidates.json` 与 `clusters.json` 须同在或同缺)。`.failed` 无 sibling 记录体**不**报违例
+(失败可以没有记录体;`.done` 无记录体由 marker↔记录对账判定,见下);**孤儿 marker**(编码文件名不对应任何 canonical
 单元 id 的磁盘 marker,scout 排除 tier 级 merge/audit)→ `notes[]` advisory、不计入任何 tier 计数、fail-soft。
+
+**marker↔记录对账违例**(record+marker 单元:scout 批、t1 簇/成员、t2 分片、t4):`.done` 在而记录文件
+缺席 = **不自洽** → 退出码 2 + stdout `marker_without_record` 分类计数(scout/t1/t2_shards/t4)+ recipe
+「重派自愈:枚举器已将其重新列入 pending(原因短码 `no_record`),派发器认领时删旧 `.done`;NEVER
+手删 marker」——记录体缺席**不再是**合法 touch-only 终态(产物丢了就是丢了,标记不补产物)。豁免闭集
+(按设计 marker-only,NEVER 误报):pack 派发标记(`pack__` 前缀)、t3 规则产物单元(规则文件即产物,
+装配 lint 收口)、t2 终结标记(artifact 为 inventory)。t4 终态 = `consistency.json` 记录 + `.done`
+标记**两者都在**(派生同判)。
 
 **哨兵生命周期双向违例**(guard 激活语义闭环):
 - **进行中缺哨兵**:run 进行中(run_config 在、step≠done)但 `<init-dir>/.active` 缺 → 退出码 2 +

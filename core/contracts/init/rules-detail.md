@@ -68,4 +68,20 @@ display name + `@<rel-to-target>` reference, writes the concise
 `<!-- security-controls:begin --> … :end -->` index block into `<target>/AGENTS.md`
 (idempotent replace; sweeps legacy branded blocks), and purity-lints every detail
 file. stdout summary reports `rules_dir`, `categories[]`, `migrated_legacy_blocks`,
-and `lint`. See `core/scripts/assemble_rules.py --help`.
+`lint`, and `coverage`. See `core/scripts/assemble_rules.py --help`.
+
+## Coverage gate(装配边界对账;两 format 共用)
+
+装配在纯净 lint 之外做**清单↔规则覆盖对账**:`controls_inventory.json` 中每条带
+evidence 的控制,至少一个 evidence token 的**路径**(整路径或文件名级;归一化大小写
+与斜杠,与 T2 边界存在性闸门同一共享锚点模块)MUST 出现在其类别对应规则文件文本中
+(opencode:`<rules-dir>/<cat>.md`;claude:`.claude/rules/security-<cat>.md`)。任一控制
+未呈现 → opencode 面**不写盘**、退出码 2,stderr 按 category 输出未呈现计数与首 N
+(默认 5,`--coverage-top`)控制名——编排器按既有 lint 违例同形路径**回 T3 修受影响
+类别**(至多重派一轮);仍失败 → `assemble_rules.py --accept-coverage-gaps` 收口(唯一
+放宽开关:对账照跑、披露照写,缺口计数与类别落 stdout `coverage`,编排器记入运行
+报告与 manifest `boundaries[]`〔`coverage_gaps_accepted`〕,NEVER 静默放行)。通过或
+放宽时 opencode 受管块尾幂等披露一行「覆盖:M/N 控制已入规则」;claude 面无受管块,
+披露走 stdout + 运行报告。inventory 缺席(`--inventory` > `<target>/.mgh-init/
+controls_inventory.json`)→ 对账跳过并在 stdout 披露(管线外独立使用;管线内步骤
+顺序保证装配前 inventory 在场)。

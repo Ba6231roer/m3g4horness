@@ -16,6 +16,36 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Added — mgh-init 三道确定性产物闸门(0.1.102)
+
+真实大仓首跑(36h 无人值守)产物审计钉死「流程稳定、产物质量无人对账」断层:inventory
+691 条控制仅 45 条(6.5%)能在规则文件对上证据、部分批次 `.done` 在而记录文件消失、子代理
+零 JSON 语法校验通道。本变更在既有 R5.9 边界上加三道零 LLM 确定性闸门(全部 fail-loud):
+
+- **证据锚点存在性门**(T2 边界,`validate_inventory.py`):每条 evidence token 按解析阶梯
+  (精确 → 同目录大小写 → 全仓唯一文件名,唯一命中算过并计 `by_basename`)解析到真实文件,
+  行号在范围、符号段逐段在场;违规分类计数 + stderr 首 N 示例含控制名。新增共享单一真源
+  `core/scripts/anchor_resolve.py`(token 三形态解析/归一化匹配,两道闸门复用)。
+- **清单↔规则覆盖对账门**(装配边界,`assemble_rules.py`,两 format 共用):inventory 带证据
+  控制的证据路径(整路径/文件名级,归一化匹配)MUST 出现在其类别规则文件文本;未呈现 →
+  不写盘退出码 2(stderr 按 category 计数 + 首 N 控制名,回 T3 重派一轮);`--accept-coverage-gaps`
+  唯一放宽开关(对账照跑、受管块「覆盖:M/N」披露照写、缺口入 stdout coverage → 台账
+  `coverage_gaps_accepted`)。t3/assemble/done fragment + rules-detail 契约同步补指引。
+- **marker↔记录对账**(枚举器 + resume):`.done` 在而记录文件缺席 = 不构成终态——
+  `list_scout_batches`/`list_clusters` 重新列入 pending(`reason:"no_record"` +
+  `marker_without_record` 计数),派发器认领删旧 `.done`(fanout_runner 新 `stale_done_deleted`);
+  pack 成员标 `record_missing:true` 不被跳过;`resume_state --check` 报违例(scout/t1/t2 分片/t4,
+  pack__/t3/t2 终结标记豁免);scout 层完成判定同判;checkpoints 目录未知文件(自发账本残留)
+  告警计数(`unknown_files`)不失败;契约 scout-plan/clusters/resume-state 同步。
+- **合法 JSON 校验通道 + 禁自发账本**(模板与守卫):五个 fanout 任务模板各加「写入后
+  `py -m json.tool` 只读校验,失败即单元失败(NEVER 摸 .done、NEVER 为过校验改写)」指令
+  (t3 按 markdown 产物如实限定);t1-task Form B 明文 NEVER 写包级账本/清单/manifest;
+  守卫经 5 例回归锚核实**零改动**已放行该只读形态(`-c` 仍拦、树外操作数仍净网)。
+
+测试:新增 `test_anchor_resolve`(18)/`test_validate_inventory`(15),扩 assemble/枚举器/
+resume/fanout_runner/守卫/native-dispatch 静态锚;`test_resume_state` 的「touch-only `.done`
+合法」旧断言按新语义反转为违例断言。
+
 ### Added — 产出质量评审中期结论:测量阶段收口(0.1.101)
 
 `docs/reviews/init-quality-2026-10/interim-report.md`——基于真实大仓 36h run 的 4 轮工具

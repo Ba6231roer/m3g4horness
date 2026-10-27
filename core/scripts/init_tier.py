@@ -85,6 +85,48 @@ def forward_failed_ids(checkpoints_dir: Path, canonical_ids) -> set:
     return failed
 
 
+def marker_without_record_ids(checkpoints_dir: Path, canonical_ids) -> set:
+    """Canonical unit ids whose `.done` marker exists but whose RECORD file is
+    absent (marker-without-record: the subagent's product was lost after the
+    marker). Such a unit does NOT constitute a terminal state — the enumerator
+    re-lists it as pending (reason `no_record`) and the dispatcher's claim
+    deletes the stale `.done` (same shape as the failed-marker claim deletion).
+    Marker-only-by-design units (pack dispatch markers, t3 rule units, the t2
+    terminal marker) NEVER enter: their ids are simply not passed here."""
+    out = set()
+    if not checkpoints_dir.is_dir():
+        return out
+    for uid in canonical_ids:
+        cp, dm, _fm = forward_marker_paths(checkpoints_dir, uid)
+        if Path(dm).is_file() and not Path(cp).is_file():
+            out.add(uid)
+    return out
+
+
+# Checkpoint-dir entries that are NOT any of these shapes are "unknown files"
+# (spontaneous ledger/bookkeeping leftovers — e.g. a design-external manifests
+# dir). Disclosed as a warn count by the enumerators; NEVER a gate.
+_KNOWN_ENTRY_SUFFIXES = (".json", ".json.done", ".json.failed", ".run.log")
+_KNOWN_ENTRY_NAMES = {"shards"}
+
+
+def unknown_checkpoint_files(checkpoints_dir: Path) -> list:
+    """Checkpoint-dir entry names that match NO known form: record bodies
+    (`*.json`), markers (`*.json.done`/`*.json.failed`), pack dispatch markers
+    (`pack__*`), per-unit runner logs (`*.run.log`), the t2 shards dir. Sorted
+    for determinism; [] when the dir is absent."""
+    if not checkpoints_dir.is_dir():
+        return []
+    out = []
+    for e in sorted(checkpoints_dir.iterdir()):
+        name = e.name
+        if (name.endswith(_KNOWN_ENTRY_SUFFIXES) or name.startswith("pack__")
+                or name in _KNOWN_ENTRY_NAMES):
+            continue
+        out.append(name)
+    return out
+
+
 def orphan_markers(checkpoints_dir: Path, canonical_ids, exclude=()) -> list:
     """Marker files on disk whose encoded filename corresponds to NO canonical
     unit id (renamed/legacy run products). Fail-soft audit input: the caller
@@ -183,17 +225,25 @@ def scout_complete(init_dir: Path) -> bool:
     terminal AND scout_candidates + checkpoints/scout/merge.json.done + fold-in
     `provenance.scout_merged` all present)). A terminal `.failed` batch counts toward
     completion; completion is still gated on the merge/fold-in artifacts so a tier with
-    finished readers but no merge output is NOT complete."""
+    finished readers but no merge output is NOT complete. A `.done` marker whose
+    record file is absent (marker-without-record) does NOT count as terminal — the
+    batch re-dispatches via the enumerator (a lost record silently counted as done
+    is a real covered-loss defect, never a complete state)."""
     scout_plan = init_dir / "scout_plan.json"
     if not scout_plan.is_file():
         return False
     sp, err = _load_json(scout_plan)
     batches = 0
+    batch_ids: list = []
     if not err and isinstance(sp, dict) and isinstance(sp.get("batches"), list):
         batches = len(sp["batches"])
+        batch_ids = [b.get("batch_id") for b in sp["batches"]
+                     if isinstance(b, dict) and b.get("batch_id")]
     if batches == 0:
         return True  # nothing to scout
     scout_cp = init_dir / "checkpoints" / "scout"
+    if marker_without_record_ids(scout_cp, batch_ids):
+        return False  # lost records: re-dispatch via the enumerator
     done = _count_markers(scout_cp, "*.json.done", exclude=("merge.json", "audit.json"))
     failed = _count_markers(scout_cp, "*.json.failed", exclude=("merge.json", "audit.json"))
     if done + failed < batches:

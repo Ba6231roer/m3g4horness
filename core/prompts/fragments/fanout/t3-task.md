@@ -27,5 +27,11 @@ rule_path (write EXACTLY here): {{rule_path}}
 done_marker (touch EXACTLY this after writing the rule): {{done_marker}}
 failed_marker (reference only; the dispatcher writes it on a failed ack): {{failed_marker}}
 
+The rule file itself is markdown, NOT JSON — validate its structure per the
+stage prompt. For any JSON record you write (e.g. a `.failed` marker body),
+validate READ-ONLY with `py -m json.tool <path>` (discard stdout); a non-zero
+exit means the record is malformed — treat THIS unit as failed (NEVER touch
+`done_marker`, NEVER rewrite content just to make the check pass).
+
 Final reply = single bounded ack line only (`ok <rule_path> <n>` /
 `failed <reason>`), per the stage prompt's Return-to-orchestrator section.

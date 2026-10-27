@@ -27,5 +27,11 @@ slice_dir (in-tree dir for needs_slice[] big-file slices): {{slice_dir}}
 chunk_sources (absolute tool script, invoke verbatim as `py "<path>"`): {{chunk_sources_abs}}
 codegraph signal: codegraph={{codegraph}}
 
+After writing the checkpoint, validate its JSON syntax READ-ONLY: run
+`py -m json.tool <checkpoint_path>` (discard stdout). A non-zero exit means
+the record is malformed — treat THIS unit as failed (reply the `failed` ack /
+`.failed` marker; NEVER touch `done_marker`, NEVER rewrite the record just to
+make the check pass).
+
 Final reply = single bounded ack line only (`ok <checkpoint_path> <n>` /
 `failed <reason>`), per the stage prompt's Return-to-orchestrator section.

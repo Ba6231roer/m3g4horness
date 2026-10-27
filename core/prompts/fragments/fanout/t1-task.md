@@ -36,6 +36,13 @@ codegraph signal: codegraph={{codegraph}}
 
 Read `input_path`, then run EXACTLY ONE of the two forms below.
 
+After writing EACH checkpoint record (Form B: every member checkpoint you
+write), validate its JSON syntax READ-ONLY: run `py -m json.tool
+<checkpoint_path>` (discard stdout). A non-zero exit means the record is
+malformed — treat THIS unit as failed (reply the `failed` ack / `.failed`
+marker; NEVER touch `done_marker`, NEVER rewrite the record just to make the
+check pass).
+
 **Form A — single cluster** (the input's top level has `cluster_id` and NO
 `pack_id`): the fields above are yours. Induce this one cluster per the stage
 prompt. The checkpoint record you write MUST carry a root-level `unit` field
@@ -48,13 +55,19 @@ Return-to-orchestrator section.
 **Form B — pack of same-category small clusters** (the input's top level has
 `pack_id`, `members[]`, `checkpoints[]`): `cluster_id` above carries the PACK
 id, and `checkpoint_path`/`done_marker`/`failed_marker` above are PACK-level.
-Work through `members[]` IN ORDER, one cluster at a time — each member is an
+NEVER write any pack-level ledger/inventory/manifest file (e.g. a
+`pack_manifests/` dir) — write ONLY the member `checkpoint_path` and marker
+paths the input's `checkpoints[]` gives. Work through `members[]` IN ORDER,
+one cluster at a time — each member is an
 independent induction unit (behavior per the stage prompt; never a canonical
 judging between members):
 1. Skip done members: the member's entry in the input's `checkpoints[]` array
    gives its `checkpoint_path` and `done_marker`. If that `done_marker` file
    already exists, SKIP the member entirely (it was induced in a previous
    attempt) — NEVER re-induce it, NEVER rewrite its checkpoint or marker.
+   EXCEPTION: a member whose `checkpoints[]` entry carries `record_missing: true`
+   (its record file was lost after the marker) is NOT skipped — re-induce it
+   exactly like a pending member (write its checkpoint, re-touch its marker).
 2. Induce a pending member from ITS record in `members[]` only; write its
    checkpoint record to ITS `checkpoint_path` with a root-level `unit` field =
    EXACTLY that member's `cluster_id` (NEVER the pack id), then touch ITS

@@ -41,6 +41,14 @@ A `Batch` (one S3 scout-reader isolation unit = resume unit):
 | `bytes` | int | 本批累计 bytes;MUST ≤ `--batch-bytes` |
 | `needs_slice[]` | [file] | 单文件 `bytes > --batch-bytes` 者,scout-reader 须经 `chunk_sources.py` 切片,**不整文件喂 LLM** |
 
+- **marker↔记录对账**(枚举器 `list_scout_batches.py` 与 `resume_state.py --check`):
+  `.done` 标记在而记录文件(`<batch_id>.json`)缺席 = **不构成终态**——枚举器把该批重新
+  列入 `pending[]`(原因短码 `reason:"no_record"`)+ 顶层计数 `marker_without_record`,
+  派发器认领时删除旧 `.done`(与失败重派删 `.failed` 同形),据此**自然重派**;scout 层
+  完成判定(`scout_complete`)同判,缺口批未重跑前 scout 层不算完成。孤儿 marker /
+  checkpoints 目录未知文件(非记录/标记/pack/runner-log 形态)仅 stderr 告警计数
+  (`unknown_files`),NEVER 失败。
+
 - **批数涌现**:`num_batches = ceil(Σtarget_bytes / --batch-bytes)`,非固定常量。
 - **包内聚**:切批前按 `pkg` 排序,同目录相关文件落同批。
 - **每批文件数 ≤ `--batch-cap`**(防 subagent 赶进度草率)。

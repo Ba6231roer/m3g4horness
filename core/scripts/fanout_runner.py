@@ -2833,6 +2833,7 @@ def main() -> int:
     quota_window_completed_ts: float | None = None
     retried_once: set[str] = set()   # --retry-failed: per-unit once-per-call bound
     retried_failed = 0       # markers deleted at claim this run (stdout `retried_failed`)
+    stale_done_deleted = 0   # marker-without-record .done markers deleted at claim
     # Zero-progress circuit breaker, dispatch-window anchored: every K =
     # --stall-waves x --wave newly dispatched units, re-derive the disk
     # terminal count once; --stall-waves consecutive zero-growth re-derivations
@@ -3096,7 +3097,7 @@ def main() -> int:
         stale by the time a slot frees. With --retry-failed a .failed marker is
         instead DELETED at claim (once per unit per call; the failure evidence
         stays in the unit's *.run.log) and the unit dispatches normally."""
-        nonlocal skipped_terminal, retried_failed
+        nonlocal skipped_terminal, retried_failed, stale_done_deleted
         while True:
             try:
                 unit = queue.popleft()
@@ -3106,6 +3107,28 @@ def main() -> int:
             uid = unit.get(id_field, "?")
             try:
                 if dm and Path(dm).is_file():
+                    rec = unit.get("checkpoint_path") or unit.get("rule_path")
+                    if (rec and not str(uid).startswith("pack::")
+                            and not Path(rec).is_file()):
+                        # marker-without-record: the unit's product was lost after
+                        # the marker — NEVER certify it terminal. The stale .done
+                        # is deleted at claim (same shape as --retry-failed's
+                        # .failed deletion) and the unit re-dispatches normally.
+                        # pack:: units are exempt: their pack-level checkpoint
+                        # record NEVER exists by design (member markers + records
+                        # are the truth; the enumerator marks lost members
+                        # record_missing instead).
+                        try:
+                            Path(dm).unlink()
+                        except OSError as e:
+                            _eprint(f"warn: cannot delete stale done marker for "
+                                    f"{uid} at {dm}: {e} — skip (lazy check)")
+                            skipped_terminal += 1
+                            continue
+                        stale_done_deleted += 1
+                        _eprint(f"[fanout_runner] unit {uid}: marker-without-record "
+                                f"— stale .done deleted at claim, re-dispatching")
+                        return unit
                     skipped_terminal += 1
                     _eprint(f"[fanout_runner] unit {uid}: "
                             f"marker already terminal on disk — skip (lazy check)")
@@ -3806,6 +3829,7 @@ def main() -> int:
         rate_limited_trig = _rate_limited()
         result["cooldowns"] = cooldowns
         result["retried_failed"] = retried_failed
+        result["stale_done_deleted"] = stale_done_deleted
         result["rate_limited"] = rate_limited_trig
         if rate_limited_trig:
             with storm_lock:

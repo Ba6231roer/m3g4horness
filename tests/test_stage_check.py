@@ -109,15 +109,20 @@ class TestValidateInventory(unittest.TestCase):
     def setUp(self):
         self.d = _load("validate_inventory")
         self.dir = Path(tempfile.mkdtemp(prefix="mgh_vchk_"))
+        # a real repo root + source file so the evidence-anchor existence gate
+        # resolves the fixture's anchors (the `repo` field is the resolution root)
+        self.repo = Path(tempfile.mkdtemp(prefix="mgh_vrepo_"))
+        (self.repo / "a.java").write_text(
+            "class Auth {\n  void check() {}\n}\n", encoding="utf-8")
 
     def _inv(self, controls):
         (self.dir / "inv.json").write_text(json.dumps(
-            {"repo": "r", "format": "claude", "controls": controls}, ensure_ascii=False),
-            encoding="utf-8")
+            {"repo": str(self.repo), "format": "claude", "controls": controls},
+            ensure_ascii=False), encoding="utf-8")
 
     def test_good(self):
         self._inv([{"name": "a", "kind": "auth", "category": "authorization",
-                    "evidence": ["a.java:Auth:check"]}])
+                    "evidence": ["a.java:Auth.check"]}])
         self.assertEqual(_run(self.d, ["--inventory", str(self.dir / "inv.json")]), 0)
 
     def test_bad_kind_drift(self):

@@ -14,6 +14,10 @@
      (`found_controls`/`evidence_count`)/ 过程散文(`扫描器模式定义` 等)/ 无源码锚点的控制;lint 覆盖
      工具内部 token + schema 字段 + 特征过程散文(opencode 另查 `---` YAML 围栏;claude `paths:` frontmatter 豁免)。
      回 T3 修正后重跑
+   · 覆盖对账门(fail-loud 退出码 2)= inventory 带证据控制未呈现于其类别规则文件(证据路径
+     整路径/文件名级归一化匹配;stderr 按 category 列计数 + 首 N 控制名):按 stderr **重派 T3
+     受影响类别一轮**;仍失败 → 同命令加 `--accept-coverage-gaps` 收口(受管块披露「覆盖:M/N」
+     照写、缺口入 stdout coverage 与运行报告;NEVER 静默放行)
    · 进 T4 前(T4 纪律不依赖 step 派生路由,固定路径 Read):Read
      `<mgh-core>/prompts/fragments/init-stage/t4.md`
      (T4 = spawn init-rules-consistency 一致性修订 + touch `checkpoints/t4/consistency.json.done`;

@@ -60,9 +60,18 @@ CLI contract (`--help` is the contract surface, R5.1):
 
 stdout (structured JSON; stderr = diagnostics/progress only, R5.3b):
   {"repo": "...", "total": N, "done": M, "failed": F, "pending": [<ClusterLite>, ...],
+   "marker_without_record": R, "unknown_files": U,
    "truncated": false, "offset": 0, "limit": K, "effective_limit": k, "shrunk": false}
   packing mode adds: "cluster_total": C, "cluster_done": D  (cluster-level counts; never
   present on the off path)
+  - marker_without_record = #canonical units whose `.done` exists but whose RECORD
+                  file is absent (product lost after the marker): NOT terminal —
+                  the unit re-enters pending[] with reason `no_record` (pack
+                  members marked `record_missing` in the pack input + members[]);
+                  the stale `.done` is deleted at claim. done excludes these units.
+  - unknown_files  = #checkpoint-dir entries matching NO known form (record /
+                  marker / pack__ dispatch marker / *.run.log / shards dir) —
+                  spontaneous ledger leftovers; stderr warn per name, NEVER a gate.
   - total       = len(clusters[])             (the REAL count, not len(wrapper))
   - done        = #canonical units whose `.done` marker exists (FORWARD marker-path
                   computation: encode `<safe(unit_id)>.json.done` with the same
@@ -126,6 +135,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from init_tier import (scout_complete, safe_unit_filename, forward_marker_paths,
                        forward_done_ids, forward_failed_ids, orphan_markers,
+                       marker_without_record_ids, unknown_checkpoint_files,
                        MAX_UNIT_FILENAME_STEM)  # noqa: E402
 
 DEFAULT_MAX_UNIT_BYTES = 192 * 1024    # 192KB — aligns with --big-file-bytes 200KB
@@ -214,8 +224,12 @@ def _done_ids(checkpoints_dir: Path, canonical_ids):
     forever; record-body fields may drift/be absent and are not load-bearing).
 
     Covers whole-cluster ids and `<cid>::shard-<n>` shard ids alike (both are
-    members of `canonical_ids`)."""
-    return forward_done_ids(checkpoints_dir, canonical_ids)
+    members of `canonical_ids`). marker-without-record ids are EXCLUDED: a
+    `.done` whose record file is absent does not constitute a terminal state
+    (the unit re-enters pending with reason `no_record`; the dispatcher's claim
+    deletes the stale marker; pack inputs mark such members `record_missing`)."""
+    done = forward_done_ids(checkpoints_dir, canonical_ids)
+    return done - marker_without_record_ids(checkpoints_dir, canonical_ids)
 
 
 def _failed_ids(checkpoints_dir: Path, canonical_ids):
@@ -557,7 +571,7 @@ def _slim_pack(pack_id: str, category, kind, hit_count: int, merged_path: str,
 
 
 def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_dir,
-                      repo_root, done, failed) -> int:
+                      repo_root, done, failed, mwr=frozenset(), unknown_count=0) -> int:
     """The `--pack-bytes > 0` enumeration path. Classification is pure and marker-blind
     for identity: terminal-failed clusters (pre-existing `.failed`) are never packable;
     oversize clusters stay on the existing shard path; everything else is packable
@@ -623,9 +637,15 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
                 merged_members.append(
                     _pack_member_entry(m["cluster"], m["hits"], repo_root))
                 mcp, mdm, _ = _paths(checkpoints_dir, m["cid"])
-                checkpoints_index.append({"cluster_id": m["cid"],
-                                          "checkpoint_path": mcp,
-                                          "done_marker": mdm})
+                # a member whose .done outlived its record is NOT skipped by the
+                # pack subagent — marked record_missing so the template re-induces
+                # it (member-level marker-without-record reconciliation)
+                entry = {"cluster_id": m["cid"],
+                         "checkpoint_path": mcp,
+                         "done_marker": mdm}
+                if m["cid"] in mwr:
+                    entry["record_missing"] = True
+                checkpoints_index.append(entry)
             merged = {
                 "repo": str(repo_root) if repo_root is not None else wrapper.get("repo"),
                 "pack_id": pack_id,
@@ -646,11 +666,14 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
             members_meta = []
             for m in members:
                 mcp, mdm, _ = _paths(checkpoints_dir, m["cid"])
-                members_meta.append({"cluster_id": m["cid"],
-                                     "input_path": str(merged_path),
-                                     "checkpoint_path": mcp,
-                                     "done_marker": mdm,
-                                     "bytes": m["bytes"]})
+                meta = {"cluster_id": m["cid"],
+                        "input_path": str(merged_path),
+                        "checkpoint_path": mcp,
+                        "done_marker": mdm,
+                        "bytes": m["bytes"]}
+                if m["cid"] in mwr:
+                    meta["record_missing"] = True
+                members_meta.append(meta)
             all_units.append(_slim_pack(
                 pack_id, category, members[0]["cluster"].get("kind"),
                 sum(len(m["hits"]) for m in members), str(merged_path),
@@ -734,6 +757,8 @@ def _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands, inputs_di
         "total": total,
         "done": done_count,
         "failed": failed_count,
+        "marker_without_record": len(mwr),
+        "unknown_files": unknown_count,
         "pending": page,
         "truncated": bool(wrapper.get("truncated", False)),
         "offset": args.offset,
@@ -907,6 +932,16 @@ def main():
 
     done = _done_ids(checkpoints_dir, canonical_ids)
     failed = _failed_ids(checkpoints_dir, canonical_ids)
+    mwr = marker_without_record_ids(checkpoints_dir, canonical_ids)
+    for uid in sorted(mwr):
+        print(f"warn: marker-without-record {uid}: .done exists but the record file "
+              f"is absent — re-listed as pending (reason no_record; pack members "
+              f"marked record_missing); the stale .done is deleted at claim",
+              file=sys.stderr)
+    unknown = unknown_checkpoint_files(checkpoints_dir)
+    for name in unknown:
+        print(f"warn: unknown file in checkpoints dir (not a record/marker/pack/"
+              f"runner-log form; audit only): {name}", file=sys.stderr)
     # orphan audit (fail-soft): markers whose encoded filename maps to no
     # canonical unit id (renamed/legacy run products) — stderr warn only, they
     # NEVER enter done/failed/pending.
@@ -918,7 +953,8 @@ def main():
     # _enumerate_packed). Off path below stays byte-identical — zero pack code runs.
     if materialize and args.pack_bytes > 0:
         return _enumerate_packed(args, wrapper, clusters, checkpoints_dir, cands,
-                                 inputs_dir, repo_root, done, failed)
+                                 inputs_dir, repo_root, done, failed, mwr,
+                                 len(unknown))
 
     all_units = []          # full slim work-list (pre-page)
     clusters_with_pending = 0
@@ -990,12 +1026,18 @@ def main():
                     # --include-failed re-emits it under its canonical shard id)
                     continue
                 shard = uid != cid
-                all_units.append(_slim_materialized(
+                slim = _slim_materialized(
                     cluster, uid, len(hits) if not shard else _shard_hit_count(inputs_dir, uid),
-                    ipath, nbytes, shard, checkpoints_dir))
+                    ipath, nbytes, shard, checkpoints_dir)
+                if uid in mwr:
+                    slim["reason"] = "no_record"
+                all_units.append(slim)
                 emitted = True
         else:
-            all_units.append(_lite(cluster, checkpoints_dir))
+            lite = _lite(cluster, checkpoints_dir)
+            if cid in mwr:
+                lite["reason"] = "no_record"
+            all_units.append(lite)
             emitted = True
         if emitted:
             clusters_with_pending += 1
@@ -1014,6 +1056,8 @@ def main():
         "total": total,
         "done": done_count,
         "failed": clusters_failed,
+        "marker_without_record": len(mwr),
+        "unknown_files": len(unknown),
         "pending": page,
         "truncated": bool(wrapper.get("truncated", False)),
         "offset": args.offset,
@@ -1022,7 +1066,8 @@ def main():
         "shrunk": shrunk,
     }
     print(f"clusters.json: {total} total, {done_count} done, {clusters_failed} failed, "
-          f"{len(all_units)} pending unit(s); page offset={args.offset} eff={eff} "
+          f"{len(all_units)} pending unit(s); marker_without_record={len(mwr)} "
+          f"unknown_files={len(unknown)}; page offset={args.offset} eff={eff} "
           f"shrunk={shrunk} (checkpoints: {checkpoints_dir})", file=sys.stderr)
     print(json.dumps(result, ensure_ascii=False))
     return 0

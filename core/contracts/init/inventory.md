@@ -40,6 +40,18 @@ A `Control`:
 | `role` | enum | `canonical`\|`competing`\|`duplicate`\|`possibly-dead` (set in **T2**) |
 | `confidence` | float | 0–1; low evidence / verify-disagreement lowers it |
 
+### evidence anchor existence(T2 边界闸门)
+
+`validate_inventory.py` 在形状校验之外对**每条控制的每个 evidence token** 做存在性校验
+(零 LLM 确定性检查;解析/解析阶梯实现是共享单一真源 `anchor_resolve.py`,装配边界
+覆盖对账复用同一实现):文件按确定性阶梯解析(仓库根相对精确 → 同目录大小写不敏感 →
+**全仓唯一文件名**;唯一文件名命中**算过**,计入 `by_basename` 计数——路径形态差异
+不算违规);`path:line` 行号 MUST 落在 `1..len(lines)`;`path::类.方法`/`path:类.方法`
+符号段逐段 MUST 在文件文本中在场。任一 `file_missing` / `line_out_of_range` /
+`symbol_absent` → 退出码 2,stderr 按类列首 N 个违规 token 与所属控制名——回 T2
+修正 token 本身,NEVER 宽松放行、NEVER 自动改写。仓库根 = `--repo` flag > 顶层
+`repo` 字段,两者皆缺 → 退出码 2(存在性闸门 NEVER 半途跳过)。
+
 ### `category → kind` normalization (deterministic, in discover_controls.py)
 
 | category | kind |

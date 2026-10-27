@@ -2045,6 +2045,62 @@ class TestInterpreterExecConfinement(unittest.TestCase, _RealTreeBashMixin):
         self.assertEqual(code, 0)
 
 
+class TestJsonToolValidationChannel(unittest.TestCase, _RealTreeBashMixin):
+    """The sanctioned read-only JSON syntax-validation channel (tier task templates
+    instruct subagents to run `py -m json.tool <checkpoint>` after every write):
+    the module form is NOT an executed-script shape, NOT a `-c` inline body, and an
+    in-tree path passes the rule-m net. Regression anchor: the channel stays open
+    while `-c` introspection stays blocked and an out-of-tree operand stays netted."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    def _checkpoint(self) -> Path:
+        cp = self.sona / ".mgh-init" / "checkpoints" / "t1" / "auth__A.json"
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        cp.write_text('{"unit": "auth::A"}', encoding="utf-8")
+        return cp
+
+    def test_pass_module_json_tool_in_tree(self):
+        # the sanctioned channel: py -m json.tool <in-tree checkpoint path> -> pass
+        cp = self._checkpoint()
+        code, _ = self._bash(f'py -m json.tool "{cp}"', target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_pass_module_json_tool_relative_operand(self):
+        # relative operand (templates pass absolute paths; relative simply isn't judged)
+        self._checkpoint()
+        code, _ = self._bash("py -m json.tool .mgh-init/checkpoints/t1/auth__A.json",
+                             target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 0)
+
+    def test_module_out_of_tree_operand_netted(self):
+        # the channel is NOT an out-of-tree read hole: an anchored out-of-tree
+        # operand hits the rule-m net (read allow-set miss)
+        code, _ = self._bash(f'py -m json.tool "{self.sonb / "x.json"}"',
+                             target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+
+    def test_py_c_introspection_still_blocked(self):
+        # the adjacently-shaped `-c` form stays blocked (the channel is a NARROW
+        # whitelist, not an interpreter opening)
+        code, err = self._bash('py -c "import json; json.load(open(\'x.json\'))"',
+                               target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+        self.assertIn("describe_artifact", err)
+
+    def test_other_module_form_not_special_cased(self):
+        # no other module gets a pass by association: `py -m <module>` with an
+        # out-of-tree anchored operand is still netted (module identity is not
+        # a blanket exemption — only the in-tree read allow-set governs)
+        code, _ = self._bash(f'py -m http.server --directory "{self.sonb}"',
+                             target=self.sona, cwd=self.sona)
+        self.assertEqual(code, 2)
+
+
 class TestMghCoreMissingInstall(unittest.TestCase, _RealTreeBashMixin):
     """mgh-core missing-install stop-all (rule l, terminal state — checked BEFORE every other
     Bash rule): a command referencing an mgh-core/scripts script-extension path that is ABSENT

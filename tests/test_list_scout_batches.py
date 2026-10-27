@@ -87,6 +87,38 @@ class TestListScoutBatches(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertEqual(data["total"], data["done"] + len(data["pending"]))
 
+    def test_done_marker_without_record_returns_pending(self):
+        # marker-without-record: .done exists, record file absent -> NOT terminal;
+        # the batch re-enters pending[] with reason no_record + top-level count,
+        # and done drops by one (the enumerator never certifies a lost product)
+        p = self._write(_BATCHES)
+        cp = self.d / "checkpoints" / "scout"
+        self._mark_done("scout-002")
+        (cp / "scout-002.json").unlink()          # the record vanishes
+        code, out, err = self._run(p, cp)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["marker_without_record"], 1)
+        self.assertEqual(data["done"], 0)
+        by = {b["batch_id"]: b for b in data["pending"]}
+        self.assertIn("scout-002", by)
+        self.assertEqual(by["scout-002"]["reason"], "no_record")
+        self.assertIn("marker-without-record scout-002", err)
+
+    def test_unknown_checkpoint_files_warned_counted_not_failed(self):
+        # spontaneous ledger leftovers in the checkpoints dir: warn + count, exit 0
+        p = self._write(_BATCHES)
+        cp = self.d / "checkpoints" / "scout"
+        cp.mkdir(parents=True, exist_ok=True)
+        (cp / "pack_manifests").mkdir()
+        (cp / "ledger.txt").write_text("x", encoding="utf-8")
+        code, out, err = self._run(p, cp)
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["unknown_files"], 2)
+        self.assertIn("pack_manifests", err)
+        self.assertIn("ledger.txt", err)
+
     def test_lite_shape(self):
         code, out, _ = self._run(self._write(_BATCHES))
         by = {b["batch_id"]: b for b in json.loads(out)["pending"]}
@@ -581,7 +613,10 @@ class TestPendingAdvertisedPathsForwardEncoded(unittest.TestCase):
         _, data, _ = self._run([{"batch_id": bid, "targets": [], "bytes": 0,
                                  "needs_slice": []}])
         (item,) = data["pending"]
-        Path(item["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(item["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+        # terminal form = record + marker (a .done without its record file is
+        # marker-without-record → re-listed pending, never terminal)
+        Path(item["checkpoint_path"]).write_text("{}", encoding="utf-8")
         Path(item["done_marker"]).write_text("", encoding="utf-8")
         _, data2, _ = self._run([{"batch_id": bid, "targets": [], "bytes": 0,
                                   "needs_slice": []}])

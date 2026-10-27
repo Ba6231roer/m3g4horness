@@ -21,6 +21,13 @@ CLI contract (`--help` is the contract surface, R5.1):
   --init-dir explicit run dir (full path; highest priority).
   --run-root run dir NAME under <target> (default .mgh-init; used when --init-dir absent).
   --check    boundary check (R5.9): validate on-disk state self-consistency; exit 0/2.
+             Covers the sentinel lifecycle both ways (in-progress run missing .active =
+             guard dormant; completed run with .active still present = residual
+             write-lock) + orphan/judgment audits over scout/t1/t3 + marker-without-
+             record violations (record+marker units — scout batches, t1 clusters/
+             members, t2 shards, t4 — whose .done exists but whose record file is
+             absent; marker-only-by-design units — pack__ dispatch markers, t3 rule
+             units, the t2 terminal marker — are exempt and NEVER flagged).
   --invalidate-stale
              delete stale downstream t2/t3/t4 aggregate `.done` markers (scout enabled +
              incomplete → those markers were produced from regex-only input); combine
@@ -195,7 +202,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # as list_clusters/list_scout_batches — count caliber and enumeration pending[]
 # semantics agree by construction).
 from init_tier import (scout_complete, stale_marker_paths, forward_marker_paths,
-                       forward_done_ids, forward_failed_ids, orphan_markers)  # noqa: E402
+                       forward_done_ids, forward_failed_ids, orphan_markers,
+                       marker_without_record_ids)  # noqa: E402
 # The canonical T1 unit-id set is a SHARED producer recomputation (list_clusters
 # owns it — real candidates + the shared default unit budget, EXACTLY the
 # materializable unit set; resume_state imports, never a second copy, else count
@@ -363,9 +371,9 @@ def _both_marker_violations(cp: Path, label: str) -> list:
     state (D5) — e.g. a subagent acked `failed` after already touching `.done`, or the
     orchestrator wrote `.failed` for a unit that later succeeded. Returns one violation
     dict per offending unit. A `.failed` whose sibling record body is absent is NOT a
-    violation (failures may produce no record body); a `.done` without a record body is
-    the LEGAL touch-only form (the marker is the terminal credential) — audited as an
-    orphan only when its encoded name maps to no canonical unit id."""
+    violation (failures may produce no record body). A `.done` without its record file
+    is judged by the marker-without-record check below (record+marker units: NOT a
+    legal touch-only terminal — the product was lost and the unit must re-dispatch)."""
     out = []
     if not cp.is_dir():
         return out
@@ -408,8 +416,12 @@ def _t2_map_substate(init_dir: Path) -> str | None:
 
 
 def _t4_done(init_dir: Path) -> bool:
+    """t4 terminal = consistency.json record + marker BOTH present (record+marker
+    unit: a bare marker with the record lost is marker-without-record → NOT
+    terminal → the step re-derives to t4 and the subagent rewrites both)."""
     t4 = init_dir / "checkpoints" / "t4"
-    return _marker_exists(t4 / "consistency.json.done", t4 / ".done")
+    return (_marker_exists(t4 / "consistency.json.done", t4 / ".done")
+            and (t4 / "consistency.json").is_file())
 
 
 def _scout_merge_done(init_dir: Path) -> bool:
@@ -729,9 +741,19 @@ def resolve(init_dir: Path):
         # done = canonical batch ids judged by FORWARD marker-path computation
         # (same source as list_scout_batches; the bare-glob count differed from
         # the enumerator's pending[] semantics — shard/orphan blind spots).
-        scout_done_count = len(forward_done_ids(scout_cp, scout_ids))
+        # marker-without-record ids are EXCLUDED (same caliber as the enumerator:
+        # a .done whose record file is absent is NOT terminal — re-dispatch).
+        scout_done_count = len(forward_done_ids(scout_cp, scout_ids)
+                               - marker_without_record_ids(scout_cp, scout_ids))
         scout_failed_count = len(forward_failed_ids(scout_cp, scout_ids))
     scout_terminal_count = scout_done_count + scout_failed_count  # gates scout tier (D3)
+    if not no_scout:
+        _scout_mwr = len(marker_without_record_ids(scout_cp, scout_ids))
+        if _scout_mwr:
+            notes.append(f"scout: {_scout_mwr} batch(es) marker-without-record "
+                         "(.done present, record file lost) — NOT terminal; the "
+                         "enumerator re-lists them pending (reason no_record) and "
+                         "the dispatcher's claim deletes the stale .done")
 
     # t1 done/failed = forward marker-path computation over the SHARED canonical
     # unit-id set, recomputed via list_clusters's producer-side composite (real
@@ -742,8 +764,15 @@ def resolve(init_dir: Path):
     t1_ids: list = canonical_unit_ids_for_run(
         clusters_p, _runconfig_unit_budget(cfg)) if clusters_p.is_file() else []
     t1_total = len(t1_ids)
-    t1_done_count = len(forward_done_ids(t1_cp, t1_ids))
+    # same mwr exclusion as the enumerator (count caliber agreement by construction)
+    t1_done_count = len(forward_done_ids(t1_cp, t1_ids)
+                        - marker_without_record_ids(t1_cp, t1_ids))
     t1_failed_count = len(forward_failed_ids(t1_cp, t1_ids))
+    _t1_mwr = len(marker_without_record_ids(t1_cp, t1_ids))
+    if _t1_mwr:
+        notes.append(f"t1: {_t1_mwr} unit(s) marker-without-record (.done present, "
+                     "record file lost) — NOT terminal; the enumerator re-lists them "
+                     "pending (reason no_record; pack members marked record_missing)")
 
     t3_total = 0
     t3_ids: list = []
@@ -1105,9 +1134,8 @@ def check(init_dir: Path) -> dict:
     if scout_candidates.is_file() and not _scout_merge_done(init_dir):
         violations.append({"issue": "scout_candidates.json present but scout merge marker absent"})
     # orphan markers (fail-soft advisory): disk markers whose encoded filename maps to
-    # no canonical unit id (legacy/renamed run products). touch-only is a LEGAL form —
-    # a `.done` marker with no sibling record body is NOT a violation (the marker is
-    # the terminal credential; the body is diagnostic). Orphans never enter counts.
+    # no canonical unit id (legacy/renamed run products). Orphans never enter counts;
+    # record PRESENCE is judged separately below (marker-without-record violations).
     scout_ids: list = []
     if not no_scout:
         sp, sp_err = _load_json(init_dir / "scout_plan.json")
@@ -1144,6 +1172,35 @@ def check(init_dir: Path) -> dict:
     # t1 clusters, t3 categories. (merge.json/audit.json have no .failed sibling in practice.)
     for cp, label in ((scout_cp, "scout"), (t1_cp, "t1"), (t3_cp, "t3")):
         violations.extend(_both_marker_violations(cp, label))
+    # marker-without-record (record+marker units): a .done whose RECORD file is
+    # absent is NOT a terminal state — the product was lost after the marker.
+    # Closed exemption set (marker-only BY DESIGN, zero false positives here):
+    # pack dispatch markers (`pack__` prefix — never in a canonical id set), t3
+    # rule units (the rule file IS the product; assembly lint owns it), the t2
+    # terminal marker (artifact = controls_inventory.json, lives outside t2/).
+    mwr_counts = {}
+    if not no_scout:
+        mwr_counts["scout"] = len(marker_without_record_ids(scout_cp, scout_ids))
+    mwr_counts["t1"] = len(marker_without_record_ids(t1_cp, t1_ids))
+    t2_shards_cp = init_dir / "checkpoints" / "t2" / "shards"
+    t2_mwr = 0
+    if t2_shards_cp.is_dir():
+        for d in t2_shards_cp.glob("*.json.done"):
+            if not d.with_name(d.name[:-len(".done")]).is_file():
+                t2_mwr += 1
+    mwr_counts["t2_shards"] = t2_mwr
+    mwr_counts["t4"] = len(marker_without_record_ids(
+        init_dir / "checkpoints" / "t4", ["consistency.json"]))
+    mwr_total = sum(mwr_counts.values())
+    if mwr_total:
+        recipe = ("re-dispatch self-heals: the enumerator re-lists such units "
+                  "pending (reason no_record) and the dispatcher's claim deletes "
+                  "the stale .done; NEVER hand-delete markers to 'fix' this")
+        for tier, n in mwr_counts.items():
+            if n:
+                violations.append({"issue": f"marker_without_record[{tier}]: {n} "
+                                            f"unit(s) carry a .done marker but NO "
+                                            f"record file — {recipe}"})
     # discover products inconsistent
     if clusters_p.is_file() != candidates.is_file():
         violations.append({"issue": "discover products inconsistent: controls_candidates.json and "
@@ -1217,7 +1274,8 @@ def check(init_dir: Path) -> dict:
             elif merged == 0:
                 notes.append(f"scout reviewed {batches} batch(es) but merged 0 candidates — "
                              "possible recall gap (advisory, not a gate)")
-    return {"ok": not violations, "violations": violations, "notes": notes}
+    return {"ok": not violations, "violations": violations, "notes": notes,
+            "marker_without_record": mwr_counts}
 
 
 def main():

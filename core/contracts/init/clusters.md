@@ -63,3 +63,11 @@ A `Cluster`(one T1 isolation unit;源 `form_clusters` @ `discover_controls.py:40
   分隔符 → 文件名分量经 `_safe_name` 消毒(`/`、`\`、`:` → `_`)且 **stem 截长(≤ 200,保尾判别段)**
   后方可写;canonical `cluster_id`(含 `::`)原样保留为 slim envelope 的 `cluster_id` 字段、物化输入
   记录内、检查点记录的 `unit` 字段。
+- **marker↔记录对账**(枚举器 `list_clusters.py` 与 `resume_state.py --check`):`.done` 标记在而
+  记录文件(`<safe(unit)>.json`)缺席 = **不构成终态**——枚举器把该单元重新列入 `pending[]`
+  (原因短码 `reason:"no_record"`)+ 顶层计数 `marker_without_record`,派发器认领时删除旧 `.done`
+  (与失败重派删 `.failed` 同形),据此**自然重派**;pack 模式下此类成员在合并输入的 `checkpoints[]`
+  与 stdout `members[]` 标 `record_missing:true`(包会话**不跳过**该成员,如 pending 成员重归纳)。
+  豁免闭集(按设计 marker-only,NEVER 误报):pack 派发标记(`pack__` 前缀)、t3 规则产物单元
+  (规则文件即产物)、t2 终结标记(artifact 为 inventory)。孤儿 marker / checkpoints 目录未知文件
+  (非记录/标记/pack/runner-log 形态)仅 stderr 告警计数(`unknown_files`),NEVER 失败。

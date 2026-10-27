@@ -497,6 +497,7 @@ class TestForwardCaliberAndCheck(unittest.TestCase):
         enc = IT.safe_unit_filename("auth::U::ff")
         s.write_json(f"checkpoints/t1/{enc}.json", {"cluster_id": "auth::U::ff"})
         s.touch(f"checkpoints/t1/{enc}.json.done")
+        s.write_json("checkpoints/t2/shards/t2-authorization.json", {"shard": True})
         s.touch("checkpoints/t2/shards/t2-authorization.json.done")
         st = s.state()
         self.assertEqual(st["step"], "t2")          # no new step id
@@ -508,9 +509,11 @@ class TestForwardCaliberAndCheck(unittest.TestCase):
         self.assertTrue(any("map-reduce intermediate" in n for n in body["notes"]),
                         body["notes"])
 
-    def test_check_touch_only_done_marker_not_violation(self):
-        # `.done` with NO sibling record body = legal touch-only form (the marker is
-        # the terminal credential; bodies are diagnostic) → --check exit 0.
+    def test_check_marker_without_record_is_violation(self):
+        # a `.done` with NO record file = marker-without-record → --check exit 2
+        # + count + re-dispatch recipe (the unit re-enters pending; the stale
+        # marker is deleted at claim — NEVER a legal touch-only terminal for
+        # record+marker units).
         s = _State(no_scout=True)
         s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
                                                    "truncated": False, "unresolved": []})
@@ -519,10 +522,36 @@ class TestForwardCaliberAndCheck(unittest.TestCase):
             "truncated": False})
         s.touch(f"checkpoints/t1/{_enc('auth::T::dd')}.json.done")  # no record body
         code, out, _ = s.main("--check")
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         body = json.loads(out)
-        self.assertTrue(body["ok"])
-        self.assertFalse(any("without record" in v["issue"] for v in body["violations"]))
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["marker_without_record"]["t1"], 1)
+        self.assertTrue(any("marker_without_record[t1]" in v["issue"]
+                            and "re-dispatch" in v["issue"]
+                            for v in body["violations"]), body["violations"])
+
+    def test_check_marker_without_record_closed_exemption_set(self):
+        # marker-only BY DESIGN units NEVER flag: pack dispatch markers
+        # (pack__ prefix), t3 rule units (no checkpoint record exists), the t2
+        # terminal marker (artifact = inventory).
+        s = _State(no_scout=True)
+        s.write_json("controls_candidates.json", {"repo": str(s.target), "candidates": [],
+                                                  "truncated": False, "unresolved": []})
+        s.write_json("clusters.json", {"repo": str(s.target), "clusters": [], "truncated": False})
+        s.write_json("controls_inventory.json", {"repo": str(s.target), "format": "opencode",
+                                                 "controls": [
+            {"name": "c", "kind": "auth", "category": "authentication",
+             "evidence": ["src/A.java:1"]}]})
+        s.touch("checkpoints/t2/synthesis.json.done")          # t2 terminal: exempt
+        s.touch("checkpoints/t3/authentication.opencode.json.done")  # t3 rule unit
+        s.touch("checkpoints/t1/pack__input-validation__abcd1234.json.done")
+        code, out, _ = s.main("--check")
+        mwr = json.loads(out)["marker_without_record"]
+        self.assertEqual(mwr["t4"], 0)
+        self.assertEqual(mwr["t2_shards"], 0)
+        self.assertTrue(all("marker_without_record" not in v["issue"]
+                            for v in json.loads(out)["violations"]),
+                        json.loads(out)["violations"])
 
     def test_help_carries_caliber_disclosure(self):
         import subprocess, os
@@ -1124,6 +1153,9 @@ class TestShardedClusterCaliber(unittest.TestCase):
         for i, uid in enumerate(shard_ids):
             enc = _enc(uid)
             if i < n_done:
+                # terminal form = record + marker (a .done without its record is
+                # marker-without-record → NOT terminal)
+                s.write_json(f"checkpoints/t1/{enc}.json", {"unit": uid})
                 s.touch(f"checkpoints/t1/{enc}.json.done")
             elif i < n_done + n_failed:
                 s.write_json(f"checkpoints/t1/{enc}.json.failed",
@@ -1174,6 +1206,7 @@ class TestShardedClusterCaliber(unittest.TestCase):
         # orphan advisories by --check (pre-fix the degraded id set flagged all 3)
         s = self._sharded()
         for uid in self._shard_ids(s):
+            s.write_json(f"checkpoints/t1/{_enc(uid)}.json", {"unit": uid})
             s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
         code, out, _ = s.main("--check")
         body = json.loads(out)
@@ -1350,6 +1383,7 @@ class TestRunConfigUnitBudgetLockstep(unittest.TestCase):
             LC.collect_canonical_ids(clusters, cands_by_id, 65536, s.target)) - {self.CID})
         self.assertEqual(len(shard_ids), 2, "fixture must shard at 65536")
         for uid in shard_ids:
+            s.write_json(f"checkpoints/t1/{_enc(uid)}.json", {"unit": uid})
             s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
         return s, shard_ids
 
@@ -1393,6 +1427,7 @@ class TestRunConfigUnitBudgetLockstep(unittest.TestCase):
                                      LC.DEFAULT_MAX_UNIT_BYTES, s.target)) - {self.CID})
         self.assertEqual(len(shard_ids), 3)
         for uid in shard_ids:
+            s.write_json(f"checkpoints/t1/{_enc(uid)}.json", {"unit": uid})
             s.touch(f"checkpoints/t1/{_enc(uid)}.json.done")
         st = s.state()
         self.assertEqual(st["step"], "t2")
@@ -1504,6 +1539,8 @@ class NativeScoutBranchTest(unittest.TestCase):
         cp = init_dir / "checkpoints" / "scout"
         for b in markers:
             cp.mkdir(parents=True, exist_ok=True)
+            # terminal form = record + marker (marker-only = marker-without-record)
+            (cp / f"{IT.safe_unit_filename(b)}.json").write_text("{}", encoding="utf-8")
             (cp / f"{IT.safe_unit_filename(b)}.json.done").write_text(
                 "", encoding="utf-8")
         for b in failed:

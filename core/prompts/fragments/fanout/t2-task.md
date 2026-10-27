@@ -31,5 +31,11 @@ done_marker (touch EXACTLY this after writing the summary): {{done_marker}}
 failed_marker (reference only; the dispatcher writes it on a failed ack):
 {{failed_marker}}
 
+After writing the summary checkpoint, validate its JSON syntax READ-ONLY: run
+`py -m json.tool <checkpoint_path>` (discard stdout). A non-zero exit means
+the record is malformed — treat THIS unit as failed (reply the `failed` ack /
+`.failed` marker; NEVER touch `done_marker`, NEVER rewrite the record just to
+make the check pass).
+
 Final reply = single bounded ack line only (`ok <checkpoint_path> <n>` /
 `failed <reason>`), per the stage prompt's Return-to-orchestrator section.

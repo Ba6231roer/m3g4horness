@@ -275,7 +275,8 @@ class TestListClustersPacking(unittest.TestCase):
         _, out, _ = self._run(p, "--pack-bytes", "100000")
         (pack,) = json.loads(out)["pending"]
         m0 = pack["members"][0]
-        Path(m0["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(m0["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(m0["checkpoint_path"]).write_text("{}", encoding="utf-8")
         Path(m0["done_marker"]).write_text("", encoding="utf-8")
         _, out2, _ = self._run(p, "--pack-bytes", "100000")
         data = json.loads(out2)
@@ -292,7 +293,8 @@ class TestListClustersPacking(unittest.TestCase):
         _, out, _ = self._run(p, "--pack-bytes", "100000")
         (pack,) = json.loads(out)["pending"]
         for m in pack["members"]:
-            Path(m["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(m["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(m["checkpoint_path"]).write_text("{}", encoding="utf-8")
             Path(m["done_marker"]).write_text("", encoding="utf-8")
         _, out2, _ = self._run(p, "--pack-bytes", "100000")
         data = json.loads(out2)
@@ -300,6 +302,72 @@ class TestListClustersPacking(unittest.TestCase):
         self.assertEqual(data["done"], 1)                     # pack counted done
         self.assertEqual(data["cluster_done"], 2)
         self.assertEqual(data["cluster_total"], 2)
+
+    # -- marker-without-record reconciliation (record+marker units) --
+
+    def test_done_marker_without_record_returns_pending(self):
+        # .done exists, record file absent -> NOT terminal; the cluster re-enters
+        # pending[] with reason no_record + top-level count (unpacked path)
+        clusters, cands = _pack_clusters(n_per_cat=1, cats=("crypto",))
+        p = self._write(clusters, cands)
+        _, out, _ = self._run(p)
+        (item,) = json.loads(out)["pending"]
+        Path(item["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(item["checkpoint_path"]).write_text("{}", encoding="utf-8")
+        Path(item["done_marker"]).write_text("", encoding="utf-8")
+        Path(item["checkpoint_path"]).unlink()            # the record vanishes
+        code, out2, err = self._run(p)
+        data = json.loads(out2)
+        self.assertEqual(code, 0)
+        self.assertEqual(data["marker_without_record"], 1)
+        self.assertEqual(data["done"], 0)
+        (re_listed,) = data["pending"]
+        self.assertEqual(re_listed["cluster_id"], item["cluster_id"])
+        self.assertEqual(re_listed["reason"], "no_record")
+        self.assertIn("marker-without-record", err)
+
+    def test_pack_member_record_missing_marked_in_input(self):
+        # packed: a member's .done outlived its record -> the pack stays pending
+        # AND the pack input's checkpoints[] marks that member record_missing
+        # (the pack subagent must re-induce it, not skip it)
+        clusters, cands = _pack_clusters(n_per_cat=2, cats=("crypto",))
+        p = self._write(clusters, cands)
+        _, out, _ = self._run(p, "--pack-bytes", "100000")
+        (pack,) = json.loads(out)["pending"]
+        m0 = pack["members"][0]
+        Path(m0["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(m0["checkpoint_path"]).write_text("{}", encoding="utf-8")
+        Path(m0["done_marker"]).write_text("", encoding="utf-8")
+        Path(m0["checkpoint_path"]).unlink()
+        _, out2, _ = self._run(p, "--pack-bytes", "100000")
+        data = json.loads(out2)
+        self.assertEqual(data["done"], 0)                  # pack NOT done
+        (pack2,) = data["pending"]
+        marked = {m["cluster_id"]: m for m in pack2["members"]}
+        self.assertTrue(marked[m0["cluster_id"]].get("record_missing"))
+        merged = json.loads(Path(pack2["input_path"]).read_text(encoding="utf-8"))
+        by_id = {c["cluster_id"]: c for c in merged["checkpoints"]}
+        self.assertTrue(by_id[m0["cluster_id"]].get("record_missing"))
+        others = [c for c in merged["checkpoints"] if c["cluster_id"] != m0["cluster_id"]]
+        self.assertTrue(all(not c.get("record_missing") for c in others))
+
+    def test_pack_marker_exempt_and_unknown_files_counted(self):
+        # pack dispatch markers (pack__ prefix) are marker-only BY DESIGN: never
+        # marker-without-record, never orphans, never unknown files; a design-
+        # external ledger file IS an unknown file (warn count, exit 0)
+        clusters, cands = _pack_clusters(n_per_cat=1, cats=("crypto",))
+        p = self._write(clusters, cands)
+        self.cp.mkdir(parents=True, exist_ok=True)
+        pack_marker = self.cp / "pack__input-validation__abcd1234.json.done"
+        pack_marker.write_text("", encoding="utf-8")
+        (self.cp / "pack_manifests").mkdir()
+        code, out, err = self._run(p)
+        data = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(data["marker_without_record"], 0)     # pack marker exempt
+        self.assertEqual(data["unknown_files"], 1)             # ledger dir only
+        self.assertIn("pack_manifests", err)
+        self.assertNotIn("pack__", err)                        # no false-positive warn
 
     # -- exclusions: oversize/shard units, terminal-failed clusters, failed packs --
 
@@ -548,6 +616,10 @@ class TestClusterThreeWayCounting(unittest.TestCase):
         Path(item[f"{kind}_marker"]).write_text(
             json.dumps({"unit": item["cluster_id"], "reason": "r", "tier": "t1"}),
             encoding="utf-8")
+        if kind == "done":
+            # terminal form = record + marker (a .done without its record is
+            # marker-without-record → re-listed pending, never terminal)
+            Path(item["checkpoint_path"]).write_text("{}", encoding="utf-8")
 
     def test_all_shards_failed_cluster_counts_failed_not_done(self):
         # ① the red shape: 1 cluster x 2 shards, both .failed -> {done:0, failed:1,
@@ -601,7 +673,8 @@ class TestClusterThreeWayCounting(unittest.TestCase):
         pack_items = [it for it in d1["pending"] if it["cluster_id"].startswith("pack::")]
         self.assertEqual(len(pack_items), 1)
         for m in pack_items[0]["members"]:
-            Path(m["done_marker"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(m["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(m["checkpoint_path"]).write_text("{}", encoding="utf-8")
             Path(m["done_marker"]).write_text("", encoding="utf-8")
         shard_items = [it for it in d1["pending"]
                        if not it["cluster_id"].startswith("pack::")]

@@ -302,13 +302,12 @@ class ScriptWiringAnchors(unittest.TestCase):
         for twin in AGG_TWINS:
             self.assertIn(twin, t, twin)
 
-    def test_shared_scout_task_template_zero_changed(self):
+    def test_shared_scout_task_template_shape_anchors(self):
         # the subprocess template keeps its reference-only failed-marker line
         # byte-for-byte — the native form's self-write lives ONLY in the twin.
         t = _read(SCOUT_TASK)
         self.assertIn("reference only; the dispatcher writes it", t)
         self.assertNotIn("init-scout-native", t)
-
 
 class AggregateFragmentAnchors(unittest.TestCase):
     """The aggregate-layer discipline fragment carries every load-bearing rule
@@ -577,13 +576,55 @@ class AggregateScriptWiringAnchors(unittest.TestCase):
                        "init-aggregate-native-dispatch"):
             self.assertIn(needle, t, needle)
 
-    def test_shared_aggregate_task_templates_zero_changed(self):
+    def test_shared_aggregate_task_templates_shape_anchors(self):
         for name in ("t1", "t2", "t3", "scout-merge"):
             t = _read(ROOT / "core" / "prompts" / "fragments" / "fanout"
                       / f"{name}-task.md")
             self.assertIn("reference only; the dispatcher writes it", t, name)
             for twin in AGG_TWINS:
                 self.assertNotIn(twin, t, f"{name}: {twin}")
+
+
+class TaskTemplateValidationAnchors(unittest.TestCase):
+    """All five tier task templates carry the sanctioned read-only JSON syntax
+    validation channel (`py -m json.tool`) + the failure disposition (unit
+    failure, NEVER touch .done, NEVER rewrite to pass); t1-task additionally
+    carries the pack-ledger prohibition and the record_missing re-induce
+    exception. Deleting any pinned line turns these red."""
+
+    def test_all_five_templates_carry_validation_channel(self):
+        for name in ("scout", "t1", "t2", "t3", "scout-merge"):
+            t = _read(ROOT / "core" / "prompts" / "fragments" / "fanout"
+                      / f"{name}-task.md")
+            self.assertIn("py -m json.tool", t, name)      # the channel
+            self.assertIn("check pass", t, name)           # disposition clause
+            self.assertIn("NEVER touch", t, name)
+            self.assertIn("NEVER rewrite", t, name)
+
+    def test_json_record_templates_validate_the_checkpoint(self):
+        # the four JSON-record templates point the check at the checkpoint
+        # placeholder; t3's product is markdown (its line scopes to JSON
+        # records only — no checkpoint placeholder exists there)
+        for name in ("scout", "t1", "t2", "scout-merge"):
+            t = _read(ROOT / "core" / "prompts" / "fragments" / "fanout"
+                      / f"{name}-task.md")
+            self.assertIn("validate its JSON syntax READ-ONLY", t, name)
+            self.assertIn("<checkpoint_path>", t, name)
+
+    def test_t1_task_pack_ledger_prohibition(self):
+        t = _read(ROOT / "core" / "prompts" / "fragments" / "fanout"
+                  / "t1-task.md")
+        self.assertIn("NEVER write any pack-level ledger/inventory/manifest file",
+                      t)
+        self.assertIn("pack_manifests", t)
+
+    def test_t1_task_record_missing_reinduce_exception(self):
+        # a pack member whose record was lost after its marker is re-induced,
+        # not skipped (marker-without-record reconciliation)
+        t = _read(ROOT / "core" / "prompts" / "fragments" / "fanout"
+                  / "t1-task.md")
+        self.assertIn("record_missing: true", t)
+        self.assertIn("NOT skipped", t)
 
 
 if __name__ == "__main__":

@@ -738,6 +738,8 @@ class TestTierCli(unittest.TestCase):
                  for i in range(2)]
         done = Path(units[0]["done_marker"])
         done.parent.mkdir(parents=True, exist_ok=True)
+        # terminal form = record + marker
+        Path(units[0]["checkpoint_path"]).write_text("{}", encoding="utf-8")
         done.write_text("{}", encoding="utf-8")
         lp = self._listing_file("scout-merge", units)
         r = _run_cli_tier("scout-merge", self.tmp, lp)
@@ -883,6 +885,11 @@ class _FakeDispatchBase(unittest.TestCase):
             self.windows.append(stall_timeout_s)
             if ack == "ok":
                 unit = next(u for u in self.units if u.get("batch_id") == uid)
+                # honest-subagent shape: write the RECORD, then the marker
+                # (a marker without its record is a stale terminal)
+                rec = unit.get("checkpoint_path") or unit.get("rule_path")
+                if rec:
+                    Path(rec).write_text("{}", encoding="utf-8")
                 Path(unit["done_marker"]).write_text("done", encoding="utf-8")
             pid = 700000 + len(self.calls)
             if on_spawn is not None:
@@ -1113,6 +1120,8 @@ class TestSlotBackfillDispatch(_FakeDispatchBase):
         # get their markers, every later re-fill lazy-skips the whole queue,
         # and the breaker's (b) drain re-lists count the zero growth → drift
         # trip with done_marker_exists=true evidence instead of spawn loops.
+        Path(self.units[0]["checkpoint_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.units[0]["checkpoint_path"]).write_text("{}", encoding="utf-8")
         Path(self.units[0]["done_marker"]).write_text("done", encoding="utf-8")
         listing = {"repo": str(self.repo), "total": 3, "done": 0, "failed": 0,
                    "pending": self.units}
@@ -1131,6 +1140,68 @@ class TestSlotBackfillDispatch(_FakeDispatchBase):
         self.assertEqual(len(dp), 3)
         self.assertTrue(all(e["done_marker_exists"] for e in dp.values()),
                         "drift diagnostic: disk markers all exist")
+
+
+class TestMarkerWithoutRecordClaim(_FakeDispatchBase):
+    """marker-without-record at claim: a .done whose record file is absent is a
+    STALE terminal — deleted at claim (same shape as --retry-failed's .failed
+    deletion) and the unit re-dispatches; a .done WITH its record still skips."""
+
+    def _mwr_stub(self):
+        # disk-truth stub mirroring the real enumerator's mwr semantics: a unit
+        # stays pending until BOTH record and .done exist (or .failed exists)
+        stub = self.tmp / "stub_mwr_enum.py"
+        body = f"""
+import json
+from pathlib import Path
+UNITS = json.loads({json.dumps(self.units)!r})
+pending = [u for u in UNITS
+           if not Path(u['done_marker']).is_file()
+           or not Path(u['checkpoint_path']).is_file()]
+print(json.dumps({{'repo': {str(self.repo)!r}, 'total': len(UNITS),
+                   'done': len(UNITS) - len(pending), 'failed': 0,
+                   'pending': pending}}))
+"""
+        stub.write_text(body, encoding="utf-8")
+        return stub
+
+    def test_stale_done_deleted_at_claim_and_redispatched(self):
+        u0 = self.units[0]
+        Path(u0["done_marker"]).write_text("", encoding="utf-8")  # marker, NO record
+
+        def behavior(uid, nth):
+            # the re-dispatched subagent rewrites the lost record, then acks ok
+            unit = next(u for u in self.units if u.get("batch_id") == uid)
+            Path(unit["checkpoint_path"]).write_text("{}", encoding="utf-8")
+            return "spawn-ok", "ok"
+
+        code, out, err = self._run_main(behavior, stub=self._mwr_stub())
+        self.assertEqual(code, 0, err)
+        self.assertIn("marker-without-record", err)
+        self.assertIn("scout-001", [c[0] for c in self.calls],
+                      "the stale-marked unit must actually re-dispatch")
+        self.assertTrue(Path(u0["checkpoint_path"]).is_file())
+        data = json.loads(out)
+        self.assertEqual(data["stale_done_deleted"], 1)
+        self.assertEqual(data["done"], self.N_UNITS)
+
+    def test_done_with_record_still_skips(self):
+        # record + marker both present -> the lazy check still skips (never
+        # re-dispatches a genuinely terminal unit)
+        u0 = self.units[0]
+        Path(u0["checkpoint_path"]).write_text("{}", encoding="utf-8")
+        Path(u0["done_marker"]).write_text("", encoding="utf-8")
+
+        def behavior(uid, nth):
+            unit = next(u for u in self.units if u.get("batch_id") == uid)
+            Path(unit["checkpoint_path"]).write_text("{}", encoding="utf-8")
+            return "spawn-ok", "ok"
+
+        code, out, err = self._run_main(behavior, stub=self._mwr_stub())
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("scout-001", [c[0] for c in self.calls])
+        data = json.loads(out)
+        self.assertEqual(data["stale_done_deleted"], 0)
 
 
 class TestKillFailureDisposition(_FakeDispatchBase):
@@ -1156,6 +1227,11 @@ class TestKillFailureDisposition(_FakeDispatchBase):
             self.calls.append((uid, status, ack))
             if ack == "ok":
                 unit = next(u for u in self.units if u.get("batch_id") == uid)
+                # honest-subagent shape: write the RECORD, then the marker
+                # (a marker without its record is a stale terminal)
+                rec = unit.get("checkpoint_path") or unit.get("rule_path")
+                if rec:
+                    Path(rec).write_text("{}", encoding="utf-8")
                 Path(unit["done_marker"]).write_text("done", encoding="utf-8")
             pid = 700000 + len(self.calls)
             if on_spawn is not None:
@@ -1629,6 +1705,10 @@ class TestExitPathChildCleanup(_FakeDispatchBase):
             if on_spawn is not None:
                 on_spawn(p.pid)
             unit = next(u for u in self.units if u["batch_id"] == uid)
+            # honest-subagent shape: record first, then the marker
+            rec = unit.get("checkpoint_path") or unit.get("rule_path")
+            if rec:
+                Path(rec).write_text("{}", encoding="utf-8")
             Path(unit["done_marker"]).write_text("done", encoding="utf-8")
             self.calls.append((uid, "spawn-ok", "ok"))
             return ("spawn-ok", "ok", "ok", None, False, True)
@@ -3004,6 +3084,11 @@ class _StormBase(_FakeDispatchBase):
             self.calls.append((uid, status, ack))
             if ack == "ok":
                 unit = next(u for u in self.units if u.get("batch_id") == uid)
+                # honest-subagent shape: write the RECORD, then the marker
+                # (a marker without its record is a stale terminal)
+                rec = unit.get("checkpoint_path") or unit.get("rule_path")
+                if rec:
+                    Path(rec).write_text("{}", encoding="utf-8")
                 Path(unit["done_marker"]).write_text("done", encoding="utf-8")
             pid = 700000 + len(self.calls)
             if on_spawn is not None:
@@ -3301,6 +3386,7 @@ class TestStdoutContractKeys(_FakeDispatchBase):
             {"runner", "tier", "repo", "host", "total", "done", "failed",
              "pending", "wave", "waves_run", "partial", "stall_killed",
              "stalled", "cooldowns", "retried_failed", "rate_limited",
+             "stale_done_deleted",
              # cost visibility (design D4): the always-on pair, plus the
              # runtime_* trio (present because this run completed units) and
              # the ABSENT stall_window_s (nothing widened here)
@@ -3308,6 +3394,7 @@ class TestStdoutContractKeys(_FakeDispatchBase):
              "runtime_p50_s", "runtime_p95_s", "runtime_max_s"})
         self.assertEqual(data["cooldowns"], 0)
         self.assertEqual(data["retried_failed"], 0)
+        self.assertEqual(data["stale_done_deleted"], 0)
         self.assertFalse(data["rate_limited"])
         self.assertEqual(data["stall_killed_slots_s"], 0)
         self.assertEqual(data["stall_killed_slot_pct"], 0.0)
@@ -3721,7 +3808,7 @@ class TestQuotaAdmissionGate(_FakeDispatchBase):
             "pending", "wave", "waves_run", "partial", "stall_killed",
             "stalled", "stall_killed_slots_s", "stall_killed_slot_pct",
             "runtime_p50_s", "runtime_p95_s", "runtime_max_s",
-            "cooldowns", "retried_failed", "rate_limited"})
+            "cooldowns", "retried_failed", "stale_done_deleted", "rate_limited"})
         self.assertNotIn("quota admission", err)
         sidecars = list(self.init.glob("fanout_progress.*.json"))
         self.assertEqual(len(sidecars), 1)

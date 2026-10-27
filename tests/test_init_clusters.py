@@ -751,6 +751,8 @@ class TestForwardDoneJudgment(unittest.TestCase):
         first = json.loads(out)["pending"]
         self.assertGreater(len(first), 1)                    # genuinely sharded
         shard0 = first[0]
+        # terminal form = record + marker (marker-only = marker-without-record)
+        Path(shard0["checkpoint_path"]).write_text("{}", encoding="utf-8")
         Path(shard0["done_marker"]).write_text("", encoding="utf-8")
         code, out, _ = self._run(p, "--candidates", str(self.d / "controls_candidates.json"),
                                  "--materialize", str(inputs), "--max-unit-bytes", "2000")

@@ -72,6 +72,8 @@ class TestScoutForwardJudgment(unittest.TestCase):
     def test_short_id_done_marker_judges_done(self):
         p = self._write(_BATCHES)
         self.cp.mkdir(parents=True, exist_ok=True)
+        # terminal form = record + marker (marker-only = marker-without-record)
+        (self.cp / "scout-002.json").write_text("{}", encoding="utf-8")
         (self.cp / "scout-002.json.done").write_text("", encoding="utf-8")
         code, out, err = self._run(p)
         self.assertEqual(code, 0)

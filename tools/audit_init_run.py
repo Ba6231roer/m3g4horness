@@ -117,27 +117,55 @@ class SourceCache:
         return self._lines[key]
 
 
-def resolve_path(raw: str, target: Path):
-    """Resolve an anchor path token against the repo root; case-insensitive FS fallback."""
+class BasenameIndex:
+    """Unique-basename fallback resolver (one walk over the target tree).
+
+    Inventory/T1 evidence paths are not always repo-root-relative; when an
+    anchor path fails to resolve directly, a UNIQUE basename match recovers
+    it (counted separately — it signals a path-format issue, not fabrication).
+    """
+
+    def __init__(self, target: Path):
+        self.map: dict[str, list[str]] = {}
+        for root, dirs, names in os.walk(target):
+            dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
+            for n in names:
+                self.map.setdefault(n.lower(), []).append(
+                    os.path.join(root, n))
+
+    def unique(self, name: str):
+        hits = self.map.get(name.lower(), [])
+        return hits[0] if len(hits) == 1 else None
+
+
+def resolve_path(raw: str, target: Path, bidx: BasenameIndex | None = None):
+    """Resolve an anchor path token against the repo root; case-insensitive FS
+    fallback; unique-basename fallback last (returns (path|None, how))."""
     raw = raw.replace("\\", "/").strip().strip('"').strip("'")
+    if raw.startswith("./"):
+        raw = raw[2:]
     if not raw:
-        return None
+        return None, "empty"
     p = Path(raw)
     if not p.is_absolute():
         p = target / raw
     p = Path(os.path.normpath(str(p)))
     if p.is_file():
-        return p
+        return p, "exact"
     parent = p.parent
     if parent.is_dir():
         want = p.name.lower()
         try:
             for entry in os.listdir(parent):
                 if entry.lower() == want:
-                    return parent / entry
+                    return parent / entry, "case"
         except OSError:
             pass
-    return None
+    if bidx is not None:
+        got = bidx.unique(p.name)
+        if got:
+            return Path(got), "basename"
+    return None, "missing"
 
 
 def parse_anchor_token(tok):
@@ -269,17 +297,31 @@ def audit_anchors(inventory: dict | None, rule_files: dict, target: Path,
     """Inventory evidence + rule-file anchor tokens -> existence/line/symbol/snippet."""
     m = {"total": 0, "ok": 0, "bad_file": 0, "bad_line": 0, "bad_symbol": 0,
          "unchecked": 0, "examples": [], "snippets_checked": 0,
-         "snippet_mismatch": 0, "snippet_examples": []}
+         "snippet_mismatch": 0, "snippet_examples": [], "by_basename": 0}
+    bidx_holder: list[BasenameIndex] = []
 
     def check_token(tok, line, sym, snippet, origin):
         m["total"] += 1
-        path = resolve_path(tok, target)
+        path, how = resolve_path(tok, target)
+        if path is None:
+            # lazy unique-basename fallback (first miss builds the index)
+            if not bidx_holder:
+                try:
+                    bidx_holder.append(BasenameIndex(target))
+                except OSError:
+                    bidx_holder.append(None)
+            if bidx_holder[0] is not None:
+                got = bidx_holder[0].unique(Path(tok.replace("\\", "/")).name)
+                if got:
+                    path, how = Path(got), "basename"
         if path is None:
             m["bad_file"] += 1
             if len(m["examples"]) < 20:
                 m["examples"].append({"origin": origin, "token": tok[:160],
                                       "kind": "file_missing"})
             return
+        if how == "basename":
+            m["by_basename"] += 1
         key = str(path)
         if line is not None:
             n = cache.line_count(key)
@@ -383,8 +425,11 @@ def audit_reconciliation(inventory: dict | None, rules_dir: Path, target: Path,
                 tok = parse_anchor_token(item)[0]
             if not tok:
                 continue
+            # match on the repo-relative path AS WRITTEN or its basename —
+            # inventory evidence and rule text may root paths differently
             rel = tok.replace("\\", "/")
-            if rel in body or os.path.basename(rel) in body:
+            base = os.path.basename(rel)
+            if rel in body or base in body:
                 hit = True
                 break
         if hit:
@@ -406,6 +451,46 @@ def audit_reconciliation(inventory: dict | None, rules_dir: Path, target: Path,
                 r["index_orphans"] = sorted(links - set(files))[:20]
                 r["index_unlinked"] = sorted(set(files) - links)[:20]
     return r
+
+
+def pack_manifest_expected(cp_root: Path):
+    """Collect expected member record basenames + member ids from pack
+    manifests (any checkpoints/*manifest* dir). Regex-over-JSON on purpose:
+    robust to manifest shape drift for this diagnostic."""
+    expected: set[str] = set()
+    n_manifests = 0
+    try:
+        dirs = sorted(os.listdir(cp_root))
+    except OSError:
+        return expected, 0
+    for d in dirs:
+        if "manifest" not in d.lower():
+            continue
+        dp = cp_root / d
+        if not dp.is_dir():
+            continue
+        for f in sorted(os.listdir(dp)):
+            if not f.endswith(".json"):
+                continue
+            ok, data, _ = read_text(dp / f)
+            if not ok:
+                continue
+            n_manifests += 1
+            for mt in re.finditer(r'"checkpoint_path"\s*:\s*"([^"]+)"', data):
+                expected.add(Path(mt.group(1).replace("\\", "/")).name)
+    return expected, n_manifests
+
+
+def classify_t1_orphans(t1_st: dict, expected: set[str]):
+    """Split orphan t1 markers: expected-by-manifest (record GENUINELY missing
+    — a T1 coverage gap) vs not in any manifest (stale/foreign marker)."""
+    gap = stale = 0
+    for base in t1_st.get("orphan_ids") or []:
+        if base in expected:
+            gap += 1
+        else:
+            stale += 1
+    return gap, stale
 
 
 def post_t4_lint(target: Path, fmt: str, rules_dir: Path, script: Path):
@@ -493,10 +578,18 @@ def main(argv=None) -> int:
         for d in sorted(os.listdir(cp_root)):
             if (cp_root / d).is_dir():
                 tiers_found.append(d)
+    pack_expected, pack_manifest_count = (set(), 0)
+    if cp_root.is_dir():
+        pack_expected, pack_manifest_count = pack_manifest_expected(cp_root)
     for tier in tiers_found:
         st = scan_tier(cp_root / tier)
         st["orphan_sha_hit"] = pack_reconcile(st, cp_root / tier) \
             if tier == "t1" else 0
+        if tier == "t1":
+            st["orphan_gap"], st["orphan_stale"] = classify_t1_orphans(
+                st, pack_expected)
+        else:
+            st["orphan_gap"] = st["orphan_stale"] = 0
         detail["tiers"][tier] = st
 
     ok_inv, inventory, inv_err = load_json(init_dir / "controls_inventory.json")
@@ -570,37 +663,42 @@ def main(argv=None) -> int:
 
     tier_names = sorted(detail["tiers"])
     scout_t = detail["tiers"].get("scout", {})
-    mismatch_examples = []
-    for n in (scout_t.get("orphan_ids") or []) + (scout_t.get("rec_no_done_ids") or []):
-        leaf = n.split("/")[-1][:36]
-        if leaf.isascii() and len(mismatch_examples) < 3:
-            mismatch_examples.append(leaf)
+
+    def _leaf(name):
+        n = name.split("/")[-1][:36]
+        return n if n.isascii() else ""
+
+    orphan_ex = [x for x in (_leaf(n) for n in (scout_t.get("orphan_ids") or [])) if x][:2]
+    recno_ex = [x for x in (_leaf(n) for n in (scout_t.get("rec_no_done_ids") or [])) if x][:2]
     t1_t = detail["tiers"].get("t1", {})
     json_bad_total = sum(t.get("json_bad", 0) for t in detail["tiers"].values())
     lines = [
-        "AUDIT v1.1 fmt=%s" % args.format,
+        "AUDIT v1.2 fmt=%s" % args.format,
         "markers " + " ".join(mk(t) for t in tier_names),
         "records " + " ".join(
             "%s=%d(files=%d)" % (t, detail["tiers"][t].get("records", 0),
                                  detail["tiers"][t].get("files_total", 0))
             for t in tier_names),
-        "orphan_json t1=%d(sha_hit=%d) scout=%d t2=%d t3=%d other_marker=%d rec_no_scout=%d rec_no_total=%d" % (
-            t1_t.get("orphan_done", 0), t1_t.get("orphan_sha_hit", 0),
+        "orphan_json t1=%d gap=%d stale=%d sha_hit=%d scout=%d t2=%d t3=%d other_marker=%d rec_no_scout=%d rec_no_total=%d" % (
+            t1_t.get("orphan_done", 0), t1_t.get("orphan_gap", 0),
+            t1_t.get("orphan_stale", 0), t1_t.get("orphan_sha_hit", 0),
             scout_t.get("orphan_done", 0),
             detail["tiers"].get("t2", {}).get("orphan_done", 0),
             detail["tiers"].get("t3", {}).get("orphan_done", 0),
             detail["tiers"].get("t3", {}).get("orphan_other", 0),
             scout_t.get("rec_no_done", 0),
             sum(t.get("rec_no_done", 0) for t in detail["tiers"].values())),
+        "packs manifests=%d" % pack_manifest_count,
         "json_bad total=%d %s" % (json_bad_total, " ".join(
             "%s=%d" % (t, detail["tiers"][t].get("json_bad", 0))
             for t in tier_names)),
         "t2 shards=%d shard_bad=%d synthesis=%s" % (
             t2.get("records", 0), t2.get("json_bad", 0), _synthesis_state(detail)),
         "t4 consistency=%s post_t4_lint=%s" % (t4c, lint.split("|")[0]),
-        "anchors total=%d ok=%d bad_file=%d bad_line=%d bad_symbol=%d unchecked=%d" % (
+        "anchors total=%d ok=%d bad_file=%d(basename_resolved=%d) bad_line=%d bad_symbol=%d unchecked=%d" % (
             anchors["total"], anchors["ok"], anchors["bad_file"],
-            anchors["bad_line"], anchors["bad_symbol"], anchors["unchecked"]),
+            anchors["by_basename"], anchors["bad_line"],
+            anchors["bad_symbol"], anchors["unchecked"]),
         "snippets checked=%d mismatch=%d" % (
             anchors["snippets_checked"], anchors["snippet_mismatch"]),
         "inv controls=%d cats=%d files=%d missing_files=%d extra_files=%d" % (
@@ -617,8 +715,13 @@ def main(argv=None) -> int:
             "off" if (cfg and cfg.get("no_scout")) else "on"),
         "detail_json=written",
     ]
-    if mismatch_examples:
-        lines.append("scout_mismatch_examples=" + ",".join(mismatch_examples))
+    if orphan_ex or recno_ex:
+        parts = []
+        if orphan_ex:
+            parts.append("orphan=" + ",".join(orphan_ex))
+        if recno_ex:
+            parts.append("no_marker=" + ",".join(recno_ex))
+        lines.append("scout_mismatch " + " ".join(parts))
     dc = detail.get("declarative_config") or {}
     if dc:
         lines.append("decl_cfg scanned=%d hit_files=%d hits=%d" % (

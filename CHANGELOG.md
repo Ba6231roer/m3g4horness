@@ -16,6 +16,26 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — audit_init_run.py v1.2:t1 缺口判定 + basename 回退 + 两个新登记项(0.1.98)
+
+真实 run v1.1 手抄页判读后的最后一轮工具增强(目标:一次重跑闭合全部悬案):
+
+- **t1 缺口判定(登记 #18,可能重大)**:Form B pack 模板要求每个成员写自己的记录文件,
+  但实测 836 marker vs 721 记录、sha_hit=0——v1.2 读 `checkpoints/*manifest*`(52 份
+  pack 清单)中的期望成员记录路径,把 115 个孤儿 marker 判定为 `gap`(记录真缺失 = T1
+  静默覆盖损失,下游无门可拦)或 `stale`(陈旧 marker)。
+- **锚点 basename 回退**:inventory 证据路径不总以仓根相对(v1.1 实测 bad_file=1067);
+  唯一文件名匹配可恢复的单独计数(`basename_resolved=`),恢复不了才是真缺失。
+- **cover 保持 basename 匹配**(v1.1 已有;represented=45/691 初值待 v1.2 复核),登记
+  **#19 新**:rulewriter 设计意图"一条规则对应一个有锚点的控制",实测锚点引用 ~258 vs
+  inventory 691 控制——终产物覆盖疑似严重不足,待 v1.2 定量,坐实则对账门立即立项。
+- **#16/#17 回填**:t2 19/19 对上(子目录递归);t3 的 8 个孤儿 marker 判定**良性**(原生
+  t3 模板只要求规则文件 + marker,无记录文件——设计内);decl hits 更正 649→469(抄误);
+  scout 差异 = merge/rollup 工件 + `scout-338` 一个待现场核对;`packs manifests=` 行与
+  scout_mismatch 按 orphan/no_marker 分类输出。
+- 测试 4 用例(pack 清单 gap/stale、basename 回退、单冒号证据、子目录递归)全绿;
+  zero_deps / no_compile_warnings 过。
+
 ### Added — install.sh 一键打包模式(--pack):opencode 分发 zip 直出,接内网 skillhub 通道(0.1.97)
 
 - **install.sh 新增打包模式 `--pack[=<输出.zip>]`**(仅 opencode):同一条安装流先完整跑进

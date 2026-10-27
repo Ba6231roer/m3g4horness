@@ -49,6 +49,15 @@ class AuditInitRunTest(unittest.TestCase):
         _w(cp / "t1/beta.json", "{not valid json")
         (cp / "t1/beta.json.done").touch()
         _w(cp / "t1/input-validation__X__src_Foo_java__deadbeef.json.done", "")
+        # pack manifest: declares the member's expected checkpoint path; the
+        # marker below exists but its record file does NOT -> genuine gap
+        _w(cp / "pack_manifests/p1.json", json.dumps({
+            "pack_id": "pack::input-validation::aaaa1111",
+            "members": [{"cluster_id": "input-validation::X::src/M.java::aaaa1111"}],
+            "checkpoints": [{
+                "checkpoint_path": "C:/x/checkpoints/t1/input-validation__X__src_M_java__aaaa1111.json",
+                "done_marker": "C:/x/checkpoints/t1/input-validation__X__src_M_java__aaaa1111.json.done"}]}))
+        _w(cp / "t1/input-validation__X__src_M_java__aaaa1111.json.done", "")
         # t2: shard record NESTED one level (regression for recursion) + the
         # marker-only synthesis marker (absent content file is by design)
         _w(cp / "t2/parts/part-1.json", json.dumps({"summary": "ok"}))
@@ -112,21 +121,25 @@ class AuditInitRunTest(unittest.TestCase):
         m = self._stdout_map(proc)
         # markers: only tiers with a checkpoints dir appear; scout absent here
         self.assertNotIn("markers:scout", m)
-        self.assertEqual(m["markers:t1"], "3/0")
+        self.assertEqual(m["markers:t1"], "4/0")
         self.assertEqual(m["markers:t2"], "2/0")
         self.assertEqual(m["markers:t3"], "2/0")
         # records: t1=2; t2=1 via ONE-LEVEL RECURSION (parts/part-1.json);
-        # files_total includes markers themselves
-        self.assertEqual(m["records:t1"], "2(files=5)")
+        # files_total includes markers themselves; pack manifest counted too
+        self.assertEqual(m["records:t1"], "2(files=6)")
         self.assertEqual(m["records:t2"], "1(files=3)")
+        self.assertEqual(m["packs:manifests"], "1")
         self.assertEqual(m["json_bad:total"], "1")
         self.assertEqual(m["json_bad:t1"], "1")
-        # orphan json marker (sanitized name) matches record content via sha8
-        self.assertEqual(m["orphan_json:t1"], "1(sha_hit=1)")
-        self.assertEqual(m["orphan_json:rec_no_total"], "0")
-        # non-json marker base → artifact-attached (native design), not a
-        # missing record
+        # orphan json markers split by pack-manifest truth: one EXPECTED by a
+        # manifest (record genuinely missing = gap), one stale (its sha8 tail
+        # hits record content)
+        self.assertEqual(m["orphan_json:t1"], "2")
+        self.assertEqual(m["orphan_json:gap"], "1")
+        self.assertEqual(m["orphan_json:stale"], "1")
+        self.assertEqual(m["orphan_json:sha_hit"], "1")
         self.assertEqual(m["orphan_json:other_marker"], "1")
+        self.assertEqual(m["orphan_json:rec_no_total"], "1")
         # synthesis.json content absent by design, not an orphan
         self.assertEqual(m["t2:synthesis"], "absent")
         self.assertEqual(m["t2:shards"], "1")
@@ -137,7 +150,7 @@ class AuditInitRunTest(unittest.TestCase):
         # rule-file :: anchor ok → total=3 ok=2 bad_file=1
         self.assertEqual(m["anchors:total"], "3")
         self.assertEqual(m["anchors:ok"], "2")
-        self.assertEqual(m["anchors:bad_file"], "1")
+        self.assertEqual(m["anchors:bad_file"], "1(basename_resolved=0)")
         self.assertEqual(m["anchors:bad_symbol"], "0")
         self.assertEqual(m["inv:controls"], "2")
         self.assertEqual(m["inv:cats"], "2")
@@ -179,6 +192,25 @@ class AuditInitRunTest(unittest.TestCase):
         self.assertEqual(m["anchors:ok"], "1")
         self.assertEqual(m["anchors:bad_line"], "1")
         self.assertEqual(m["anchors:bad_symbol"], "1")
+
+    def test_basename_fallback_resolution(self):
+        self._build_run()
+        # basename-only evidence (no dir prefix): unique-name fallback resolves
+        # it against the target tree and the symbol check still runs
+        _w(self.init / "controls_inventory.json", json.dumps({
+            "controls": [
+                {"name": "Foo sanitizer", "category": "input-validation",
+                 "evidence": ["Foo.java:Foo.bar"]},
+                {"name": "Ghost limiter", "category": "rate-limiting",
+                 "evidence": ["NoSuch.java:9"]},
+            ]}))
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        m = self._stdout_map(proc)
+        self.assertEqual(m["anchors:bad_file"], "1(basename_resolved=1)")
+        self.assertEqual(m["anchors:ok"], "2")
+        # cover by basename: Foo.java appears inside the rule text path
+        self.assertEqual(m["cover:represented"], "1")
 
     def test_usage_error_exit_2(self):
         proc = self._run()

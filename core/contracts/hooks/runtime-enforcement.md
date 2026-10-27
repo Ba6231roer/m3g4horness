@@ -414,6 +414,25 @@ approval-flow change once declared roots are user-approved; ② alias/variable i
 every other Bash rule); ③ the interpreter-exec rule (executed script location) keeps judging
 `MGH_TARGET` alone — declared roots are read-only, running code from them is not a read.
 
+### heredoc / here-string 数据体剥离（fix-mgh-guard-heredoc-body）
+
+四类**结构判定**——写动词 / 删除动词 / `>`/`>>` 重定向 / rule-m 路径净网——在判定前先做
+**数据体剥离**（守卫 `_strip_data_bodies`）：bash heredoc（`<<` / `<<-`，定界符含
+引号形态）与 PowerShell here-string（`@"…"@` / `@'…'@`）的**数据体**（定界符行之后到
+终结定界符行，含终结行）替换为单个空格——数据体是被写入文件的数据，不是命令结构。
+观测来源（评审登记册 #22，scout-338 会话取证）：数据体里的 `yyyy/MM/dd` 被净网/
+mutation 扫描器误判为越树路径片段、`>2000` 被误判为重定向，合法 checkpoint 写入连拦
+两次，模型第三次**改掉记录内容**才放行——守卫误伤直接篡改产物。
+
+| 边界 | 语义 |
+|---|---|
+| 保留面 | 操作符 token、操作符行上的其余命令（`cat > f <<'EOF'; echo done` 的 `; echo done` 照判）、重定向目标（`cat > <路径> <<` 的路径）、其余全部命令 token 逐字保留 |
+| 消费面 | 恰上述四类结构判定；其余规则（激活/解码、内联解释器、`py -c` 内省、temp-I/O、聚合整读、file-assoc、search/listing、executed-script）一律判**原文** |
+| 解释器喂养不豁免 | 接收命令是解释器（py/python 族含点版本、node/deno、powershell/pwsh、Invoke-Expression/iex；bash/sh 等代码解释器同拒剥离）时该段 **不剥离**；内联解释器拦截在**原文**上先行，覆盖无 `-` 形态（`python <<'EOF'` / `node <<EOF`）与 here-string 喂养（`Invoke-Expression @"…"@`）——剥离 NEVER 弱化既有拦截 |
+| 畸形保守 | 未终结 heredoc（到文本结束无终结行）/ here-string 未配对 / 起始 `@"` 非行末 / `<<` 出现在引号内 → 该段**不剥离**、按原文判定（可能维持误拦，NEVER 漏拦） |
+| `<<-` 制表 | 终结定界符行行首制表符按 shell 语义折叠后匹配 |
+| 非目标残余 | `<<<`（bash here-string，单串喂 stdin）不剥离，属已声明残余；非 heredoc 位置的日期/数字形态 token（如引号参数里的 `yyyy/MM/dd`）仍按普通 token 判定——本语义修结构、不建词表白名单 |
+
 A hit → exit 2 + stderr **read-side recipe** (points at "read only this batch's `input_path`/
 `targets[]`; anchor `Glob`/`Grep` (and `rg`/`grep`/… in Bash) at the repo root; NEVER read
 the parent dir / sibling modules"; when roots are declared the recipe adds "declared roots

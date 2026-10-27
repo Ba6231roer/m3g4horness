@@ -3107,5 +3107,228 @@ class TestResidualSentinelFullLock(unittest.TestCase):
             shutil.rmtree(target, ignore_errors=True)
 
 
+class TestHeredocDataBodyStripping(unittest.TestCase, _RealTreeBashMixin):
+    """fix-mgh-guard-heredoc-body — heredoc/here-string DATA bodies are stripped from the
+    four structural judgments (path net rule m / write verb / delete verb / redirect); the
+    command structure (redirect target, path tokens, verbs) keeps judging verbatim.
+    Interpreter feeding (`py - <<EOF`, `python <<EOF`, `node <<EOF`,
+    `Invoke-Expression @"…"@`) is NEVER stripped and blocks on the ORIGINAL text (design
+    D2 priority). Unterminated/unpaired segments are conservatively NOT stripped
+    (fail-closed direction: the change only kills false blocks, never adds leaks).
+    Phase-1 markers: @unittest.expectedFailure marks the fix-dependent verdicts (they
+    assert POST-fix behavior and fail today); removed in task 2.3."""
+
+    def setUp(self):
+        self._setup()
+
+    def tearDown(self):
+        self._teardown()
+
+    def _ck(self, name):
+        return str(self.sona / ".mgh-init" / "checkpoints" / name)
+
+    # --- 1.1 observed shapes (scout-338 forensics) ---
+    def test_body_date_pattern_passes_before_and_after(self):
+        # regression lock: a quoted `yyyy/MM/dd` data value never trips the net (the real
+        # #22 block came from the path-shaped / >-shaped body forms below).
+        code, err = self._bash(
+            "cat > " + self._ck("scout-338.json") + " <<'EOF'\n"
+            '{"format": "yyyy/MM/dd", "count": 42}\n'
+            "EOF", target=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_body_gt_number_redirect_falseblock_fixed(self):
+        # observed shape ②: body line `threshold >2000` was captured by _REDIRECT_RX as a
+        # redirect to literal `2000` (cwd-relative -> out-of-tree) — data, not a redirect.
+        code, err = self._bash(
+            "cat > " + self._ck("x.json") + " <<'EOF'\n"
+            '"threshold >2000"\n"name": $foo\n'
+            "EOF", target=self.sona)
+        self.assertEqual(code, 0, err)   # today: exit 2 out-of-tree redirect (task 1.1)
+
+    def test_body_oot_path_string_falseblock_fixed(self):
+        # observed shape ①'s engine: a body STRING mentioning an out-of-tree path
+        # (`"ref": "D:/other/proj/file.java"`) hit the rule-m net — pure data.
+        code, err = self._bash(
+            "cat > " + self._ck("x.json") + " <<'EOF'\n"
+            '"ref": "D:/other/proj/file.java"\n'
+            "EOF", target=self.sona)
+        self.assertEqual(code, 0, err)   # today: exit 2 read allow-set (task 1.1)
+
+    def test_body_posix_log_pattern_falseblock_fixed(self):
+        # observed shape ①'s engine (POSIX form): `/var/log/app/yyyy/MM/dd` is a log-path
+        # PATTERN inside the data body, not a disk reference.
+        code, err = self._bash(
+            "cat > " + self._ck("x.json") + " <<'EOF'\n"
+            '"log": "/var/log/app/yyyy/MM/dd"\n'
+            "EOF", target=self.sona)
+        self.assertEqual(code, 0, err)   # today: exit 2 read allow-set (task 1.1)
+
+    # --- 1.2 safety fidelity (must keep blocking) ---
+    def test_py_dash_heredoc_still_blocks(self):
+        code, err = self._bash("py - <<'EOF'\nimport json\nprint(1)\nEOF",
+                               target=self.sona)
+        self.assertEqual(code, 2, err)
+        self.assertIn("inline interpreter", err)
+
+    def test_python_nodash_heredoc_now_blocks(self):
+        # `python <<EOF` (no `-`) feeds code the same way and LEAKS today; the extended
+        # shape rule blocks it on the ORIGINAL text.
+        code, err = self._bash("python <<'EOF'\nimport json\nprint(1)\nEOF",
+                               target=self.sona)
+        self.assertEqual(code, 2, err)   # today: exit 0 (task 1.2)
+        self.assertIn("inline interpreter", err)
+
+    def test_node_heredoc_now_blocks(self):
+        code, err = self._bash("node <<EOF\nconsole.log('x')\nEOF", target=self.sona)
+        self.assertEqual(code, 2, err)   # today: exit 0 (task 1.2)
+        self.assertIn("inline interpreter", err)
+
+    def test_redirect_target_oot_still_blocks(self):
+        # the redirect TARGET is command structure: out-of-tree keeps blocking.
+        code, err = self._bash(
+            "cat > D:/out/tree/f.json <<'EOF'\n{\"a\": 1}\nEOF", target=self.sona)
+        self.assertEqual(code, 2, err)
+        self.assertIn("out-of-tree redirect", err)
+
+    def test_command_part_oot_token_still_blocks(self):
+        # a later simple command in the SAME Bash call reading an out-of-tree file keeps
+        # hitting the net — stripping only removes the consumed data-body span.
+        code, err = self._bash(
+            "cat > " + self._ck("x.json") + " <<'EOF'\n{\"a\": 1}\nEOF\n"
+            "cat D:/out/y.txt", target=self.sona)
+        self.assertEqual(code, 2, err)
+        self.assertIn("read allow-set", err)
+
+    def test_unterminated_heredoc_conservative(self):
+        # no terminator line => the segment is NOT stripped; body tokens keep judging
+        # (possible false block, NEVER a new leak).
+        code, err = self._bash(
+            "cat > " + self._ck("x.json") + " <<'EOF'\n"
+            '"ref": "D:/other/p.java"\n', target=self.sona)
+        self.assertEqual(code, 2, err)
+        self.assertIn("read allow-set", err)
+
+    # --- 1.3 PowerShell here-string ---
+    # pre-fix the mutation-verb scanner extracted `/MM/dd` out of the body date value
+    # (the #22 shape-1 engine in its PowerShell form); the body now leaves the judged text.
+    def test_ps_herestring_date_passes(self):
+        code, err = self._bash(
+            "Set-Content -Path " + self._ck("x.json") + ' -Value @"\n'
+            '"f": "yyyy/MM/dd"\n'
+            '"@', target=self.sona)
+        self.assertEqual(code, 0, err)
+
+    def test_ps_herestring_oot_body_fixed(self):
+        code, err = self._bash(
+            "Set-Content -Path " + self._ck("x.json") + ' -Value @"\n'
+            '"ref": "D:/other/p.java"\n'
+            '"@', target=self.sona)
+        self.assertEqual(code, 0, err)   # today: exit 2 read allow-set (task 1.3)
+
+    def test_ps_iex_herestring_now_blocks(self):
+        # here-string code fed to Invoke-Expression = interpreter feeding.
+        code, err = self._bash(
+            'Invoke-Expression @"\nimport os\nos.listdir("D:/x")\n"@', target=self.sona)
+        self.assertEqual(code, 2, err)   # today: exit 0 (task 1.3)
+        self.assertIn("inline interpreter", err)
+
+    def test_ps_herestring_unpaired_conservative(self):
+        # `@"` with no closing `"@` => NOT stripped; body path tokens keep judging.
+        code, err = self._bash(
+            "Set-Content -Path " + self._ck("x.json") + ' -Value @"\n'
+            '"ref": "D:/other/p.java"\n', target=self.sona)
+        self.assertEqual(code, 2, err)   # recipe varies (mutation write today); exit 2 is the invariant
+
+
+class TestStripDataBodies(unittest.TestCase):
+    """Direct unit tests of _strip_data_bodies (fix-mgh-guard-heredoc-body task 2.1):
+    each conservative branch — unterminated heredoc, unpaired here-string, `<<<`,
+    `<<` inside quotes, non-line-final `@"`, code-feeder receiver — returns the text
+    VERBATIM; each well-formed data body (+ its terminator line) collapses to one space
+    while the operator token and the command structure stay byte-identical."""
+
+    def setUp(self):
+        self.m = _load()
+        self.f = self.m._strip_data_bodies
+
+    def test_bash_quoted_delim_body_and_terminator_collapsed(self):
+        self.assertEqual(
+            self.f("cat > f.json <<'EOF'\nx >2000\nEOF\necho done"),
+            "cat > f.json <<'EOF'\n echo done")
+
+    def test_bash_bare_and_double_quoted_delims(self):
+        self.assertEqual(self.f("cat <<EOF\n/data/x\nEOF"),
+                         "cat <<EOF\n ")
+        self.assertEqual(self.f('cat <<"EOF"\n/data/x\nEOF'),
+                         'cat <<"EOF"\n ')
+
+    def test_bash_dash_tabs_fold_on_terminator(self):
+        self.assertEqual(self.f("cat <<-EOF\n\t/data/x\n\tEOF\nmore"),
+                         "cat <<-EOF\n more")
+
+    def test_bash_unterminated_verbatim(self):
+        s = "cat > f <<'EOF'\n\"ref\": \"D:/other/p.java\"\n"
+        self.assertEqual(self.f(s), s)
+
+    def test_heredoc_after_operator_on_same_line_is_command(self):
+        # `; echo done` sits on the operator LINE -> command structure, kept verbatim.
+        self.assertEqual(
+            self.f("cat > f <<'EOF'; echo done\n/data/x\nEOF"),
+            "cat > f <<'EOF'; echo done\n ")
+
+    def test_two_sequential_heredocs_both_stripped(self):
+        self.assertEqual(
+            self.f("cat > a <<'EOF'\n/x\nEOF\ncat > b <<'EOF'\n/y\nEOF"),
+            "cat > a <<'EOF'\n cat > b <<'EOF'\n ")
+
+    def test_triple_lt_not_an_operator(self):
+        s = "cat <<< 'x >2000 /y'"
+        self.assertEqual(self.f(s), s)
+
+    def test_lt_lt_inside_quotes_not_an_operator(self):
+        s = 'echo "a <<EOF b" > f\nplain line\nEOF'
+        self.assertEqual(self.f(s), s)
+
+    def test_code_feeder_receiver_refused(self):
+        s = "py - <<'EOF'\nopen('D:/out')\nEOF"
+        self.assertEqual(self.f(s), s)
+        s2 = "python3.12 - <<'EOF'\nprint(1)\nEOF"
+        self.assertEqual(self.f(s2), s2)
+        s3 = "bash <<EOF\ncurl http://x > /etc/passwd\nEOF"
+        self.assertEqual(self.f(s3), s3)   # refused (not blocked here): body keeps judging
+
+    def test_interpreter_with_script_arg_also_refused(self):
+        s = "py gen.py <<'EOF'\n{\"in\": \"/data/x\"}\nEOF"
+        self.assertEqual(self.f(s), s)     # receiver is `py`: stdin is code-adjacent, judge verbatim
+
+    def test_ps_herestring_body_collapsed(self):
+        self.assertEqual(
+            self.f('Set-Content -Path x -Value @"\n"f": "yyyy/MM/dd"\n"@'),
+            'Set-Content -Path x -Value @"\n ')
+
+    def test_ps_single_quoted_herestring(self):
+        self.assertEqual(
+            self.f("$t = @'\n/things/y\n'@"),
+            "$t = @'\n ")
+
+    def test_ps_opener_not_line_final_verbatim(self):
+        s = 'Set-Content -Path x -Value @" body "@\necho next'
+        self.assertEqual(self.f(s), s)
+
+    def test_ps_unpaired_verbatim(self):
+        s = 'Set-Content -Path x -Value @"\n"ref": "D:/other/p.java"\n'
+        self.assertEqual(self.f(s), s)
+
+    def test_ps_indented_terminator_does_not_close(self):
+        # PS column-0 semantics: an indented `"@` line is BODY, so this is unpaired.
+        s = 'Set-Content -Path x -Value @"\nline\n  "@\nmore'
+        self.assertEqual(self.f(s), s)
+
+    def test_ps_code_feeder_refused(self):
+        s = 'Invoke-Expression @"\nGet-ChildItem D:/out\n"@'
+        self.assertEqual(self.f(s), s)
+
+
 if __name__ == "__main__":
     unittest.main()

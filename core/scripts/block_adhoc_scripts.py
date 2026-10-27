@@ -37,8 +37,11 @@ target, to avoid over-blocking when the orchestrator did not pin one).
 Blocks the real-world failure shapes —
   (a) Bash `py -c|python -c` introspection of artifacts (import json / open( / load( / .json),
       and ANY heredoc/here-string inline code fed to the interpreter (`py - <<EOF` /
-      `py - <<< '…'` / `… | python3 - <<'EOF'`) — blocked by SHAPE alone (no body-token sniffing:
-      heredoc bodies are often invisible or truncated in the command string);
+      `py - <<< '…'` / `… | python3 - <<'EOF'` / no-dash `python <<'EOF'` / `node <<EOF` /
+      `powershell <<…` / here-string fed to `Invoke-Expression @"…"@`) — blocked by SHAPE
+      alone (no body-token sniffing: heredoc bodies are often invisible or truncated in the
+      command string), on the ORIGINAL text BEFORE any data-body stripping (the strip can
+      never weaken these blocks);
   (b) Write/Edit of ANY script extension {.py,.ps1,.sh,.bash,.zsh,.bat,.cmd,.ts,.js,.mjs,.cjs}
       — runtime scripts are READ-ONLY (NO path whitelist: the prior core/scripts and
       tests/tools/hooks exemptions only mattered while inactive, at which point main() already
@@ -159,7 +162,12 @@ Blocks the real-world failure shapes —
       rule). Residual boundaries (regex-over-string, NOT a shell parser): alias/variable
       indirection (`$p='D:\\out'; cp x $p`) extracts no bare path; an unknown write verb INTO a
       declared read root passes the net (the root is in the read allow-set) — declared roots
-      are user-approved read-only trees.
+      are user-approved read-only trees. The verb rules of (h) and this net judge the
+      DATA-BODY-STRIPPED command text (_strip_data_bodies): heredoc/here-string bodies are
+      data written to files, not command structure — body tokens (`yyyy/MM/dd`, `>2000`,
+      out-of-tree path STRINGS) leave the judged text while the redirect target and every
+      command token stay verbatim; unterminated/unpaired segments and code-feeder receivers
+      (`py - <<` …) are never stripped (conservative — stripping may only kill false blocks).
   (n) dsh-dialect bypass surfaces (add-mgh-dsh-host-foundation; names are the shim-normalized
       guard names, NEVER dsh field names): `RunCode` = the host's bundled in-process code
       runner, the direct analogue of the blocked `py -c` inline-interpreter shape — denied
@@ -219,13 +227,27 @@ _PYC_WRITE_TOKENS = ("makedirs", "mkdir", "write(", "write_text", "write_bytes",
                      "os.rename", "os.remove", "os.unlink")
 # Inline interpreter code shapes (rule (a)). The `-c` alternative keeps its EXISTING judged
 # path (_is_introspect_py_c, body-token gated — benign `py -c` behavior unchanged); the
-# heredoc (`- <<`) / here-string (`- <<<`) alternatives block by SHAPE alone, because a
-# heredoc body is often invisible or truncated in the command string, so token sniffing is
-# unreliable there and feeding inline code to an interpreter IS the violation shape. A bare
-# `-` WITHOUT `<<` (e.g. `git log -`, other stdin piping) is deliberately NOT in this rule
-# face — minimal interception surface, new observed shapes net in later (same stance as the
-# Bash verb tables).
-_PY_INLINE_RX = re.compile(r'(?:^|[\s;&|(])py(?:thon)?[0-9.]*\s+(?:-c\b|- <<<|- <<)')
+# heredoc (`<<`, covering `- <<` / `- <<<` AND the no-dash `python <<'EOF'` / `node <<EOF`
+# forms — an interpreter plus a heredoc is code feeding, whatever stands between) blocks by
+# SHAPE alone, because a heredoc body is often invisible or truncated in the command
+# string, so token sniffing is unreliable there and feeding inline code to an interpreter
+# IS the violation shape. Receiver set = python family (dotted versions fold via [0-9.]*),
+# node/deno, powershell/pwsh (fix-mgh-guard-heredoc-body D2: this ORIGINAL-text detection
+# runs BEFORE heredoc data-body stripping, so the strip can NEVER weaken this block). A
+# bare `-` WITHOUT `<<` (e.g. `git log -`, other stdin piping) is deliberately NOT in this
+# rule face — minimal interception surface, new observed shapes net in later (same stance
+# as the Bash verb tables).
+_PY_INLINE_RX = re.compile(
+    r'(?:^|[\s;&|(])(?:py(?:thon)?[0-9.]*|node|deno|powershell|pwsh)'
+    r'\s+(?:-[^\s]*\s+)*(?:-c\b|<<)')
+# A PowerShell here-string (`@"` / `@'`) fed DIRECTLY to Invoke-Expression / iex (with
+# optional flag tokens between) — the PS peer of feeding a heredoc to `py`: the payload is
+# code about to run (fix-mgh-guard-heredoc-body D4: the verb joins the interpreter table).
+# The here-string data-body stripper refuses the same receivers, so stripping can never
+# hide one of these feeds (belt-and-suspenders with the receiver refusal).
+_IEX_HERESTRING_RX = re.compile(
+    r'(?:^|[\s;&|(])(?:invoke-expression|iex)\s+(?:-[^\s]*\s+)*@[\'"]',
+    re.IGNORECASE)
 
 # Script extensions blocked at runtime (leaf scripts read-only; .ts covers the opencode plugin
 # glue -- its install-time write happens while the guard is inactive). .json/.md are NOT here
@@ -368,6 +390,175 @@ def _glob_free_prefix(tok: str) -> str:
         if ch == "*" or ch == "?":
             return tok[:i] or tok
     return tok
+
+
+# ---- heredoc / here-string DATA-BODY stripping (fix-mgh-guard-heredoc-body) ----------
+# A heredoc/here-string body is DATA being written to a file, not command structure. The
+# observed #22 failure: the rule-m net / redirect / mutation scanners judged body tokens
+# (`yyyy/MM/dd` -> a POSIX path fragment via the no-left-boundary scanner, `>2000` -> a
+# redirect to literal `2000`) and blocked legitimate checkpoint writes until the model
+# REWROTE the record content to slip past — a guard false positive corrupting artifacts.
+# _strip_data_bodies replaces each CONSUMED body span (+ its terminator line) with a
+# single space BEFORE the four structural judgments (mutation verbs / delete / redirect /
+# rule-m net); the operator token, the redirect target and every other command token stay
+# verbatim, and EVERY other rule keeps judging the original text. Conservative direction
+# (fail-closed): an unterminated heredoc, an unpaired here-string, an opener that is not
+# line-final, or a `<<` inside quotes is NOT stripped — the original text keeps judging,
+# so stripping can only kill false blocks, NEVER hide commands (a possible extra block is
+# acceptable; a new leak is not). `<<<` (bash here-string feeds ONE string; body flows via
+# stdin, not a file) is deliberately NOT an operator here — documented residual.
+
+# Code interpreters whose heredoc/here-string payload is CODE, never data. A feed to one
+# of these is blocked by the inline-interpreter rules on the ORIGINAL text (D2 priority:
+# original-text detection runs first); refusal to strip is the belt-and-suspenders layer
+# so a stripping defect can never hide fed code from the net. bash/sh/... are refused
+# (not blocked) — their fed bodies keep judging exactly as before this change. Trailing
+# version digits/dots and `.exe` fold on lookup (python3.12 / node.exe -> python / node).
+_HEREDOC_CODE_FEEDERS = frozenset((
+    "py", "py3", "python", "node", "deno", "powershell", "pwsh",
+    "invoke-expression", "iex", "bash", "sh", "dash", "zsh", "ksh",
+    "csh", "tcsh", "perl", "ruby", "php", "lua", "rscript", "osascript",
+))
+
+# A heredoc operator + its delimiter token: `<<`/`<<-`, optional spacing, optionally
+# quote-wrapped delimiter word. group(1) = the `<<-` tab-fold flag, group(3) = the bare
+# delimiter word (the quotes of group(2) never participate in terminator matching — a
+# terminator line is always the bare word, per shell semantics).
+_HEREDOC_OP_RX = re.compile(r'<<(-?)\s*(["\']?)([^\s;"\'&|)]+)\2')
+
+
+def _receiver_is_code_feeder(segment: str) -> bool:
+    """True iff the lead token of the receiving simple command (the text between the last
+    shell delimiter and the heredoc/here-string operator) is a known code interpreter.
+    Stray `&`/`|` tokens (from `&&`/`||` splitting) are skipped; version digits, dots and
+    `.exe` fold so `python3.12 -` / `node.exe` still recognize."""
+    for tok in segment.split():
+        tok = tok.strip("\"'").lower()
+        if tok in ("&", "|"):
+            continue
+        if tok.endswith(".exe"):
+            tok = tok[:-4]
+        while tok and (tok[-1].isdigit() or tok[-1] == "."):
+            tok = tok[:-1]
+        return tok in _HEREDOC_CODE_FEEDERS
+    return False
+
+
+def _strip_data_bodies(text: str) -> str:
+    """Command-structure text for the four structural Bash judgments: every CONSUMED
+    heredoc/here-string data body (+ its terminator line) is replaced with a single
+    space. Single left-to-right scan with bash quote tracking (a `<<` inside quotes is a
+    literal, never an operator; a backslash inside double quotes escapes the next char);
+    the leftmost construct wins and scanning resumes AFTER a consumed span, so a `<<` or
+    `@"` inside a body is never mistaken for a new operator. Consumers: mutation verbs /
+    delete / redirect / rule-m net ONLY (design D1) — activation, decoding, the
+    interpreter rules, temp-I/O, aggregate reads, file-assoc, search/listing and the
+    executed-script rules all keep the original text."""
+    out = []
+    i = 0
+    n = len(text)
+    quote = None      # active bash quote char while scanning (None outside quotes)
+    seg_start = 0     # start of the current simple command (receiver detection)
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+                out.append(ch)
+            elif quote == '"' and ch == "\\" and i + 1 < n:
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch in "\n;&|":
+            seg_start = i + 1
+        elif ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+            got = _consume_heredoc(text, i, seg_start)
+            if got is not None:
+                line_end, span_end = got
+                # keep the WHOLE operator line (trailing command like `; echo done` is
+                # command structure — never dropped, only the body span collapses)
+                out.append(text[i:line_end])
+                out.append(" ")
+                i = span_end
+                continue
+        elif ch == "@" and i + 1 < n and text[i + 1] in "\"'":
+            got = _consume_ps_herestring(text, i, seg_start)
+            if got is not None:
+                line_end, span_end = got
+                out.append(text[i:line_end])
+                out.append(" ")
+                i = span_end
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _consume_heredoc(text: str, op_i: int, seg_start: int):
+    """Resolve one bash heredoc starting at its `<<` operator. Returns (line_end,
+    span_end) — end of the OPERATOR LINE including its newline / end of the terminator
+    line including its newline — or None when the segment stays verbatim (code-feeder
+    receiver, malformed operator, no body line, or no terminator by end of text — all
+    conservative). The caller keeps text[op_i:line_end] verbatim (the operator AND any
+    trailing command on that line — `cat <<'EOF'; echo done` keeps `; echo done`), then
+    collapses [line_end, span_end) to one space. The body starts on the line AFTER the
+    operator line; `<<-` folds leading tabs on the terminator line; a terminator line
+    must BE the bare delimiter word (trailing CR tolerated for CRLF payloads)."""
+    if _receiver_is_code_feeder(text[seg_start:op_i]):
+        return None
+    m = _HEREDOC_OP_RX.match(text, op_i)
+    if not m:
+        return None
+    delim = m.group(3)
+    if delim.startswith("\\"):
+        delim = delim[1:]      # `<<\EOF` quote-forcing form terminates on the bare word
+    nl = text.find("\n", m.end())
+    if nl < 0:
+        return None            # no body line at all -> unterminated -> conservative
+    pos = nl + 1
+    while pos <= len(text):
+        le = text.find("\n", pos)
+        line = text[pos:] if le < 0 else text[pos:le]
+        cand = line.lstrip("\t") if m.group(1) else line
+        if cand.rstrip("\r") == delim:
+            return (nl + 1, (le + 1) if le >= 0 else len(text))
+        if le < 0:
+            return None        # end of text without a terminator -> conservative
+        pos = le + 1
+    return None
+
+
+def _consume_ps_herestring(text: str, at_i: int, seg_start: int):
+    """Resolve one PowerShell here-string starting at its `@"` / `@'` opener. The opener
+    must be the LAST token on its line (PowerShell syntax — anything trailing means it is
+    not a here-string); the body is the following lines until a line that, whitespace-
+    right-stripped, IS the terminator (`"@` / `'@` at line start per PS column-0
+    semantics — leading whitespace disqualifies, trailing content disqualifies). Returns
+    (line_end, span_end) — end of the opener line including its newline / end of the
+    terminator line including its newline — or None (code-feeder receiver / trailing
+    content / unpaired — all conservative)."""
+    if _receiver_is_code_feeder(text[seg_start:at_i]):
+        return None
+    term = text[at_i + 1] + "@"
+    le = text.find("\n", at_i)
+    if le < 0 or text[at_i + 2:le].strip():
+        return None
+    pos = le + 1
+    while pos <= len(text):
+        e = text.find("\n", pos)
+        line = text[pos:] if e < 0 else text[pos:e]
+        if line.rstrip() == term:
+            return (le + 1, (e + 1) if e >= 0 else len(text))
+        if e < 0:
+            return None
+        pos = e + 1
+    return None
 
 # mgh-core missing-install discrimination (rule l): a path segment pair marking an INSTALLED
 # mgh-core script + a script extension. The segment is host-neutral (matches both
@@ -798,12 +989,20 @@ def _is_py_inline_heredoc(cmd: str) -> bool:
     """Shape-only heredoc/here-string detection (rule (a) extension): the command body is
     split into segments on `;`/`&&`/`||`/`|` and each segment judged independently. A
     `-c`-shaped match is left to _is_introspect_py_c (behavior unchanged), so only the
-    `-` + `<<`/`<<<` form blocks here. No body-token sniffing."""
+    heredoc forms (`- <<`, `- <<<`, and the no-dash `python <<` / `node <<` feeds) block
+    here. No body-token sniffing."""
     for seg in re.split(r"&&|\|\||[;|]", cmd):
         for m in _PY_INLINE_RX.finditer(seg):
             if "-c" not in m.group(0):
                 return True
     return False
+
+
+def _is_iex_herestring(cmd: str) -> bool:
+    """Shape-only detection of a PowerShell here-string fed to Invoke-Expression / iex
+    (the PS peer of the interpreter heredoc feed; fix-mgh-guard-heredoc-body D4). Runs on
+    the ORIGINAL command text, before any data-body stripping."""
+    return bool(_IEX_HERESTRING_RX.search(cmd))
 
 
 def _out_of_tree_mutation(command: str, target, cwd):
@@ -1305,6 +1504,13 @@ def main():
         if _mgh_core_missing_install(cmd, target, judge_cwd):
             _emit_missing_install_block(domain, cmd, target)
             return 2
+        # data-body stripping (fix-mgh-guard-heredoc-body): heredoc/here-string DATA
+        # bodies leave the judged text of the FOUR structural rules below (mutation
+        # verbs / delete / redirect / rule-m net). Code-feeder receivers (`py - <<` …)
+        # are refused inside the stripper, and the interpreter-feed rules below keep
+        # judging the ORIGINAL cmd — detection on the original text runs FIRST (D2), so
+        # stripping can never weaken a block. Every non-structural rule also keeps cmd.
+        judged = _strip_data_bodies(cmd)
         # rule-a relabel (L1/D8): a `py -c` WRITE/DELETE shape with an out-of-tree path is
         # checked BEFORE the introspection rule. The prior _INTRO_TOKENS `open(`/`load(`/`.json`
         # falsely labelled `py -c "open('D:/out/f','w').write('x')"` as introspection, surfacing
@@ -1312,7 +1518,7 @@ def main():
         # write-side recipe. Order matters: this gate precedes _is_introspect_py_c so the write
         # shape wins when both a write token and an introspection token are present. Target
         # absent => _out_of_tree_mutation returns pass (degrade, same as every side).
-        mut_kind, mut_dest, mut_oot = _out_of_tree_mutation(cmd, target, judge_cwd)
+        mut_kind, mut_dest, mut_oot = _out_of_tree_mutation(judged, target, judge_cwd)
         if mut_kind in ("write", "delete"):
             # Single destination judgment for all three Bash write entries (verb face /
             # redirect / `py -c` write shape): domain-mirroring the Write/Edit tool face —
@@ -1344,6 +1550,14 @@ def main():
             sys.stderr.write(
                 f"blocked: ad-hoc inline interpreter code (heredoc/here-string fed to "
                 f"`py`) in {domain} run-domain.\n  {_recipe(domain)}\n")
+            return 2
+        if _is_iex_herestring(cmd):
+            # PS peer of the interpreter heredoc feed: a here-string handed to
+            # Invoke-Expression / iex is code about to run (D4). Judged on the ORIGINAL
+            # text, before any data-body stripping.
+            sys.stderr.write(
+                f"blocked: ad-hoc inline interpreter code (here-string fed to "
+                f"Invoke-Expression/iex) in {domain} run-domain.\n  {_recipe(domain)}\n")
             return 2
         # temp-dir write + read-back is checked BEFORE the aggregate read: a list_* command that
         # carries an aggregate as a --flag AND redirects stdout to temp would otherwise trip the
@@ -1423,7 +1637,7 @@ def main():
         # additionally need a sanctioned subtree — root pollution fails loud). target
         # absent => degrade (the loop is skipped).
         if target is not None:
-            for rm in _REDIRECT_RX.finditer(cmd):
+            for rm in _REDIRECT_RX.finditer(judged):
                 rdest = rm.group(1).strip('"\'')
                 if not rdest or _is_temp_redirect_target(rdest):
                     continue
@@ -1460,7 +1674,8 @@ def main():
         # consulted, mirror of their tool face). No path token => pass; target unpinned
         # => degrade to pass (mirror of every other path rule).
         net_write_roots = out_roots if domain in _ALLOWLIST_SUBTREES else ()
-        offender = _path_outside_allowset(cmd, target, judge_cwd, read_roots, net_write_roots)
+        offender = _path_outside_allowset(judged, target, judge_cwd, read_roots,
+                                          net_write_roots)
         if offender is not None:
             _emit_bash_allowset_block(domain, cmd, offender, target,
                                       sentinel_read_roots, config_read_roots)

@@ -16,6 +16,32 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — 守卫 heredoc/here-string 数据体剥离(0.1.103)
+
+评审登记册 #22(scout-338 会话取证):子代理以 `cat > checkpoint <<'EOF'` 写 JSON 时,数据体里
+的 `yyyy/MM/dd` 被路径净网/mutation 扫描器误判为越树路径片段、`>2000` 被误判为重定向,合法
+写入连拦两次,模型第三次**改掉记录内容**才放行——守卫误伤直接篡改产物。本变更给守卫加
+**结构剥离预处理**(fix-mgh-guard-heredoc-body,规格 `runtime-hook-enforcement`):
+
+- **数据体剥离**(`_strip_data_bodies`):bash heredoc(`<<`/`<<-`,引号/裸定界符,制表折叠)与
+  PowerShell here-string(`@"…"@`/`@'…'@`)的数据体(含终结行)替换为单空格;**消费面恰四类**
+  结构判定——写动词/删除/重定向/rule-m 路径净网;操作符行上的其余命令(如 `; echo done`)、
+  重定向目标、全部命令 token 逐字保留;其余规则(激活/解码/内联解释器/`py -c` 内省/temp-I/O/
+  聚合整读/file-assoc/search/listing/executed-script)一律判**原文**。
+- **解释器喂养不豁免、原文先行**(design D2):`py - <<` 原样全拦,并**补上三个原漏拦形态**——
+  `python <<'EOF'`/`node <<EOF`(无 `-` 喂养)与 `Invoke-Expression @"…"@`(here-string 喂养);
+  剥离器对解释器接收者(py/python 族含点版本/node/deno/powershell/pwsh/iex,以及 bash/sh 等
+  代码解释器)一律拒剥离,双保险。
+- **畸形保守**(只消灭误拦、绝不制造漏拦):未终结 heredoc、未配对 here-string、起始 `@"` 非
+  行末、引号内 `<<`、`<<<` 均不剥离、按原文判定。
+- 三端字节级同步(canonical `core/scripts` + claude/opencode 两份 hook 副本,parity 测试强制);
+  契约 `runtime-enforcement.md` 新增「数据体剥离」小节(purity allowlist 行号随移重钉);根
+  `AGENTS.md` 诚实边界守卫段残余清单更新(heredoc 内容误伤类移除,补未终结保守与非 heredoc
+  日期形态两条残余);登记册 #22 处置闭环。测试:`test_block_adhoc_scripts` 新增 30 测
+  (14 行为红→绿 + 16 剥离器直测,直测抓出并修复「操作符行尾命令被跳判」泄漏 bug),全量
+  336 测 + parity 三件(74+13+10)+ 插件/零依赖/编译告警全绿;六域(init/sast/sra/srr/sdr/
+  ut-init)直接调守卫冒烟 12/12 过。
+
 ### Added — mgh-init 三道确定性产物闸门(0.1.102)
 
 真实大仓首跑(36h 无人值守)产物审计钉死「流程稳定、产物质量无人对账」断层:inventory

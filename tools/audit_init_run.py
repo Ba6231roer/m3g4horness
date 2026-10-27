@@ -202,7 +202,7 @@ def scan_tier(cp_dir: Path):
           "orphan_done": 0, "orphan_other": 0, "rec_no_done": 0,
           "orphan_ids": [], "marker_other_ids": [], "rec_no_done_ids": [],
           "bad_files": [], "failed_reasons": [], "markers_terminal_only": 0,
-          "files_total": 0}
+          "files_total": 0, "pack_markers": 0}
     names: dict[str, Path] = {}
     try:
         for entry in sorted(os.listdir(cp_dir)):
@@ -240,7 +240,11 @@ def scan_tier(cp_dir: Path):
             if ok and data.strip():
                 st["failed_reasons"].append(data.strip()[:200])
     for base in done_json:
-        if base not in record_names:
+        if base.startswith("pack__") or base.startswith("pack::"):
+            # pack dispatch units are marker-only BY DESIGN (init_tier's own
+            # orphan audit skips the same prefix); member records are real
+            st["pack_markers"] += 1
+        elif base not in record_names:
             st["orphan_done"] += 1
             st["orphan_ids"].append(base)
     for base in done_other:
@@ -511,27 +515,30 @@ def scout_probe(init_dir: Path, scout_t: dict):
     def _norm(s: str) -> str:
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
-    def _hit(token: str) -> bool:
+    def _hit(token: str):
         raw_marker = token + ".json.done"
         raw_record = token + ".json"
         nt = _norm(token)
         if not nt:
-            return False
-        for n in names:
-            if n in (raw_marker, raw_record):
-                continue
-            if nt in _norm(n):
-                return True
-        return False
+            return []
+        return [n for n in names
+                if n not in (raw_marker, raw_record) and nt in _norm(n)][:3]
 
-    elsewhere = sum(1 for i in ids if _hit(i))
+    hits = {i: _hit(i) for i in ids}
+    elsewhere = sum(1 for i in ids if hits[i])
     cands_hit = 0
+    cands_detail = []
     for cand_file in ("scout_candidates.json", "controls_candidates.json"):
         p = init_dir / cand_file
         if p.is_file():
             ok, data, _ = read_text(p)
             if ok:
-                cands_hit = sum(1 for i in ids if i in data)
+                for i in ids:
+                    if i in data:
+                        cands_hit += 1
+                        cands_detail.append("%s:1" % i)
+                    else:
+                        cands_detail.append("%s:0" % i)
                 break
     extras = []
     scout_dir = init_dir / "checkpoints" / "scout"
@@ -549,6 +556,8 @@ def scout_probe(init_dir: Path, scout_t: dict):
         if ok and isinstance(data, dict) and isinstance(data.get("candidates"), list):
             total_cands = len(data["candidates"])
     return {"ids": len(ids), "elsewhere": elsewhere, "cands_hit": cands_hit,
+            "cands_detail": ",".join(cands_detail)[:120],
+            "hit_names": [n for v in hits.values() for n in v][:3],
             "extras": len(extras), "extra_names": extras,
             "cands_total": total_cands}
 
@@ -741,9 +750,10 @@ def main(argv=None) -> int:
             "%s=%d(files=%d)" % (t, detail["tiers"][t].get("records", 0),
                                  detail["tiers"][t].get("files_total", 0))
             for t in tier_names),
-        "orphan_json t1=%d gap=%d stale=%d sha_hit=%d scout=%d t2=%d t3=%d other_marker=%d rec_no_scout=%d rec_no_total=%d" % (
+        "orphan_json t1=%d gap=%d stale=%d sha_hit=%d pack_markers=%d scout=%d t2=%d t3=%d other_marker=%d rec_no_scout=%d rec_no_total=%d" % (
             t1_t.get("orphan_done", 0), t1_t.get("orphan_gap", 0),
             t1_t.get("orphan_stale", 0), t1_t.get("orphan_sha_hit", 0),
+            t1_t.get("pack_markers", 0),
             scout_t.get("orphan_done", 0),
             detail["tiers"].get("t2", {}).get("orphan_done", 0),
             detail["tiers"].get("t3", {}).get("orphan_done", 0),
@@ -790,9 +800,10 @@ def main(argv=None) -> int:
             "scout_probe orphan=%d elsewhere=%d cands_hit=%d cands_total=%d extras=%d"
             % (sp["ids"], sp["elsewhere"], sp["cands_hit"], sp["cands_total"],
                sp["extras"]))
-        for n in sp["extra_names"]:
+        lines.append("scout_cands_detail %s" % sp["cands_detail"])
+        for n in sp["hit_names"] + sp["extra_names"]:
             if n.isascii():
-                lines.append("scout_extra_name %s" % n[:40])
+                lines.append("scout_hit_name %s" % n[:60])
     dc = detail.get("declarative_config") or {}
     if dc:
         lines.append("decl_cfg scanned=%d hit_files=%d hits=%d" % (

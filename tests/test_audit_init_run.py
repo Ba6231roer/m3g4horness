@@ -49,6 +49,9 @@ class AuditInitRunTest(unittest.TestCase):
         _w(cp / "t1/beta.json", "{not valid json")
         (cp / "t1/beta.json.done").touch()
         _w(cp / "t1/input-validation__X__src_Foo_java__deadbeef.json.done", "")
+        # pack dispatch marker: marker-only BY DESIGN (init_tier's own audit
+        # skips the pack__ prefix) — must NOT count as an orphan
+        _w(cp / "t1/pack__input-validation__0badf00d.json.done", "")
         # pack manifest: declares the member's expected checkpoint path; the
         # marker below exists but its record file does NOT -> genuine gap
         _w(cp / "pack_manifests/p1.json", json.dumps({
@@ -121,20 +124,22 @@ class AuditInitRunTest(unittest.TestCase):
         m = self._stdout_map(proc)
         # markers: only tiers with a checkpoints dir appear; scout absent here
         self.assertNotIn("markers:scout", m)
-        self.assertEqual(m["markers:t1"], "4/0")
+        self.assertEqual(m["markers:t1"], "5/0")
         self.assertEqual(m["markers:t2"], "2/0")
         self.assertEqual(m["markers:t3"], "2/0")
         # records: t1=2; t2=1 via ONE-LEVEL RECURSION (parts/part-1.json);
         # files_total includes markers themselves; pack manifest counted too
-        self.assertEqual(m["records:t1"], "2(files=6)")
+        self.assertEqual(m["records:t1"], "2(files=7)")
         self.assertEqual(m["records:t2"], "1(files=3)")
         self.assertEqual(m["packs:manifests"], "1")
         self.assertEqual(m["json_bad:total"], "1")
         self.assertEqual(m["json_bad:t1"], "1")
-        # orphan json markers split by pack-manifest truth: one EXPECTED by a
-        # manifest (record genuinely missing = gap), one stale (its sha8 tail
+        # pack__ marker classified benign (pack_markers), NOT an orphan;
+        # remaining orphans split by pack-manifest truth: one EXPECTED by a
+        # manifest (record genuinely missing = gap), one stale (sha8 tail
         # hits record content)
         self.assertEqual(m["orphan_json:t1"], "2")
+        self.assertEqual(m["orphan_json:pack_markers"], "1")
         self.assertEqual(m["orphan_json:gap"], "1")
         self.assertEqual(m["orphan_json:stale"], "1")
         self.assertEqual(m["orphan_json:sha_hit"], "1")

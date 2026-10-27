@@ -16,6 +16,26 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Fixed — audit v1.4(pack marker 豁免)+ 会话取证三 findings 入册(0.1.100)
+
+维护者对 scout-341(正常)与 scout-338(异常)两个会话的导出取证 + v1.3 手抄页,带来三项
+结论与两项待办:
+
+- **#18 结案(良性)**:`init_tier.py` 孤儿审计本就豁免 `pack__` 前缀——pack 派发单元设计上
+  只有终止 marker 无记录;算术吻合(721 记录 = 全部 solo+成员,836 marker = 721 + 115 个
+  pack marker),t1 零覆盖损失。工具 v1.4 补同款豁免(`pack_markers=` 单列)。衍生发现:
+  `checkpoints/pack_manifests/` 52 个 json 无任何脚本会写 = 模型自发记账(#1 违例规模化)。
+- **#20 升级(写入后消失)**:scout-338 会话明确"三次尝试后成功写入 3210 字节记录 + touch
+  .done",文件现已不在;`.probe-962`/`.probe.tmp` 等探路残留。v1.4 探针细化:命中文件名
+  打印(`scout_hit_name`)、候选归属 per-id 明细(`scout_cands_detail`),消除任务文件名与
+  "merge" 泛词干扰。
+- **#21/#22 新增(待办,维护者另开修复任务)**:①守卫按设计拦掉子代理写入时的
+  `python3 -c`/`node -e` JSON 校验 → 产物退化为 wc -c/ls 存在性检查(零语法校验成常态);
+  ②守卫对 heredoc 内容误伤——`yyyy/MM/dd` 被路径净网误判越树、`>2000`/`$` 被误判重定向,
+  模型为通过守卫**改掉了记录里的日期片段**(守卫误伤直接导致记录内容被篡改);修复方向 =
+  守卫 heredoc 体感知/白名单 + 合法校验通道。
+- 测试 5 用例全绿;zero_deps / no_compile_warnings 过。
+
 ### Changed — audit_init_run.py v1.3:默认增量输出 + scout-338 探针(0.1.99)
 
 - **默认 diff 输出**(维护者要求:计算方式没变的数字不再反复抄):每次运行把扁平键值摘要

@@ -212,6 +212,38 @@ class AuditInitRunTest(unittest.TestCase):
         # cover by basename: Foo.java appears inside the rule text path
         self.assertEqual(m["cover:represented"], "1")
 
+    def test_diff_mode_and_scout_probe(self):
+        self._build_run()
+        # scout tier: orphan done-marker + a MISNAMED record (dash->space) +
+        # a scout_candidates.json without that batch
+        cp = self.init / "checkpoints" / "scout"
+        cp.mkdir(parents=True, exist_ok=True)
+        (cp / "scout-338.json.done").touch()
+        _w(cp / "scout 338.json", "{}")
+        _w(self.init / "scout_candidates.json",
+           json.dumps({"candidates": [{"file": "a", "batch": "scout-7"}]}))
+        first = self._run()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        m = self._stdout_map(first)
+        self.assertIn("mode=full", first.stdout)
+        self.assertIn("baseline_saved=yes", first.stdout)
+        # misnamed variant (dash->space) is found by normalized search
+        self.assertEqual(m["scout_probe:orphan"], "1")
+        self.assertEqual(m["scout_probe:elsewhere"], "1")
+        self.assertEqual(m["scout_probe:cands_hit"], "0")
+        self.assertEqual(m["scout_probe:cands_total"], "1")
+        # second run with NO changes -> diff mode, one NO_CHANGES line
+        second = self._run()
+        self.assertIn("mode=diff changed=0", second.stdout)
+        self.assertIn("NO_CHANGES", second.stdout)
+        # third run after a change -> only changed keys printed
+        _w(self.init / "checkpoints/t1/another.json", "broken{")
+        (self.init / "checkpoints/t1/another.json.done").touch()
+        third = self._run()
+        self.assertIn("mode=diff changed=", third.stdout)
+        self.assertIn("json_bad:t1 1 -> 2", third.stdout)
+        self.assertNotIn("cover:represented", third.stdout)
+
     def test_usage_error_exit_2(self):
         proc = self._run()
         self.assertEqual(proc.returncode, 2)

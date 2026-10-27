@@ -493,6 +493,66 @@ def classify_t1_orphans(t1_st: dict, expected: set[str]):
     return gap, stale
 
 
+def scout_probe(init_dir: Path, scout_t: dict):
+    """Probe orphan scout markers: (a) misnamed-but-present records (search
+    every filename under init-dir for the batch token), (b) whether the batch
+    reached scout_candidates.json (batch-token string search), (c) count of
+    non-record/non-marker files in the scout tier (miswritten outputs land
+    here)."""
+    ids = [b[: -len(".json")] for b in (scout_t.get("orphan_ids") or [])
+           if b.endswith(".json")]
+    if not ids:
+        return None
+    names: list[str] = []
+    for root, dirs, files in os.walk(init_dir):
+        dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
+        names.extend(files)
+
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    def _hit(token: str) -> bool:
+        raw_marker = token + ".json.done"
+        raw_record = token + ".json"
+        nt = _norm(token)
+        if not nt:
+            return False
+        for n in names:
+            if n in (raw_marker, raw_record):
+                continue
+            if nt in _norm(n):
+                return True
+        return False
+
+    elsewhere = sum(1 for i in ids if _hit(i))
+    cands_hit = 0
+    for cand_file in ("scout_candidates.json", "controls_candidates.json"):
+        p = init_dir / cand_file
+        if p.is_file():
+            ok, data, _ = read_text(p)
+            if ok:
+                cands_hit = sum(1 for i in ids if i in data)
+                break
+    extras = []
+    scout_dir = init_dir / "checkpoints" / "scout"
+    if scout_dir.is_dir():
+        for entry in sorted(os.listdir(scout_dir)):
+            if entry.endswith((".json", ".done", ".failed")):
+                continue
+            extras.append(entry)
+            if len(extras) >= 3:
+                break
+    total_cands = -1
+    p = init_dir / "scout_candidates.json"
+    if p.is_file():
+        ok, data, _ = load_json(p)
+        if ok and isinstance(data, dict) and isinstance(data.get("candidates"), list):
+            total_cands = len(data["candidates"])
+    return {"ids": len(ids), "elsewhere": elsewhere, "cands_hit": cands_hit,
+            "extras": len(extras), "extra_names": extras,
+            "cands_total": total_cands}
+
+
 def post_t4_lint(target: Path, fmt: str, rules_dir: Path, script: Path):
     if script is None or not script.is_file():
         return "skipped"
@@ -556,6 +616,9 @@ def main(argv=None) -> int:
                     help="count declarative config files (xml/properties/…) "
                          "with security-declaration patterns")
     ap.add_argument("--json-out", help="default <init-dir>/audit_report.json")
+    ap.add_argument("--full", action="store_true",
+                    help="print the full summary even when a previous "
+                         "audit_summary.json exists (default: diff-only)")
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
@@ -673,7 +736,6 @@ def main(argv=None) -> int:
     t1_t = detail["tiers"].get("t1", {})
     json_bad_total = sum(t.get("json_bad", 0) for t in detail["tiers"].values())
     lines = [
-        "AUDIT v1.2 fmt=%s" % args.format,
         "markers " + " ".join(mk(t) for t in tier_names),
         "records " + " ".join(
             "%s=%d(files=%d)" % (t, detail["tiers"][t].get("records", 0),
@@ -722,13 +784,63 @@ def main(argv=None) -> int:
         if recno_ex:
             parts.append("no_marker=" + ",".join(recno_ex))
         lines.append("scout_mismatch " + " ".join(parts))
+    sp = scout_probe(init_dir, scout_t)
+    if sp:
+        lines.append(
+            "scout_probe orphan=%d elsewhere=%d cands_hit=%d cands_total=%d extras=%d"
+            % (sp["ids"], sp["elsewhere"], sp["cands_hit"], sp["cands_total"],
+               sp["extras"]))
+        for n in sp["extra_names"]:
+            if n.isascii():
+                lines.append("scout_extra_name %s" % n[:40])
     dc = detail.get("declarative_config") or {}
     if dc:
         lines.append("decl_cfg scanned=%d hit_files=%d hits=%d" % (
             dc["files_scanned"], dc["files_hit"], dc["hits"]))
+
+    # summary persistence + diff printing: only keys that CHANGED since the
+    # previous audit are printed by default (--full forces the whole page)
+    flat: dict[str, str] = {}
     for ln in lines:
+        toks = ln.split()
+        if not toks or "=" in toks[0]:
+            continue
+        label = toks[0]
+        for tok in toks[1:]:
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                flat["%s:%s" % (label, k)] = v
+    summary_path = init_dir / "audit_summary.json"
+    prev_keys = None
+    if summary_path.is_file():
+        ok_s, prev_summary, _ = load_json(summary_path)
+        if ok_s and isinstance(prev_summary, dict) \
+                and isinstance(prev_summary.get("keys"), dict):
+            prev_keys = prev_summary["keys"]
+    out_lines = []
+    if prev_keys is not None and not args.full:
+        changed = {k: v for k, v in flat.items() if prev_keys.get(k) != v}
+        removed = [k for k in prev_keys if k not in flat]
+        out_lines.append("AUDIT v1.3 fmt=%s mode=diff changed=%d removed=%d"
+                         % (args.format, len(changed), len(removed)))
+        for k in sorted(changed):
+            out_lines.append("%s %s -> %s" % (k, prev_keys.get(k, "?"), changed[k]))
+        for k in sorted(removed):
+            out_lines.append("%s REMOVED" % k)
+        if not changed and not removed:
+            out_lines.append("NO_CHANGES")
+    else:
+        out_lines.append("AUDIT v1.3 fmt=%s mode=full" % args.format)
+        out_lines.extend(lines)
+        out_lines.append("baseline_saved=yes")
+    out_lines.append("detail: %s" % json_out)
+    for ln in out_lines:
         print(ln)
-    print("detail: %s" % json_out)
+    try:
+        with open(summary_path, "w", encoding="utf-8") as fh:
+            json.dump({"v": "1.3", "keys": flat}, fh, ensure_ascii=False, indent=1)
+    except Exception as exc:  # noqa: BLE001
+        print("warn: cannot write audit_summary.json: %s" % exc, file=sys.stderr)
     return 0
 
 

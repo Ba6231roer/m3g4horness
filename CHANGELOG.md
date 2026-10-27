@@ -16,6 +16,22 @@ end-to-end verification is still pending (see *Pending* below).
 
 ## [Unreleased]
 
+### Changed — audit_init_run.py v1.3:默认增量输出 + scout-338 探针(0.1.99)
+
+- **默认 diff 输出**(维护者要求:计算方式没变的数字不再反复抄):每次运行把扁平键值摘要
+  存 `<init-dir>/audit_summary.json`,再次运行**默认只打印相对上次的变更键**(`key old -> new`),
+  无变更打印一行 `NO_CHANGES`;`--full` 强制全量。首跑全量 + `baseline_saved=yes`。
+- **scout 探针**(登记 #20:scout-338.json 缺失但 marker 在、会话记录自报"6 candidates
+  emitted"——首个直接观测到的单元级产物缺失):对孤儿批做三查——①归一化文件名全 init 目录
+  搜索(抓"横杠变空格"等改名变体);②批次 token 在 scout_candidates.json/controls_candidates.json
+  的归属(候选是否真进入了下游);③scout tier 内非记录非 marker 文件计数与示例名。输出
+  `scout_probe orphan/elsewhere/cands_hit/cands_total/extras`。
+- 登记 **#20**:自报完成+marker 已摸+记录未落盘 = 执行保真失败直接观测;下游无门校验
+  "每批候选都进来"(merge_scout --check 只验边界字段);与 #18(t1 缺口)同类,加固 =
+  **marker↔记录对账门**(done 而无记录 ≠ 终态)。
+- 测试 5 用例全绿(diff 模式三态、改名变体搜索、pack gap/stale、basename 回退、单冒号);
+  zero_deps / no_compile_warnings 过。
+
 ### Changed — audit_init_run.py v1.2:t1 缺口判定 + basename 回退 + 两个新登记项(0.1.98)
 
 真实 run v1.1 手抄页判读后的最后一轮工具增强(目标:一次重跑闭合全部悬案):
